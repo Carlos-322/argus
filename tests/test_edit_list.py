@@ -69,13 +69,18 @@ def test_a_clip_whose_frames_have_no_length_plays_to_its_last_frame(tmp_path, na
     assert clips.frame_lengths(clip) is True
     assert clips.clip_frames(clip) == 20
     j = json.loads(subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
-                                   "frame=best_effort_timestamp_time,duration_time", "-of", "json", str(clip)],
+                                   "frame=best_effort_timestamp_time,duration_time,pkt_duration_time", "-of", "json", str(clip)],
                                   capture_output=True, text=True, check=True).stdout)
     t = [float(f["best_effort_timestamp_time"]) for f in j["frames"]]
     start = NO_LENGTHS[name]
     # every frame at its own time, the late camera still late, the last one lasting a frame like the others
     assert t == pytest.approx([start + i / 20 for i in range(20)], abs=1e-4)
-    assert float(j["frames"][-1]["duration_time"]) == pytest.approx(0.05, abs=1e-4)
+    # FFprobe versions expose the decoded duration under either name. Require the measurement, not a nominal FPS.
+    last = j["frames"][-1]
+    duration = next((last[k] for k in ("duration_time", "pkt_duration_time")
+                     if last.get(k) not in (None, "N/A")), None)
+    assert duration is not None, "ffprobe reported no final decoded frame duration"
+    assert float(duration) == pytest.approx(0.05, abs=1e-4)
     atoms = _top_atoms(clip)
     assert atoms.index("moov") < atoms.index("mdat"), "the index stays at the front (faststart)"
     assert clips.frame_lengths(clip) is False          # a clip whose frames all have a length is left alone

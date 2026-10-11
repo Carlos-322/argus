@@ -164,7 +164,8 @@ def make_video(c: Cam, out: Path, trim: float | None = None) -> None:
     vf = ",".join(x for x in (c.pre, pattern(c.W, c.H), c.post) if x)
     sw, sh = (c.H, c.W) if c.rot in (90, 270) else (c.W, c.H)
     tmp = out.with_name("made." + out.name) if (c.rot is not None or trim) else out
-    _ff("-f", "lavfi", "-i", f"color=c=0x808080:s={c.W}x{c.H}:r={c.rate}", "-vf", vf, "-frames:v", c.frames,
+    # The source itself must support odd sizes before encoder negotiation; a 4:2:0 source can round them down.
+    _ff("-f", "lavfi", "-i", f"color=c=0x808080:s={c.W}x{c.H}:r={c.rate},format=yuv444p", "-vf", vf, "-frames:v", c.frames,
         "-fps_mode", "passthrough", *c.enc, tmp)
     assert (sw, sh) == video_facts(tmp)["stored"]
     if trim:
@@ -249,16 +250,22 @@ def video_facts(path: Path) -> dict:
     decoded frame's time and length (what a player shows, an edit list applied)."""
     r = subprocess.run([FP, "-v", "error", "-select_streams", "v:0", "-show_entries",
                         "stream=width,height,sample_aspect_ratio:stream_side_data=rotation:"
-                        "frame=best_effort_timestamp_time,duration_time", "-of", "json", str(path)],
+                        "frame=best_effort_timestamp_time,duration_time,pkt_duration_time", "-of", "json", str(path)],
                        capture_output=True, text=True, check=True)
     j = json.loads(r.stdout)
     st = j["streams"][0]
     rot = next((int(round(float(s["rotation"]))) for s in st.get("side_data_list") or [] if "rotation" in s), 0)
     fr = [f for f in j.get("frames", []) if f.get("best_effort_timestamp_time") not in (None, "N/A")]
     t = np.array([float(f["best_effort_timestamp_time"]) for f in fr])
-    d = [float(f["duration_time"]) for f in fr if f.get("duration_time") not in (None, "N/A")]
+    # Read the final frame's actual duration, including the field name used by older FFprobe builds.
+    final = fr[-1]
+    duration = next((final[k] for k in ("duration_time", "pkt_duration_time")
+                     if final.get(k) not in (None, "N/A")), None)
+    assert duration is not None, f"{path}: ffprobe reported no final decoded frame duration"
+    last = float(duration)
+    assert np.isfinite(last) and last >= 0, f"{path}: invalid final decoded frame duration {duration!r}"
     return {"stored": (int(st["width"]), int(st["height"])), "rot": rot % 360,
-            "sar": st.get("sample_aspect_ratio", "1:1"), "t": t, "last": d[-1] if d else 0.0}
+            "sar": st.get("sample_aspect_ratio", "1:1"), "t": t, "last": last}
 
 
 def gray_frames(path: Path, w: int, h: int) -> np.ndarray:
