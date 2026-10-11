@@ -5,7 +5,8 @@ labels it in parts: the recording is cut at frame boundaries within the request 
 spaced target (from recorded state when available and anchor-camera image change otherwise), each
 part is labelled as its own request, and the parts' labels are shifted back onto the recording's clock and
 joined. Nothing about the recording's episode boundaries is invented: an unsplit recording stays one episode,
-and its subtasks are the parts' tasks on its one timeline.
+and only actual model-emitted activities become tasks on its one timeline. Request-local
+goals, outcomes and progress remain attributed assessments, not recording-level judgments.
 
 Each part is told it is one part of a continuous recording cut at a still moment, so activity carrying across
 a cut is expected; an issue a part reports about being cut off at one of our cuts (a truncated start or end)
@@ -329,17 +330,21 @@ def write_pieces(ep_dir: Path, pieces_root: Path) -> list[Path]:
                                   s["name"], field_interpretation(ctx, s["name"]).get("role")) is True else {})}
                              if s["name"] in touch else s for s in ctx["signals"]]
         if ctx.get("annotation_subtasks"):
-            # the dataset's timed subtasks are on the recording's clock; the part is shown those that overlap it, on
-            # its own clock and clipped to it (a step with no end time is a moment), and every part is shown those
-            # with no time the board can read (none, or not a number), untimed, as a short episode's prompt names them
+            # Keep the publisher's full claim, even when its interval crosses a request boundary.
+            # Its shifted interval may start before zero or end after this request. The separate
+            # visible window describes what this request can check, never a new publisher deadline.
             subs = [(x, me.number(x.get("t0")),
                      me.number(x["t1"]) if x.get("t1") is not None else me.number(x.get("t0")))
                     for x in ctx["annotation_subtasks"] if isinstance(x, dict)]
             c2["annotation_subtasks"] = [
-                {**x, "t0": None, **({"t1": None} if "t1" in x else {})} if a is None else
-                {**x, "t0": round(max(a, t0) - t0, 3),
-                 **({"t1": round(min(a if b is None else b, t1) - t0, 3) if b is not None else None} if "t1" in x
-                    else {})}
+                {**x, 'source_annotation': copy.deepcopy(x), "t0": None,
+                 **({"t1": None} if "t1" in x else {})} if a is None else
+                {**x, 'source_annotation': copy.deepcopy(x), "t0": round(a - t0, 3),
+                 **({"t1": round(b - t0, 3) if b is not None else None} if "t1" in x else {}),
+                 'request_window': {'source_start_s': a, 'source_end_s': b,
+                    'visible_start_s': round(max(a, t0) - t0, 3),
+                    'visible_end_s': round(min(a if b is None else b, t1) - t0, 3),
+                    'continues_before': a < t0, 'continues_after': b is not None and b > t1}}
                 for x, a, b in subs if a is None or ((a if b is None else b) >= t0 and a < t1)]
         write_atomic(d / "sources.json", new_src, indent=1)
         write_atomic(d / "context.json", c2, indent=1, default=str)

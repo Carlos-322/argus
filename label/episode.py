@@ -1711,7 +1711,19 @@ def annotation_lines(ctx: dict) -> list[str]:
         if "text" in x:
             return x["text"]
         return "recorded annotation without a label or text: " + json.dumps(x, ensure_ascii=False, default=str)
-    lines = [f"  {when(x)}  {label(x)}" + ("" if x.get("ok", True) else "  (marked unsuccessful)")
+    def window(x):
+        w = x.get('request_window')
+        if not isinstance(w, dict):
+            return ''
+        source = when({'t0': w.get('source_start_s'), 't1': w.get('source_end_s')})
+        visible = when({'t0': w.get('visible_start_s'), 't1': w.get('visible_end_s')})
+        edges = [text for key, text in (('continues_before', 'continues before this request'),
+                                       ('continues_after', 'continues after this request')) if w.get(key)]
+        return (f"\n    Original recording span: {source}. Visible request span: {visible}. "
+                + (', '.join(edges) + '. ' if edges else '')
+                + 'Only the visible portion can be checked; an internal request boundary does not change '
+                  'the annotation deadline or establish that its goal failed.')
+    lines = [f"  {when(x)}  {label(x)}" + ("" if x.get("ok", True) else "  (marked unsuccessful)") + window(x)
              for x in (ctx.get("annotation_subtasks") or []) if isinstance(x, dict)]
     return lines
 

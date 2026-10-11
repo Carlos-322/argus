@@ -276,7 +276,9 @@ def test_a_part_of_a_long_head_camera_recording_gets_its_subtasks_on_its_own_clo
     (tmp_path / "v").mkdir()
     _clip(tmp_path / "v" / "a.mp4", 90)                      # 3 s at 30 fps
     ep = tmp_path / "eps" / "episode_a"
-    subs = [{"t0": 0.0, "t1": 1.4, "label": "pick up the cup"}, {"t0": 1.6, "t1": 3.0, "label": "wipe the table"}]
+    subs = [{"t0": 0.0, "t1": 1.4, "label": "pick up the cup"},
+            {"t0": 1.2, "t1": 2.4, "label": "transfer the cup", "ok": False, "publisher_note": "handoff attempt"},
+            {"t0": 1.6, "t1": 3.0, "label": "wipe the table"}]
     formats.video_views_episode(ep, {"exo": ("a", tmp_path / "v" / "a.mp4")}, "ego_head", "mine",
                                 {"instruction": "clean up", "annotation_subtasks": subs})
     monkeypatch.setattr(pieces, "piece_max", lambda ctx: 1.6)
@@ -289,8 +291,20 @@ def test_a_part_of_a_long_head_camera_recording_gets_its_subtasks_on_its_own_clo
     # the part's own clock runs 0..(t1 - t0); the second subtask is at 1.6-3.0 s of the recording
     assert f"{1.6 - t0:.1f}-{3.0 - t0:.1f}s  wipe the table" in block, block
     first = me.load(parts[0])["context"]["annotation_subtasks"]
-    assert [x["label"] for x in first] == ["pick up the cup"] + (["wipe the table"] if t0 > 1.6 else [])
-    assert all(x["t0"] >= 0 for x in e["context"]["annotation_subtasks"])
+    assert [x["label"] for x in first] == ['pick up the cup', 'transfer the cup'] + (["wipe the table"] if t0 > 1.6 else [])
+    earlier = next(x for x in first if x['label'] == 'transfer the cup')
+    later = next(x for x in e['context']['annotation_subtasks'] if x['label'] == 'transfer the cup')
+    assert earlier['t1'] == 2.4 and later['t0'] == round(1.2 - t0, 3)
+    assert earlier['source_annotation'] == later['source_annotation'] == subs[1]
+    assert earlier['request_window']['continues_after'] is True
+    assert later['request_window']['continues_before'] is True
+    assert earlier['request_window']['visible_end_s'] == t0
+    assert later['request_window']['visible_start_s'] == 0
+    assert later['ok'] is False and '(marked unsuccessful)' in block
+    assert 'Original recording span: 1.2-2.4s' in block
+    assert 'Only the visible portion can be checked' in block
+    assert 'continues before this request' in block
+    assert json.loads((ep / 'context.json').read_text())['annotation_subtasks'] == subs
 
 
 def test_stitch_run_carries_every_short_episodes_reply_whatever_came_back(tmp_path):
