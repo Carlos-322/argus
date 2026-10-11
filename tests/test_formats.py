@@ -4302,6 +4302,7 @@ def test_valid_episode_lengths_and_text_tasks_stay_recorded_without_issues():
 
 def test_trimmed_lerobot_producers_bound_signal_summaries_to_the_camera_window():
     """Both raw table layouts must drop signal rows past a preparation duration cap."""
+    import json
     import hashlib
     import numpy as np
     from label import episode as me
@@ -4323,6 +4324,15 @@ def test_trimmed_lerobot_producers_bound_signal_summaries_to_the_camera_window()
             report = f.convert(root, 'ego_head', out, 'trim', 1.5)
             assert not report['failed'], report
             ep = out / report['episodes'][0]['episode_id']
+            # The actual request must distinguish the selected rows from preserved source extents.
+            selected_request = me.build_request(ep)
+            assert 'nothing was trimmed' not in selected_request['prompt']
+            assert 'first 1.5 s of a 3 s recording' in selected_request['prompt']
+            assert 'Source metadata may describe the full recording' in selected_request['prompt']
+            from label.evidence_access import Access
+            discovery = Access(me.load(ep)).selection_content(selected_request['content'])
+            discovery_context = json.loads(discovery[0]['text'].split('\n', 1)[1])
+            assert 'first 1.5 s of a 3 s recording' in discovery_context['request_window']
             loaded = me.load(ep)
             assert loaded['sources'][me.anchor(loaded)]['n_frames'] == 45
             with np.load(ep / 'signals.npz') as stored:

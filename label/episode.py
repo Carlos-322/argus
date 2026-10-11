@@ -2065,6 +2065,40 @@ def implied_checks(ep: dict, pl: dict, blocks: list[Block] | None = None) -> tup
     return tuple(dict.fromkeys(c for b in (present_blocks(ep, pl) if blocks is None else blocks) for c in b.checks))
 
 
+def recording_window_note(ep: dict) -> str:
+    """Describe preparation-owned selection bounds without changing retained source metadata."""
+    ctx = ep["context"]
+    piece, trimmed = ctx.get("piece"), ctx.get("trimmed")
+
+    def number(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+    scope = ""
+    if isinstance(piece, dict):
+        start, end = piece.get("t0_s"), piece.get("t1_s")
+        index, count = piece.get("index"), piece.get("count")
+        if (number(start) and number(end) and 0 <= start < end
+                and type(index) is int and type(count) is int and 1 <= index <= count
+                and number(ctx.get("duration_s")) and abs(end - start - ctx["duration_s"]) <= 0.002):
+            scope = (f"This request is part {index} of {count}, from {start:g} to {end:g} s on the "
+                     "parent recording clock. Its displayed times start on the part's own clock. ")
+    elif isinstance(trimmed, dict):
+        end, total = trimmed.get("to_s"), trimmed.get("of_s")
+        if number(end) and number(total) and 0 < end < total and number(ctx.get("duration_s")):
+            if abs(end - ctx["duration_s"]) <= 0.002:
+                scope = f"This request covers only the first {end:g} s of a {total:g} s recording. "
+        elif number(end) and number(total) and end == total:
+            return ""
+    if not scope:
+        return ("Preparation records a selected request window with unverified bounds; do not assume this "
+                "request covers the whole source recording.\n" if piece or trimmed else "")
+    return (scope + "Source metadata may describe the full recording, including its larger frame count, "
+            "duration and annotations outside this request. That difference alone is not a recording fault. "
+            "Judge only the supplied window; an activity unfinished at a preparation cut is not by itself an "
+            "operator mistake, failed task or truncated source recording. Use unknown when an outcome lies "
+            "outside this window. Still report faults and mistakes supported within the supplied evidence.\n")
+
+
 def _intro_head(ep: dict) -> str:
     ctx = ep["context"]
     r = rig(ep)
@@ -2080,6 +2114,12 @@ def _intro_head(ep: dict) -> str:
         else f"a person holds {k} handheld grippers, one per hand, and does the task with them")
     kind_of = ("one clip of first-person human video from the {d} dataset, collected to train robots and world "
                "models" if r == "ego_head" else "one episode of a robot-learning demonstration from the {d} dataset{w}")
+    window = recording_window_note(ep)
+    if window:
+        availability = (" Unavailable instants and replacement frames are named below."
+                        if ep.get("unavailable_instants") else "")
+        return (f"You are labelling {kind_of.format(d=ctx.get('dataset'), w=what)}: {who}. "
+                f"You see the sampled footage for this request.{availability} " + window)
     if ep.get("unavailable_instants"):
         return (f"You are labelling {kind_of.format(d=ctx.get('dataset'), w=what)}: {who}. You see the available "
                 "sampled footage; unavailable instants and replacement frames are named below.\n")

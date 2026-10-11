@@ -60,6 +60,10 @@ def test_each_part_reads_the_recording_at_its_own_span(monkeypatch):
             assert ctx["piece"]["index"] == i and ctx["piece"]["count"] == 3 and ctx["piece"]["of"] == src.name
             assert "instruction" not in ctx and "Pick up the cube" in ctx["collection_note"]
             assert ctx["collection_note"].startswith(f"this clip is part {i} of 3 of one continuous")
+            request = me.build_request(parts[i - 1])
+            assert "nothing was trimmed" not in request["prompt"]
+            assert f"part {i} of 3" in request["prompt"]
+            assert "Source metadata may describe the full recording" in request["prompt"]
             assert np.array_equal(e["state"], whole["state"][a:a + m])
             ks = [0, m - 1]
             for v in me.views(whole):

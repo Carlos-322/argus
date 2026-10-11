@@ -40,7 +40,7 @@ state_unaligned fps duration_s n_state_frames real_times clocks clock_start_s cl
 cameras depth signals source instruction instruction_note task_label capture_qc sensor_checks stream_checks
 stream_pairing reader_issues contacts unshown_cameras recorded_jumps gripper_channels gripper_value piece
 packaging collection_note data_dictionary retained_evidence_root recorded_camera_ns recorded_mcap_fields recorded_hdf5_metadata'''.split())
-PREPARED_CONTEXT = PREPARED_CONTEXT | {'represented_source_members', 'annotation_policy', 'task_mode', 'state_contract'}
+PREPARED_CONTEXT = PREPARED_CONTEXT | {'represented_source_members', 'annotation_policy', 'task_mode', 'state_contract', 'trimmed'}
 
 
 def needs_inspection(ep, sensor_evidence):
@@ -656,6 +656,10 @@ class Access:
         description = {k: ctx[k] for k in ('instruction', 'task_label', 'profile', 'state_kind',
                        'duration_s', 'n_state_frames', 'fps', 'state_unaligned', 'limitations',
                        'collection_note', 'camera_clock', 'depth_camera_clock', 'clock_origin_note') if k in ctx}
+        from label.episode import recording_window_note
+        window = recording_window_note(self.ep)
+        if window:
+            description['request_window'] = window.strip()
         description['already_supplied_sensor_evidence'] = bounded(self.supplied, 16000)
         parts = [{'type': 'text', 'text': 'RECORDING CONTEXT\n' + packed(description)}]
         images = [i for i, part in enumerate(content) if part.get('type') == 'image_url']
