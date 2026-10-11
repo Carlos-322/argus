@@ -69,7 +69,9 @@ PRICE_OUT = 5.0e-5
 # OpenAI list prices (USD per token: input, cached input, output), and from LONG_PROMPT_TOKENS prompt tokens the
 # long-context ones, for a call sent straight to OpenAI, whose response carries tokens but no cost
 OPENAI_PRICES = {"gpt-6-astra": ((1.0e-5, 1.0e-6, 5.0e-5), (2.0e-5, 2.0e-6, 7.5e-5)),
-                 "gpt-6-sol": ((2.0e-6, 2.0e-7, 1.0e-5), (4.0e-6, 4.0e-7, 1.5e-5))}
+                 "gpt-6-sol": ((2.0e-6, 2.0e-7, 1.0e-5), (4.0e-6, 4.0e-7, 1.5e-5)),
+                 # Standard pricing: https://developers.openai.com/api/docs/models/gpt-6.1-sol
+                 "gpt-6.1-sol": ((2.0e-6, 1.0e-7, 1.0e-5), (4.0e-6, 2.0e-7, 1.5e-5))}
 LONG_PROMPT_TOKENS = 272000
 
 # Requests carry at most 500 images, and at most IMAGE_LIMIT_BYTES of images as the provider counts them

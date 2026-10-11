@@ -794,7 +794,13 @@ def test_an_openai_key_sends_the_request_straight_to_openai(monkeypatch):
     assert resp["provider"] == "OpenAI"
     assert resp["usage"]["list_cost"] == pytest.approx(60000 * 1e-5 + 40000 * 1e-6 + 2000 * 5e-5)
     assert harness._cost(resp["usage"]) == resp["usage"]["list_cost"]
+    sol = harness.call_model(content, "openai/gpt-6.1-sol", "high", "sk-proj-x", 64000, 60)
+    assert seen["body"]["model"] == "gpt-6.1-sol"
+    assert seen["body"]["reasoning_effort"] == "high"
+    assert sol["usage"]["list_cost"] == pytest.approx(60000 * 2e-6 + 40000 * 1e-7 + 2000 * 1e-5)
     long = dict(usage, prompt_tokens=300000)                            # the long-context prices from 272,000
+    assert harness.openai_list_cost("openai/gpt-6.1-sol", long) == pytest.approx(
+        260000 * 4e-6 + 40000 * 2e-7 + 2000 * 1.5e-5)
     assert harness.openai_list_cost("openai/gpt-6-sol", long) == pytest.approx(260000 * 4e-6 + 40000 * 4e-7
                                                                                 + 2000 * 1.5e-5)
     with pytest.raises(RuntimeError, match="needs an OpenRouter key"):
