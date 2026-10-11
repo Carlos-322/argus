@@ -558,13 +558,18 @@ def test_a_dataset_label_time_written_as_text_reads_the_same_in_the_prompt_the_p
     (tmp_path / "v").mkdir()
     _clip(tmp_path / "v" / "a.mp4", 90)
     ep = tmp_path / "eps" / "episode_a"
-    subs = [{"t0": "2.0", "t1": "2.5", "label": "times as text"}, {"t0": "1.5s", "label": "time with its unit"},
+    subs = [{"t0": "2.0", "t1": "2.5", "label": "times as text",
+             'request_window': {'source_start_s': 80, 'source_end_s': 90},
+             'source_annotation': {'publisher_frame_note': 'native metadata, not an API piece'}},
+            {"t0": "1.5s", "label": "time with its unit"},
             {"t0": True, "t1": 2.0, "label": "a flag, no time"}, {"t0": 0.2, "t1": 1.0, "label": "timed"}]
     f.video_views_episode(ep, {"exo": ("a", tmp_path / "v" / "a.mp4")}, "ego_head", "mine",
                           {"instruction": "clean up", "annotation_subtasks": subs})
     block = me.build_request(ep)["prompt"].split("THE DATASET'S ANNOTATION FOR THIS EPISODE")[1]
     assert "2.0-2.5s  times as text" in block and "1.5s  time with its unit" in block
     assert "no time  a flag, no time" in block and "0.2-1.0s  timed" in block
+    assert 'Original recording span:' not in block
+    assert json.loads((ep / 'context.json').read_text())['annotation_subtasks'][0] == subs[0]
     board = [board_build.dataset_label(x) for x in subs]
     assert [(x["t0"], x["t1"]) for x in board] == [(2.0, 2.5), (1.5, 1.5), (None, 2.0), (0.2, 1.0)]
 

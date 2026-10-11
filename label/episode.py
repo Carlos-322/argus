@@ -1712,8 +1712,12 @@ def annotation_lines(ctx: dict) -> list[str]:
             return x["text"]
         return "recorded annotation without a label or text: " + json.dumps(x, ensure_ascii=False, default=str)
     def window(x):
+        piece = ctx.get('piece')
         w = x.get('request_window')
-        if not isinstance(w, dict):
+        start = number(piece.get('t0_s')) if isinstance(piece, dict) else None
+        end = number(piece.get('t1_s')) if isinstance(piece, dict) else None
+        if (start is None or end is None or end <= start
+                or not isinstance(x.get('source_annotation'), dict) or not isinstance(w, dict)):
             return ''
         source = when({'t0': w.get('source_start_s'), 't1': w.get('source_end_s')})
         visible = when({'t0': w.get('visible_start_s'), 't1': w.get('visible_end_s')})
