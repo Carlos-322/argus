@@ -51,9 +51,9 @@ def check(labels: dict, contacts: list[dict], strips: dict, fps: float, instrume
     recording's (contacts), the strip times each contact picture was built with ({id: {"begin": [...], "end": [...]}})
     and the camera's frame rate. instrumented_hands names the hands with touch recordings, including quiet sensors.
     Legacy callers without coverage can check missing contacts only on recorded-contact sides. Raw labels are kept.
-    None when no contacts, missing observations or supplied coverage exist."""
+    None when no contacts, missing observations or actual instrumented coverage exist."""
     missing_observations = [x for x in (labels.get('contacts_missing') or []) if isinstance(x, dict)]
-    if not contacts and instrumented_hands is None and not missing_observations:
+    if not contacts and not instrumented_hands and not missing_observations:
         return None
     seen = {c.get("id"): c for c in (labels.get("contacts") or []) if isinstance(c, dict) and c.get("review_status") != "rejected"}
     by_id = {c["id"]: c for c in contacts if c.get("review_status") != "rejected"}

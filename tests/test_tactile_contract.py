@@ -64,6 +64,8 @@ def test_contact_coverage_respects_effective_roles_companions_and_legacy_check_s
     legacy = cc.check(labels, recorded, {}, 30)
     assert legacy['notes'][0]['evidence'].endswith('3.0 s, right, bottle')
     assert cc.check(labels, [], {}, 30)['notes'] == []
+    assert cc.check({}, [], {}, 30, instrumented_hands={}) is None
+    assert cc.check({}, [], {}, 30, instrumented_hands={'right'}) == {'contacts': 0, 'checked': 0, 'notes': []}
     assert labels == original
 
 
