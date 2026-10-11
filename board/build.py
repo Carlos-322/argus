@@ -545,12 +545,24 @@ def add_contacts(d: dict, ctx: dict, result: dict | None = None) -> None:
     episode prepared before contacts were measured has none in its context; labelling found them on the recording
     (label/episode.py build_request, label/pieces.py write_pieces) and its result holds them, so those are used."""
     recorded = ctx.get("contacts") or (result or {}).get("contacts") or []
-    if not recorded:
+    from label import contacts as lc
+    from label.dictionary_context import field_interpretation
+    meta = {s['name']: {**s, 'dictionary': field_interpretation(ctx, s['name'])}
+            for s in ctx.get('signals') or [] if isinstance(s, dict) and s.get('name')}
+    covered = {} if ctx.get('state_unaligned') else lc.coverage(meta)
+    d.pop('contact_sensor_coverage', None)
+    if covered:
+        d['contact_sensor_coverage'] = covered
+    missing = d.get('contacts_missing') or []
+    if missing:
+        d['contacts_missing'] = [{**m, 'withheld_from_final': True,
+                                 'withheld_reason': 'Instrumentation coverage is unknown for the reported hand.'}
+                                if isinstance(m, dict) and m.get('hand') not in covered else m for m in missing]
+    if not recorded and not missing:
         for k in ("contacts_model", "contact_views"):
             d.pop(k, None)
         return
     from checks import contacts as cc
-    from label import contacts as lc
     # a contact timed by a signal placed from both starts says so, also one found before contacts carried it
     recorded = lc.mark_aligned(recorded, {s["name"]: s for s in ctx.get("signals") or []
                                           if isinstance(s, dict) and s.get("name")})
@@ -560,7 +572,7 @@ def add_contacts(d: dict, ctx: dict, result: dict | None = None) -> None:
     d["contacts"] = [{**c, **({"seen": seen[c["id"]]} if c["id"] in seen else {}), "shown": c["id"] in shown}
                      for c in recorded]
     res = cc.check({"contacts": list(seen.values()), "contacts_missing": d.get("contacts_missing") or []}, recorded,
-                   views.get("strips") or {}, float(ctx.get("fps") or 30))
+                   views.get("strips") or {}, float(ctx.get("fps") or 30), instrumented_hands=set(covered))
     if res is not None:
         d["dataset_checks"] = d.get("dataset_checks") or {}
         d["dataset_checks"]["contact_checks"] = res

@@ -9,6 +9,64 @@ import pytest
 from label import sensor_evidence as se
 
 
+def test_contact_checks_follow_recorded_hands_even_when_the_pressure_stays_quiet(tmp_path):
+    from test_touch_depth import _hdf5
+    from prepare import formats
+    from label import contacts as lc
+    from checks import contacts as cc
+
+    source = tmp_path / 'recording'
+    source.mkdir()
+    _hdf5(source / 'glove.hdf5', demos=1, press=None)
+    prepared = tmp_path / 'prepared'
+    report = formats.convert(source, 'ego_head', prepared, 'quiet_glove', 10)
+    assert not report['failed']
+    ctx = json.loads((prepared / report['episodes'][0]['episode_id'] / 'context.json').read_text())
+    meta = {entry['name']: entry for entry in ctx['signals']}
+    assert lc.coverage(meta) == {'right': ['right_pressure']}
+    assert not ctx['contacts'], 'quiet measurements must not invent positive contacts to establish coverage'
+    labels = {'contacts_missing': [
+        {'t_s': .5, 'hand': 'right', 'object': 'cup'},
+        {'t_s': .6, 'hand': 'left', 'object': 'plate'},
+        {'t_s': .7, 'hand': None, 'object': 'bowl'},
+        {'t_s': .8, 'hand': 'both', 'object': 'tray'},
+        {'t_s': .9, 'hand': 'right', 'object': 'spoon', 'review_status': 'rejected'}]}
+    original = copy.deepcopy(labels)
+    checked = cc.check(labels, ctx['contacts'], {}, ctx['fps'], instrumented_hands=lc.coverage(meta))
+    assert checked['contacts'] == checked['checked'] == 0
+    assert [note['check'] for note in checked['notes']] == ['contact_missing']
+    assert checked['notes'][0]['evidence'].endswith('0.5 s, right, cup')
+    assert labels == original
+    # A reviewed interpretation can withdraw touch meaning without altering the recording or its raw labels.
+    meta['right_pressure']['dictionary'] = {'role': 'annotation', 'provenance': 'human'}
+    assert lc.coverage(meta) == {}
+    assert cc.check(labels, [], {}, ctx['fps'], instrumented_hands=lc.coverage(meta))['notes'] == []
+    assert labels == original
+
+
+def test_contact_coverage_respects_effective_roles_companions_and_legacy_check_scope():
+    from label import contacts as lc
+    from checks import contacts as cc
+
+    meta = {'left_channel0': {'dictionary': {'role': 'touch'}},
+            'right_pressure': {'touch': False, 'touch_role': 'touch'},
+            'left_pressure': {'dictionary': {'role': 'joint_state'}, 'touch_role': 'touch'},
+            'right_pressure_cmd': {'dictionary': {'role': 'touch'}},
+            'left_channel1': {'touch_role': 'touch', 'dictionary': {'role': None}},
+            'left_pressure variation within each frame': {'variation_of': 'left_pressure'},
+            'left_right_pressure': {'dictionary': {'role': 'touch'}},
+            'pad': {'dictionary': {'role': 'touch'}}}
+    assert lc.coverage(meta) == {'left': ['left_channel0'], 'right': ['right_pressure']}
+    recorded = [{'id': 'c1', 'hand': 'right', 'start_s': 0, 'end_s': 1}]
+    labels = {'contacts_missing': [{'t_s': 2, 'hand': 'left', 'object': 'cup'},
+                                   {'t_s': 3, 'hand': 'right', 'object': 'bottle'}]}
+    original = copy.deepcopy(labels)
+    legacy = cc.check(labels, recorded, {}, 30)
+    assert legacy['notes'][0]['evidence'].endswith('3.0 s, right, bottle')
+    assert cc.check(labels, [], {}, 30)['notes'] == []
+    assert labels == original
+
+
 def episode(signals, metadata, entries=None, cameras=None):
     n = len(next(iter(signals.values()))) if signals else 5
     ctx = {'episode_id': 'episode_test', 'fps': 10, 'signals': metadata,

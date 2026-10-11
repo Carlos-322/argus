@@ -1391,12 +1391,28 @@ def touch_contacts(ep: dict, pl: dict, contacts) -> list[dict]:
     return [c for c in contacts or [] if any(nm in touch for nm in c.get("signals") or [])]
 
 
+def _contact_coverage(ep: dict) -> dict:
+    from label.contacts import coverage
+    from label.dictionary_context import field_interpretation
+    return coverage({name: {**entry, 'dictionary': field_interpretation(ep['context'], name)}
+                     for name, entry in (ep.get('signal_meta') or {}).items()})
+
+
 def contacts_block(ep: dict, pl: dict) -> str:
-    """The episode's contacts as the recording gives them (label/contacts.py), what each contact picture shows, and
-    what to return for them. Empty when no contact is timed by a touch signal (touch_contacts)."""
+    """Recorded contacts and instrumented-hand coverage, including quiet touch streams."""
+    covered = _contact_coverage(ep)
+    missing = ('  "contacts_missing": [{"t_s": <float>, "hand": "left" | "right", "object": "<name>"}], '
+               'only a visible grasp or press on an instrumented hand that no recorded contact covers. '
+               'An uninstrumented hand or an unknown hand cannot establish a missing tactile response. '
+               'A discrepancy is a review candidate, not proof of a failed sensor or no physical contact; '
+               'sensor placement, contact detection and timing can limit the comparison.\n')
+    instruments = ('\nCONTACTS: instrumented hands and their recorded touch signals: '
+                   + '; '.join(f'{hand}: {", ".join(names)}' for hand, names in covered.items()) + '.\n') if covered else (
+                   '\nCONTACTS: no instrumented hand is identified by the recorded touch signals. '
+                   'Return an empty contacts_missing list.\n')
     shown = touch_contacts(ep, pl, ep.get("contacts_shown"))
     if not shown:
-        return ""
+        return instruments + '  "contacts": [], no detected contacts were supplied.\n' + missing if covered else ""
     rest = [c for c in touch_contacts(ep, pl, ep.get("contacts")) if c["id"] not in {x["id"] for x in shown}]
     depth = any(_contact_views(ep, c)[2] for c in shown)
     # each strip is described, and its frame asked for, only for the contacts whose picture has it (contact_strips)
@@ -1409,7 +1425,7 @@ def contacts_block(ep: dict, pl: dict) -> str:
                  + lacking(begin, "already touching at the first frame")] if begin else [])
                + ([f"three{'' if begin else ' frames'} around the time {'it' if begin else 'the signal'} says the "
                    "touch ends, numbered 1 to 3" + lacking(end, "still touching at the last frame")] if end else []))
-    return ("\nCONTACTS: the recording's touch signals say a hand is touching something in these spans. They are the "
+    return (instruments + "The recording's touch signals say a hand is touching something in these spans. They are the "
             "recording's claims, to check against the frames:\n" + "\n".join(_contact_line(c) for c in shown) + "\n"
             + (("  The signals record more contacts that are not shown: "
                 + "; ".join(f"{c['id']} {c['start_s']:.2f}-{c['end_s']:.2f} s"
@@ -1427,8 +1443,7 @@ def contacts_block(ep: dict, pl: dict) -> str:
             + '"hand": "left" | "right" | "both" | "unclear", "object": "<what it touches>", '
             '"grip": "<how the hand holds or presses it>", "action": "<what the contact does in the task>", '
             '"slip": "yes" | "no" | "unclear", "notes": "<or null>"}], one per contact shown,\n'
-            '  "contacts_missing": [{"t_s": <float>, "hand": "left" | "right" | "unclear", "object": "<name>"}], each '
-            "moment a hand clearly takes hold of or presses something that no contact of the recording covers.\n")
+            + missing)
 
 
 SIGNAL_TABLE_MIN_CHARS = 12000
@@ -1751,7 +1766,7 @@ def _state_unaligned(ep: dict, pl: dict) -> bool:
 
 
 def _has_contacts(ep: dict, pl: dict) -> bool:
-    return bool(touch_contacts(ep, pl, ep.get("contacts_shown")))
+    return bool(touch_contacts(ep, pl, ep.get("contacts_shown"))) or bool(_contact_coverage(ep))
 
 
 def _no_state(ep: dict, pl: dict) -> bool:

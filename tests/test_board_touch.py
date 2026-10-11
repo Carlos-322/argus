@@ -68,7 +68,8 @@ def _run(runs: Path, ep: Path, contacts: list) -> Path:
               "contacts": [{"id": first["id"], "touch_seen": "no", "first_touch_frame": None, "last_touch_frame": None,
                             "hand": "right", "object": "nothing visible", "grip": None, "action": None,
                             "slip": "unclear", "notes": None}],
-              "contacts_missing": [{"t_s": 5.0, "hand": "left", "object": "cup"}]}
+              "contacts_missing": [{"t_s": 5.0, "hand": "left", "object": "cup"},
+                                   {"t_s": 5.0, "hand": "right", "object": "lid"}]}
     strips = {first["id"]: {"begin": [first["start_s"] + o for o in (-0.3, -0.15, 0.0, 0.15, 0.3)],
                             "end": [first["end_s"] + o for o in (-0.15, 0.0, 0.15)]}}
     (run / "out" / f"{ep.name}.json").write_text(json.dumps({
@@ -90,14 +91,24 @@ def test_board_build_joins_each_contact_with_what_the_model_saw(tmp_path):
     assert c1["shown"] is True and c1["seen"]["touch_seen"] == "no" and c2["shown"] is False and "seen" not in c2
     assert {k: c1[k] for k in ("start_s", "end_s", "peak_s", "regions")} == \
         {k: recorded[0][k] for k in ("start_s", "end_s", "peak_s", "regions")}
-    assert d["contacts_missing"] == [{"t_s": 5.0, "hand": "left", "object": "cup"}]
+    left, right = d["contacts_missing"]
+    assert {k: left[k] for k in ("t_s", "hand", "object")} == {"t_s": 5.0, "hand": "left", "object": "cup"}
+    assert left["withheld_from_final"] is True and left["withheld_reason"]
+    assert right == {"t_s": 5.0, "hand": "right", "object": "lid"}
     assert "contacts_model" not in d and "contact_views" not in d
     cc = d["dataset_checks"]["contact_checks"]
     assert cc["contacts"] == 2 and cc["checked"] == 1
     assert {n["check"] for n in cc["notes"]} == {"touch_not_seen", "contact_missing"}
+    missing_note = next(n["evidence"] for n in cc["notes"] if n["check"] == "contact_missing")
+    assert "right, lid" in missing_note and "left, cup" not in missing_note
     # the strength the Touch lane draws is in the episode's sensors file
     sn = json.loads((board / "sensors" / "episode_000000.json").read_text())
     assert "strength" in sn["signals"][0]
+    unplaced = {"contacts_missing": [{"t_s": 5.0, "hand": "right", "object": "lid"}]}
+    ctx = json.loads((ep / "context.json").read_text())
+    board_build.add_contacts(unplaced, {**ctx, "state_unaligned": True})
+    assert unplaced["contacts_missing"][0]["withheld_from_final"] is True
+    assert not any(n["check"] == "contact_missing" for n in unplaced["dataset_checks"]["contact_checks"]["notes"])
 
 
 def test_the_board_keeps_the_contacts_labelling_found_when_the_context_has_none(tmp_path):

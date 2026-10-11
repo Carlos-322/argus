@@ -46,14 +46,19 @@ def _between(strip: list, f, first: bool) -> float | None:
     return None if i == len(strip) - 1 else (strip[i] + strip[i + 1]) / 2
 
 
-def check(labels: dict, contacts: list[dict], strips: dict, fps: float) -> dict | None:
+def check(labels: dict, contacts: list[dict], strips: dict, fps: float, instrumented_hands=None) -> dict | None:
     """dataset_checks["contact_checks"] for one episode: the model's contacts (labels["contacts"], by id), the
     recording's (contacts), the strip times each contact picture was built with ({id: {"begin": [...], "end": [...]}})
-    and the camera's frame rate. None when the episode has no recorded contacts."""
-    if not contacts:
+    and the camera's frame rate. instrumented_hands names the hands with touch recordings, including quiet sensors.
+    Legacy callers without coverage can check missing contacts only on recorded-contact sides. Raw labels are kept.
+    None when no contacts, missing observations or supplied coverage exist."""
+    missing_observations = [x for x in (labels.get('contacts_missing') or []) if isinstance(x, dict)]
+    if not contacts and instrumented_hands is None and not missing_observations:
         return None
     seen = {c.get("id"): c for c in (labels.get("contacts") or []) if isinstance(c, dict) and c.get("review_status") != "rejected"}
     by_id = {c["id"]: c for c in contacts if c.get("review_status") != "rejected"}
+    covered = ({c.get('hand') for c in by_id.values()} if instrumented_hands is None else set(instrumented_hands))
+    covered &= {'left', 'right'}
     notes, offsets = [], []
     # a contact with an alignment assumption (label/contacts.py mark_aligned) has the placement's times, so where the frames
     # show its touch says how far off the placement is, not that the sensor's clock is, nor that the sensor fired on
@@ -102,7 +107,8 @@ def check(labels: dict, contacts: list[dict], strips: dict, fps: float) -> dict 
              f"({', '.join(c for c, _, _ in wrong)}): the left and right sensors look swapped") if swapped else
             f"{len(wrong)} of {len(known)} contacts are seen on the other hand than the signal's name says "
             f"({', '.join(f'{c} recorded {h}, seen {m}' for c, h, m in wrong)})")})
-    missing = [x for x in (labels.get("contacts_missing") or []) if isinstance(x, dict) and x.get("review_status") != "rejected"]
+    missing = [x for x in missing_observations if x.get('review_status') != 'rejected'
+               and not x.get('withheld_from_final') and str(x.get('hand') or '').strip().lower() in covered]
     if missing:
         notes.append({"check": "contact_missing", "evidence": (
             f"{len(missing)} moment{'s' if len(missing) != 1 else ''} where a hand takes hold of or presses something "

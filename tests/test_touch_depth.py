@@ -271,9 +271,8 @@ def test_the_notes_an_upload_sends_reach_the_board_as_sent_with_their_times_on_t
     assert any(it["name"].endswith("calibration/rgb/T_device_camera") for it in notes["items"])
 
 
-def test_an_episode_with_a_contact_shows_it_and_one_without_is_labelled_as_before(tmp_path):
-    """The contact's picture follows the detail views and the prompt says what it is and what to return; the touch
-    signal's timing is given only there. A recording with no touch signal gets no word about contacts."""
+def test_contact_requests_keep_instrumentation_coverage_when_the_glove_stays_quiet(tmp_path):
+    """Actual HDF conversion supplies positive contact strips or a quiet instrumented glove to the request."""
     root = tmp_path / "up"
     root.mkdir()
     _hdf5(root / "kitchen_p1.hdf5", demos=2)
@@ -287,13 +286,15 @@ def test_an_episode_with_a_contact_shows_it_and_one_without_is_labelled_as_befor
     strips = r["contact_views"]["strips"]["c1"]
     assert len(strips["begin"]) == 5 and len(strips["end"]) == 3
     assert "contacts" in r["blocks"] and {"contacts", "contacts_missing"} <= set(r["schema_fields"])
-    # the same glove never pressed: no contact, no word of contacts and no contact fields asked for
+    # The same instrumented glove stays quiet. Coverage remains known even without detected contacts.
     (tmp_path / "up2").mkdir()
     _hdf5(tmp_path / "up2" / "kitchen_p2.hdf5", demos=1, press=None)
     rep = formats.convert(tmp_path / "up2", "ego_head", tmp_path / "eps2", "touchset", 900)
     r = me.build_request(tmp_path / "eps2" / rep["episodes"][0]["episode_id"])
-    assert "contacts" not in r["blocks"] and not {"contacts", "contacts_missing"} & set(r["schema_fields"])
-    assert "CONTACTS:" not in r["prompt"] and "contact_views" not in r
+    assert "contacts" in r["blocks"] and {"contacts", "contacts_missing"} <= set(r["schema_fields"])
+    assert '"contacts": []' in r["prompt"] and "contact_views" not in r
+    assert "right: right_pressure" in r["prompt"]
+    assert "uninstrumented hand" in r["prompt"]
 
 
 def test_one_request_judges_each_signal_touch_at_most_once(tmp_path, monkeypatch):
@@ -467,7 +468,7 @@ def test_contacts_are_checked_against_the_frames():
               for i in range(3)}
     seen = [{"id": f"c{i}", "touch_seen": "yes", "first_touch_frame": 5, "last_touch_frame": 3, "hand": "left"}
             for i in range(3)]
-    res = cc.check({"contacts": seen, "contacts_missing": [{"t_s": 9.0, "hand": "left", "object": "cup"}]}, contacts,
+    res = cc.check({"contacts": seen, "contacts_missing": [{"t_s": 9.0, "hand": "right", "object": "cup"}]}, contacts,
                    strips, 30)
     kinds = {n["check"] for n in res["notes"]}
     assert {"clock_offset", "hand_mismatch", "contact_missing"} <= kinds

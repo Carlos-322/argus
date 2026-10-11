@@ -221,6 +221,17 @@ def test_a_stitched_record_keeps_the_contacts_its_parts_showed_and_every_parts_b
     assert out["config"]["prompt_blocks"] == ["collection_note", "no_state", "signals", "contacts"]
     assert out["config"]["schema_fields"] == ["contacts", "contacts_missing"]
     assert out["config"]["checks_implied"] == ["sensor_checks", "contact_checks"]
+    quiet = []
+    for i, pc in enumerate(pcs):
+        r = result(i)
+        r.pop('contacts', None)
+        r.pop('contact_views', None)
+        r['labels']['contacts_missing'] = [{'t_s': .5, 'hand': 'right', 'object': 'cup'}]
+        quiet.append((pc, r))
+    stitched = pieces.stitch(src, quiet)
+    assert not stitched.get('contacts')
+    assert [m['t_s'] for m in stitched['labels']['contacts_missing']] == pytest.approx(
+        [pc['piece']['t0_s'] + .5 for pc in pcs])
 
 
 def test_a_contact_cut_by_our_cuts_asks_each_part_only_for_the_strips_it_shows_and_stitches_them_back(tmp_path,

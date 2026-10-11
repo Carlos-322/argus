@@ -44,8 +44,25 @@ DIP_BACK = 0.8       # that comes back above this share before the contact ends
 
 
 def _side(name: str) -> str | None:
-    from prepare.formats import side_of
-    return side_of(name)
+    from prepare.formats import recorded_state_side
+    return recorded_state_side(name)
+
+
+def coverage(meta: dict[str, dict]) -> dict[str, list[str]]:
+    """Known hands with eligible touch recordings, including quiet sensors, under their effective interpretations."""
+    from prepare.formats import names_touch
+    out: dict[str, list[str]] = {}
+    for name, m in meta.items():
+        if not isinstance(m, dict) or m.get('variation_of') or name.endswith(VARIATION_SUFFIX):
+            continue
+        role = (m.get('dictionary') or {}).get('role')
+        permission = sg.touch_cache_permission(name, role, m.get('touch_role'))
+        if permission is False or permission is not True and not names_touch(name):
+            continue
+        hand = _side(name)
+        if hand:
+            out.setdefault(hand, []).append(name)
+    return {hand: sorted(out[hand]) for hand in ('left', 'right') if hand in out}
 
 
 def _strength(a: np.ndarray, m: dict) -> np.ndarray:

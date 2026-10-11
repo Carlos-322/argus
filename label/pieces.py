@@ -967,7 +967,7 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
         L["_excluded"] = excluded
     if dropped:
         L["_dropped"] = dropped
-    if views["shown"]:
+    if views["shown"] or contacts_missing:
         L["contacts"], L["contacts_missing"] = list(contacts_model.values()), contacts_missing
     from label.sensor_evidence import merge
     sensor_evidence = merge(parts, ctx, ep_dir=ep_dir)

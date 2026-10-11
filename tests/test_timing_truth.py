@@ -95,7 +95,7 @@ def test_contact_checks_do_not_substitute_a_common_start(by, words):
 def test_common_start_contact_compatibility_and_measured_controls():
     c = dict(id='c1', hand='left', start_s=1, end_s=2, peak_s=1.5, signals=['force'], aligned_by='assumed start')
     assert episode.CONTACT_ASSUMED in episode._contact_line(c)
-    result = contact_checks.check({'contacts_missing': [{'t_s': 2}]}, [c], {}, 10)
+    result = contact_checks.check({'contacts_missing': [{'t_s': 2, 'hand': 'left'}]}, [c], {}, 10)
     assert result['placed_from_both_starts'] == ['c1']
     assert 'both starts' in result['notes'][0]['evidence']
     c.pop('aligned_by')

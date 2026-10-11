@@ -4490,7 +4490,7 @@ function sensorEvidence(d) {
       add(t, 'Contact signal weakens and returns', 'dip');
     if (!c.to_end) add(c.end_s, 'Contact signal ends', 'end');
   }
-  for (const m of d.contacts_missing || []) if (m && m.review_status !== 'rejected' && finite(m.t_s)) moments.push({t: m.t_s, kind: 'missing',
+  for (const m of d.contacts_missing || []) if (m && !m.withheld_from_final && m.review_status !== 'rejected' && finite(m.t_s)) moments.push({t: m.t_s, kind: 'missing',
     headline: 'Visible grasp has no recorded contact', reading: 'No covering contact', visual: 'Reported from video',
     detail: [text(m.hand), text(m.object)].filter(Boolean).join(' '), priority: 6, index: -1, timing: ''});
   moments.sort((a, b) => a.t - b.t || b.priority - a.priority);
@@ -4614,9 +4614,9 @@ function gripFindingStripHtml(f, G = null, pager = '') {
   if (!f) return '';
   return `<span class="gf-copy">
     <span class="gf-meta"><span class="gf-phase${f.phase === 'Now' ? ' is-now' : ''}">${esc(f.phase)}</span>
-      <span class="gf-time">${fmtT(f.start)} to ${fmtT(f.end)}</span>${pager}</span>
+      <span class="gf-time">${f.start === f.end ? fmtT(f.start) : `${fmtT(f.start)} to ${fmtT(f.end)}`}</span>${pager}</span>
     <button type="button" class="gf-title" title="Replay this finding">${f.generic ? genericSensorHeadlineHtml(f.headline, f.anatomical) : gripFingerHtml(f.headline)}</button>
-    ${f.kind === 'insight' && f.generic && (f.overlayDetail || f.claim || f.detail) ? `<span class="gf-detail">${esc(f.overlayDetail || f.claim || f.detail)}</span>` : ''}
+    ${f.generic && (f.kind === 'insight' || f.kind === 'anomaly') && (f.overlayDetail || f.claim || f.detail) ? `<span class="gf-detail">${esc(f.overlayDetail || f.claim || f.detail)}</span>` : ''}
     ${f.kind === 'insight' ? gripOverlayPressureHtml(G, f, 2) : ''}</span>
     <span class="gf-inspect" aria-hidden="true">↗</span>`;
 }
@@ -5112,7 +5112,7 @@ function tcData(d) {
   const contacts = (d.contacts || []).filter(c => c && c.review_status !== 'rejected' && isFinite(c.start_s) && isFinite(c.end_s))
     .map(c => c.seen && c.seen.review_status === 'rejected' ? {...c, seen: null} : c)
     .slice().sort((a, b) => a.start_s - b.start_s || String(a.hand).localeCompare(String(b.hand)));
-  const missing = (d.contacts_missing || []).filter(x => x && x.review_status !== 'rejected' && x.t_s != null && isFinite(parseFloat(x.t_s)))
+  const missing = (d.contacts_missing || []).filter(x => x && !x.withheld_from_final && x.review_status !== 'rejected' && x.t_s != null && isFinite(parseFloat(x.t_s)))
     .map(x => ({...x, t_s: parseFloat(x.t_s)})).sort((a, b) => a.t_s - b.t_s);
   // one row per hand the contacts name (or one row when they name none), and a row for a hand only a missed grasp names
   const named = new Set(contacts.map(c => tcHandKey(c.hand)));

@@ -328,7 +328,8 @@ def test_a_parts_context_carries_the_whole_recordings_touch_verdict_and_presence
     ep, pl = CASES["teleop_joints"]()
     _add_contact(ep, pl)
     ep["signal_meta"]["left_glove_pressure"]["touch"] = False
-    assert not me._has_contacts(ep, pl) and "CONTACTS:" not in me.build_prompt(ep, pl, cell_w=448, cell_h=252)[1]
+    assert not me.touch_contacts(ep, pl, ep["contacts_shown"])
+    assert me._has_contacts(ep, pl) and '"contacts": []' in me.build_prompt(ep, pl, cell_w=448, cell_h=252)[1]
     # pressed all through, so its own numbers show no rest; the recording's verdict says touch
     ep["signals"]["left_glove_pressure"] = 2072.0 + np.random.default_rng(1).normal(0, 2, (900, 16))
     ep["signal_meta"]["left_glove_pressure"]["touch"] = True

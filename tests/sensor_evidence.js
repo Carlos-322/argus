@@ -34,9 +34,13 @@ assert.equal(E.activeSensorEvidence(d, 2).headline, 'Hand attribution disagrees'
 d = E.sensorEvidence({contacts:[{...c, shown:false}]});
 assert.equal(E.activeSensorEvidence(d, 2).visual, 'Not visually checked');
 assert(!E.activeSensorEvidence(d,2).detail, 'unshown contacts cannot reuse model interpretation');
-d = E.sensorEvidence({contacts_missing:[{t_s:3, hand:'left', object:'cup'},{t_s:null}]});
+d = E.sensorEvidence({contacts_missing:[{t_s:3, hand:'left', object:'cup'},{t_s:null},
+  {t_s:0,hand:'left',object:'bowl',withheld_from_final:true,withheld_reason:'Uninstrumented hand'}]});
 assert.equal(d.moments.length, 1);
 assert.equal(E.activeSensorEvidence(d,3).headline, 'Visible grasp has no recorded contact');
+const missingOverlay = E.gripFindingStripHtml({...d.overlayFindings[0], phase:'Now'});
+assert(missingOverlay.includes('3.0s') && !missingOverlay.includes('3.0s to 3.0s'));
+assert(missingOverlay.includes('left cup'), 'the discrepancy identifies its hand and object');
 const depth = E.sensorEvidenceHtml(E.sensorEvidence({}), ['exo']);
 assert(!depth.includes('data-grip-finding=') && !depth.includes('Sensor findings'), 'depth availability alone cannot invent a sensor finding');
 assert(E.sensorEvidenceHtml(E.sensorEvidence({contacts:[c]}),[]).includes('Unloaded baseline unverified'));
@@ -187,4 +191,3 @@ queue.dispose();delete global.document;
   delete global.document; delete global._activeFile; delete global.loadSensors;
   console.log('Sensor evidence controls passed');
 })().catch(e => {console.error(e);process.exitCode=1;});
-
