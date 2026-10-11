@@ -11,7 +11,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const src = fs.readFileSync(process.argv[2] || path.join(__dirname, '..', 'board', 'serve.py'), 'utf8');
+const src = require('./page_functions')(process.argv[2]).src;
 const grab = name => {
   const m = src.match(new RegExp(`\\nfunction ${name}\\([\\s\\S]*?\\n}\\n`));
   if (!m) { console.log(`no function ${name} in the page`); process.exit(1); }
@@ -105,5 +105,28 @@ check(tp.every((pt, i) => i === 0 || pt.p >= tp[i - 1].p), `a session that only 
 // the second task never finished: the session stays under 100% however far its own progress got
 const tf = progressPoints(two, 12, {tasks: [{start_s: 0, completed_at_s: 6}, {start_s: 6, completed_at_s: null}]});
 check(sample(tf, 0, 12).every(([, p]) => shown(p) < 100), 'a session with an unfinished task never reads 100%');
+
+// Independent request predicates do not define whole-recording progress, even when local tasks exist.
+check(progressPoints(two, 12, {tasks: [{start_s: 0, completed_at_s: 6}], progressScope: 'request_parts'}).length === 0,
+  'request-part progress has no global chart or zero-percent fallback');
+const {renderParts, renderNotesClock} = new Function(grab('requestPartAssessmentsHtml') + grab('requestNotesClockHtml')
+  + 'return {renderParts: requestPartAssessmentsHtml, renderNotesClock: requestNotesClockHtml};')();
+const partData = {part_assessments: [{source_piece: {index: 2, t0_s: 388.8, t1_s: 626.8},
+  task_summary: '<local goal>', completion: {task_completed: 'success', completed_at_s: 619.6, reason: 'Visible end state'},
+  progress: [{start_s: 388.8, end_s: 403, progress: 0.03}]}]};
+global.esc = value => String(value).replace(/</g, '&lt;').replace(/>/g, '&gt;');
+global.fmtT = value => value + 's';
+const partHtml = renderParts(partData);
+check(partHtml.includes('Request part 2') && partHtml.includes('388.8s') && partHtml.includes('626.8s')
+  && partHtml.includes('619.6s') && partHtml.includes('&lt;local goal&gt;') && partHtml.includes('3%'),
+  'request assessment retains source times, escaped text and local progress');
+check(partHtml.includes('whole-recording') && !renderParts({}), 'part qualification is explicit and absent on normal episodes');
+const closureEvidence = {part: 2, t_s: 602, evidence: 'Door remains ajar at 219.07-222.00s; shut by 230.80s.'};
+const closureBefore = JSON.stringify(closureEvidence);
+check(renderNotesClock(partData, closureEvidence).includes('request part 2, starting at 388.8s')
+  && JSON.stringify(closureEvidence) === closureBefore && partHtml.includes('original recording clock'),
+  'joined issue notes disclose their local clock without rewriting source prose or original timestamps');
+check(!renderNotesClock({}, closureEvidence) && !renderNotesClock(partData, {part: 1}),
+  'a clock is not inferred when its request ownership is absent');
 
 process.exit(bad ? 1 : 0);

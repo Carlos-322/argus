@@ -12,7 +12,7 @@
 #   media/...           videos, goal frames and hand keypoint downloads,     Cache-Control immutable, 1 year
 #                       content-addressed names
 #   <build_id>/...      the build's data and its relative index.html         immutable (a new build is a new prefix);
-#                       BUILD.json is not uploaded (it names local paths)
+#                       BUILD.json is kept as local build availability metadata
 #   index.html          the build's index.public.html                         60 s in browsers, 5 min at the edge
 # Order: media, then the build, then the root index.html last, so the live page never points at an object that
 # is not uploaded yet. Nothing is deleted, so rolling back is re-uploading an older build's index.public.html as

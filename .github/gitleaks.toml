@@ -1,0 +1,14 @@
+title = "Argus secret scanning"
+
+[extend]
+useDefault = true
+
+# The two reviewed fields hold this nonsecret SHA256 evidence descriptor digest.
+# Match the exact field, value, file and scanner rule together.
+[[allowlists]]
+description = "Verified evidence descriptor digest in two controlled depth receipt fields"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "line"
+paths = ['''(^|/)tests/fixtures/depth_release_cited_samples\.json$''']
+regexes = ['''^\s*"access_descriptor_digest"\s*:\s*"b622c0e17663b6f7ea9e88f48843f9e48a7bdae4ccfa7909594a108c8222f713"\s*,?\s*$''']

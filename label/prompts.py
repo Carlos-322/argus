@@ -1,8 +1,9 @@
 """The instructions every episode of a rig shares, exactly as the model receives them.
 
-A request has three parts: these instructions (identical for every episode of a rig, so the provider serves
-them from its prompt cache), then the facts about one episode (label/episode.py: its dataset, cameras, sampled
-instants, recorded state and instruction), then its frames. The instructions are, in order: what the footage
+A request has three parts: these instructions (identical for every episode of a rig with the same instruction
+presence and the same recorded or video only variant, so the provider serves them from its prompt cache), then
+the facts about one episode (label/episode.py: its dataset, cameras, sampled instants, recorded state and
+instruction), then its frames. The instructions are, in order: what the footage
 is, the output schema, why the episode is labelled and what counts as a problem (the data contract), how to use
 the episode's instruction or the dataset's annotation (or, for a robot episode that has none, how to
 name its task), and the note that keeps the timeline at the level of action phases.
@@ -18,6 +19,21 @@ from pathlib import Path
 
 FIXED_HEADER = ("HOW TO LABEL. These instructions are the same for every episode; the episode itself "
                 "(its dataset, cameras, frames, recorded motion and instruction) follows after them.\n\n")
+
+# An episode with no recorded state and no other signal is video only (label/episode.py RECORDED_BLOCKS), and its
+# shared instructions say nothing of a recorded motion it does not have. These are the words taken out, from the
+# header, the robot rigs' tag list and the data contract; the 2026-10-02 audit found "the recorded motion" in the
+# instructions of every video only robot episode. Tests check the resulting video-only capabilities and schema.
+VIDEO_ONLY_HEADER = ("frames, recorded motion and instruction", "frames and instruction")
+VIDEO_ONLY_TAG = ("state_video_mismatch, ", "")
+VIDEO_ONLY_CONTRACT_WORDING = [
+    (" from\n  the recorded motion)", ")"),
+    ("; the recorded motion\n  disagreeing with the video)", ")"),
+    ("(what the cameras show, what the recorded motion says, what the instruction\n  says, and how the task is done)",
+     "(what the cameras show, what the instruction\n  says, and how the task is done)"),
+    ("and breaks the link\n  between what is seen, what is recorded and what is asked",
+     "and breaks the link\n  between what is seen and what is asked"),
+]
 
 # The output schema of the robot rigs. Tags are offered for reuse, so one kind of problem gets one tag across
 # episodes; they are never a closed list. Each timeline segment is a positional row, so its keys are not
@@ -84,14 +100,18 @@ Return ONLY JSON with this shape. Each timeline segment is one array whose value
     {"issue": "<what is anomalous, in plain words>",
      "category": "<short snake_case tag for the kind of data issue. Reuse one of these when it fits, so the same kind gets the same tag across episodes: <<ISSUE_TAGS>>. Coin your own when none fits.>",
      "severity": "low" | "medium" | "high",
-     "t_s": <float when it occurs, or null if it spans the episode>,
+     "t_s": <float when it starts, or null if it spans the episode>,
+     "end_s": <float when it is over (the last frame it affects), or null if it spans the episode>,
      "evidence": "<which camera and time show it>"}
   ],
   "operator_mistakes": [
     {"issue": "<what went wrong in the performance, in plain words>",
      "category": "<short snake_case tag for the kind of mistake. Reuse one of these when it fits, so the same kind gets the same tag across episodes: <<MISTAKE_TAGS>>. Coin your own when none fits.>",
      "severity": "low" | "medium" | "high",
-     "t_s": <float when it occurs, or null if it spans the episode>,
+     "t_s": <float when the incident starts, or null if it spans the episode>,
+     "end_s": <float when it is over: the aim is met, the object is back, or the operator moves on; null if it spans the episode>,
+     "recovered": <true when the operator corrected it within the episode, false when not>,
+     "deliberate": "yes" | "no" | "unclear",
      "evidence": "<which camera and time show it>"}
   ]
 }
@@ -104,20 +124,28 @@ Rules:
   and the overall goal, NEVER as an isolated snapshot. You see the entire video,
   so reason over the full trajectory: what state had the task reached by this
   step, and does this step move it toward the goal FROM THERE.
-- contribution is the direction of movement relative to where the trajectory had
-  gotten to, judged by effect on task state, not how the motion looks:
-    "advancing": moves the task toward the goal given the history. This INCLUDES
-      recovering from an earlier fumble, getting back on track is advancing
-      relative to the botched state even if in isolation it looks like mere
-      repositioning, and includes indirect but effective means (bracing an object
-      so the other arm can work).
-    "wasteful": effort that does not move the task forward given the history, e.g.
-      repeating an approach that already failed with nothing new, or motion that
-      only undoes prior progress.
+- contribution says what a stretch did for what the operator was trying to do at that moment, judged by
+  its effect, not by how the motion looks. The aim is the operator's own, read from what they do: what the
+  motion is directed at, and above all what they do next. Retrying the same thing, fetching an object back
+  or putting something back supports a failed-attempt interpretation; building on the result and
+  moving on supports success. These are evidence of intent, not categorical proof. Where there is no outside goal, the operator's own aims are all there is; never
+  judge a stretch against a task you imagine for them.
+    "advancing": gets, or moves toward, what the operator was aiming at. This includes recovering after a
+      failure and indirect but effective means (bracing an object so the other arm can work).
+    "wasteful": motion that serves no aim that is met: every try at an aim except the one that works,
+      whether or not the tries differ; a fumble; a detour; motion the operator later undoes; hesitating
+      with an object in hand.
     "idle": the arm is not engaged in the task.
-  Do NOT rubber-stamp a genuinely stuck struggle as advancing, and do NOT punish
-  an unusual but effective strategy as wasteful. Per-step success/failure is not
-  used; success/failure lives at the key_event level.
+  A motion that gets what it was aimed at is never wasteful, however unusual or slow it looks (a regrasp to
+  change an object's orientation, setting one object down to free a gripper, a probe or tilt to look), and
+  imprecision the operator leaves may be intentional. Check the visible result and declared goal rather than
+  assuming either error or success from the absence of a correction.
+- A failure is an attempt that does not get what it was aimed at, or an outcome nobody aimed at: an object
+  that unintentionally slips, falls, rolls or is knocked is a failure, even if it is recovered afterwards.
+  An intentionally released, dropped or rolled object is judged against its evident aim. Each failed
+  attempt is a key_event with outcome failure. A step succeeded only when the frames show its result (the
+  object between the jaws in the frames after, the things meant to meet meeting, the object staying where
+  it was put); when they do not show it, it is not a success, even when the instruction asks for that step.
 - progress is per step, 0..1: how much of the whole task is done at that instant
   (the absolute level), 0 at the start, 1.0 only when the full success_predicate
   holds, a never-completed task plateaus below 1.0 at the best state reached, and
@@ -196,8 +224,9 @@ Rules:
   <b>" phrases. Use whatever clear spatial or support relation you actually see
   (on, in, next-to, inside, holding, leaning-on, stacked-on, ...); there is no
   fixed set of relations. List only relations you can actually see.
-- recovery pairs each FAILED subevent with its recovery. failure_t_s and failure
-  describe the mistake (failure_t_s is when it happens, lining up with the wasteful
+- recovery pairs each failure with what the operator did about it. Repeated failed tries at one aim
+  are one entry, from the first try (failure_t_s) to the one that works (recovered_at_s). failure_t_s and
+  failure describe the failure (failure_t_s is when it happens, lining up with the wasteful
   attempt in the timeline and, for a milestone failure, a key_event with outcome
   failure). If the operator later corrects it within the episode, set recovered true,
   recovered_at_s to the time the correction succeeds, and correction to what they
@@ -229,9 +258,11 @@ OPERATOR_MISTAKE_TAGS = ("failed_grasp, dropped_object, knocked_object, collisio
                          "hesitation, unnecessary_motion, goal_undone, incomplete_task")
 
 
-def schema(r: str) -> str:
-    """The output schema for a robot rig (the head camera has its own, EGO_SCHEMA)."""
-    s = SCHEMA.replace("<<ISSUE_TAGS>>", DATA_ISSUE_TAGS).replace("<<MISTAKE_TAGS>>", OPERATOR_MISTAKE_TAGS)
+def schema(r: str, recorded: bool = True) -> str:
+    """The output schema for a robot rig (the head camera has its own, EGO_SCHEMA). A video only episode is offered no
+    tag for a state it does not have."""
+    tags = DATA_ISSUE_TAGS if recorded else _replace_once(DATA_ISSUE_TAGS, *VIDEO_ONLY_TAG)
+    s = SCHEMA.replace("<<ISSUE_TAGS>>", tags).replace("<<MISTAKE_TAGS>>", OPERATOR_MISTAKE_TAGS)
     if r == "handheld_gripper":
         for old, new in HANDHELD_WORDING:
             s = _replace_once(s, old, new)
@@ -282,7 +313,7 @@ Return ONLY JSON with this shape. Each timeline segment is one array whose value
     {"start_s": <float>, "end_s": <float>,
      "task": "<the unit of work the person set out to do, open-vocab, e.g. 'pour water into the kettle', 'chop the onion'>",
      "objects": ["<the objects this task acts on>"],
-     "outcome": "success" | "partial" | "failure",
+     "outcome": "success" | "partial" | "failure" | "unclear",
      "success_predicate": "<the end-state that means THIS unit of work is done>",
      "completed_at_s": <float or null>,
      "note": "<why, if partial/failure or unclear>"}
@@ -304,14 +335,18 @@ Return ONLY JSON with this shape. Each timeline segment is one array whose value
     {"issue": "<what is anomalous, in plain words>",
      "category": "<short snake_case tag for the kind of data issue. Reuse one of these when it fits, so the same kind gets the same tag across episodes: instruction_mismatch, other_person_same_object, camera_fault, recording_fault, unintended_out_of_view, setup_change, idle_stretch. Coin your own when none fits.>",
      "severity": "low" | "medium" | "high",
-     "t_s": <float when it occurs, or null if it spans the episode>,
+     "t_s": <float when it starts, or null if it spans the episode>,
+     "end_s": <float when it is over (the last frame it affects), or null if it spans the episode>,
      "evidence": "<which camera and time show it>"}
   ],
   "operator_mistakes": [
     {"issue": "<what went wrong in the performance, in plain words>",
      "category": "<short snake_case tag for the kind of mistake. Reuse one of these when it fits, so the same kind gets the same tag across episodes: dropped_object, knocked_object, failed_grasp, rework, prolonged_struggle, hesitation, unnecessary_motion, incomplete_task. Coin your own when none fits.>",
      "severity": "low" | "medium" | "high",
-     "t_s": <float when it occurs, or null if it spans the episode>,
+     "t_s": <float when the incident starts, or null if it spans the episode>,
+     "end_s": <float when it is over: the aim is met, the object is back, or the operator moves on; null if it spans the episode>,
+     "recovered": <true when the operator corrected it within the episode, false when not>,
+     "deliberate": "yes" | "no" | "unclear",
      "evidence": "<which camera and time show it>"}
   ]
 }
@@ -320,24 +355,32 @@ Rules:
 - Name objects by what you actually see. There is no fixed vocabulary.
   If you cannot tell what something is, describe it by shape/colour.
 - Only claim what the frames show; when unsure, say so in notes rather than guessing.
-- contribution and progress are judged IN CONTEXT of the whole clip so far
-  and the activity the person is working on at that step (see tasks), NEVER as an isolated snapshot. You see the entire video,
+- contribution and progress are judged IN CONTEXT of the whole episode so far
+  and the overall goal, NEVER as an isolated snapshot. You see the entire video,
   so reason over the full trajectory: what state had the task reached by this
   step, and does this step move it toward the goal FROM THERE.
-- contribution is the direction of movement relative to where the trajectory had
-  gotten to, judged by effect on task state, not how the motion looks:
-    "advancing": moves the task toward the goal given the history. This INCLUDES
-      recovering from an earlier fumble, getting back on track is advancing
-      relative to the botched state even if in isolation it looks like mere
-      repositioning, and includes indirect but effective means (steadying or holding an object
-      so the other hand can work).
-    "wasteful": effort that does not move the task forward given the history, e.g.
-      repeating an approach that already failed with nothing new, or motion that
-      only undoes prior progress.
-    "idle": the hand is not engaged in the work (a hand steadying or holding something for the other is advancing).
-  Do NOT rubber-stamp a genuinely stuck struggle as advancing, and do NOT punish
-  an unusual but effective strategy as wasteful. Per-step success/failure is not
-  used; success/failure lives at the key_event level.
+- contribution says what a stretch did for what the operator was trying to do at that moment, judged by
+  its effect, not by how the motion looks. The aim is the operator's own, read from what they do: what the
+  motion is directed at, and above all what they do next. Retrying the same thing, fetching an object back
+  or putting something back supports a failed-attempt interpretation; building on the result and
+  moving on supports success. These are evidence of intent, not categorical proof. Where there is no outside goal, the operator's own aims are all there is; never
+  judge a stretch against a task you imagine for them.
+    "advancing": gets, or moves toward, what the operator was aiming at. This includes recovering after a
+      failure and indirect but effective means (bracing an object so the other arm can work).
+    "wasteful": motion that serves no aim that is met: every try at an aim except the one that works,
+      whether or not the tries differ; a fumble; a detour; motion the operator later undoes; hesitating
+      with an object in hand.
+    "idle": the hand is not engaged in the task.
+  A motion that gets what it was aimed at is never wasteful, however unusual or slow it looks (a regrasp to
+  change an object's orientation, setting one object down to free a hand, a probe or tilt to look), and
+  imprecision the operator leaves may be intentional. Check the visible result and declared goal rather than
+  assuming either error or success from the absence of a correction.
+- A failure is an attempt that does not get what it was aimed at, or an outcome nobody aimed at: an object
+  that unintentionally slips, falls, rolls or is knocked is a failure, even if it is recovered afterwards.
+  An intentionally released, dropped or rolled object is judged against its evident aim. Each failed
+  attempt is a key_event with outcome failure. A step succeeded only when the frames show its result (the
+  object between the jaws in the frames after, the things meant to meet meeting, the object staying where
+  it was put); when they do not show it, it is not a success, even when the instruction asks for that step.
 - progress is per step, 0..1, toward the CURRENT sub-task the operator is working on
   (see tasks below), NOT the whole session: 0 when they start a sub-task, 1.0 when
   that sub-task's end-state is reached, then it RESETS toward 0 when they move on to
@@ -413,8 +456,9 @@ Rules:
   <b>" phrases. Use whatever clear spatial or support relation you actually see
   (on, in, next-to, inside, holding, leaning-on, stacked-on, ...); there is no
   fixed set of relations. List only relations you can actually see.
-- recovery pairs each FAILED subevent with its recovery. failure_t_s and failure
-  describe the mistake (failure_t_s is when it happens, lining up with the wasteful
+- recovery pairs each failure with what the operator did about it. Repeated failed tries at one aim
+  are one entry, from the first try (failure_t_s) to the one that works (recovered_at_s). failure_t_s and
+  failure describe the failure (failure_t_s is when it happens, lining up with the wasteful
   attempt in the timeline and, for a milestone failure, a key_event with outcome
   failure). If the operator later corrects it within the episode, set recovered true,
   recovered_at_s to the time the correction succeeds, and correction to what they
@@ -556,15 +600,13 @@ _MISTAKES = {
         "  giving up."),
 }
 
-_SLACK_EGO = (
-    "- NORMAL WORKING SLACK IS NOT A MISTAKE. Real work includes brief pauses to look, glancing at coworkers or a\n"
-    "  screen, wiping or adjusting gloves, reaching for the next part, adjusting the camera or seat, and small\n"
-    "  corrective adjustments of a grip or a placement; none of these belongs in either list. A fumble recovered\n"
-    "  within a few seconds, or a slow but sound stretch, stays in the timeline and recovery fields only. A\n"
-    "  performance problem belongs in operator_mistakes when a model learning from this clip would pick up a bad\n"
-    "  habit (a drop or a slip it would copy, an object knocked over, a struggle that goes on and on) or when it\n"
-    "  wastes a substantial share of the clip. Every mistake still belongs in the timeline and recovery fields as\n"
-    "  usual.")
+_SLACK_EGO = """- OPERATOR MISTAKES ARE THE FAILURES AND WASTEFUL STRETCHES, GROUPED AND GRADED. Every failure and every
+  wasteful stretch in the timeline belongs to exactly one operator mistake, recovered or not, and every
+  operator mistake is made of them. One mistake is one incident: the failed tries at one aim and the motion
+  between them, a drop and fetching the object back, or one stretch of motion that serves no aim. t_s and
+  end_s span the whole incident. deliberate says whether the incident looks staged; it never removes an
+  incident or lowers its severity. Setup or settling in the first and last few seconds, brief pauses to look
+  with nothing in hand, and idle stretches are not mistakes."""
 
 
 # The shared contract in the head camera's words: a video and its annotation, where the robot rigs have cameras,
@@ -587,10 +629,11 @@ EGO_CONTRACT_WORDING = [
 ]
 
 
-def data_contract(r: str) -> str:
+def data_contract(r: str, recorded: bool = True) -> str:
     """Why the episode is labelled and what counts as a problem, in the words of this rig. The purpose, the two
     lists and the severity scale are shared; what the cameras are, what a mistake looks like and what normal
-    slack is are the rig's own."""
+    slack is are the rig's own. A video only robot episode (recorded False) has the words about a recorded motion
+    taken out (VIDEO_ONLY_CONTRACT_WORDING)."""
     robot = r != "ego_head"
     c = _DATA_CONTRACT_BASE
     c = _replace_once(c, "<<WHY>>", _WHY["robot" if robot else "ego_head"])
@@ -598,8 +641,11 @@ def data_contract(r: str) -> str:
     c = _replace_once(c, "<<VISIBILITY>>", _VISIBILITY[r])
     c = _replace_once(c, "<<MAP>>", _MAP["robot" if robot else "ego_head"])
     c = _replace_once(c, "<<MISTAKES>>", _MISTAKES[r])
+    if robot and not recorded:
+        for old, new in VIDEO_ONLY_CONTRACT_WORDING:
+            c = _replace_once(c, old, new)
     if not robot:
-        slack = c[c.index("- NORMAL DEMONSTRATION SLACK"):c.index("- SEVERITY IS TRAINING IMPACT")]
+        slack = c[c.index("- OPERATOR MISTAKES ARE THE FAILURES"):c.index("- SEVERITY IS TRAINING IMPACT")]
         c = _replace_once(c, slack, _SLACK_EGO + "\n")
         for old, new in EGO_CONTRACT_WORDING:
             c = _replace_once(c, old, new)
@@ -608,8 +654,7 @@ def data_contract(r: str) -> str:
     return c
 
 
-_DATA_CONTRACT_BASE = (
-    """- WHY YOU ARE LABELLING THIS. These labels decide what happens to this recording in a robot-learning
+_DATA_CONTRACT_BASE = """- WHY YOU ARE LABELLING THIS. These labels decide what happens to this recording in a robot-learning
   training set: keep it, trim it, mask part of it, correct its instruction, or drop it. Models trained on it
   <<WHY>> learn whatever the recording shows, including its mistakes and its accidents. A problem
   is anything that would teach such a model something wrong or unintended, or that makes part of the
@@ -630,13 +675,13 @@ _DATA_CONTRACT_BASE = (
   mismatch (a data issue), not an unfinished task (an operator mistake), and the outcome is still judged
   against the instruction. An operator mistake is recorded correctly; the question it raises is
   whether a model should learn from it.
-- NORMAL DEMONSTRATION SLACK IS NOT A MISTAKE. Real demonstrations include a few seconds of setup or
-  settling at the start and end, brief pauses to look, and small corrective adjustments of a grasp or a
-  placement; none of these belongs in either list. A fumble recovered within a few seconds, or a slow but
-  sound stretch, stays in the timeline and recovery fields only. A performance problem belongs in
-  operator_mistakes when a model imitating this episode would pick up a bad habit (a failed grasp or a drop it
-  would copy, an object knocked over, a struggle that goes on and on) or when it wastes a substantial share
-  of the episode. Every mistake still belongs in the timeline and recovery fields as usual.
+- OPERATOR MISTAKES ARE THE FAILURES AND WASTEFUL STRETCHES, GROUPED AND GRADED. Every failure and every
+  wasteful stretch in the timeline belongs to exactly one operator mistake, recovered or not, and every
+  operator mistake is made of them. One mistake is one incident: the failed tries at one aim and the motion
+  between them, a drop and fetching the object back, or one stretch of motion that serves no aim. t_s and
+  end_s span the whole incident. deliberate says whether the incident looks staged; it never removes an
+  incident or lowers its severity. Setup or settling in the first and last few seconds, brief pauses to look
+  with nothing in hand, and idle stretches are not mistakes.
 - SEVERITY IS TRAINING IMPACT, not how visible or dramatic something looks, in both lists. It comes from
   two things together: how much of the episode the problem touches, and how directly it corrupts what a
   model takes from the episode (what the cameras show, what the recorded motion says, what the instruction
@@ -645,18 +690,22 @@ _DATA_CONTRACT_BASE = (
   between what is seen, what is recorded and what is asked is high even when it is subtle to spot, because
   every frame inherits it. medium: a bounded part of the episode is wrong or wasted, and the rest is good
   once that part is trimmed, masked or corrected. low: worth knowing, but a model trained on the episode as
-  it is would barely be affected. For operator mistakes the same scale asks how much of what a model would
-  imitate is the mistake: a wrong strategy or a failure that dominates the episode is high; a clear
-  mistake confined to one stretch is medium; a slow or untidy stretch that still does the task the right
-  way is low, however long it takes to watch. A problem that is easy to fix
+  it is would barely be affected. For operator mistakes the scale grades the incident by what to do with its stretch: low is a
+  brief incident over within about two seconds that leaves the scene as it was (a grasp that misses and the
+  next one holds); medium is an incident that changes the scene (a drop, a knock, a spill) or lasts longer
+  than about three seconds, so its stretch should be trimmed or masked; high is an incident that dominates
+  the episode, or leaves the task wrong or given up.
+  Between these examples, grade the incident by its duration and consequences; a brief recovered
+  fumble remains a mistake. Inclusion is independent of severity.
+  A problem that is easy to fix
   once someone knows about it (trim the tail, mask a stretch, rewrite the instruction) is still an issue and
   keeps its severity; being fixable is exactly why it must be reported. Do not inflate: preferences about
-  style or efficiency that would not change what a model learns are not issues. Do not deflate: never argue
+  style that would not change what a model learns are not issues. Do not deflate: never argue
   a real problem away because some kind of training might tolerate it.
 - Each entry in either list carries the concrete evidence (which camera, which time). Leave a list empty
   when nothing belongs in it; a clean, well performed episode with both lists empty is a normal, common
   result.
-""")
+"""
 
 
 def _replace_once(text: str, old: str, new: str) -> str:
@@ -717,11 +766,12 @@ what a policy learns the instruction means, so it follows the instruction:
   A step whose result already holds at the first frame (a cap already off, a plug already in) is
   part of the end state that holds, not part of the goal that never happened: keep the relation
   aligned, and record the step the demonstration never shows as an instruction_mismatch.
-- An instruction can name one of several like items ("place the coffee filter in the dripper" with two
-  filters and two drippers, "roll the sock" beside a pile of socks). When the demonstration handles all of
-  them, the given goal holds as soon as the first one is done: that frame is the goal frame, and progress
-  reaches 1.0 there. The others are more than the instruction asks, so choose the relation narrower and
-  record a low-severity instruction_mismatch saying the instruction does not say how many.
+- Judge quantity and completion from the instruction's actual constraints. When its goal is satisfied
+  and the operator repeats it or performs compatible additional activity, relation narrower can describe
+  that added scope. Extra activity that preserves the requested result and violates no explicit constraint
+  does not alone establish an instruction_mismatch. Report a mismatch when a violated constraint or a
+  materially misleading instruction would teach the wrong activity, method, object or outcome. This does
+  not exempt genuine fumbles or failed attempts from operator_mistakes.
 - The objects the instruction names are part of its claim. One instruction is often written once
   for many recordings, so the object handled in this one can be a different kind of object from the
   one it names. Identify every object from what the frames show of it (its shape and parts, how it
@@ -734,8 +784,10 @@ Use the given goal for the compliance question: completion.task_completed and
 success_predicate are the terminal state of THIS GIVEN goal (did the demo satisfy what was
 ASKED?), so a demo of a different task is a completion "failure" against the given goal even
 though its own steps are advancing. Calling it success would teach a policy that the instruction
-means that other task. Still fill task_summary with what you INDEPENDENTLY observe; if the footage
-does not match the given instruction, record an instruction_mismatch in data_issues.
+means that other task. Still fill task_summary with what you INDEPENDENTLY observe. Record materially
+contradicted instruction claims in data_issues; a narrower or broader scope alone is not such a contradiction.
+This does not change completion: a genuinely unmet requested goal remains partial or failed when the
+available recording establishes that outcome; unseen continuation is unknown.
 
 Also emit a top-level "goal_alignment" object comparing the given goal to what you
 independently observed, so a mismatch between the label and the footage is captured explicitly:
@@ -793,13 +845,18 @@ def lean(r: str) -> str:
     return LEAN_NOTE
 
 
-def fixed_instructions(r: str, *, has_instruction: bool = True) -> str:
-    """Everything before the episode's own facts. A head-camera dataset has one variant whether or not it is
-    annotated, so every episode of it shares the cached prefix."""
+def fixed_instructions(r: str, *, has_instruction: bool = True, recorded: bool = True, sessions: bool = False) -> str:
+    """Everything before the episode's own facts. A head-camera dataset has one variant per recorded or video only
+    episode, whether or not it is annotated. A robot rig has up to four variants (instruction present or not,
+    recorded or video only). Every episode of the same variant shares the cached prefix. recorded False (no
+    recorded state and no other signal, label/episode.py is_recorded) takes out every word about a recorded
+    motion."""
+    head = FIXED_HEADER if recorded else _replace_once(FIXED_HEADER, *VIDEO_ONLY_HEADER)
     if r == "ego_head":
-        return FIXED_HEADER + what_this_is(r) + EGO_SCHEMA + data_contract(r) + EGO_ANNOTATION_RULES + lean(r)
-    return (FIXED_HEADER + what_this_is(r) + schema(r) + data_contract(r)
-            + (INSTRUCTION_RULES if has_instruction else NO_INSTRUCTION_RULES) + lean(r))
+        return head + what_this_is(r) + EGO_SCHEMA + data_contract(r) + EGO_ANNOTATION_RULES + lean(r)
+    rules = session_rules(r) if sessions else INSTRUCTION_RULES if has_instruction else NO_INSTRUCTION_RULES
+    head = FIXED_HEADER if recorded else _replace_once(FIXED_HEADER, *VIDEO_ONLY_HEADER)
+    return head + what_this_is(r) + schema(r, recorded) + data_contract(r, recorded) + rules + lean(r)
 
 
 # An episode with no instruction (a bare video, or a dataset that ships none) still needs a task to grade the
@@ -816,10 +873,55 @@ say in completion.reason what leaves it uncertain.
 """
 
 
+# Session annotation preserves the original recording; request cuts do not create dataset episodes.
+SESSION_RULES = """
+ABOUT THE TASKS. This recording is a session: the source or caller declares several activities within one recording. Over it, the
+demonstrator does a SEQUENCE of distinct activities (stacking some blocks, then sorting cups, then putting a lid
+on a box). Any supplied instruction remains context for the activities; do not discard it. There is no single
+recording-wide goal, so do not force one. Segment the recording into its distinct activities and
+emit them as a top-level "tasks" list, in time order:
+  "tasks": [
+    {"start_s": <float>, "end_s": <float>,
+     "task": "<the unit of work the demonstrator set out to do, open-vocab, as an imperative, e.g. 'stack the three red blocks', 'put the lid on the box'>",
+     "objects": ["<the objects this task acts on>"],
+     "outcome": "success" | "partial" | "failure" | "unclear",
+     "success_predicate": "<the end-state that means THIS unit of work is done>",
+     "completed_at_s": <float or null>,
+     "note": "<why, if partial/failure or unclear>"}
+  ]
+- A task is a coherent unit of intent, COARSER than key_events (milestones within a task) and coarser than the
+  timeline. A new task begins when the demonstrator turns to a different objective. Name each task as the most
+  specific end state its actions converge on, never as a description any motion satisfies (moving, repositioning
+  or rearranging the objects). Stretches with no evident objective (idling, looking around, tidying between
+  activities) belong to no task; tasks need not cover the whole recording.
+- Each task's outcome is judged on BALANCE OF EVIDENCE, per task independently: success = its end-state is clearly
+  reached; partial = a real observable part of it is left undone; failure = it is demonstrably not accomplished
+  (unintentionally dropped, abandoned, undone); unclear = evidence does not settle the result. An abandoned attempt is a failure (or partial) for that task and does not taint
+  the others. A task already under way at the first frame, or still under way at the last, is judged only on what
+  the recording shows; say in its note what is outside this view. Internal request cuts are not evidence of a failed
+  activity or a defect in the original recording.
+- Each task's completed_at_s (its goal frame) is the FIRST frame its success_predicate holds AND keeps holding for
+  the rest of that task's span: the last action that puts the task's objects into their final state, not when the
+  grippers move on. null if the end-state is never reached.
+- progress in the timeline is toward the CURRENT task, not the whole session: 0 when a task starts, 1.0 when its
+  end-state is reached, then it resets for the next task. contribution is judged against the task the
+  demonstrator is working on at that step.
+- task_summary is one sentence summarising the session's activities. instruction_variants rephrase the activity
+  that fills most of the recording.
+- completion: there is no single goal, so set task_completed, success_predicate, completed_at_s,
+  goal_reached_at_s, undone_at_s and undone_by to null, and reason to "a session of several tasks; each task's
+  outcome is under tasks".
+"""
+
+def session_rules(r: str) -> str:
+    """Reuse session intent and outcomes with the rig's acting parts."""
+    return SESSION_RULES if r == 'handheld_gripper' else SESSION_RULES.replace('grippers move on', 'arms move on')
+
+
 def example_block(r: str, example_dir: str | Path | None) -> str:
     """An in-context example, off by default (the model comparison's with-example runs): one complete annotation
     of a different episode of the same rig, given with its own context. It closes the shared instructions, so it
-    is identical for every episode of a dataset and cached with them."""
+    is identical for every episode that gets the same shared instructions and cached with them."""
     if not example_dir:
         return ""
     f = Path(example_dir) / f"example_{r}.json"

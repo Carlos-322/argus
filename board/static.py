@@ -16,8 +16,12 @@ page loads is a plain file:
                                          (board/build.py hands/), timed against the web copy of its clip
   <out>/<build_id>/data/keypoints/index.json  the head-camera episodes with a hand keypoints download, each with the
                                          path of its file under media/k/
+  <out>/<build_id>/data/sensors/<file>   the other signals and depth of each episode that has them (board/build.py
+                                         sensors/), with private access fields withheld and data/sensors/index.json listing them; their
+                                         times are on the main camera's clock, which its web copy keeps
   <out>/<build_id>/BUILD.json            provenance, counts, and which media files are still missing
-  <out>/media/v/<cam>/<eid>.<hash>.mp4   web copies of the clips (board/clips.py's own files, stream-copied)
+  <out>/media/v/<cam>/<eid>.<hash>.mp4   web copies of the clips (board/clips.py's own files, stream-copied), a
+                                         camera's depth clip under v/depth_<cam>/ when it has one
   <out>/media/f/<cam>/<eid>/<ms>.<hash>.jpg  goal frames, the same JPEGs the live /api/frame returns
   <out>/media/k/<eid>.<hash>.json        the hand keypoint downloads, byte for byte as board/build.py wrote them
                                          (hand_keypoints/: the dataset video's own pixels and frame times, so no
@@ -69,6 +73,9 @@ from pathlib import Path
 from board import clips as bc
 from board import hands as hands_overlay
 from board import serve as sa
+from board.to_board import dumps
+from board.public_export import project as public_json, public_build_manifest
+from label.atomic import write_atomic
 
 HERE_DIR = Path(__file__).resolve().parent
 TITLE = "Data Dashboard"
@@ -81,8 +88,10 @@ ENC_TAG = bc.ENC_TAG
 # every published video's name carries this tag, the recipe's name when the board's media were first built. A static
 # build stream-copies the board's clips, so a later recipe change that leaves their bytes alone must not rename (and
 # upload again) every published file; the tag changes only when the published bytes do
-MEDIA_TAG = "h264-crf20-veryfast-main1280-1920x1080-side1280x1080-kf2s-srcts-camclock-v3"
-FRAME_TAG = "frame-640-v1"   # serve.extract_frame at w=640
+MEDIA_TAG = "h264-crf20-veryfast-main1280-1920x1080-side1280x1080-kf2s-srcts-camclock-v4"
+FRAME_TAG = "frame-640-v2"   # serve.extract_frame at w=640, using exact display intervals
+# Frame lookup uses JavaScript decimal millisecond keys. Larger integers can change their text or precision.
+MAX_EXACT_FRAME_MS = (1 << 53) - 1
 
 
 # ---------------------------------------------------------------- what the page shows
@@ -91,21 +100,23 @@ clip_path = sa.clip_path   # the source clip board/serve.py's /api/video serves 
 
 
 def media_key(cam: str) -> str:
-    return cam if cam in ("left", "right") or sa.EXTRA_CAM.fullmatch(cam or "") else "exo"
+    return cam if cam in ("left", "right") or sa.EXTRA_CAM.fullmatch(cam or "") or sa.DEPTH_CAM.fullmatch(cam or "") \
+        else "exo"
 
 
 def shown_cams(d: dict) -> list:
     """Camera values the page's renderEp requests from /api/video, main camera first."""
-    views = d.get("camera_views") or ["exo", "left", "right"]
-    main = "exo" if "exo" in views else views[0]
-    cams = [main]
-    if d.get("_rig") != "ego_head":      # a head camera is shown alone
-        for v in views:
-            if v != main and v != "exo":
-                c = v if v in ("left", "right") or sa.EXTRA_CAM.fullmatch(v) else "right"
-                if c not in cams:
-                    cams.append(c)
-    return cams
+    views = d.get("camera_views") or (["exo"] if d.get("_rig") == "ego_head" else ["exo", "left", "right"])
+    retained = [u["view"] for u in d.get("unshown_cameras") or []
+                if isinstance(u, dict) and sa.EXTRA_CAM.fullmatch(str(u.get("view") or ""))]
+    candidates = list(dict.fromkeys([*views, *retained]))
+    roles = d.get("camera_presentation") or {}
+    main = next((v for v in candidates if (roles.get(v) or {}).get("role") == "scene"),
+                "exo" if "exo" in views else views[0])
+    rank = {"scene": 0, "other": 1, "tactile": 2}
+    return [main, *sorted((v for v in candidates if v != main),
+                         key=lambda v: rank.get((roles.get(v) or {}).get("role"), 1))]
+
 
 
 def goal_times(d: dict) -> list:
@@ -124,14 +135,22 @@ def goal_times(d: dict) -> list:
     res = []
     for t in out:
         try:
-            res.append(float(t))
-        except (TypeError, ValueError):
+            value = float(t)
+            # Keep saved labels and existing keys. Admit only keys the browser computes identically.
+            if math.isfinite(value) and value >= 0:
+                scaled = value * 1000
+                key = ms_key(value)
+                whole = math.floor(scaled)
+                browser_key = whole + int(scaled - whole >= 0.5)
+                if key <= MAX_EXACT_FRAME_MS and key == browser_key:
+                    res.append(value)
+        except (TypeError, ValueError, OverflowError):
             pass
     return res
 
 
 def ms_key(t: float) -> int:
-    return math.floor(t * 1000 + 0.5)   # JavaScript's Math.round(t * 1000)
+    return math.floor(t * 1000 + 0.5)   # Preserve existing keys; goal_times checks browser agreement.
 
 
 def src_sig(p: Path) -> str:
@@ -170,13 +189,19 @@ def hands_dir(qa: Path, given: Path | None = None) -> Path | None:
     return h if h.is_dir() and any(h.glob("episode_*.json")) else None
 
 
+def sensors_dir(qa: Path, given: Path | None = None) -> Path | None:
+    """The board's sensors files (board/build.py sensors/), when it has them."""
+    d = given if given is not None else qa.parent / "sensors"
+    return d if (d / "index.json").exists() else None
+
+
 def keypoints_dir(qa: Path, given: Path | None = None) -> Path | None:
     """The board's hand keypoint downloads (board/build.py hand_keypoints/), when it has them."""
     k = given if given is not None else qa.parent / "hand_keypoints"
     return k if (k / "index.json").exists() else None
 
 
-def plan(qa: Path, clips: Path, compare: Path | None = None):
+def plan(qa: Path, clips: Path, compare: Path | None = None, dictionary_job: Path | None = None):
     """Every listed episode with its rail record, dataset, rank in its dataset's rail, and media. The goal frames
     include those of other models' labels (compare/), which the page shows when a comparison is chosen."""
     recs = sa.rail_records(qa)
@@ -185,7 +210,7 @@ def plan(qa: Path, clips: Path, compare: Path | None = None):
     eps = []
     for rec in recs:
         ds = rec.get("dataset") or ""
-        d = json.loads((qa / rec["file"]).read_text())
+        d = sa.current_label(json.loads((qa / rec["file"]).read_text()), dictionary_job, rec["file"])
         eid = (d.get("_meta") or {}).get("episode_id") or ""
         media, frames = {}, {}
         if eid:
@@ -196,13 +221,18 @@ def plan(qa: Path, clips: Path, compare: Path | None = None):
                 media[key] = {"src": src, "rel": video_rel(eid, key, src_sig(src)), "main": cam == cams[0]}
                 # the camera's first frame, the video's poster: the player shows footage from the first paint
                 frames[f"{key}|0"] = {"src": src, "t": 0.0, "rel": frame_rel(eid, key, 0, src_sig(src))}
+                # the camera's depth clip (board/clips.py), which the page's depth switch plays, when it was cut
+                dsrc = clip_path(clips, eid, f"depth_{cam}")
+                if dsrc.exists():
+                    media[f"depth_{cam}"] = {"src": dsrc, "rel": video_rel(eid, f"depth_{cam}", src_sig(dsrc)),
+                                             "main": cam == cams[0]}
             main = cams[0]
             msrc = clip_path(clips, eid, main)
             times = goal_times(d)
             for kd in cmp_keys:
                 cf = kd / rec["file"]
                 if cf.exists():
-                    times += goal_times(json.loads(cf.read_text()))
+                    times += goal_times(sa.current_label(json.loads(cf.read_text()), dictionary_job, cf.name))
             for t in times:
                 k = f"{media_key(main)}|{ms_key(t)}"
                 frames[k] = {"src": msrc, "t": t,
@@ -251,22 +281,48 @@ def transcode(src: Path, dst: Path, threads: int, main: bool = True) -> dict:
     camera or a side one (main)."""
     t0 = time.time()
     sp = probe(src)
+    # A retimed clip's movie clock must keep its fine boundaries, including a camera's nonzero first display time.
+    fine_clock = ["-movie_timescale", str(bc.DISPLAY_TICKS_PER_S), "-video_track_timescale",
+                  str(bc.DISPLAY_TICKS_PER_S)] if sa._shown_from_halfway(src) else []
     dst.parent.mkdir(parents=True, exist_ok=True)
     part = dst.with_name("." + dst.name + ".part.mp4")
-    if _compliant(sp):
+    import av
+    compliant = _compliant(sp)
+    if compliant:
+        with av.open(str(src)) as source:
+            # An edit list hides encoded packets; decode it to preserve only the visible frames.
+            compliant = not any(p.is_discard for p in source.demux(source.streams.video[0]) if p.size)
+    if compliant:
         mode = "copy"
-        cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-copyts", "-i", str(src),
-               "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy", "-movflags", "+faststart", str(part)]
+        options = {"movflags": "+faststart"}
+        if fine_clock:
+            options.update(movie_timescale=str(bc.DISPLAY_TICKS_PER_S),
+                           video_track_timescale=str(bc.DISPLAY_TICKS_PER_S))
+        # Copy the actual sample lengths, which older ffmpeg demuxers omit and their MP4 muxer then guesses.
+        with av.open(str(src)) as source, av.open(str(part), "w", format="mp4", options=options) as target:
+            target.metadata.update(source.metadata)
+            streams = [source.streams.video[0]] + list(source.streams.audio[:1])
+            outputs = {}
+            for stream in streams:
+                output = target.add_stream_from_template(stream)
+                output.time_base = stream.time_base
+                output.metadata.update(stream.metadata)
+                outputs[stream.index] = output
+            for packet in source.demux(*streams):
+                if packet.size:
+                    packet.stream = outputs[packet.stream.index]
+                    target.mux(packet)
     else:
         mode = "encode"
         amap = ["-map", "0:a:0"] if sp["audio"] else []
         acodec = ["-c:a", "aac", "-b:a", "96k"] if sp["audio"] else []
         cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-copyts", "-i", str(src),
                "-map", "0:v:0", *amap, "-fps_mode", "passthrough",
-               *bc.video_args(sp["w"], sp["h"], main, threads, sp["resample"]), *acodec, str(part)]
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(f"ffmpeg {mode} {src}: {r.stderr.strip()[-300:]}")
+               *bc.video_args(sp["w"], sp["h"], main, threads, sp["resample"]), *acodec,
+               *(["-enc_time_base", "demux"] if fine_clock else []), *fine_clock, str(part)]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"ffmpeg {mode} {src}: {r.stderr.strip()[-300:]}")
     bc.frame_lengths(part)          # some ffmpeg builds leave the last frame 0 s long, so it is never shown
     op = probe(part)
     warn = []
@@ -292,7 +348,7 @@ def _compliant(pr: dict) -> bool:
 def cmd_measure(a):
     """Probe every clip, then sample-encode the ones transcode() would encode and sample-copy the rest,
     and project output size and wall time from what the samples measured."""
-    eps = plan(a.qa, a.clips, compare_dir(a.qa, a.compare))
+    eps = plan(a.qa, a.clips, compare_dir(a.qa, a.compare), getattr(a, "dictionary_job", None))
     pairs = []   # (ds, key, rank, src, main)
     for e in eps:
         for key, m in e["media"].items():
@@ -383,7 +439,7 @@ def cmd_measure(a):
 # ---------------------------------------------------------------- media
 
 def cmd_media(a):
-    eps = plan(a.qa, a.clips, compare_dir(a.qa, a.compare))
+    eps = plan(a.qa, a.clips, compare_dir(a.qa, a.compare), getattr(a, "dictionary_job", None))
     sel = [e for e in eps if not a.limit_per_dataset or e["rank"] < a.limit_per_dataset]
     if a.dataset:
         sel = [e for e in sel if e["ds"] in a.dataset]
@@ -471,8 +527,14 @@ def _git_commit() -> str:
 
 
 def build_id_for(qa: Path, files: list, compare: Path | None = None, hands: Path | None = None,
-                 keypoints: Path | None = None, frames: list | None = None) -> str:
+                 keypoints: Path | None = None, frames: list | None = None, sensors: Path | None = None, dictionary_job: Path | None = None) -> str:
     h = hashlib.sha1()
+    if sensors is not None:
+        for f in ["index.json", *files]:
+            sp = sensors / f
+            if sp.exists():
+                st = sp.stat()
+                h.update(f"sensors|{f}|{st.st_size}|{st.st_mtime_ns}\n".encode())
     # the frames on disk are part of the build (the page lists only those), so a build made before the media finish
     # gets a new id once they have
     for rel in frames or []:
@@ -491,6 +553,9 @@ def build_id_for(qa: Path, files: list, compare: Path | None = None, hands: Path
     newest = 0
     for f in files:
         st = (qa / f).stat()
+        if dictionary_job is not None:
+            current = sa.current_label(json.loads((qa / f).read_text()), dictionary_job, f)
+            h.update(dumps(current, sort_keys=True).encode())
         newest = max(newest, st.st_mtime)
         h.update(f"{f}|{st.st_size}|{st.st_mtime_ns}\n".encode())
     h.update(hashlib.sha1(sa.INDEX_HTML.encode()).digest())
@@ -517,13 +582,16 @@ def media_status(eps, media_root: Path):
 
 
 def cmd_site(a):
+    if a.public_base and public_json({'public_base': a.public_base}).get('public_base') != a.public_base:
+        raise ValueError('--public-base must be a public URL without credentials or signed access parameters')
     compare = compare_dir(a.qa, a.compare)
-    eps = plan(a.qa, a.clips, compare)
+    eps = plan(a.qa, a.clips, compare, getattr(a, "dictionary_job", None))
     files = [e["rec"]["file"] for e in eps]
     hands = hands_dir(a.qa, a.hands)
     keypoints = keypoints_dir(a.qa, a.keypoints)
+    sensors = sensors_dir(a.qa, getattr(a, "sensors", None))
     present = sorted(f["rel"] for e in eps for f in e["frames"].values() if (a.out / "media" / f["rel"]).exists())
-    bid = a.build_id or build_id_for(a.qa, files, compare, hands, keypoints, present)
+    bid = a.build_id or build_id_for(a.qa, files, compare, hands, keypoints, present, sensors, getattr(a, "dictionary_job", None))
     out = a.out / bid
     if out.exists() and not a.force:
         print(f"{out} exists (a build id names one set of inputs); pass --force to rewrite it")
@@ -549,30 +617,32 @@ def cmd_site(a):
             row.append(rec["episode_id"])
         idx_eps.append(row)
         # the page's view of the episode: each issue carries the family it is counted under
-        view = sa.episode_view(json.loads((a.qa / rec["file"]).read_text()))
-        (stage / "data/ep" / rec["file"]).write_text(json.dumps(view))
+        view = sa.episode_view(sa.current_label(json.loads((a.qa / rec["file"]).read_text()),
+                                               getattr(a, "dictionary_job", None), rec["file"]))
+        (stage / "data/ep" / rec["file"]).write_text(dumps(view))
     for ds, recs in by_ds.items():
-        (stage / "data/lists" / f"{ds}.json").write_text(json.dumps(recs, separators=(",", ":")))
-    (stage / "data/index.json").write_text(json.dumps({"build": bid, "datasets": datasets, "eps": idx_eps},
+        (stage / "data/lists" / f"{ds}.json").write_text(dumps(public_json(recs), separators=(",", ":")))
+    (stage / "data/index.json").write_text(dumps(public_json({"build": bid, "datasets": datasets, "eps": idx_eps}),
                                                       separators=(",", ":")))
     n_cmp = 0
     if compare is not None:
         # other models' labels: the same files the live board's /api/compare serves, each episode as the page shows it
         (stage / "data/compare").mkdir()
         for name in ("index.json", "metrics.json"):
-            shutil.copyfile(compare / name, stage / "data/compare" / name)
+            (stage / "data/compare" / name).write_text(dumps(public_json(json.loads((compare / name).read_text()))))
         listed = set(files)
         (stage / "data/compare/lists").mkdir()
         for kd in sorted(p for p in compare.iterdir() if p.is_dir()):
             (stage / "data/compare" / kd.name).mkdir()
             for f in kd.glob("*.json"):
                 if f.name in listed:
-                    view = sa.episode_view(json.loads(f.read_text()))
-                    (stage / "data/compare" / kd.name / f.name).write_text(json.dumps(view))
+                    view = sa.episode_view(sa.current_label(json.loads(f.read_text()),
+                                                          getattr(a, "dictionary_job", None), f.name))
+                    (stage / "data/compare" / kd.name / f.name).write_text(dumps(view))
                     n_cmp += 1
             # the model's rail records, the same the live board serves at /api/compare/list
             recs = [r for r in sa.rail_records(kd) if r["file"] in listed]
-            (stage / "data/compare/lists" / f"{kd.name}.json").write_text(json.dumps(recs, separators=(",", ":")))
+            (stage / "data/compare/lists" / f"{kd.name}.json").write_text(dumps(public_json(recs), separators=(",", ":")))
     hands_res = None
     if hands is not None:
         # the hand pose files, each re-timed against the web copy the static page plays (the copy keeps the clip's
@@ -591,7 +661,7 @@ def cmd_site(a):
                 doc = hands_overlay.retime(json.loads((hands / f).read_text()), mp4)
             except (ValueError, RuntimeError) as err:
                 return f, str(err)[:200]
-            (stage / "data/hands" / f).write_text(json.dumps(doc, separators=(",", ":")))
+            (stage / "data/hands" / f).write_text(dumps(public_json(doc), separators=(",", ":")))
             return f, None
         with cf.ThreadPoolExecutor(8) as ex:
             res = list(ex.map(one, todo))
@@ -599,7 +669,7 @@ def cmd_site(a):
                      "skipped": {f: err for f, err in res if err is not None}}
     kp_res = None
     if keypoints is not None:
-        # the downloads, byte for byte: they are in the dataset video's own pixels and times, not the web copy's.
+        # the downloads, with private access fields withheld: they are in the dataset video's own pixels and times, not the web copy's.
         # They go under media/ with a name from their content, so publishing a new build uploads only the ones
         # that changed
         (stage / "data/keypoints").mkdir()
@@ -608,7 +678,7 @@ def cmd_site(a):
         kidx["files"] = {f: v for f, v in kidx["files"].items() if f in listed and (keypoints / f).exists()}
         (a.out / "media" / "k").mkdir(parents=True, exist_ok=True)
         for f, v in kidx["files"].items():
-            body = (keypoints / f).read_bytes()
+            body = dumps(public_json(json.loads((keypoints / f).read_text())), separators=(",", ":")).encode()
             rel = f"k/{q(f[:-5])}.{hashlib.sha1(body).hexdigest()[:10]}.json"
             dst = a.out / "media" / rel
             if not dst.exists():
@@ -616,13 +686,26 @@ def cmd_site(a):
                 part.write_bytes(body)
                 part.rename(dst)
             v["path"] = rel
-        (stage / "data/keypoints/index.json").write_text(json.dumps(kidx, separators=(",", ":")))
+            v["bytes"] = len(body)
+        (stage / "data/keypoints/index.json").write_text(dumps(public_json(kidx), separators=(",", ":")))
         kp_res = {"dir": str(keypoints), "files": len(kidx["files"]),
                   "bytes": sum(v["bytes"] for v in kidx["files"].values())}
-    # the page asks for other models' labels, hand pose files and keypoint downloads only when the build has them
-    # (no request that can only fail)
+    sn_res = None
+    if sensors is not None:
+        # the sensors files, with private access fields withheld: their times are on the main camera's clock, which the web copies keep
+        (stage / "data/sensors").mkdir()
+        sidx = json.loads((sensors / "index.json").read_text())
+        listed = set(files)
+        sidx["files"] = {f: v for f, v in sidx["files"].items() if f in listed and (sensors / f).exists()}
+        for f in sidx["files"]:
+            (stage / "data/sensors" / f).write_text(dumps(public_json(json.loads((sensors / f).read_text()))))
+        (stage / "data/sensors/index.json").write_text(dumps(public_json(sidx), separators=(",", ":")))
+        sn_res = {"dir": str(sensors), "files": len(sidx["files"])}
+    # the page asks for other models' labels, hand pose files, sensors files and keypoint downloads only when the build
+    # has them (no request that can only fail)
     has = {"compare": compare is not None, "hands": bool(hands_res and hands_res["files"]),
-           "keypoints": bool(kp_res and kp_res["files"]), "labels_license": sa.labels_license(a.board)}
+           "keypoints": bool(kp_res and kp_res["files"]), "sensors": bool(sn_res and sn_res["files"]),
+           "labels_license": sa.labels_license(a.board)}
     name = sa.board_name(a.board)
     header = sa.read_header(getattr(a, "header", None))
     (stage / "index.html").write_text(sa.render_index(
@@ -641,9 +724,13 @@ def cmd_site(a):
              "qa": str(a.qa), "clips": str(a.clips), "enc": ENC_TAG, "public_base": a.public_base,
              "episodes": len(eps), "datasets": {ds: len(r) for ds, r in by_ds.items()},
              "compare": {"dir": str(compare), "files": n_cmp} if compare is not None else None,
-             "hands": hands_res, "keypoints": kp_res,
+             "hands": hands_res, "keypoints": kp_res, "sensors": sn_res,
              "media": st, "missing_media": missing}
-    (stage / "BUILD.json").write_text(json.dumps(build, indent=1))
+    (stage / "BUILD.json").write_text(dumps(public_build_manifest(build), indent=1))
+    # Operational paths stay outside the publication root, including its media.
+    root_key = hashlib.sha256(str(a.out.resolve()).encode()).hexdigest()[:16]
+    receipt = a.out.resolve().parent / '.argus-build-receipts' / root_key / f'{bid}.json'
+    write_atomic(receipt, build)
     if out.exists():
         out.rename(a.out / f".{bid}.old.{int(time.time())}")
     stage.rename(out)
@@ -654,7 +741,7 @@ def cmd_site(a):
 
 
 def cmd_status(a):
-    eps = plan(a.qa, a.clips, compare_dir(a.qa, a.compare))
+    eps = plan(a.qa, a.clips, compare_dir(a.qa, a.compare), getattr(a, "dictionary_job", None))
     st, missing = media_status(eps, a.out / "media")
     per = Counter()
     miss = set(missing)
@@ -679,6 +766,7 @@ def main():
     ap.add_argument("--hands", type=Path, default=None, help="hand pose files (default BOARD/hands)")
     ap.add_argument("--keypoints", type=Path, default=None,
                     help="hand keypoint downloads (default BOARD/hand_keypoints)")
+    ap.add_argument("--sensors", type=Path, default=None, help="sensors files (default BOARD/sensors)")
     ap.add_argument("--out", type=Path, default=None, help="output root (default BOARD/static)")
     ap.add_argument("--jobs", type=int, default=4, help="parallel ffmpeg processes (default 4)")
     ap.add_argument("--threads", type=int, default=4, help="threads per ffmpeg (default 4)")
@@ -687,6 +775,7 @@ def main():
     ap.add_argument("--samples", type=int, default=3, help="measure: sample encodes per dataset and camera")
     ap.add_argument("--first", type=int, default=50, help="measure: also project each dataset's first N episodes")
     ap.add_argument("--public-base", help="site: absolute URL of the bucket root, for index.public.html")
+    ap.add_argument("--dictionary-job", type=Path, help="project current human interpretation from this source job")
     ap.add_argument("--build-id", help="site: override the content-derived build id")
     ap.add_argument("--force", action="store_true", help="site: rewrite an existing build id")
     ap.add_argument("--title", default=TITLE, help=f"site: the page title, in the header and the browser tab "
