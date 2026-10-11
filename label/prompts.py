@@ -766,11 +766,12 @@ what a policy learns the instruction means, so it follows the instruction:
   A step whose result already holds at the first frame (a cap already off, a plug already in) is
   part of the end state that holds, not part of the goal that never happened: keep the relation
   aligned, and record the step the demonstration never shows as an instruction_mismatch.
-- An instruction can name one of several like items ("place the coffee filter in the dripper" with two
-  filters and two drippers, "roll the sock" beside a pile of socks). When the demonstration handles all of
-  them, the given goal holds as soon as the first one is done: that frame is the goal frame, and progress
-  reaches 1.0 there. The others are more than the instruction asks, so choose the relation narrower and
-  record a low-severity instruction_mismatch saying the instruction does not say how many.
+- Judge quantity and completion from the instruction's actual constraints. When its goal is satisfied
+  and the operator repeats it or performs compatible additional activity, relation narrower can describe
+  that added scope. Extra activity that preserves the requested result and violates no explicit constraint
+  does not alone establish an instruction_mismatch. Report a mismatch when a violated constraint or a
+  materially misleading instruction would teach the wrong activity, method, object or outcome. This does
+  not exempt genuine fumbles or failed attempts from operator_mistakes.
 - The objects the instruction names are part of its claim. One instruction is often written once
   for many recordings, so the object handled in this one can be a different kind of object from the
   one it names. Identify every object from what the frames show of it (its shape and parts, how it
@@ -783,8 +784,10 @@ Use the given goal for the compliance question: completion.task_completed and
 success_predicate are the terminal state of THIS GIVEN goal (did the demo satisfy what was
 ASKED?), so a demo of a different task is a completion "failure" against the given goal even
 though its own steps are advancing. Calling it success would teach a policy that the instruction
-means that other task. Still fill task_summary with what you INDEPENDENTLY observe; if the footage
-does not match the given instruction, record an instruction_mismatch in data_issues.
+means that other task. Still fill task_summary with what you INDEPENDENTLY observe. Record materially
+contradicted instruction claims in data_issues; a narrower or broader scope alone is not such a contradiction.
+This does not change completion: a genuinely unmet requested goal remains partial or failed when the
+available recording establishes that outcome; unseen continuation is unknown.
 
 Also emit a top-level "goal_alignment" object comparing the given goal to what you
 independently observed, so a mismatch between the label and the footage is captured explicitly:
