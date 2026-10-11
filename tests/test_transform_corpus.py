@@ -25,6 +25,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import lru_cache
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -249,21 +250,23 @@ def video_facts(path: Path) -> dict:
     """ffprobe's view of a file's first video stream: stored size, display rotation, sample aspect ratio, and every
     decoded frame's time and length (what a player shows, an edit list applied)."""
     r = subprocess.run([FP, "-v", "error", "-select_streams", "v:0", "-show_entries",
-                        "stream=width,height,sample_aspect_ratio:stream_side_data=rotation:"
-                        "frame=best_effort_timestamp_time,duration_time,pkt_duration_time", "-of", "json", str(path)],
+                        "stream=width,height,sample_aspect_ratio,time_base:stream_side_data=rotation:"
+                        "frame=best_effort_timestamp,best_effort_timestamp_time", "-of", "json", str(path)],
                        capture_output=True, text=True, check=True)
     j = json.loads(r.stdout)
     st = j["streams"][0]
     rot = next((int(round(float(s["rotation"]))) for s in st.get("side_data_list") or [] if "rotation" in s), 0)
     fr = [f for f in j.get("frames", []) if f.get("best_effort_timestamp_time") not in (None, "N/A")]
     t = np.array([float(f["best_effort_timestamp_time"]) for f in fr])
-    # Read the final frame's actual duration, including the field name used by older FFprobe builds.
-    final = fr[-1]
-    duration = next((final[k] for k in ("duration_time", "pkt_duration_time")
-                     if final.get(k) not in (None, "N/A")), None)
-    assert duration is not None, f"{path}: ffprobe reported no final decoded frame duration"
-    last = float(duration)
-    assert np.isfinite(last) and last >= 0, f"{path}: invalid final decoded frame duration {duration!r}"
+    # Read the final packet on its presentation clock; ffprobe duration fields differ across FFmpeg versions.
+    import av
+    final_time = int(fr[-1]['best_effort_timestamp']) * Fraction(st['time_base'])
+    with av.open(str(path)) as c:
+        durations = [p.duration * p.time_base for p in c.demux(c.streams.video[0])
+                     if p.size and (p.pts if p.pts is not None else p.dts) is not None
+                     and (p.pts if p.pts is not None else p.dts) * p.time_base == final_time]
+    assert len(durations) == 1 and durations[0] > 0, f"{path}: invalid final packet lengths {durations!r}"
+    last = float(durations[0])
     return {"stored": (int(st["width"]), int(st["height"])), "rot": rot % 360,
             "sar": st.get("sample_aspect_ratio", "1:1"), "t": t, "last": last}
 
