@@ -286,10 +286,32 @@ def transcode(src: Path, dst: Path, threads: int, main: bool = True) -> dict:
                   str(bc.DISPLAY_TICKS_PER_S)] if sa._shown_from_halfway(src) else []
     dst.parent.mkdir(parents=True, exist_ok=True)
     part = dst.with_name("." + dst.name + ".part.mp4")
-    if _compliant(sp):
+    import av
+    compliant = _compliant(sp)
+    if compliant:
+        with av.open(str(src)) as source:
+            # An edit list hides encoded packets; decode it to preserve only the visible frames.
+            compliant = not any(p.is_discard for p in source.demux(source.streams.video[0]) if p.size)
+    if compliant:
         mode = "copy"
-        cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-copyts", "-i", str(src),
-               "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy", "-movflags", "+faststart", *fine_clock, str(part)]
+        options = {"movflags": "+faststart"}
+        if fine_clock:
+            options.update(movie_timescale=str(bc.DISPLAY_TICKS_PER_S),
+                           video_track_timescale=str(bc.DISPLAY_TICKS_PER_S))
+        # Copy the actual sample lengths, which older ffmpeg demuxers omit and their MP4 muxer then guesses.
+        with av.open(str(src)) as source, av.open(str(part), "w", format="mp4", options=options) as target:
+            target.metadata.update(source.metadata)
+            streams = [source.streams.video[0]] + list(source.streams.audio[:1])
+            outputs = {}
+            for stream in streams:
+                output = target.add_stream_from_template(stream)
+                output.time_base = stream.time_base
+                output.metadata.update(stream.metadata)
+                outputs[stream.index] = output
+            for packet in source.demux(*streams):
+                if packet.size:
+                    packet.stream = outputs[packet.stream.index]
+                    target.mux(packet)
     else:
         mode = "encode"
         amap = ["-map", "0:a:0"] if sp["audio"] else []
@@ -298,9 +320,9 @@ def transcode(src: Path, dst: Path, threads: int, main: bool = True) -> dict:
                "-map", "0:v:0", *amap, "-fps_mode", "passthrough",
                *bc.video_args(sp["w"], sp["h"], main, threads, sp["resample"]), *acodec,
                *(["-enc_time_base", "demux"] if fine_clock else []), *fine_clock, str(part)]
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(f"ffmpeg {mode} {src}: {r.stderr.strip()[-300:]}")
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"ffmpeg {mode} {src}: {r.stderr.strip()[-300:]}")
     bc.frame_lengths(part)          # some ffmpeg builds leave the last frame 0 s long, so it is never shown
     op = probe(part)
     warn = []

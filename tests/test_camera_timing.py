@@ -256,9 +256,13 @@ def test_composed_mixed_rate_footage_keeps_each_cameras_current_frame(tmp_path):
     for name, rate in (("slow", 15), ("fast", 60)):
         path = tmp_path / (name + ".mp4")
         video(path, 90, pattern=True)
-        clips.retime(path, 0.019 + np.arange(90) / rate, fps=rate, main=False)
+        capture = 0.019 + np.arange(90) / rate
+        clips.retime(path, capture, fps=rate, main=False)
         inputs.append((path, (96, 64), rate))
         with av.open(str(path)) as src:
+            stream = src.streams.video[0]
+            expected_end = capture[-1] + (capture[-1] - capture[-2]) / 2
+            assert float((stream.start_time + stream.duration) * stream.time_base) == pytest.approx(expected_end, abs=2e-6)
             original.append([(float(f.time), f.to_ndarray(format="rgb24")) for f in src.decode(video=0)])
     out = tmp_path / "mixed.mp4"
     subprocess.run(serve.footage_command(inputs, 0.4, 1.4, out, 1), check=True)

@@ -258,7 +258,7 @@ def _under(base: Path, p: Path) -> bool:
 # served from a machine that also records.
 FOOTAGE_GAP = 8
 FOOTAGE_FPS = 30
-FOOTAGE_TAG = f"footage-v3-h264-crf20-veryfast-{FOOTAGE_FPS}fps-gap{FOOTAGE_GAP}"   # a new recipe makes new files
+FOOTAGE_TAG = f"footage-v4-h264-crf20-veryfast-{FOOTAGE_FPS}fps-gap{FOOTAGE_GAP}"   # a new recipe makes new files
 _FOOTAGE_SEM = threading.Semaphore(int(os.environ.get("BOARD_FOOTAGE_CONCURRENCY", 1)))
 _FOOTAGE_THREADS = int(os.environ.get("BOARD_FOOTAGE_THREADS", 2))
 _FOOTAGE_LOCKS: dict = {}
@@ -304,16 +304,16 @@ def _probe(p: Path) -> tuple:
     (footage_command) at a rate that samples on the frames' boundaries."""
     probe = Path(FFMPEG).with_name("ffprobe") if FFMPEG else None
     r = subprocess.run([str(probe) if probe and probe.exists() else "ffprobe", "-v", "error", "-select_streams", "v:0",
-                        "-show_entries", "stream=width,height,avg_frame_rate:format=duration:packet=pts_time,duration_time",
+                        "-show_entries", "stream=width,height,avg_frame_rate:format=duration",
                         "-of", "json", str(p)], capture_output=True, text=True, timeout=30, check=True)
     j = json.loads(r.stdout)
     s = j["streams"][0]
-    dur = float(j["format"]["duration"])
-    pk = [(float(x["pts_time"]), float(x.get("duration_time") or 0)) for x in j.get("packets", [])
-          if x.get("pts_time") not in (None, "N/A")]
-    if pk:
-        last, d = max(pk)
-        dur = max(dur, last + d)
+    import av
+    with av.open(str(p)) as c:
+        pk = [(float(x.pts * x.time_base), float(x.duration * x.time_base))
+              for x in c.demux(c.streams.video[0]) if x.size and x.pts is not None]
+    # Some FFprobe builds omit packet lengths and stop their container duration at the final frame's start.
+    dur = max(t + d for t, d in pk) if pk else float(j["format"]["duration"])
     num, _, den = str(s.get("avg_frame_rate") or "0/1").partition("/")
     rate = float(num) / float(den) if den and float(den) else 0.0
     steps = sorted(b[0] - a[0] for a, b in zip(sorted(pk), sorted(pk)[1:]) if b[0] > a[0])
@@ -347,7 +347,8 @@ def footage_command(inputs: list, t0: float, t1: float, out: Path, threads: int 
         g.append(f"[b{i}][c{i}]overlay={x}:{y}:eof_action=pass[b{i + 1}]")
     g.append(f"[b{len(inputs)}]setpts=PTS-STARTPTS,format=yuv420p[v]")
     n = math.ceil(round((t1 - t0) * fps, 6))
-    return cmd + ["-filter_complex", ";".join(g), "-map", "[v]", "-frames:v", str(n), "-an", "-c:v", "libx264",
+    return cmd + ["-filter_complex", ";".join(g), "-map", "[v]", "-frames:v", str(n),
+                  "-r", str(fps), "-fps_mode", "cfr", "-an", "-c:v", "libx264",
                   "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-g", str(2 * FOOTAGE_FPS), "-threads",
                   str(threads), "-filter_complex_threads", "1", "-movflags", "+faststart", str(out)]
 

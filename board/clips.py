@@ -108,7 +108,7 @@ KEY_S = 2                    # a keyframe every 2 s, so a seek decodes at most 2
 DEPTH_CRF = 26               # a depth clip: its colour shading carries sensor noise that CRF 20 keeps at about
                              # five times the colour clip's size; 26 halves that and the shapes stay as clear
 # names the recipe; board/static.py folds it into its media names, so a new recipe gets new names
-ENC_TAG = f"h264-crf{CRF}-{PRESET}-main{MAIN_BOX[0]}x{MAIN_BOX[1]}-side{SIDE_BOX[0]}x{SIDE_BOX[1]}-kf{KEY_S}s-srcts-camclock-v4"
+ENC_TAG = f"h264-crf{CRF}-{PRESET}-main{MAIN_BOX[0]}x{MAIN_BOX[1]}-side{SIDE_BOX[0]}x{SIDE_BOX[1]}-kf{KEY_S}s-srcts-camclock-v5"
 
 
 def main_cam(sources: dict) -> str:
@@ -338,9 +338,9 @@ def retime(mp4: Path, capture_s, fps: float = 30.0, main: bool = True, query_s=N
     chooses the model's frames by, where the file's own timestamps can be an even rate its recorder never kept (a
     capture that dropped frames). Any camera but the main one comes on the pairing tolerance before its first capture
     (PAIRED_SPAN_SLACK_S), where label/episode.py _in_span first shows it; the request's instants are the main
-    camera's own captures, so it comes on at its first. The packets are copied as encoded; decode times move with the
-    display times they sit among (the same map, carried on before the first frame), so the decoder reads them in the
-    same order. The clip's comment is HALFWAY_TAG."""
+    camera's own captures, so it comes on at its first. Encoded packets keep their decode order. Their decode clock
+    spans the full presentation duration and starts early enough that every packet decodes before it is displayed.
+    The clip's comment is HALFWAY_TAG."""
     import av
     import numpy as np
     from fractions import Fraction
@@ -355,25 +355,21 @@ def retime(mp4: Path, capture_s, fps: float = 30.0, main: bool = True, query_s=N
             old = np.array(sorted(p.pts for p in pkts), dtype=np.float64)
             if len(old) != len(new):
                 raise RuntimeError(f"{mp4.name}: {len(old)} frames for {len(new)} capture times")
-            ticks = np.asarray(new, dtype=np.float64)
-
-            def moved(x):
-                if len(old) > 1 and x < old[0]:                 # before the first frame: the first step's slope
-                    return ticks[0] - (old[0] - x) * (ticks[1] - ticks[0]) / max(old[1] - old[0], 1.0)
-                return float(np.interp(x, old, ticks))
             at = {int(o): i for i, o in enumerate(old)}
+            lengths = np.diff(np.append(new, stop))
+            # MP4 sample lengths describe the decode clock. Its span must equal the full presentation span,
+            # including B-frames reordered across unequal capture intervals and the final displayed sample.
+            elapsed = np.cumsum([0] + [int(lengths[at[int(p.pts)]]) for p in pkts[:-1]])
+            decode_start = min(int(new[at[int(p.pts)]]) - int(t) for p, t in zip(pkts, elapsed))
             with av.open(str(tmp), "w", format="mp4", options={"movflags": "+faststart",
                                                             "movie_timescale": str(DISPLAY_TICKS_PER_S)}) as dst:
                 dst.metadata["comment"] = HALFWAY_TAG
                 ost = dst.add_stream_from_template(ist)
                 ost.time_base = tb
-                last_dts = None
-                for p in pkts:
+                for p, t in zip(pkts, elapsed):
                     i = at[int(p.pts)]
-                    p.duration = (new[i + 1] if i + 1 < len(new) else stop) - new[i]
-                    dts = int(np.floor(moved(p.dts))) if p.dts is not None else new[i]
-                    dts = min(dts if last_dts is None else max(dts, last_dts + 1), new[i])
-                    p.pts, p.dts, last_dts = new[i], dts, dts
+                    p.duration = int(lengths[i])
+                    p.pts, p.dts = int(new[i]), decode_start + int(t)
                     p.time_base = tb
                     p.stream = ost
                     dst.mux(p)
