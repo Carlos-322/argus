@@ -109,7 +109,8 @@ check(sample(tf, 0, 12).every(([, p]) => shown(p) < 100), 'a session with an unf
 // Independent request predicates do not define whole-recording progress, even when local tasks exist.
 check(progressPoints(two, 12, {tasks: [{start_s: 0, completed_at_s: 6}], progressScope: 'request_parts'}).length === 0,
   'request-part progress has no global chart or zero-percent fallback');
-const renderParts = new Function(grab('requestPartAssessmentsHtml') + 'return requestPartAssessmentsHtml;')();
+const {renderParts, renderNotesClock} = new Function(grab('requestPartAssessmentsHtml') + grab('requestNotesClockHtml')
+  + 'return {renderParts: requestPartAssessmentsHtml, renderNotesClock: requestNotesClockHtml};')();
 const partData = {part_assessments: [{source_piece: {index: 2, t0_s: 388.8, t1_s: 626.8},
   task_summary: '<local goal>', completion: {task_completed: 'success', completed_at_s: 619.6, reason: 'Visible end state'},
   progress: [{start_s: 388.8, end_s: 403, progress: 0.03}]}]};
@@ -120,5 +121,12 @@ check(partHtml.includes('Request part 2') && partHtml.includes('388.8s') && part
   && partHtml.includes('619.6s') && partHtml.includes('&lt;local goal&gt;') && partHtml.includes('3%'),
   'request assessment retains source times, escaped text and local progress');
 check(partHtml.includes('whole-recording') && !renderParts({}), 'part qualification is explicit and absent on normal episodes');
+const closureEvidence = {part: 2, t_s: 602, evidence: 'Door remains ajar at 219.07-222.00s; shut by 230.80s.'};
+const closureBefore = JSON.stringify(closureEvidence);
+check(renderNotesClock(partData, closureEvidence).includes('request part 2, starting at 388.8s')
+  && JSON.stringify(closureEvidence) === closureBefore && partHtml.includes('original recording clock'),
+  'joined issue notes disclose their local clock without rewriting source prose or original timestamps');
+check(!renderNotesClock({}, closureEvidence) && !renderNotesClock(partData, {part: 1}),
+  'a clock is not inferred when its request ownership is absent');
 
 process.exit(bad ? 1 : 0);

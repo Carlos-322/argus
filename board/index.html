@@ -5491,7 +5491,7 @@ function requestPartAssessmentsHtml(d) {
   const row = (label, value) => value == null || value === '' ? ''
     : `<div class="kv"><div class="kv-k">${esc(label)}</div><div class="kv-v">${esc(value)}</div></div>`;
   return `<section class="request-part-assessments"><h3 class="section">Request-part assessments</h3>
-    <div class="tasks-note">Each request covers part of this recording. Its local goal, outcome and progress do not establish the whole-recording result.</div>`
+    <div class="tasks-note">Each request covers part of this recording. Its local goal, outcome and progress do not establish the whole-recording result. Timeline timestamps use the original recording clock; times quoted inside model-written notes may use that request's clock.</div>`
     + assessments.map((a, i) => {
       const source = a.source_piece || {}, c = a.completion || {}, alignment = a.goal_alignment || {};
       const time = t => typeof t === 'number' && Number.isFinite(t) ? fmtT(t) : '?';
@@ -5509,6 +5509,19 @@ function requestPartAssessmentsHtml(d) {
           + progress.map(p => row(`${time(p.start_s)} to ${time(p.end_s)}`, `${Math.round(p.progress * 100)}%${p.action ? '  ' + p.action : ''}`)).join('') + '</details>' : '')
         + '</details>';
     }).join('') + '</section>';
+}
+
+function requestNotesClockHtml(d, x) {
+  const ids = Array.isArray(x.parts) ? x.parts : [x.part];
+  const sources = (Array.isArray(d.part_assessments) ? d.part_assessments : [])
+    .map(a => a?.source_piece).filter(s => s && ids.includes(s.index)
+      && typeof s.t0_s === 'number' && Number.isFinite(s.t0_s) && s.t0_s >= 0);
+  if (!sources.some(s => s.t0_s > 0)) return '';
+  const text = sources.length === 1
+    ? `Notes from request part ${sources[0].index}, starting at ${fmtT(sources[0].t0_s)}. Quoted times may use that request's clock.`
+    : 'Notes were repeated across requests. Quoted times may use the clock of the request that reported them. '
+      + sources.map(s => `Request part ${s.index} starts at ${fmtT(s.t0_s)}.`).join(' ');
+  return `<div class="tasks-note">${esc(text)}</div>`;
 }
 
 // The progress chart's points, [{t, p}] in time order from {t: 0, p: 0}. The chart is tied to the goal frame the board
@@ -6067,7 +6080,7 @@ function renderEp(d, opts) {
             ? famName(x.family) : tagName(x.category, key))}</span>` : ''}${t != null
             ? `<span class="di-t">@ ${esc(fmtT(t))}</span>` : ''}${verifiedChip(x)}${x.derived_from
             ? `<span class="di-cat" title="${esc(x.evidence || '')}">from the model's notes</span>` : ''}</div>
-          ${x.evidence ? `<div class="di-ev">${esc(x.evidence)}</div>` : ''}
+          ${x.evidence ? `<div class="di-ev">${esc(x.evidence)}</div>${requestNotesClockHtml(d, x)}` : ''}
         </div>
       </div>`; }).join('');
   const sp = (d.dataset_checks || {}).stream_pairing || null;
