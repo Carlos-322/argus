@@ -75,7 +75,7 @@ def test_each_part_reads_the_recording_at_its_own_span(monkeypatch):
 
 
 def test_stitching_puts_the_parts_back_on_the_recordings_clock(monkeypatch):
-    """Times move onto the recording's clock, the lists are joined, each part's outcome becomes one task, and a
+    """Times move onto the recording's clock, local outcomes retain request scope, and a
     cut-off issue at one of our cuts is set aside with the reason, while one at the recording's real end is kept."""
     monkeypatch.setattr(pieces, "piece_max", lambda ctx: 1.5)
     monkeypatch.setattr(pieces, "CUT_GUARD_S", 0.2)          # the guard, scaled to a 3-second recording
@@ -103,7 +103,8 @@ def test_stitching_puts_the_parts_back_on_the_recordings_clock(monkeypatch):
         lab = out["labels"]
         assert [s["start_s"] for s in lab["timeline"]] == [0.2, round(0.2 + cut, 3)]
         assert [k["t_s"] for k in lab["key_events"]] == [0.5, round(0.5 + cut, 3)]
-        assert [x["outcome"] for x in lab["tasks"]] == ["partial", "partial"]
+        assert lab['tasks'] == []
+        assert [x['completion']['task_completed'] for x in lab['part_assessments']] == ['partial', 'partial']
         assert [x["part"] for x in lab["data_issues"]] == [2]                  # the recording's own end stays
         assert [x["excluded_by"] for x in lab["_excluded"]] == ["piece_cut"]   # the cut after part 1 is ours
         assert out["stitched"]["parts"] == 2 and out["usage"]["est_cost_usd"] == 1.0
@@ -377,7 +378,11 @@ def test_a_long_recording_with_a_part_that_failed_is_stitched_from_the_rest_with
     # with the start of the part's own reply, which the board shows (it never reached the board before)
     assert gap == {"part": 2, "t0_s": pcs[1]["t0_s"], "t1_s": pcs[1]["t1_s"], "why": "the model's reply did not parse",
                    "raw_head": "{oops"}
-    assert [x["task"] for x in r["labels"]["tasks"]] == ["reach", "place"]
+    assert r['labels']['tasks'] == []
+    assert [x['task_summary'] for x in r['labels']['part_assessments']] == ['reach', 'place']
+    assert r['labels']['completion']['task_completed'] == 'unclear'
+    assert 'part 2 has no labels' in r['labels']['completion']['reason']
+    assert r['config']['n_frames_sent'] is None and r['config']['n_timesteps'] is None
     d = {}
     board_build.add_reader_issues(d, {}, r)
     (iss,) = d["dataset_checks"]["reader_issues"]
@@ -637,13 +642,13 @@ def test_stitch_retains_near_cut_failures_and_complete_task_outcome_evidence(tmp
         'completed_at_s': .3, 'goal_reached_at_s': .3, 'undone_at_s': .6, 'undone_by': 'operator',
         'reason': 'The operator knocks the completed stack over.'}
     result = pieces.stitch(src, list(zip(pcs, records)))
-    tasks = result['labels']['tasks']
-    assert tasks[0]['outcome'] == 'continues_past_cut'
-    assert tasks[0]['outcome_in_part'] == 'partial'
-    assert tasks[1]['outcome'] == 'success_then_undone'
-    assert tasks[1]['goal_reached_at_s'] == round(boundary + .3, 3)
-    assert tasks[1]['undone_at_s'] == round(boundary + .6, 3)
-    assert tasks[1]['undone_by'] == 'operator'
+    assert result['labels']['tasks'] == []
+    local = result['labels']['part_assessments']
+    assert local[0]['completion'] == records[0]['labels']['completion']
+    assert local[1]['completion']['task_completed'] == 'success_then_undone'
+    assert local[1]['completion']['goal_reached_at_s'] == round(boundary + .3, 3)
+    assert local[1]['completion']['undone_at_s'] == round(boundary + .6, 3)
+    assert local[1]['completion']['undone_by'] == 'operator'
     assert [event['label'] for event in result['labels']['key_events']] == [
         'The cup falls and breaks.', 'The clip ends while the cup falls and breaks.']
     excluded = result['labels']['_excluded']
@@ -663,6 +668,55 @@ def test_saved_parts_cannot_reuse_an_oversized_final_window(tmp_path, monkeypatc
     with pytest.raises(RuntimeError, match='saved part exceeds the request duration limit'):
         pieces.write_units(job, src.parent)
     assert json.loads(last.read_text())['duration_s'] == 1.2
+
+
+def test_independent_request_goals_do_not_become_episode_tasks_or_progress(tmp_path, monkeypatch):
+    """Local success for storing then retrieving the same object is not one episode verdict.
+
+    Request accounting covers every view/grid/detail image, including a failed reply.
+    Missing receipts remain unknown instead of silently reporting the first request.
+    """
+    import copy
+    job, src, parts = _three_parts(tmp_path, monkeypatch)
+    contexts = [json.loads((part / 'context.json').read_text()) for part in parts]
+    records = [_part_result(part, summary) for part, summary in zip(parts,
+               ('Store the cup', 'Retrieve the cup', 'Close the cabinet'))]
+    for i, record in enumerate(records):
+        record['config'].update(n_frames_sent=6 + i, n_image_parts=2 + i,
+                                contact_detail_s=[.25], views=['exo', 'left', 'right'])
+        record['labels']['timeline'][0].update(object='cup', progress=1.0 if i == 0 else .03)
+        record['labels']['completion'].update(success_predicate=record['labels']['task_summary'], completed_at_s=.6)
+    original = copy.deepcopy(records)
+    stitched = pieces.stitch(src, list(zip(contexts, records)))
+    labels = stitched['labels']
+    assert stitched['annotation_policy']['task_mode'] == 'episode'
+    assert stitched['given_prompt'] == json.loads((src / 'context.json').read_text())['instruction']
+    assert labels['tasks'] == [] and labels['completion']['task_completed'] == 'unclear'
+    assert labels['progress_scope'] == 'request_parts'
+    assert all(step['progress'] is None for step in labels['timeline'])
+    assert [assessment['progress'][0]['progress'] for assessment in labels['part_assessments']] == [1.0, .03, .03]
+    for i, assessment in enumerate(labels['part_assessments']):
+        offset = contexts[i]['piece']['t0_s']
+        assert assessment['completion']['completed_at_s'] == round(offset + .6, 3)
+        assert assessment['completion']['success_predicate'] == records[i]['labels']['task_summary']
+        assert assessment['progress'][0]['source_piece'] == {
+            'index': i + 1, 't0_s': offset, 't1_s': contexts[i]['piece']['t1_s']}
+    assert stitched['config']['n_frames_sent'] == 21 and stitched['config']['n_image_parts'] == 9
+    assert stitched['config']['contact_detail_s'] == [round(context['piece']['t0_s'] + .25, 3) for context in contexts]
+    assert stitched['config']['n_timesteps'] == 6
+    assert records == original
+    # A failed model reply still has a known input receipt, but contributes no labels.
+    records[1]['parse_ok'] = False
+    for part, record in zip(parts, records):
+        (job / 'run' / 'out' / f'{part.name}.json').write_text(json.dumps(record))
+    pieces.stitch_run(job, src.parent, {src.name: [part.name for part in parts]}, tmp_path / 'joined')
+    incomplete = json.loads((tmp_path / 'joined' / f'{src.name}.json').read_text())
+    assert len(incomplete['labels']['part_assessments']) == 2 and len(incomplete['stitched']['missing']) == 1
+    assert incomplete['labels']['completion']['task_completed'] == 'unclear'
+    assert incomplete['config']['n_frames_sent'] == 21 and incomplete['config']['n_image_parts'] == 9
+    assert incomplete['config']['n_timesteps'] == 6
+    assert incomplete['config']['pieces'][1]['config'] == records[1]['config']
+    assert incomplete['usage']['est_cost_usd'] == 1.5
 
 
 def test_stitch_preserves_session_policy_and_segmented_jaw_receipts(tmp_path, monkeypatch):
@@ -687,11 +741,21 @@ def test_stitch_preserves_session_policy_and_segmented_jaw_receipts(tmp_path, mo
         record['jaw_evidence'] = {'right': measured if index == 2 else {
             'status': 'abstained', 'reason': 'insufficient_marker_coverage', 'events': [],
             'quality': {'observed_fraction': .3}}}
+    # These are model-emitted activities, not fallback tasks made from requests.
+    records[0]['labels']['tasks'] = [{'start_s': .1, 'end_s': .6, 'task': 'Seat the latch',
+        'objects': ['latch'], 'outcome': 'success', 'completed_at_s': .6}]
+    records[2]['labels']['tasks'] = [{'start_s': .1, 'end_s': .6, 'task': 'Tighten the screw',
+        'objects': ['screw'], 'outcome': 'success', 'completed_at_s': .6}]
     missing = [{'part': 2, 't0_s': contexts[1]['piece']['t0_s'],
                 't1_s': contexts[1]['piece']['t1_s'], 'why': 'no reply'}]
     result = pieces.stitch(src, [(contexts[i], records[i]) for i in (0, 2)], missing)
     assert result['annotation_policy'] == parent['annotation_policy']
     assert result['prompt_mode'] == 'session'
+    tasks = result['labels']['tasks']
+    assert [task['task'] for task in tasks] == ['Seat the latch', 'Tighten the screw']
+    assert tasks[1]['completed_at_s'] == round(contexts[2]['piece']['t0_s'] + .6, 3)
+    assert [task['source_piece']['index'] for task in tasks] == [1, 3]
+    assert result['labels']['completion']['task_completed'] == 'unclear'
     evidence = result['jaw_evidence']['right']
     assert evidence['status'] == 'segmented' and evidence['missing'] == missing
     assert evidence['source_proof'] == source_proof(parent, src)

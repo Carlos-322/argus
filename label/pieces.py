@@ -521,7 +521,9 @@ def stitch_run(job: Path, eps: Path, long_eps: dict, out: Path) -> dict:
                     episode_dir=r.get('episode_dir'), cost_usd=u.get('est_cost_usd'),
                     annotation_policy=r.get('annotation_policy'),
                     usage=u, provider=r.get('provider'), generation_id=r.get('generation_id'),
-                    finish_reason=r.get('finish_reason'), resolution_route=(r.get('config') or {}).get('resolution_route'))
+                    finish_reason=r.get('finish_reason'), resolution_route=(r.get('config') or {}).get('resolution_route'),
+                    config=copy.deepcopy(r.get('config') or {}))
+            _combine_request_config(result['config'])
             routes = [((r or {}).get('config') or {}).get('resolution_route') or {}
                       for _, r in sorted(got + failed, key=lambda item: item[0]['piece']['index'])]
             result['config']['resolution_route']['parts'] = routes
@@ -566,8 +568,10 @@ def unlabelled(ep_dir: Path, failed: list[tuple[dict, dict | None]], missing: li
                       'annotation_policy': (r or {}).get('annotation_policy'),
                       'usage': (r or {}).get('usage') or {}, 'provider': (r or {}).get('provider'),
                       'generation_id': (r or {}).get('generation_id'), 'finish_reason': (r or {}).get('finish_reason'),
-                      'resolution_route': ((r or {}).get('config') or {}).get('resolution_route')}
+                      'resolution_route': ((r or {}).get('config') or {}).get('resolution_route'),
+                      'config': copy.deepcopy((r or {}).get('config') or {})}
                      for pc, r in failed]
+    _combine_request_config(cfg)
     return {"episode_dir": str(ep_dir), "model": first.get("model"), "reasoning_effort": first.get("reasoning_effort"),
             'annotation_policy': selected, 'prompt_mode': 'session' if selected['task_mode'] == 'session' else 'inferred',
             **({'jaw_evidence': jaw_evidence} if jaw_evidence else {}),
@@ -580,6 +584,25 @@ def unlabelled(ep_dir: Path, failed: list[tuple[dict, dict | None]], missing: li
 
 
 # ---------------------------------------------------------------- stitching
+
+def _combine_request_config(cfg: dict) -> None:
+    """Aggregate available request receipts; unknown counts stay unknown, not zero.
+
+    Per-part configs retain camera/layout differences and the original local clock.
+    Top-level sampled/detail times use the recording clock, including failed replies
+    whose request receipt is available. They describe supplied input, not label coverage.
+    """
+    parts = cfg['pieces']
+    configs = [part.get('config') or {} for part in parts]
+    for field in ('n_frames_sent', 'n_image_parts'):
+        values = [config.get(field) for config in configs]
+        cfg[field] = (sum(values) if all(isinstance(value, int) and not isinstance(value, bool)
+                                       and value >= 0 for value in values) else None)
+    for field in ('timesteps_s', 'contact_detail_s'):
+        cfg[field] = [round(float(t) + float(part['t0_s']), 3)
+                      for part, config in zip(parts, configs) for t in config.get(field) or []]
+    cfg['n_timesteps'] = (len(cfg['timesteps_s']) if all('timesteps_s' in config for config in configs) else None)
+    cfg['request_config_scope'] = 'available_part_records'
 
 T_KEYS = ("t_s", "start_s", "end_s", "completed_at_s", "goal_reached_at_s", "undone_at_s", "failure_t_s",
           "recovered_at_s")
@@ -814,8 +837,9 @@ def merge_jaws(ep_dir, parts, missing=()):
 
 def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = ()) -> dict:
     """One labelling result for the whole recording from its parts' results [(part context, part result), ...]
-    in order. Times are shifted onto the recording's clock; lists are joined; each part's task and outcome
-    become one entry of tasks; issues describing our cuts are set aside in _excluded with the reason. missing names
+    in order. Times are shifted onto the recording's clock; observations and actual tasks are joined.
+    Independently inferred request goals/outcomes/progress retain their scope under part_assessments,
+    never becoming episode tasks or whole-recording progress. Cut issues are set aside in _excluded. missing names
     the parts that gave no labels ({"part", "t0_s", "t1_s", "why"}, stitch_run): the recording is stitched from the
     rest, its cuts are still every cut, and the record keeps the gaps under stitched["missing"]."""
     from label import episode as me
@@ -828,19 +852,27 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
     cuts_s = starts[1:]
     L = {"scene": {"objects": [], "setting": ""}, "timeline": [], "key_events": [], "state_changes": [],
          "scene_graph": [], "recovery": [], "instruction_variants": [], "data_issues": [], "operator_mistakes": [],
-         "tasks": []}
+         "tasks": [], "part_assessments": [], "progress_scope": "request_parts"}
     contacts_model, contacts_missing, views, strip_part = {}, [], {"shown": [], "strips": {}}, {}
     excluded, summaries, reviews, seen_obj = [], [], [], set()
     usage = {"prompt_tokens": 0, "completion_tokens": 0, "reasoning_tokens": 0, "est_cost_usd": 0.0,
              "cached_tokens": 0, "cache_write_tokens": 0, "latency_s": 0.0}
-    timesteps, still, part_info, dropped, outside = [], [], [], [], []
+    still, part_info, dropped, outside = [], [], [], []
     for n, (pc, r) in enumerate(parts, start=1):
         i = int(pc["piece"].get("index") or n)      # the part's own number, with a gap where a part gave no labels
         t0, t1 = float(pc["piece"]["t0_s"]), float(pc["piece"]["t1_s"])
         lab = _shift(r.get("labels") or {}, t0)
         owner = {"index": i, "t0_s": t0, "t1_s": t1}
-        for field in ("tasks", "key_events"):
+        for field in ("tasks", "key_events", "timeline"):
             lab[field] = [{**item, "source_piece": dict(owner)} for item in lab.get(field) or []]
+        L['part_assessments'].append({
+            'source_piece': dict(owner),
+            **{field: copy.deepcopy(lab.get(field)) for field in
+               ('task_summary', 'completion', 'performance_review', 'goal_alignment')},
+            'progress': [copy.deepcopy(step) for step in lab['timeline'] if step.get('progress') is not None],
+        })
+        for step in lab['timeline']:
+            step['progress'] = None
         off = outside_part(lab, t0, t1)
         if off:
             outside.append({"part": i, "t0_s": t0, "t1_s": t1, **off})
@@ -900,30 +932,26 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
             reviews.append(f"Part {i}: {lab['performance_review'].strip()}")
         if lab.get("tasks"):
             L["tasks"] += lab["tasks"]
-        else:
-            comp = lab.get("completion") or {}
-            L["tasks"].append({"start_s": round(t0, 3), "end_s": round(t1, 3), "task": summ or f"Part {i}",
-                               "objects": [], "outcome": (comp.get("task_completed") or "unclear"),
-                               **{key: comp.get(key) for key in OUTCOME_FIELDS if key != "outcome"},
-                               "note": comp.get("reason") or "", "source_piece": dict(owner)})
         # what each part's reply broke of the output format, left out of its labels (label/harness.py typed_labels)
         dropped += [{**x, "part": i} for x in (r.get("labels") or {}).get("_dropped") or [] if isinstance(x, dict)]
         u = r.get("usage") or {}
         for k in usage:
             usage[k] = round(usage[k] + float(u.get(k) or 0), 4)
         cfg = r.get("config") or {}
-        timesteps += [round(float(x) + t0, 3) for x in cfg.get("timesteps_s") or []]
         still += _shift(r.get("arm_still_spans") or [], t0)
         part_info.append({"part": i, "t0_s": t0, "t1_s": t1, "episode_dir": r.get("episode_dir"),
                           **({'annotation_policy': copy.deepcopy(r['annotation_policy'])}
                              if r.get('annotation_policy') else {}),
+                          'config': copy.deepcopy(cfg),
                           "cost_usd": u.get("est_cost_usd"), "parse_ok": r.get("parse_ok")})
     uniq = list(dict.fromkeys(summaries))
     L["task_summary"] = uniq[0] if len(uniq) == 1 else " ".join(f"({i}) {s}" for i, s in enumerate(uniq, 1))
     L["performance_review"] = " ".join(reviews)
-    L["completion"] = {"task_completed": None, "success_predicate": None, "completed_at_s": None,
+    L["completion"] = {"task_completed": "unclear", "success_predicate": None, "completed_at_s": None,
                        "goal_reached_at_s": None, "undone_at_s": None, "undone_by": None,
-                       "reason": f"a long recording labelled in {count} parts; each part's outcome is under tasks"
+                       "reason": f"Labelled in {count} requests with independently inferred goals. "
+                                 "Local outcomes and progress are under part_assessments; "
+                                 "they do not establish a whole-recording outcome."
                                  + ("; " + "; ".join(f"part {g['part']} has no labels, as {g['why']}" for g in missing)
                                     if missing else "")}
     for k in ("timeline",):
@@ -941,7 +969,8 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
     ctx = ep["context"]
     cfg = dict(first.get("config") or {})
     part_info = sorted(part_info + [{**g, "parse_ok": False} for g in missing], key=lambda x: x["part"])
-    cfg.update(timesteps_s=timesteps, n_timesteps=len(timesteps), pieces=part_info)
+    cfg['pieces'] = part_info
+    _combine_request_config(cfg)
     # each part routed its own cell width; the recording's route records every part's, and its cost is theirs summed
     routes = [(r.get("config") or {}).get("resolution_route") or {} for _, r in parts]
     cfg["resolution_route"] = {**(routes[0] or {}), "parts": routes,

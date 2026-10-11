@@ -106,4 +106,19 @@ check(tp.every((pt, i) => i === 0 || pt.p >= tp[i - 1].p), `a session that only 
 const tf = progressPoints(two, 12, {tasks: [{start_s: 0, completed_at_s: 6}, {start_s: 6, completed_at_s: null}]});
 check(sample(tf, 0, 12).every(([, p]) => shown(p) < 100), 'a session with an unfinished task never reads 100%');
 
+// Independent request predicates do not define whole-recording progress, even when local tasks exist.
+check(progressPoints(two, 12, {tasks: [{start_s: 0, completed_at_s: 6}], progressScope: 'request_parts'}).length === 0,
+  'request-part progress has no global chart or zero-percent fallback');
+const renderParts = new Function(grab('requestPartAssessmentsHtml') + 'return requestPartAssessmentsHtml;')();
+const partData = {part_assessments: [{source_piece: {index: 2, t0_s: 388.8, t1_s: 626.8},
+  task_summary: '<local goal>', completion: {task_completed: 'success', completed_at_s: 619.6, reason: 'Visible end state'},
+  progress: [{start_s: 388.8, end_s: 403, progress: 0.03}]}]};
+global.esc = value => String(value).replace(/</g, '&lt;').replace(/>/g, '&gt;');
+global.fmtT = value => value + 's';
+const partHtml = renderParts(partData);
+check(partHtml.includes('Request part 2') && partHtml.includes('388.8s') && partHtml.includes('626.8s')
+  && partHtml.includes('619.6s') && partHtml.includes('&lt;local goal&gt;') && partHtml.includes('3%'),
+  'request assessment retains source times, escaped text and local progress');
+check(partHtml.includes('whole-recording') && !renderParts({}), 'part qualification is explicit and absent on normal episodes');
+
 process.exit(bad ? 1 : 0);

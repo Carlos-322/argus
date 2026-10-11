@@ -57,6 +57,26 @@ def test_convert_a_harness_output():
     assert d["data_issues"] == [] and d["operator_mistakes"] == [] and d["goal_alignment"] is None
 
 
+
+def test_request_part_assessments_remain_attributed_without_invented_tasks():
+    assessment = {"source_piece": {"index": 2, "t0_s": 388.8, "t1_s": 626.8},
+                  "task_summary": "Return the shoes and close the cabinet",
+                  "completion": {"task_completed": "success", "completed_at_s": 619.6},
+                  "progress": [{"start_s": 388.8, "end_s": 403, "progress": 0.03}]}
+    out = _output("episode_long", progress_scope="request_parts", part_assessments=[assessment],
+                  tasks=[], completion={"task_completed": "unclear", "reason": "Local predicates differ"})
+    d = to_board.convert(out, "demo")
+    assert d["progress_scope"] == "request_parts"
+    assert d["part_assessments"] == [assessment]
+    from board.public_export import project
+    assert json.loads(to_board.dumps(project(d)))["part_assessments"] == [assessment]
+    assert not d["tasks"] and d["completion"]["task_completed"] == "unclear"
+    assert d["_meta"]["given_prompt"] == out["given_prompt"]
+    d["part_assessments"][0]["completion"]["task_completed"] = "failure"
+    assert assessment["completion"]["task_completed"] == "success"
+    assert "progress_scope" not in to_board.convert(_output("episode_normal"), "demo")
+
+
 def test_a_partial_outcome_is_a_failure_of_the_kind_partial():
     """The board's outcome is success or failure: a model's "partial" (part of the goal left undone) becomes a
     failure that keeps its kind, for the episode and for each task of a session, and the comparison agrees with it."""

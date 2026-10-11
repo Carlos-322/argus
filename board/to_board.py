@@ -249,6 +249,9 @@ def convert(result: dict, dataset: str | None = None) -> dict:
         "operator_mistakes": labels.get("operator_mistakes") or [],
         "completion": completion,
         "tasks": tasks,
+        **({"progress_scope": "request_parts"} if labels.get("progress_scope") == "request_parts" else {}),
+        **({"part_assessments": finite(copy.deepcopy([a for a in labels["part_assessments"]
+            if isinstance(a, dict)]))} if isinstance(labels.get("part_assessments"), list) else {}),
         **({"evidence_inspection": finite(copy.deepcopy(result["evidence_inspection"]))}
            if isinstance(result.get("evidence_inspection"), dict) and result["evidence_inspection"].get("version") == 1 else {}),
         # Supplementary sensor analysis keeps its own model and source provenance.

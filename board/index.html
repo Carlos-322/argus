@@ -5485,6 +5485,32 @@ function alignHeads() {
   if (d > 0.01) short.style.paddingBottom = (parseFloat(getComputedStyle(short).paddingBottom) + d) + 'px';
 }
 
+function requestPartAssessmentsHtml(d) {
+  const assessments = Array.isArray(d.part_assessments) ? d.part_assessments.filter(a => a && typeof a === 'object') : [];
+  if (!assessments.length) return '';
+  const row = (label, value) => value == null || value === '' ? ''
+    : `<div class="kv"><div class="kv-k">${esc(label)}</div><div class="kv-v">${esc(value)}</div></div>`;
+  return `<section class="request-part-assessments"><h3 class="section">Request-part assessments</h3>
+    <div class="tasks-note">Each request covers part of this recording. Its local goal, outcome and progress do not establish the whole-recording result.</div>`
+    + assessments.map((a, i) => {
+      const source = a.source_piece || {}, c = a.completion || {}, alignment = a.goal_alignment || {};
+      const time = t => typeof t === 'number' && Number.isFinite(t) ? fmtT(t) : '?';
+      const progress = (Array.isArray(a.progress) ? a.progress : []).filter(p => p && typeof p.progress === 'number' && Number.isFinite(p.progress));
+      return `<details class="info-block kv-block"><summary>Request part ${esc(source.index ?? i + 1)} <span class="ke-time">${time(source.t0_s)} to ${time(source.t1_s)}</span></summary>`
+        + row('Local goal', a.task_summary) + row('Local outcome', c.task_completed)
+        + row('Success criterion', c.success_predicate)
+        + (c.completed_at_s != null ? row('Local goal reached', time(c.completed_at_s)) : '')
+        + (c.goal_reached_at_s != null && c.goal_reached_at_s !== c.completed_at_s ? row('Goal first reached', time(c.goal_reached_at_s)) : '')
+        + (c.undone_at_s != null ? row('Goal undone', time(c.undone_at_s)) : '')
+        + row('What undid it', c.undone_by) + row('Evidence and limits', c.reason)
+        + row('Instruction relation', alignment.relation) + row('Instruction assessment', alignment.note)
+        + row('Local review', a.performance_review)
+        + (progress.length ? `<details class="se-method"><summary>Local progress</summary><div class="tasks-note">Original recording times. These percentages refer only to this request's local goal.</div>`
+          + progress.map(p => row(`${time(p.start_s)} to ${time(p.end_s)}`, `${Math.round(p.progress * 100)}%${p.action ? '  ' + p.action : ''}`)).join('') + '</details>' : '')
+        + '</details>';
+    }).join('') + '</section>';
+}
+
 // The progress chart's points, [{t, p}] in time order from {t: 0, p: 0}. The chart is tied to the goal frame the board
 // shows: it reaches 100% exactly there and nowhere else, so the chart, the goal frame and the outcome never disagree.
 // A step's progress is the level the task has reached when the step ends, so each value is plotted at its step's end
@@ -5505,6 +5531,7 @@ function alignHeads() {
 // QA viewer (teleop-labeler/scripts/serve_qa.py) carries the same two functions, checked identical by its tests.
 function progressPoints(eventLabels, duration, goal) {
   goal = goal || {};
+  if (goal.progressScope === 'request_parts') return [];
   const UNDER = 0.99;   // the highest level shown before a goal frame, so it never reads 100%
   const stepEnd = e => (e.end_s != null && Number(e.end_s) >= e.t_s ? Number(e.end_s) : e.t_s);
   const clamp = v => Math.max(0, Math.min(1, Number(v)));
@@ -5708,8 +5735,9 @@ function renderEp(d, opts) {
   // Given or inferred. When the dataset ships an instruction, the episode was graded against it (given mode): that
   // goal is the anchor, with the model's independent assessment beside it, since a divergence between the two is
   // itself a data-quality signal. Without one, the model's assessment is the one line.
+  const partProgress = d.progress_scope === 'request_parts';
   const givenMode = meta.prompt_mode === 'given' && !!meta.given_prompt;
-  const bannerLabel = hasTasks ? 'Session summary'
+  const bannerLabel = partProgress && meta.given_prompt ? 'Source task' : hasTasks ? 'Session summary'
     : givenMode ? `Given goal and ${whoOwn(who, 'independent assessment')}`
     : `Task, as ${esc(nameParts(who)[0])}${nameParts(who)[1] ? ` (${esc(nameParts(who)[1])})` : ''} assessed it`;
   // alignment chip: whether the model's independent assessment matches the given goal
@@ -5728,7 +5756,8 @@ function renderEp(d, opts) {
     alignHtml = `<div class="align-chip ${cls}"><span>${esc(label)}</span>`
       + `${ga.note ? `<span class="ac-note">${esc(ga.note)}</span>` : ''}</div>`;
   }
-  const bannerBody = givenMode
+  const bannerBody = partProgress && meta.given_prompt
+    ? `<div class="text">${esc(meta.given_prompt)}</div>` : givenMode
     ? `<div class="goal-given"><span class="gg-badge">given goal</span>`
         + `<span class="gg-text">${esc(meta.given_prompt)}</span></div>`
       + `<div class="goal-read"><span class="gr-badge">${whoOwn(who, 'independent assessment')}</span>`
@@ -5740,8 +5769,8 @@ function renderEp(d, opts) {
   const keyEvents = (d.key_events || []).filter(k => k.t_s != null)
       .slice().sort((a, b) => a.t_s - b.t_s);
 
-  const progPts = progressPoints(eventLabels, duration, hasTasks ? {tasks}
-    : {completedAt: comp.completed_at_s, reachedAt: comp.goal_reached_at_s, undoneAt: comp.undone_at_s});
+  const progPts = progressPoints(eventLabels, duration, {progressScope: d.progress_scope, ...(hasTasks ? {tasks}
+    : {completedAt: comp.completed_at_s, reachedAt: comp.goal_reached_at_s, undoneAt: comp.undone_at_s})});
   const progSubLabel = hasTasks ? 'tasks done' : 'to goal';
   let progOverlayHtml = '';
   if (progPts.length >= 2) {
@@ -6153,7 +6182,7 @@ function renderEp(d, opts) {
     <div class="completion-banner" style="border-left:4px solid ${vColor}">
       <span class="comp-verdict" style="color:${vColor}">${esc(comp.task_completed
         ? outcomeWords(verdict, comp.failure_kind) : '-')}</span>
-      <span class="comp-detail">${undone
+      <span class="comp-detail">${partProgress ? 'Whole-recording goal frame unassessed' : undone
         ? `goal reached ${comp.goal_reached_at_s != null ? fmtT(comp.goal_reached_at_s)
           : '?'}, undone ${comp.undone_at_s != null ? fmtT(comp.undone_at_s) : '?'}`
         : `goal frame ${comp.completed_at_s != null ? fmtT(comp.completed_at_s) : 'not reached'}`}</span>
@@ -6248,6 +6277,7 @@ function renderEp(d, opts) {
       + `</div></div>
 
     ${tasksSection}
+    ${requestPartAssessmentsHtml(d)}
 
     ${perfHtml ? `<h3 class="section">How well was the task executed?</h3>${perfHtml}` : ''}
     ${rcHtml ? `<h3 class="section">Recoveries</h3><div class="info-block">${rcHtml}</div>` : ''}
