@@ -11,9 +11,9 @@ SCOPE_FILES = ('info.json', 'metadata.json', 'dataset.json', 'meta/info.json')
 DESCRIPTION_FIELDS = ('dataset_note', 'dataset_description', 'description', 'collection_note')
 
 
-def declared_context(declarations, rig: str) -> dict:
+def declared_context(declarations, rig: str | None) -> dict:
     """Resolve explicit declarations without inferring scope from descriptive text."""
-    context = {'profile': rig}
+    context = {'profile': rig} if rig is not None else {}
     modes, notes = set(), []
     for data in declarations:
         mode = data.get('task_mode')
@@ -41,12 +41,23 @@ def merge_source_contexts(rig: str, *contexts) -> dict:
                               'collection_note': context.get('collection_note')} for context in contexts], rig)
 
 
-def source_context(upload: Path, rig: str) -> dict:
-    """Read explicit upload task scope and description for preparation and Data policy resolution."""
+def source_root(upload: Path) -> Path:
+    """A common directory wrapper is transparent, but scope declarations and sibling entries end descent."""
+    from prepare.formats import hidden_part
     root = Path(upload)
     if root.is_file():
-        root = root.parent
-    declarations = []
+        return root.parent
+    while root.is_dir() and not any((root / relative).is_file() for relative in SCOPE_FILES):
+        children = [path for path in root.iterdir() if not hidden_part(path.name)]
+        if len(children) != 1 or not children[0].is_dir() or children[0].is_symlink():
+            break
+        root = children[0]
+    return root
+
+
+def scope_records(upload: Path):
+    """Native declarations, retaining their original file paths and complete JSON objects."""
+    root = source_root(upload)
     for relative in SCOPE_FILES:
         path = root / relative
         try:
@@ -56,8 +67,12 @@ def source_context(upload: Path, rig: str) -> dict:
         except (OSError, ValueError):
             continue
         if isinstance(data, dict):
-            declarations.append(data)
-    return declared_context(declarations, rig)
+            yield path, data
+
+
+def source_context(upload: Path, rig: str | None) -> dict:
+    """Read explicit upload task scope and description for preparation and Data policy resolution."""
+    return declared_context([data for _, data in scope_records(upload)], rig)
 
 
 def hdf_source_context(f, group: str, rig: str, coverage: dict) -> dict:
@@ -78,23 +93,46 @@ def hdf_source_context(f, group: str, rig: str, coverage: dict) -> dict:
     return context
 
 
+def scope_pointers(fields, context):
+    """Only native leaves already supplied as task scope or recording description."""
+    pointers = []
+    mode = fields.get('task_mode')
+    if mode in ('episode', 'session') and mode == context.get('task_mode'):
+        pointers.append('/task_mode')
+    if mode is None and fields.get('sessions') is True and context.get('task_mode') == 'session':
+        pointers.append('/sessions')
+    for key in DESCRIPTION_FIELDS:
+        value = fields.get(key)
+        if isinstance(value, str) and value.strip() and value in context.get('collection_note', ''):
+            pointers.append('/' + key)
+    return pointers
+
+
+def mark_source_context_read(root, items):
+    """Record exact source-scope paths opened during planning, without claiming unrelated notes."""
+    records = list(scope_records(root))
+    context = declared_context([fields for _, fields in records], None)
+    paths = [str(path) for path, fields in records if scope_pointers(fields, context)]
+    for item in items:
+        item['scope_metadata_read'] = paths
+
+
 def represented_scope(ctx, roots):
     """Mark only original scope leaves already supplied through this prepared context."""
     from label.source_eligibility import mark_json
-    allowed = {(Path(root) / relative).resolve() for root in roots for relative in SCOPE_FILES}
-    for source, fields in (ctx.get('recorded_metadata') or {}).items():
-        if Path(source).resolve() not in allowed or not isinstance(fields, dict):
+    records = {str(path): fields for root in roots for path, fields in scope_records(root)}
+    used = []
+    for source, fields in records.items():
+        pointers = scope_pointers(fields, ctx)
+        if not pointers:
             continue
+        # Keep complete native fields; only the leaves already supplied as recording context are represented.
+        ctx.setdefault('recorded_metadata', {}).setdefault(source, fields)
         represented = ctx.setdefault('represented_source_members', {})
-        mode = fields.get('task_mode')
-        if mode in ('episode', 'session') and mode == ctx.get('task_mode'):
-            mark_json(represented, source, '/task_mode')
-        if mode is None and fields.get('sessions') is True and ctx.get('task_mode') == 'session':
-            mark_json(represented, source, '/sessions')
-        for key in DESCRIPTION_FIELDS:
-            value = fields.get(key)
-            if isinstance(value, str) and value.strip() and value in ctx.get('collection_note', ''):
-                mark_json(represented, source, '/' + key)
+        for pointer in pointers:
+            mark_json(represented, source, pointer)
+        used.append(source)
+    return used
 
 
 def original(value):

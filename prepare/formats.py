@@ -9169,6 +9169,8 @@ def plan(root: Path, grouping: dict | None = None, ownership_context: dict | Non
         det["missing"].append(f"{len(tables)} table{'s' if len(tables) != 1 else ''} of numbers that no episode "
                               "reads: " + _and_words(tables[:12])
                               + (f" and {len(tables) - 12} more" if len(tables) > 12 else "") + ".")
+    from prepare.annotations import mark_source_context_read
+    mark_source_context_read(root, items)
     unread = unread_files(root, det, items)
     if unread:
         det["missing"].append(f"{len(unread)} file{'s' if len(unread) != 1 else ''} that no reader opens: "
@@ -9491,6 +9493,7 @@ def opened_notes(items: list[dict]) -> set[Path]:
     remain listed by unread_files."""
     out = set()
     for it in items:
+        out |= {Path(path) for path in it.get('scope_metadata_read') or []}
         if it.get("side_notes"):
             out |= set(episode_notes(it["side_notes"])["read"])
         if it.get("kind") != "video":
@@ -10206,7 +10209,7 @@ def convert(root: Path, rig: str, out: Path, dataset: str, max_seconds: float, g
             ctx['collection_note'] = '\n'.join(notes)
         if len(scope) > 1:
             from prepare.annotations import represented_scope
-            represented_scope(ctx, [root.parent if root.is_file() else root,
+            it['scope_metadata_read'] = represented_scope(ctx, [root.parent if root.is_file() else root,
                                     *([Path(item_root)] if item_root else [])])
             write_atomic(out / ctx['episode_id'] / 'context.json', ctx, indent=1, default=str)
         if it.get("side_notes"):
