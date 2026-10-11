@@ -1013,8 +1013,10 @@ aside.left .grip-strip .sensor-overlay { position: static; order: 2; max-width: 
 .sensor-overlay-stack .gf-pressure { padding-top: 5px; }
 .sensor-overlay-stack .gf-pressure-head { font-size: 10px; }
 .sensor-overlay-stack .gf-pressure-row { grid-template-columns: 78px minmax(0,1fr); font-size: 10px; }
+.sensor-overlay-stack .gf-pressure-label { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sensor-overlay-stack .gf-pressure-row svg { height: 20px; }
 .sensor-overlay-stack .gf-pressure-range, .sensor-overlay-stack .gf-pressure-value { display: none; }
+.sensor-overlay-stack .gf-pressure-gap { display: none; }
 .sensor-overlay-stack.tight .gf-pressure { gap: 2px; }
 .sensor-overlay-stack .gf-meta { position: sticky; top: 0; z-index: 1; background: rgba(22, 24, 28, .96); }
 .cam-row-grippers:not(.cam-row-single) .sensor-overlay-stack {
@@ -4568,7 +4570,7 @@ function gripOverlayPressureHtml(G, f, limit = 3) {
         path += `${pen ? 'L' : 'M'}${x(times[i]).toFixed(2)},${y(value).toFixed(2)} `;
         pen = true;
       });
-      return `<span class="gf-pressure-row"><span>${esc(v.label)}${v.depthRegion ? `<span class="gf-pressure-range">${esc(v.recordedLow)} to ${esc(v.recordedHigh)}</span>` : ''}${G.generic ? `<span class="gf-pressure-value" data-grip-mini-value="${k}"></span>` : ''}</span>
+      return `<span class="gf-pressure-row"><span><span class="gf-pressure-label" title="${esc(v.label)}">${esc(v.label)}</span>${v.depthRegion ? `<span class="gf-pressure-range">${esc(v.recordedLow)} to ${esc(v.recordedHigh)}</span>` : ''}${G.generic ? `<span class="gf-pressure-value" data-grip-mini-value="${k}"></span>` : ''}</span>
         <span class="gf-pressure-chart"><svg viewBox="0 0 180 32" preserveAspectRatio="none" role="img" aria-label="${esc(v.label)} ${G.generic ? 'recorded readings' : 'relative sensor response over this clip'}">
           <rect x="${x(f.start)}" y="2" width="${x(f.end) - x(f.start)}" height="28" fill="currentColor" opacity=".08"/>
           ${v.depthRegion ? '' : `<line x1="0" x2="180" y1="${y(0)}" y2="${y(0)}" stroke="currentColor" opacity=".3" stroke-dasharray="2 3"/>`}
