@@ -11,7 +11,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const src = fs.readFileSync(process.argv[2] || path.join(__dirname, '..', 'board', 'serve.py'), 'utf8');
+const src = require('./page_functions')(process.argv[2]).src;
 const grab = name => {
   const m = src.match(new RegExp(`\\nfunction ${name}\\([\\s\\S]*?\\n}\\n`));
   if (!m) { console.log(`no function ${name} in the page`); process.exit(1); }

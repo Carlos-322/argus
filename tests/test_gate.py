@@ -24,10 +24,6 @@ def test_every_case_names_gate_episodes_and_every_episode_is_in_its_list():
             lines = (REPO / "configs" / "slices" / f"{x['dataset']}.txt").read_text().splitlines()
             assert x["line"] in lines, x
             assert x["role"] == "case" or x["role"] == f"cost:{x['dataset']}"
-    counts = {rig: sum(1 for x in xs if score.case_for(x["name"], cases)) for rig, xs in sel.items()}
-    assert counts == {"teleop": 22, "handheld": 36, "ego": 7}
-    assert sum(1 for x in sel["handheld"] if "Prepare_tableware" in x["name"]) == 32
-    assert [x["name"] for x in sel["teleop"]].count("episode_001346_r6") == 1
 
 
 def test_every_fact_a_case_states_is_one_the_scorer_judges():

@@ -5,19 +5,21 @@
 
 PATH_OR_URL is a folder, a file or an archive, or an http(s) URL of a file or an archive, which is downloaded into
 JOB/upload first. Everything else is written under JOB, and the data itself is never edited. These are the stages
-Data Review runs on an upload, in its order and with its settings, so a folder reviewed here and the same folder
-uploaded to Data Review get the same requests and the same board:
+Data Review shares this path. Upload limits and explicit local overrides can differ; the resolved policy is saved
+in the job and each prepared episode:
 
   1. convert  the data into episode sidecars (prepare/formats.py, the reader python -m prepare folder runs), with
               a report of what was read, used and left out (JOB/report.json)
-  2. checks   crossed camera streams, recorded jumps and flat gripper channels where the data has arm state
+  2. dictionary  interpret source fields when recorded descriptors leave their meanings uncertain
+  3. checks   crossed camera streams, recorded jumps and flat gripper channels where the data has arm state
               (checks.stream_pairing), sped-up recordings measured against their neighbours in the same folder
-              (checks.timebase measure_folder), and the capture checks (checks.capture_qc)
-  3. clips    browser-playable copies of each camera for the board (python -m board clips)
-  4. dry run  every request built exactly as it would be sent, free. A recording longer than label/pieces.py's
+              (checks.timebase measure_folder), the capture checks (checks.capture_qc), and the checks on the
+              other signals and depth streams where the data has them (checks.sensors)
+  4. clips    browser-playable copies of each camera for the board (python -m board clips)
+  5. dry run  every request built exactly as it would be sent, free. A recording longer than label/pieces.py's
               PIECE_MAX_S is labelled in parts cut at still moments
-  5. label    the model labels every episode or part, stopping at --cap dollars (skipped with --free)
-  6. board    parts stitched back into one timeline per recording, and the board's files (board.build with the
+  6. label    the model labels every episode or part, stopping at --cap dollars (skipped with --free)
+  7. board    parts stitched back into one timeline per recording, and the board's files (board.build with the
               rig's rules, plus fixed_window when the reader found fixed-length files)
 
 Serve the result with `python -m board serve --board JOB --clips JOB/clips`. The model key comes from
@@ -27,14 +29,20 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
+import math
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+from label import policy
+from label.atomic import write_atomic
 
 REPO = Path(__file__).resolve().parent.parent
 PY = sys.executable
@@ -66,18 +74,28 @@ def run_step(job: Path, step: str, cmd: list[str], env: dict, ok_codes=(0,)) -> 
     return rc
 
 
-def fetch(data: str, job: Path) -> Path:
-    """The data as a local path: a URL is downloaded into JOB/upload under its own file name."""
-    if not data.startswith(("http://", "https://")):
+def fetch(data: str, job: Path, *, allow_download=True) -> Path:
+    """Keep different URL resources distinct without exposing access parameters."""
+    if not data.startswith(('http://', 'https://')):
         return Path(data).resolve()
-    dest = job / "upload" / (Path(urllib.parse.urlparse(data).path).name or "data")
+    resource = hashlib.sha256(data.encode()).hexdigest()
+    basename = Path(urllib.parse.urlsplit(data).path).name or 'data'
+    dest = job / 'upload' / resource / basename
     if not dest.exists():
+        if not allow_download:
+            raise SystemExit('Retained download is missing; use a fresh job with a new --out. Existing receipts are retained.')
         dest.parent.mkdir(parents=True, exist_ok=True)
-        print(f"== download {data}", flush=True)
-        tmp = dest.with_name(dest.name + ".part")
-        with urllib.request.urlopen(data) as r, open(tmp, "wb") as fh:
-            shutil.copyfileobj(r, fh)
-        tmp.replace(dest)
+        print('== download', flush=True)
+        temporary = None
+        try:
+            with urllib.request.urlopen(data) as response, tempfile.NamedTemporaryFile(
+                    dir=dest.parent, prefix='.download-', delete=False) as output:
+                temporary = Path(output.name)
+                shutil.copyfileobj(response, output)
+            temporary.replace(dest)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
     return dest
 
 
@@ -87,6 +105,98 @@ def commit() -> str:
                               text=True, check=True).stdout.strip()
     except Exception:
         return "unknown"
+
+
+def preparation_code_identity() -> dict:
+    """The reader and the runtime helpers it uses, independent of a Git checkout's dirty state."""
+    return {p.relative_to(REPO).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+            for package in ('prepare', 'label', 'checks', 'board', 'review')
+            for p in sorted((REPO / package).rglob('*.py')) if '__pycache__' not in p.parts}
+
+
+def file_identity(path: Path, *, context=False) -> dict:
+    from label.evidence_access import SOURCE_HASH_LIMIT
+    stat = path.stat()
+    result = {'location': hashlib.sha256(str(path.resolve()).encode()).hexdigest(), 'size': stat.st_size}
+    if context:
+        from label.dictionary import DERIVED_CONTEXT
+        document = json.loads(path.read_text())
+        # These stages add results to the context without preparing its source again.
+        document = {k: v for k, v in document.items() if k not in DERIVED_CONTEXT | {'pieces'}}
+        content = json.dumps(document, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()
+        result['size'] = len(content)
+        result['sha256'] = hashlib.sha256(content).hexdigest()
+    elif stat.st_size <= SOURCE_HASH_LIMIT:
+        result['sha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
+    else:
+        result['mtime_ns'] = stat.st_mtime_ns
+    return result
+
+
+def source_identity(data: Path, job: Path) -> dict:
+    from prepare.formats import files_under
+    files = [data] if data.is_file() else files_under(data)
+    # In particular, a CLI job nested below its input is not another uploaded recording.
+    if data.is_dir() and job.is_relative_to(data):
+        files = [p for p in files if not p.resolve().is_relative_to(job)]
+    base = data.parent if data.is_file() else data
+    return {p.relative_to(base).as_posix(): file_identity(p) for p in files}
+
+
+def prepared_identity(job: Path) -> dict:
+    from prepare.formats import files_under
+    return {p.relative_to(job).as_posix(): file_identity(p, context=p.name == 'context.json')
+            for name in ('episodes', 'episodes_unclipped') for p in files_under(job / name)}
+
+
+def preparation_checkpoint(job: Path, receipt: dict) -> None:
+    receipt.update(prepared=prepared_identity(job), report=file_identity(job / 'report.json'))
+    write_atomic(job / 'preparation_receipt.json', receipt)
+
+
+def verified_preparation(job: Path, data: Path, args, dataset: str, overrides: dict) -> tuple[dict, dict]:
+    """Reuse a proven preparation or require a new job, retaining every old artifact."""
+    from prepare import formats
+    receipt_path = job / 'preparation_receipt.json'
+    resource = args.data if args.data.startswith(('http://', 'https://')) else str(data)
+    settings = {'rig': args.rig, 'dataset': dataset, 'max_minutes': args.max_minutes, 'grouping': args.grouping}
+    current = {'version': 1, 'resource': hashlib.sha256(resource.encode()).hexdigest(),
+               'source': source_identity(data, job), 'settings': settings, 'producer': preparation_code_identity()}
+    refuse = 'Preparation cannot be verified for this resume; use a fresh job with a new --out. Existing data and receipts are retained.'
+    if receipt_path.exists():
+        try:
+            saved = json.loads(receipt_path.read_text())
+            if any(saved.get(key) != value for key, value in current.items()):
+                raise ValueError('source, settings or producer changed')
+            if saved['prepared'] != prepared_identity(job) or saved['report'] != file_identity(job / 'report.json'):
+                raise ValueError('prepared artifacts or report changed')
+            selected = {}
+            for name in saved['policies']:
+                ep = job / 'episodes' / name
+                if not ep.is_dir():
+                    ep = job / 'episodes_unclipped' / name
+                selected[name] = policy.resolve(json.loads((ep / 'context.json').read_text()), **overrides)
+            if selected != saved['policies']:
+                raise ValueError('annotation settings changed')
+            rep = json.loads((job / 'report.json').read_text())
+            if not isinstance(rep.get('episodes'), list):
+                raise ValueError('preparation report is invalid')
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+            raise SystemExit(refuse) from error
+        print('== convert (verified preparation reused)', flush=True)
+        return rep, saved
+    if any((job / name).exists() for name in ('episodes', 'episodes_unclipped', 'report.json', 'run',
+                                             'dictionary.json', 'dictionary.claim')):
+        raise SystemExit(refuse)
+    print('== convert', flush=True)
+    rep = formats.convert(data, args.rig, job / 'episodes', dataset,
+                          args.max_minutes * 60 if args.max_minutes else float('inf'), grouping=args.grouping)
+    if current['source'] != source_identity(data, job) or current['producer'] != preparation_code_identity():
+        raise SystemExit(refuse)
+    write_atomic(job / 'report.json', rep, indent=1)
+    current['policies'] = policy.persist(job / 'episodes', **overrides)
+    preparation_checkpoint(job, current)
+    return rep, current
 
 
 def main() -> int:
@@ -103,41 +213,72 @@ def main() -> int:
     ap.add_argument("--max-minutes", type=float, default=0, help="read at most this much footage (default: all)")
     ap.add_argument("--grouping", type=json.loads, default={},
                     help='JSON {folder: "takes" | "cameras"} for folders whose files cannot tell takes from cameras')
+    policy.add_arguments(ap)
     a = ap.parse_args()
+    if not math.isfinite(a.cap) or a.cap <= 0:
+        ap.error("--cap must be finite and positive")
+    if not math.isfinite(a.max_minutes) or a.max_minutes < 0:
+        ap.error("--max-minutes must be finite and nonnegative")
+    overrides = {key: getattr(a, key) for key in ("model", "reasoning", "sample_fps", "task_mode", "dataset_note")}
+    policy.resolve({"profile": a.rig}, **overrides)
 
     from board import build as build_board
     from board import clips as board_clips
     from board import rules as board_rules
-    from checks import timebase
-    from label import pieces
+    from checks import capture_qc, timebase
+    from label import pieces, dictionary_stage
     from prepare import formats
 
     job = a.out.resolve()
     job.mkdir(parents=True, exist_ok=True)
-    data = fetch(a.data, job)
+    receipt_path = job / 'preparation_receipt.json'
+    refuse = 'Preparation cannot be verified for this resume; use a fresh job with a new --out. Existing data and receipts are retained.'
+    if receipt_path.exists():
+        resource = a.data if a.data.startswith(('http://', 'https://')) else str(Path(a.data).resolve())
+        try:
+            if json.loads(receipt_path.read_text()).get('resource') != hashlib.sha256(resource.encode()).hexdigest():
+                raise ValueError('input resource changed')
+        except (OSError, ValueError, AttributeError) as error:
+            raise SystemExit(refuse) from error
+    elif any((job / name).exists() for name in ('episodes', 'episodes_unclipped', 'report.json', 'run',
+                                               'dictionary.json', 'dictionary.claim')):
+        raise SystemExit(refuse)
+    data = fetch(a.data, job, allow_download=not receipt_path.exists())
+    if data == job:
+        raise SystemExit('--out must be a separate job directory; it may be nested below --data.')
     dataset = a.dataset or data.stem
     eps = job / "episodes"
     jobs = str(max(1, a.jobs))
     env = repo_env()
 
-    print("== convert", flush=True)
-    if eps.exists():
-        shutil.rmtree(eps)
-    rep = formats.convert(data, a.rig, eps, dataset, a.max_minutes * 60 if a.max_minutes else float("inf"),
-                          grouping=a.grouping)
-    (job / "report.json").write_text(json.dumps(rep, indent=1))
+    rep, preparation = verified_preparation(job, data, a, dataset, overrides)
     if not rep["episodes"]:
         why = "; ".join(f"{f['name']}: {f['why']}" for f in rep["failed"][:3])
         raise SystemExit("no episode could be read" + (f" ({why})" if why else ""))
+
+    selected = preparation['policies']
+    write_atomic(job / "annotation_policy.json", selected)
+
+    print('== dictionary', flush=True)
+    dictionary_stage.prepare(job, eps, [e['episode_id'] for e in rep['episodes']], free=a.free, cap=a.cap)
 
     if any(e["state_kind"] != "none" for e in rep["episodes"]):
         for flag in ([], ["--jumps"], ["--grippers"]):
             run_step(job, f"checks{''.join(flag).replace('--', '_')}",
                      [PY, "-m", "checks.stream_pairing", *flag, "--jobs", jobs, str(eps)], env)
         timebase.measure_folder(eps)
-    run_step(job, "checks_capture", [PY, "-m", "checks.capture_qc", "--jobs", jobs, str(eps)], env)
-    # exit 1 is board clips saying no episode came out whole (clips/failed.json lists why), told below as the upload's
-    # own reason; any other failure of the step is still an error
+    # EXIT_FAILED is some episode's capture checks not running (its worker died twice): that episode's record has every
+    # check errored with the error, which the board shows, and the other episodes go on
+    if run_step(job, "checks_capture", [PY, "-m", "checks.capture_qc", "--jobs", jobs, str(eps)], env,
+                ok_codes=(0, capture_qc.EXIT_FAILED)):
+        print("capture checks could not run on some episodes; each is shown with its checks errored "
+              f"(log {job / 'logs' / 'checks_capture.log'})", flush=True)
+    if any((eps / e["episode_id"] / "signals.npz").exists() or (eps / e["episode_id"] / "depth.json").exists()
+           for e in rep["episodes"]):
+        run_step(job, "checks_sensors", [PY, "-m", "checks.sensors", "--jobs", jobs, str(eps)], env)
+    # exit 1 is board clips saying no episode came out at all (clips/failed.json lists why), told below as the upload's
+    # own reason; any other failure of the step is still an error. An episode with a camera that decodes is kept, and
+    # what was wrong with its other cameras goes into the report's notes
     rc = run_step(job, "clips", [PY, "-m", "board", "clips", "--episodes", str(eps), "--out", str(job / "clips"),
                                  "--jobs", jobs, "--clip-threads", "1"], env, ok_codes=(0, 1))
     left_out = board_clips.set_aside_failed(eps, job / "clips")
@@ -145,8 +286,10 @@ def main() -> int:
         board_clips.drop_from_report(rep, left_out)
         if not rep["episodes"]:
             raise SystemExit("no episode could be put on the board: " + "; ".join(f["why"] for f in left_out[:3]))
-        (job / "report.json").write_text(json.dumps(rep, indent=1))
-        print(f"left out, a camera file does not decode: {', '.join(f['name'] for f in left_out)}", flush=True)
+        print(f"left out, no camera file decodes: {', '.join(f['name'] for f in left_out)}", flush=True)
+    board_clips.note_camera_problems(rep, eps)
+    write_atomic(job / "report.json", rep, indent=1)
+    preparation_checkpoint(job, preparation)
     if rc != 0:
         raise SystemExit(f"clips exited {rc} with episodes still to put on the board (log {job / 'logs' / 'clips.log'})")
 
@@ -158,28 +301,44 @@ def main() -> int:
         print(f"free run: requests built in {job / 'dry'}, model not called", flush=True)
         return 0
 
+    if preparation['source'] != source_identity(data, job):
+        raise SystemExit('Source changed during review; use a fresh job with a new --out. Existing receipts are retained.')
+
     run_dir = job / "run"
     run_dir.mkdir(exist_ok=True)
+    prior_run = json.loads((run_dir / 'run.json').read_text()) if (run_dir / 'run.json').exists() else {}
     info = {"run_id": job.name, "kind": "review", "dataset": dataset, "slice": str(eps),
-            "code": f"argus@{commit()}", "started_at": now(), "cap_usd": a.cap, "status": "running"}
+            "code": f"argus@{commit()}", "started_at": prior_run.get('started_at') or now(), "cap_usd": a.cap, "status": "running",
+            "annotation_policy": selected}
     (run_dir / "run.json").write_text(json.dumps(info, indent=1))
-    run_step(job, "label", [PY, "-m", "label.harness", "--episodes-root", str(job / "units"), "--out-dir",
-                            str(run_dir / "out"), "--concurrency", str(a.concurrency), "--max-spend", str(a.cap)],
-             env, ok_codes=(0, 1))
-    info.update(status="done", finished_at=now())
+    remaining = dictionary_stage.remaining_label_budget(job, a.cap)
+    if remaining > 0:
+        run_step(job, "label", [PY, "-m", "label.harness", "--episodes-root", str(job / "units"), "--out-dir",
+                                str(run_dir / "out"), "--concurrency", str(a.concurrency),
+                                "--max-spend", str(remaining)], env, ok_codes=(0, 1))
+    else:
+        print('label budget exhausted by prior spending or outstanding reservations', flush=True)
+    spend = dictionary_stage.dictionary_spend(job)
+    label_cost = dictionary_stage.label_spend(job)
+    complete = spend['complete'] and dictionary_stage.label_spend_complete(job)
+    total = label_cost + (spend['cost_usd'] or 0.0)
+    info.update(status="done", finished_at=now(), dictionary=spend,
+                cost_usd=round(total, 6) if complete else None,
+                reserved_cost_usd=round(label_cost + spend['reserved_usd'], 6),
+                cost_complete=complete)
     (run_dir / "run.json").write_text(json.dumps(info, indent=1))
 
     print("== board", flush=True)
     final = job / "run_final"
-    if final.exists():
-        shutil.rmtree(final)
     st = pieces.stitch_run(job, eps, long_eps, final / "out")
     (final / "run.json").write_text(json.dumps(info, indent=1))
     entry = board_rules.own_data_entry(dataset, str(final), str(eps), a.rig, rep.get("packaging"))
     (job / "manifest.json").write_text(json.dumps({"board": job.name, "datasets": [entry]}, indent=1))
     build_board.build(job)
     if st["incomplete"]:
-        print(f"not on the board, a part was not labelled: {', '.join(st['incomplete'])}", flush=True)
+        print(f"on the board with a part not labelled, flagged at its span: {', '.join(st['incomplete'])}", flush=True)
+    if st["unlabelled"]:
+        print(f"on the board with no labels, no part was labelled: {', '.join(st['unlabelled'])}", flush=True)
     print(f"done: python -m board serve --board {job} --clips {job / 'clips'}", flush=True)
     return 0
 

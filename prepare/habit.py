@@ -9,8 +9,8 @@ episodes.jsonl, tasks.jsonl, subtasks.jsonl, human_subtasks.jsonl) and, per list
 videos of the three cameras used. It writes EPISODES/episode_<index>/ with context.json, sources.json, state.npz and
 instruction.txt (see prepare/formats.py, whose LeRobot reader this uses). HABIT specifics set here:
 - observation.state is, per arm, the end effector's x y z (m) and three rotation values followed by the
-  gripper opening, so the state kind is "ee_pose" (the LeRobot reader's teleop default, "joints", would read
-  poses as joint angles).
+  gripper opening. This selected adapter supplies its established Cartesian contract to the shared reader
+  before state and commands are qualified.
 - The instruction is the episode's high-level instruction. The instruction note says that a person shares the
   workspace in every episode, and gives the person's and the robot's timed parts as the operators marked them.
 - The publisher's own labels (task_status, and the frames it marks as error, intervention and high-jerk
@@ -27,13 +27,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from label.atomic import write_atomic
 from prepare import cli
 from prepare import hub
 from prepare import formats
 
-# an uploaded LeRobot dataset with HABIT's own columns (its error, intervention and person's-subtask marks) is read
-# by this adapter, so its end-effector state, instruction, person's parts and publisher labels come along
-UPLOAD = "lerobot"
+UPLOAD = None
 
 REPO = "configinc/HABIT"
 META_FILES = ("info.json", "episodes.jsonl", "tasks.jsonl", "subtasks.jsonl", "human_subtasks.jsonl")
@@ -75,7 +74,8 @@ def timed_parts(idx: np.ndarray, texts: dict, fps: float) -> list[str]:
 
 
 def _texts(p: Path) -> dict:
-    return {json.loads(line)["task_index"]: json.loads(line)["task"] for line in open(p)}
+    with open(p) as source:
+        return {json.loads(line)["task_index"]: json.loads(line)["task"] for line in source}
 
 
 def task_note(root: Path, df: pd.DataFrame, fps: float) -> str:
@@ -139,7 +139,7 @@ def write_episode(it: dict, r: dict, root: Path, out: Path, dataset: str) -> dic
     eidx = int(it["row"]["eidx"])
     info = json.loads((root / "meta" / "info.json").read_text())
     fps = float(info["fps"])
-    ctx = formats.convert_lerobot(it, RIG, out, dataset, hold_back=PUBLISHER_COLUMNS)
+    ctx = formats.convert_lerobot(it, RIG, out, dataset, hold_back=PUBLISHER_COLUMNS, native_adapter="habit")
     ep = out / ctx["episode_id"]
     df = pd.read_parquet(root / info["data_path"].format(episode_chunk=eidx // int(info.get("chunks_size") or 1000),
                                                          episode_index=eidx),
@@ -158,8 +158,10 @@ def write_episode(it: dict, r: dict, root: Path, out: Path, dataset: str) -> dic
                                  "intervention_spans_s": spans(df["is_intervention_segment"].to_numpy(), fps),
                                  "high_jerk_spans_s": spans(df["is_high_jerk_segment"].to_numpy(), fps),
                                  "sid": r.get("sid"), "unit_name": r.get("unit_name")})
-    ctx.pop("state_note", None)
-    (ep / "context.json").write_text(json.dumps(ctx, indent=1))
+    formats.drop_no_state(ctx)
+    from prepare.state_contract import native_contract
+    ctx["state_contract"] = native_contract("habit", "ee_pose")
+    write_atomic(ep / "context.json", ctx, indent=1)
     return ctx
 
 

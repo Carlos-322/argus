@@ -4,3 +4,17 @@ __pycache__/
 .pytest_cache/
 *.pyc
 .DS_Store
+
+# Local credentials and scanner output.
+.env
+.env.*
+!.env.example
+*.key
+*.p12
+*.pfx
+private*.pem
+credentials*.json
+secrets*.json
+.credentials/
+.secrets/
+gitleaks-report*.json
