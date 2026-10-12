@@ -7363,7 +7363,7 @@ def h5_file_signals(paths: list[Path], q_abs: np.ndarray, n_anchor: int, fps: fl
 
 # modules of prepare/ that are the reader and its tools, not dataset adapters
 NOT_ADAPTERS = {"__main__", "cli", "display", "folder", "formats", "hub", "lerobot", "lerobot_labels", "mcap_claims",
-                "mcap_fields", "mcap_pose", "hdf_metadata", "remux",
+                "mcap_fields", "mcap_pose", "mcap_registration", "hdf_metadata", "remux",
                 "signal_alignment", "state_notes", "state_contract", "videos", "camera_clock", "jaws"}
 
 
