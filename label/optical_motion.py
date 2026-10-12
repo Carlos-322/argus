@@ -13,12 +13,12 @@ MIN_MARKERS = 24
 MAX_COMPARISONS = 16
 
 
-def _image(im):
+def _image(im, width=ANALYSIS_WIDTH):
     from label.frames import Shrunk, downscaled
     if isinstance(im, Shrunk):
-        widths = [w for w in im.by_width if w <= ANALYSIS_WIDTH]
-        im = im.at(max(widths) if widths else min(im.by_width))
-    return downscaled(im, ANALYSIS_WIDTH)
+        widths = [w for w in im.by_width if w >= width]
+        im = im.at(min(widths) if widths else max(im.by_width))
+    return downscaled(im, width)
 
 
 def _contrast(im):
@@ -106,7 +106,11 @@ def measure(frames, times):
     ks = sorted(k for k in frames if k in times)
     if len(ks) < 2:
         return None
-    first = _image(frames[ks[0]])
+    from label.frames import Shrunk
+    width = min(ANALYSIS_WIDTH, *(min(frames[k].width, max(frames[k].by_width))
+                                  if isinstance(frames[k], Shrunk) else frames[k].width for k in ks))
+    native_size = (frames[ks[0]].width, frames[ks[0]].height)
+    first = _image(frames[ks[0]], width)
     if min(first.size) < 64:
         return None
     detected = _dots(_contrast(first))
@@ -118,8 +122,8 @@ def measure(frames, times):
     samples, pairs = [], []
     previous = None
     for k in ks:
-        im = _image(frames[k])
-        if im.size == first.size:
+        im = _image(frames[k], width)
+        if (frames[k].width, frames[k].height) == native_size and im.size == first.size:
             position, valid, agreement = _positions(_contrast(im), reference, radius)
         else:
             position = baseline; valid = np.zeros(len(reference), dtype=bool); agreement = base_agreement
@@ -143,5 +147,5 @@ def measure(frames, times):
             'reference_markers': len(reference), 'samples': [r for r in samples if r['time_s'] in used_times],
             'pairs': selected, 'comparisons_total': len(pairs),
             'method': 'Contrast-weighted dot centers at two thresholds. Pairs compare the same valid markers. Coherent movement is retained; local_p95_px separately removes a fitted affine field.',
-            'coordinates': 'Analysis-image pixels, x right and y down. No world direction, pressure or force calibration. The first supplied frame is a reference, not a certified unloaded pad.',
+            'coordinates': 'Pixels at the common analysis_size, x right and y down. No world direction, pressure or force calibration. The first supplied frame is a reference, not a certified unloaded pad.',
             'coverage': 'Only supplied image instants. Large movement, lost dots and ambiguous centers produce quality gaps. Sparse comparisons cannot establish continuous slip or complete transient coverage.'}
