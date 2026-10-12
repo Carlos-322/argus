@@ -162,7 +162,8 @@ def inventory(episodes: list[Path]) -> dict:
     if len(owners) != len(set(owners)):
         raise ValueError("episode folder names must be unique within an upload")
 
-    def add(ep, name, kind, shape, dtype, meta, context_path, *, file=None, key=None, numbers=None, limitation=None):
+    def add(ep, name, kind, shape, dtype, meta, context_path, *, file=None, key=None, numbers=None, limitation=None,
+            source_identity=None, source_descriptor_sha256=None):
         descriptor = {"name": str(name), "kind": kind, "shape": shape, "dtype": dtype,
                       "names": meta.get("names") or [], "rate_hz": meta.get("rate_hz"),
                       "source": _relative(meta.get("source") or (file or "context.json") + "#" + context_path, ep)}
@@ -176,6 +177,9 @@ def inventory(episodes: list[Path]) -> dict:
             binding["file"] = file
         if key is not None:
             binding["key"] = key
+        if source_identity is not None:
+            binding['source_identity'] = source_identity
+            binding['source_descriptor_sha256'] = source_descriptor_sha256
         field["bindings"].append(binding)
         if limitation:
             field["limitations"].append(f"{ep.name} {limitation}")
@@ -255,6 +259,27 @@ def inventory(episodes: list[Path]) -> dict:
             file = meta.get("file") or "signals.npz"
             numeric(ep, meta, "signal", f"signals/{i}", file, meta.get("key"))
             claimed.setdefault(file, set()).add(meta.get("key"))
+        if ctx.get('table_field_inventory'):
+            from label.evidence_access import table_source_identity
+            table_identity = table_source_identity(ctx, ep)
+        for i, detail in enumerate(ctx.get('table_field_inventory') or []):
+            from label.evidence_access import header
+            file = ctx['recorded_table_fields']
+            meta = _relative({'name': detail['name'], **(detail.get('descriptor') or {}),
+                              'source': 'owned source table column ' + detail['name']}, ep)
+            path = Path(ctx.get('retained_evidence_root') or ep) / file
+            try:
+                if detail.get('reason'):
+                    raise ValueError(detail['reason'])
+                shape, _, dtype, _ = header(path, detail['array'])
+                shape, dtype = list(shape[1:]), str(dtype)
+                limitation = 'Typed source samples retain original values and row presence. No floating point summary is assigned.'
+            except (OSError, ValueError, KeyError, zipfile.BadZipFile) as error:
+                shape, dtype = detail.get('source_shape'), detail.get('dtype')
+                limitation = detail.get('reason') or f'owned source array unreadable ({type(error).__name__})'
+            add(ep, detail['name'], 'native', shape, dtype, meta, f'table_field_inventory/{i}',
+                file=file, key=detail.get('array'), limitation=limitation, source_identity=table_identity,
+                source_descriptor_sha256=_digest(detail.get('descriptor') or {}))
         for i, meta in enumerate(source.get("bookkeeping") or []):
             file = meta.get("file") or "signals.npz"
             numeric(ep, meta, "bookkeeping", f"source/bookkeeping/{i}", file, meta.get("key"))
@@ -288,7 +313,8 @@ def inventory(episodes: list[Path]) -> dict:
         for key, value in sorted(ctx.items()):
             if key in DERIVED_CONTEXT:
                 continue
-            if key in ("signals", "cameras", "source", "state_names", "action_names", "state_identity", "state_identities"):
+            if key in ("signals", "cameras", "source", "state_names", "action_names", "state_identity", "state_identities",
+                       "table_field_inventory", "recorded_table_fields"):
                 continue
             kind = "calibration" if any(word in key for word in ("calibration", "intrinsic", "extrinsic")) else \
                 "annotation" if any(word in key for word in ("annotation", "instruction", "task", "subtask", "quality", "notes")) else "bookkeeping"
@@ -506,6 +532,8 @@ def needs_interpretation(episodes: list[Path]) -> bool:
         native = any(not detail.get('already_supplied') for archive in archives
                      for channel in archive.get('mcap_field_inventory') or []
                      for detail in channel.get('field_details') or [])
+        native = native or any(not field.get('bookkeeping') for archive in archives
+                               for field in archive.get('table_field_inventory') or [])
         if (ctx.get('signals') or ctx.get('depth') or native or needs_extra_evidence(ctx)
                 or (ctx.get('state_kind') not in (None, 'none') and not ctx.get('represented_source_members'))):
             return True

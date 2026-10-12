@@ -88,7 +88,8 @@ def _array(fr, entry: dict | None = None) -> np.ndarray:
         a = fr.to_ndarray(format="gray16le").astype(np.uint16)
     storage = (entry or {}).get('storage') or {}
     if not storage:
-        return a
+        source_dtype = (entry or {}).get('source_dtype')
+        return a.astype(np.uint8) if source_dtype == 'uint8' else a
     if storage.get('encoding') != 'uint16_bitplanes':
         raise ValueError('Unsupported depth storage encoding')
     dtype = np.dtype(storage['dtype'])

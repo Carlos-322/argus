@@ -210,6 +210,8 @@ def main() -> int:
     ap.add_argument("--cap", type=float, default=20.0, help="most the labelling may spend, in USD (default 20)")
     ap.add_argument("--concurrency", type=int, default=8, help="requests in flight (default 8)")
     ap.add_argument("--jobs", type=int, default=2, help="decode processes per step (default 2)")
+    ap.add_argument("--timeout", type=int, default=None,
+                    help="seconds per labeling request (default: the harness's 600 seconds)")
     ap.add_argument("--max-minutes", type=float, default=0, help="read at most this much footage (default: all)")
     ap.add_argument("--grouping", type=json.loads, default={},
                     help='JSON {folder: "takes" | "cameras"} for folders whose files cannot tell takes from cameras')
@@ -219,6 +221,8 @@ def main() -> int:
         ap.error("--cap must be finite and positive")
     if not math.isfinite(a.max_minutes) or a.max_minutes < 0:
         ap.error("--max-minutes must be finite and nonnegative")
+    if a.timeout is not None and a.timeout <= 0:
+        ap.error("--timeout must be positive")
     overrides = {key: getattr(a, key) for key in ("model", "reasoning", "sample_fps", "task_mode", "dataset_note")}
     policy.resolve({"profile": a.rig}, **overrides)
 
@@ -294,9 +298,10 @@ def main() -> int:
         raise SystemExit(f"clips exited {rc} with episodes still to put on the board (log {job / 'logs' / 'clips.log'})")
 
     long_eps = pieces.write_units(job, eps)
+    timeout_args = ["--timeout", str(a.timeout)] if a.timeout is not None else []
     env = repo_env(RDA_DECODE_CONCURRENCY=os.environ.get("RDA_DECODE_CONCURRENCY") or str(2 * int(jobs)))
     run_step(job, "dry_run", [PY, "-m", "label.harness", "--episodes-root", str(job / "units"), "--out-dir",
-                              str(job / "dry"), "--concurrency", jobs, "--dry-run"], env)
+                              str(job / "dry"), "--concurrency", jobs, "--dry-run", *timeout_args], env)
     if a.free:
         print(f"free run: requests built in {job / 'dry'}, model not called", flush=True)
         return 0
@@ -315,7 +320,7 @@ def main() -> int:
     if remaining > 0:
         run_step(job, "label", [PY, "-m", "label.harness", "--episodes-root", str(job / "units"), "--out-dir",
                                 str(run_dir / "out"), "--concurrency", str(a.concurrency),
-                                "--max-spend", str(remaining)], env, ok_codes=(0, 1))
+                                "--max-spend", str(remaining), *timeout_args], env, ok_codes=(0, 1))
     else:
         print('label budget exhausted by prior spending or outstanding reservations', flush=True)
     spend = dictionary_stage.dictionary_spend(job)

@@ -735,6 +735,20 @@ whole with what you observed. When it gives neither, each activity is judged on 
 """
 
 
+EGO_SESSION_ANNOTATION_RULES = _replace_once(
+    EGO_ANNOTATION_RULES,
+    "When the annotation gives a goal, the clip is a task episode: its tasks are the steps of that goal, and success is\n"
+    "the goal's end-state. When it gives timed subtasks but no goal, goal_alignment compares the subtask sequence as a\n"
+    "whole with what you observed. When it gives neither, each activity is judged on its own end-state.",
+    "This recording is declared to be a session of independent activities. Any supplied goal remains recording\n"
+    "context; do not force every activity to be a step of that goal. Identify the observed activities in tasks,\n"
+    "and judge progress and outcome against each activity's own end-state. Retain the publisher's goal and timed\n"
+    "subtask claims, checking their labels, spans and stated outcomes against the footage as above. goal_alignment\n"
+    "compares the supplied goal to the observed activities, or the supplied subtask sequence as a whole when there\n"
+    "is no goal. When neither is supplied, each activity is judged on its own end-state.",
+)
+
+
 # How to grade against the episode's instruction and fill goal_alignment (the robot rigs).
 INSTRUCTION_RULES = """
 ABOUT THE EPISODE'S INSTRUCTION (the instruction itself is given below with the episode).
@@ -842,14 +856,15 @@ def lean(r: str) -> str:
 
 
 def fixed_instructions(r: str, *, has_instruction: bool = True, recorded: bool = True, sessions: bool = False) -> str:
-    """Everything before the episode's own facts. A head-camera dataset has one variant per recorded or video only
-    episode, whether or not it is annotated. A robot rig has up to four variants (instruction present or not,
+    """Everything before the episode's own facts. Head-camera episode and session modes each have recorded and
+    video only variants, whether or not annotated. A robot recording setup has up to four variants (instruction present or not,
     recorded or video only). Every episode of the same variant shares the cached prefix. recorded False (no
     recorded state and no other signal, label/episode.py is_recorded) takes out every word about a recorded
     motion."""
     head = FIXED_HEADER if recorded else _replace_once(FIXED_HEADER, *VIDEO_ONLY_HEADER)
     if r == "ego_head":
-        return head + what_this_is(r) + EGO_SCHEMA + data_contract(r) + EGO_ANNOTATION_RULES + lean(r)
+        rules = EGO_SESSION_ANNOTATION_RULES if sessions else EGO_ANNOTATION_RULES
+        return head + what_this_is(r) + EGO_SCHEMA + data_contract(r) + rules + lean(r)
     rules = session_rules(r) if sessions else INSTRUCTION_RULES if has_instruction else NO_INSTRUCTION_RULES
     head = FIXED_HEADER if recorded else _replace_once(FIXED_HEADER, *VIDEO_ONLY_HEADER)
     return head + what_this_is(r) + schema(r, recorded) + data_contract(r, recorded) + rules + lean(r)

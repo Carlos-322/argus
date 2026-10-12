@@ -1,73 +1,88 @@
 # Argus
 
-Argus annotates robot-learning recordings and checks their data quality. Give it a dataset and a short description, then review the timeline, task outcomes, mistakes and supporting evidence beside the footage.
+[![Offline checks](https://github.com/Pantheon-Industries-Inc/argus/actions/workflows/ci.yml/badge.svg)](https://github.com/Pantheon-Industries-Inc/argus/actions/workflows/ci.yml)
+[![Python 3.11](https://img.shields.io/badge/python-3.11-455468)](pyproject.toml)
+[![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-455468)](LICENSE)
 
-It reads LeRobot, MCAP, HDF5, video files and archives for teleoperated arms, handheld UMI grippers and human ego video. Recorded instructions, state and sensors provide evidence where their ownership, units and clocks support it. Video-only inputs are supported too.
+[Project](https://pantheon.inc/research/argus) | [Example annotations](https://pantheon.inc/data-board) | [Hosted Data Review](https://data.pantheon.inc/review)
 
-The project accompanies [Argus: An Open-Source Annotator for Robotics Data](https://pantheon.inc/research/argus). See the [published dashboard](https://pantheon.inc/data-board) for example annotations or [Data Review](https://data.pantheon.inc/review) for hosted uploads. Hosted deployments have their own version and upload limits.
+### Update v2: Midcentury on WGO-Bench
 
-![An episode playing with its cameras, timeline and outcome](media/board.gif)
+[Midcentury AI](https://www.midcentury.xyz/blog/optimizing-argus) reported a state-of-the-art result with its adaptation of Argus: **50.2% semantic F1 on WGO-Bench**, using **Sol 6.1 High** in an internal evaluation of 100 videos. Its Argus baseline uses the same model. Other published systems were not rerun through its evaluator, so the published scores are comparison context and do not isolate harness quality.
 
-## Install
+### Update v1: Format and sensor support
 
-You need Python 3.11, [uv](https://docs.astral.sh/uv/), Node.js for viewer checks, and `ffmpeg` with `ffprobe` 5.1 or newer.
+Main now combines source-aware ingestion, depth and tactile reasoning, and consistent failure/recovery rules across teleoperated robots, handheld grippers and human first-person recordings. Long recordings retain one episode and their original clock through bounded model requests; findings, supporting evidence and qualified source claims carry through to the viewer and JSON exports.
+
+## Overview
+
+Argus turns robot-learning recordings into dense annotations of **actions, task progress, failures, recoveries and recording quality**. We believe the combination of broad format support, behavioral annotation and source-verified multimodal reasoning distinguishes Argus among open-source robotics annotation tools. Provide recordings, their recording setup and a short description: the shared pipeline resolves settings and field meanings, checks the data, and lets the model inspect useful evidence without requiring a new annotation prompt for each dataset.
+
+![Shared annotation architecture: source-owned episode evidence, shared request policy, conditional request construction, optional evidence selection and source access, final annotation, verified joining and viewer/JSON outputs.](media/architecture.svg)
+
+**Recording setups:** teleoperated arms, handheld grippers using the Universal Manipulation Interface (UMI), and human first-person video. **Formats:** LeRobot v2.0/v2.1/v3.0, MCAP, HDF5, video files and folders, and ZIP/TAR archives, with supported JSON/CSV/Parquet sidecars. Nine public dataset adapters also provide download and sample-selection entrypoints.
+
+| Available evidence | How it contributes |
+|---|---|
+| RGB cameras | Timestamped multi-view grids, first/last frames and relevant boundaries establish actions, progress, outcomes and visible mistakes. |
+| Robot state and actions | Declared joints, poses, grippers and control meanings support motion checks and comparison with the footage. Training targets are not automatically treated as commands. |
+| Depth | Images and measured regions can establish camera-relative distance or separation where units, calibration and clocks support it. Relative depth stays relative. |
+| Tactile | Pressure, normal/shear force, contact arrays and optical tactile images can reveal changes in grip, contact distribution or surface motion. Raw response is not automatically physical force or slip. |
+| Other recorded fields | Numeric channels, event flags, native waveform packets and structured metadata can be inspected through the same bounded evidence interface. Eligible waveform samples support spectral analysis when a recorded sample rate is available; this is not general audio transcription. |
+| Publisher context | Instructions, task spans, annotations and calibration retain their source ownership. The model checks claims against observations; missing or conflicting information remains qualified. |
+
+Labels include action phases (advancing, wasteful or idle), subgoals, key events, outcomes, operator mistakes and recoveries, scene changes and recording issues. Sensor conclusions carry evidence, confidence and limitations; ambiguous clocks and unsupported physical claims remain qualified. Inspection may yield no additional finding.
+
+[Format readers](prepare/formats.py) retain source evidence; [field interpretation](label/dictionary.py) resolves meanings and units; [checks](checks) assess recording integrity. Shared [policy](label/policy.py) and [frame planning](label/episode.py) construct requests. When useful, the model [inspects additional evidence](label/evidence_access.py) before [annotation](label/harness.py); [joining](label/pieces.py) restores the original timeline. RGB-only recordings use this same path without requiring extra sensor inputs.
+
+## Install and review
+
+You need Python 3.11, [uv](https://docs.astral.sh/uv/), Node.js for viewer checks, and `ffmpeg`/`ffprobe` 5.1 or newer.
 
 ```bash
 git clone https://github.com/Pantheon-Industries-Inc/argus.git
 cd argus
 uv sync --frozen
-uv run --frozen --offline pytest -q -ra
 ```
 
-The tests make no model calls. Paid annotation uses `OPENROUTER_API_KEYS` (comma-separated keys) or `OPENAI_API_KEY` for OpenAI models directly. Set credentials in your shell or secret manager. Downloading gated datasets also requires accepting their terms and setting `HF_TOKEN`. Runtime data and outputs belong under the ignored `data/` directory.
-
-## Review your data
-
-First build the base requests without making model calls:
+Paid annotation requires `OPENROUTER_API_KEYS` (comma-separated keys) or `OPENAI_API_KEY` in your shell or secret manager. Gated Hugging Face datasets require accepting their terms and setting `HF_TOKEN`. Keep inputs and outputs under the ignored `data/` directory.
 
 ```bash
+# Prepare and inspect base requests without model calls.
 uv run python -m review --data path/to/dataset --rig teleop_arms \
   --dataset-note "Two arms arrange blocks on a tray." --out data/review/mine --free
-```
 
-Then annotate under a spending cap and open the result:
-
-```bash
+# Annotate the same job under a spending cap, then open its board.
 uv run python -m review --data path/to/dataset --rig teleop_arms \
   --dataset-note "Two arms arrange blocks on a tray." --out data/review/mine --cap 20
 uv run python -m board serve --board data/review/mine --clips data/review/mine/clips
 ```
 
-`--data` accepts a folder, file, archive or HTTP(S) URL. Choose `--rig teleop_arms`, `handheld_gripper` or `ego_head`. The description supplies context; recorded instructions and metadata stay attributed to their source.
+`--data` accepts a folder, file, archive or HTTP(S) URL. `--rig` identifies the recording setup: `teleop_arms` (robot arms), `handheld_gripper` (UMI) or `ego_head` (human first-person video). Formats and evidence are discovered from the source. Hosted Data Review resolves defaults automatically through the shared policy; its deployed version and upload limits can differ.
 
-| Choice | Behavior |
+| Default or optional setting | Behavior |
 |---|---|
-| Astra, the default | `openai/gpt-6-astra`, medium reasoning; one regular sample every 1.5 s for teleop, 1 s for UMI and 0.5 s for ego. First/last frames and eligible evidence boundaries are also included. |
-| Sol 6.1 High | Add `--model openai/gpt-6.1-sol --reasoning high`. Its default is 1 FPS on every rig, with a minimum of 1 FPS. |
-| Denser sampling | Add `--sample-fps 2` for subsecond fumbles or rapid recoveries. More images reduce the available request window and increase cost. |
-| Task scope | `--task-mode episode` evaluates one goal. `--task-mode session` annotates separate task spans and outcomes within the same recording. Reliable source declarations can establish session scope; an absent instruction alone does not. Ego retains its activities schema. |
+| Astra, the default | `openai/gpt-6-astra`, medium reasoning; a regular sample every 1.5s for robot arms, 1s for handheld grippers and 0.5s for human first-person video, plus eligible boundaries and first/last frames. |
+| Sol 6.1 High | `--model openai/gpt-6.1-sol --reasoning high`; defaults to 1 FPS on all recording setups and requires at least 1 FPS. |
+| Faster actions | `--sample-fps 2` is recommended for subsecond fumbles and rapid recoveries. More images shorten the available request window and can increase cost. |
+| Task scope | Source declarations establish episode or session scope. `--task-mode episode` or `session` overrides it; missing instructions alone do not imply a session. Human first-person annotations retain their activities schema. |
 
-One recording stays one public episode. Long recordings use bounded internal request windows, then rejoin their labels on the original clock. Session tasks are annotations within that recording; they do not physically cut it into new task episodes. Explicit preparation or hosted footage limits are separate and report any trimming. Missing or unparsed parts stay visible at their spans, and an unlabelled recording keeps its usable footage, checks and sensors.
+One recording remains one public episode. Internal request parts rejoin on its original clock; session tasks annotate activities within it. Explicit preparation limits report trimming; missing parts and processing failures remain visible alongside usable footage and evidence.
 
-The resolved model, reasoning, cadence, task scope and description are saved with the job and reused on resume. Changing the paid request identity requires a new run. Request records show effective settings, selected frames and omitted or qualified evidence.
+Resume reuses recorded settings, source proofs, selected frames and evidence omissions. Changing paid request semantics requires a new run. `--free` skips paid field interpretation, routing and evidence selection; its base requests do not predict later evidence choices. Caps include applicable calls and outstanding reservations; unknown charges remain reserved.
 
-`--free` builds base requests and skips paid routing, field interpretation and evidence selection. During a paid run, eligible extra sensors or depth may trigger bounded interpretation and inspection choices before the final request. Their selections, receipts and costs are retained. A dry request therefore does not promise every later paid evidence choice. The cap covers applicable calls and outstanding reservations; an unknown charge remains reserved rather than being reported as free.
+## Results and further use
 
-## Results and evidence
+A review job keeps prepared `episodes/`, base requests in `dry/`, receipts in `run/`, rejoined labels in `run_final/`, and the board. Episode JSON, filtered JSON Lines and static exports preserve annotations and substantive evidence. Public exports withhold private access descriptors and infrastructure paths. Human field interpretations take precedence, including an explicitly blank role; stale findings are withheld when their source or interpretation changes.
 
-A review job contains prepared `episodes/`, base requests in `dry/`, paid receipts in `run/`, the rejoined outputs in `run_final/`, and the board. Staged label runs write `data/runs/<dataset>/<run_id>/`, with `run.json` and per-episode outputs.
+The viewer uses the canonical [board/index.html](board/index.html) for live and static pages. It shows behavioral and sensor findings over the footage, with supporting readings and detail available alongside it. Keep uploaded footage under its own access policy and license when sharing.
 
-Labels include action phases marked advancing, wasteful or idle; key events, progress and instruction alignment; task outcomes and goal frames; operator mistakes, failed attempts and recoveries; scene changes; and recording issues. Robot episode completion and session/ego task outcomes use their respective schemas. Examples live in `configs/examples/`.
+![Two-camera UMI annotation walkthrough, with action phases, subgoals and goal reasoning over the footage.](media/board_demo.webp)
 
-Prepared episodes retain native arrays, clocks, calibration and attributed publisher claims. Unresolved ownership or conflicting annotations remain qualified. Motion checks require declared physical roles, suitable units and usable clocks; a vector's width alone does not establish joints or poses. Pressure, optical motion, jaw movement and relative depth can support observations, but force, slip, physical distance and contact timing require suitable calibration and timing evidence.
+Animated WebP from the standalone demonstration; the canonical viewer is linked above.
 
-The board keeps the episode navigation and existing action, progress, recovery, depth and hand-pose controls. It distinguishes recording faults from model or processing failures. Useful sensor conclusions appear with their readings, reasoning, confidence, alternatives and limitations. An inspection can return no additional finding. Source-declared action meanings stay attributed; training targets are not automatically treated as control commands.
-
-Episode JSON, filtered JSON Lines and static exports retain annotations and substantive evidence. Public projection withholds private access descriptors and infrastructure locations. Human field interpretations take precedence over model guesses, including an explicitly blank role; stale conclusions are withheld when the source or interpretation no longer supports them. Keep uploaded footage under its own access policy and license when sharing a board.
-
-## Advanced stages
-
-The normal entrypoint is `review`. Individual stages remain available for dataset downloads, existing prepared episodes and custom boards:
+<details>
+<summary>Individual stages, dataset adapters and custom boards</summary>
 
 ```bash
 uv run python -m prepare folder prepare --root path/to/data --rig teleop_arms --out data/episodes/mine/all
@@ -76,41 +91,18 @@ uv run python -m label --dataset mine --episodes data/episodes/mine/all --kind d
 uv run python -m label --dataset mine --episodes data/episodes/mine/all --kind full --cap 20
 ```
 
-Dataset adapters keep their download and sampling entrypoints. For example:
+Public adapters are `molmo`, `abc130k`, `galaxea`, `habit`, `fastumi`, `realomin`, `egocentric100k`, `genhumanego` and `openaoe`; `configs/slices/` records published selections. Generic readers preserve source fields instead of applying corpus-release cropping or task selection.
 
-```bash
-uv run python -m prepare molmo prepare --episodes configs/quickstart/teleop.txt --out data/episodes/molmo/quickstart
-uv run python -m prepare lerobot prepare --root path/to/lerobot --rig teleop_arms --out data/episodes/mine/all
-uv run python -m prepare videos prepare --root path/to/videos --rig ego_head --instructions instructions.json --out data/episodes/ego/all
-```
+For a custom board, create `data/boards/mine/manifest.json` with the dataset, prepared episodes and run paths. [configs/quickstart/board.json](configs/quickstart/board.json) shows the structure with published-dataset severity rules. Use `python -m board build`, `clips`, `serve`, and `static media`/`static site`; each takes `--help`. Refresh the board after dictionary edits. Owner editing requires `board serve --dictionary-job JOB`.
 
-The public adapters are `molmo`, `abc130k`, `galaxea`, `habit`, `fastumi`, `realomin`, `egocentric100k`, `genhumanego` and `openaoe`. `configs/slices/` records the published sample selections. Generic upload readers preserve source fields rather than applying corpus-specific release cropping or task selection.
+Paid staged runs require a clean tracked checkout. `--resume RUN --why "reason"` uses saved settings and remaining budget; `python -m label.reparse RUN` reparses stored replies without another call. Receipts survive failures. `board grids` reconstructs base request grids only when original input hashes can be verified; detail/sensor images are counted but not reconstructed there.
 
-`checks` writes deterministic results into each episode's `context.json`, including clock, camera pairing, signal, capture and supported sensor checks. It reports unreadable inputs and check failures separately from a clear result. Timebase review remains available through `python -m checks.timebase scan` and `apply`; inspect the proposed correction before applying it.
+`checks.timebase scan` proposes clock corrections; inspect them before `apply`. Capture, source and sensor check failures are distinct from clean results. Optional hand pose uses `board/hand_pose/modal_app.py` and `board/hands.py`; it is separate from ordinary annotation and has the licenses below.
 
-Paid `label` runs require a clean tracked checkout. `--resume RUN --why "reason"` continues an interrupted staged run with its saved settings and remaining budget. Stored replies and billing receipts survive failures. `python -m label.reparse RUN` reparses saved replies without another model call. A retained failure is distinct from authorization to dispatch or charge again.
+</details>
 
-Frame selection includes the declared cadence, first/last frames and supported boundaries. Teleop resolution routing, calibration, retained camera coverage and provider limits affect the actual request. Its record retains image order, sampled times and effective resolution. Model outputs are stochastic; neither repeated labels nor image bytes across different decoding environments are promised to be identical.
-
-## Boards, comparisons and gate
-
-For a custom board, copy `configs/quickstart/board.json`, then set its dataset, run and prepared-episode paths:
-
-```bash
-mkdir -p data/boards/mine
-cp configs/quickstart/board.json data/boards/mine/manifest.json
-uv run python -m board build data/boards/mine
-uv run python -m board clips --episodes data/episodes/mine/all --out data/clips
-uv run python -m board serve --board data/boards/mine --clips data/clips
-uv run python -m board static media --board data/boards/mine --clips data/clips
-uv run python -m board static site --board data/boards/mine --clips data/clips
-```
-
-Live and static pages use the canonical `board/index.html` through `board.serve.render_index`. Refresh a board after changing its field dictionary before producing a static export. Local owner editing is enabled explicitly with `board serve --dictionary-job JOB`.
-
-Requests record ordered image hashes without storing duplicate image archives. `uv run python -m board grids data/boards/mine` reconstructs base frame grids only when their original inputs and image bytes can be verified. The viewer distinguishes answered requests from dry or unverified dispatches, keeps request-part clocks, and identifies unavailable parts. Detail and sensor images are counted in the receipt but are not reconstructed by this command. Legacy labels without input hashes remain unavailable.
-
-Model comparisons and frame-verified gate cases remain separate paid workflows:
+<details>
+<summary>Model comparisons, gate cases and offline verification</summary>
 
 ```bash
 uv run python -m compare prepare --selection configs/compare/main.json
@@ -118,14 +110,13 @@ uv run python -m compare label --selection configs/compare/main.json --models as
 uv run python -m compare board --entries data/runs/compare/main.json --out data/boards/compare
 uv run python -m gate prepare
 uv run python -m gate label --kind full --cap 20
-uv run python -m gate score data/runs/gate_teleop/RUN data/runs/gate_handheld/RUN data/runs/gate_ego/RUN
 ```
 
-Comparison caps apply per model run; gate caps apply per rig run. Effective sampling may differ by model, so compare saved requests before treating a result as an identical-input comparison. `--with-example` supplies a reference annotation, and `--routes` reuses recorded resolution choices. `python -m compare.metrics BOARD` summarizes a comparison board. Gate selections and expected facts are in `gate/selection.json` and `gate/cases.json`; current scores come from the runs you score, not a number pinned in this README.
+Comparison caps apply per model run and gate caps per recording setup. Sampling may differ by model: compare saved requests before claiming identical inputs. `--with-example` supplies a reference annotation; `--routes` reuses resolution choices. [gate/selection.json](gate/selection.json) and [gate/cases.json](gate/cases.json) define the selected cases; `gate score` evaluates the supplied runs.
 
-The optional ACE-Ego-Hand overlay uses `board/hand_pose/modal_app.py` on Modal GPUs and `board/hands.py` to build and verify overlay files. Its module docstring contains the setup commands, including MANO registration and download. It is separate from ordinary annotation and has the model licenses below.
+`uv run --frozen --offline pytest -q -ra` runs offline tests. CI uses the locked environment, Node, ffmpeg and ffprobe without provider credentials or dataset access. Secret scans cover the committed tree and reachable history; they do not grant permission to publish uploaded data.
 
-Every entrypoint takes `--help`. Offline CI runs the locked Python environment and viewer checks with Node, ffmpeg and ffprobe, without model credentials. Secret scanning covers the committed tree and reachable Git history; it does not establish permission to publish uploaded data.
+</details>
 
 ## Credits
 

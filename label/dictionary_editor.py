@@ -113,13 +113,20 @@ def public_dictionary(job: Path, episode_id: str | None = None) -> dict:
             'damaged_entries': len(record.get('damaged_entries') or []), 'editable': False}
 
 
-def for_episode(episode: Path, owner: str | None = None) -> dict | None:
-    """Find the upload receipt beside a prepared episode without changing its label."""
+def for_episode(episode: Path, owner: str | None = None, *, private_bindings: bool = False) -> dict | None:
+    """Find the scoped receipt; annotation may retain native source proofs, public callers never do."""
     episode = Path(episode)
     for parent in list(episode.parents)[:4]:
         if (parent / 'dictionary.json').is_file():
             try:
-                return public_dictionary(parent, owner or episode.name)
+                result = public_dictionary(parent, owner or episode.name)
+                if private_bindings:
+                    originals = {field['id']: field for field in _record(parent)['inventory']['fields']}
+                    for field in result['fields']:
+                        if field.get('kind') == 'native':
+                            field['bindings'] = copy.deepcopy([binding for binding in originals[field['id']].get('bindings', [])
+                                                               if binding.get('episode') == result['episode_id']])
+                return result
             except (ValueError, OSError):
                 return {'status': 'unreadable', 'fields': [], 'entries': {}, 'machine_entries': {},
                         'limitations': ['The saved data dictionary is unreadable.'], 'editable': False}

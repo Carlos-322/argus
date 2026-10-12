@@ -2084,6 +2084,10 @@ class Signals(dict):
         self.meta: dict[str, dict] = {}
         self.left_out: list[tuple[str, str]] = []
         self.clocks: dict[str, np.ndarray] = {}      # per-frame clocks the recording keeps (write_signals)
+        self.clock_metadata: dict[str, dict] = {}
+        self.native_table_fields: list[dict] = []
+        self.native_table_frames: np.ndarray | None = None
+        self.native_table_bytes = 0
         self.issues: list[dict] = []                 # problems with what was kept, as add_issue's entries
         self.no_gaps: set[str] = set()               # signals whose frames with no reading are no issue (write_signals)
         self.bytes = 0                               # the kept signals' size as float32, for SIGNAL_EPISODE_BYTES
@@ -2091,7 +2095,7 @@ class Signals(dict):
 
     def fits(self, rows: int, values: int) -> bool:
         """Whether a signal of rows x values keeps the running total within SIGNAL_EPISODE_BYTES."""
-        return self.bytes + int(rows) * int(values) * 4 <= SIGNAL_EPISODE_BYTES
+        return self.bytes + self.native_table_bytes + int(rows) * int(values) * 4 <= SIGNAL_EPISODE_BYTES
 
     def keep(self, name: str, a: np.ndarray, m: dict) -> None:
         """a kept under name with its meta m, as its summary per frame (summarise_rows, a data issue) when it would take
@@ -2142,6 +2146,11 @@ def merge_signals(into: Signals, more: Signals) -> Signals:
         into.keep(k, v, dict((getattr(more, "meta", {}) or {}).get(k) or {}))
     into.left_out += list(getattr(more, "left_out", []) or [])
     into.clocks.update(getattr(more, "clocks", {}) or {})
+    into.clock_metadata.update(getattr(more, "clock_metadata", {}) or {})
+    into.native_table_fields += list(getattr(more, "native_table_fields", []) or [])
+    into.native_table_bytes += getattr(more, "native_table_bytes", 0)
+    if getattr(more, "native_table_frames", None) is not None:
+        into.native_table_frames = more.native_table_frames
     into.issues += list(getattr(more, "issues", []) or [])
     into.no_gaps |= set(getattr(more, "no_gaps", ()) or ())
     return into
@@ -2199,12 +2208,13 @@ def is_counter(values) -> bool:
     """Whether a column counts rows one by one (a sequence number, seq, frame_id): whole numbers that never fall and
     step by exactly 1 at 90% of its rows or more, since a recorder can stamp a row twice. Such a column is bookkeeping,
     as an MCAP channel's counters are (_counters), so it is left out with COUNTER_NOTE."""
-    x = np.asarray(values, dtype=np.float64).ravel()
-    x = x[np.isfinite(x)]
-    if len(x) < COUNTER_MIN_MESSAGES or not np.all(x == np.round(x)):
+    x = np.asarray(values).ravel()
+    if x.dtype.kind not in 'iu':
+        x = np.asarray(x, dtype=np.float64)
+        x = x[np.isfinite(x)]
+    if len(x) < COUNTER_MIN_MESSAGES or (x.dtype.kind not in 'iu' and not np.all(x == np.round(x))):
         return False
-    d = np.diff(x)
-    return bool((d >= 0).all() and (d == 1).mean() >= 0.9)
+    return bool((x[1:] >= x[:-1]).all() and ((x[1:] - x[:-1]) == 1).mean() >= 0.9)
 
 
 def value_names(names, dims: int) -> list[str] | None:
@@ -2244,23 +2254,36 @@ def recorded_signals(df, used, n: int, features: dict | None = None) -> Signals:
         return out
     features = features or {}
     at = frame_rows(df, n)
+    if "frame_index" in df:
+        frames = np.asarray(df["frame_index"].to_numpy())
+        if frames.dtype.kind in "biuf":
+            out.native_table_frames = frames
     if n and len(df):
         table_issue(out, df, at, n)
     for c in df.columns:
-        if c in used or SIGNAL_SKIP.search(str(c)) or str(c).startswith("observation.images"):
+        if c in used or SIGNAL_SKIP.search(str(c)):
             continue
-        if (features.get(c) or {}).get("dtype") == "video":
+        f = features.get(c) or {}
+        declared_bookkeeping = any(f.get(key) in ('bookkeeping', 'counter', 'sequence_number', 'clock')
+                                   for key in ('role', 'recorded_role', 'sensor_type') if isinstance(f.get(key), str))
+        if f.get("dtype") == "video":
             continue
-        if (features.get(c) or {}).get("dtype") == "image":
-            got = _image_cells(df[c])             # only the small per-pad images reach here (read_root image_signals)
+        if f.get("dtype") == "image":
+            cells = _image_values(df[c])
+            got = _image_cells(df[c], cells)
             if got is None:
                 out.left_out.append((str(c), "none of its images could be decoded"))
                 continue
             a, shape, bad = got
             if bad:
                 bad_cells_issue(out, str(c), bad, len(a), "images that could not be decoded")
-            out.add(str(c), on_frames(a, at, n), shape=shape, source="image column " + str(c))
+            if declared_bookkeeping:
+                out.left_out.append((str(c), 'declared bookkeeping by source metadata'))
+            else:
+                out.add(str(c), on_frames(a, at, n), shape=shape, source="image column " + str(c), metadata=f)
+            _retain_table_native(out, str(c), cells, f, bookkeeping=declared_bookkeeping)
             continue
+        cells = [_native_table_cell(x) for x in df[c].to_numpy()]
         a, bad = _cells_rows(df[c])
         if a is None or not a.shape[1]:
             continue                      # text (a task, a note): read by the task and note readers, not a signal
@@ -2270,6 +2293,9 @@ def recorded_signals(df, used, n: int, features: dict | None = None) -> Signals:
         inf = int(np.isinf(a).any(axis=1).sum())
         if inf:
             bad_cells_issue(out, str(c), inf, len(a), "cells holding a value that is not a finite number")
+        lossy = _table_projection_loses_values(cells, a.dtype)
+        variants = {(cell.shape, cell.dtype.str) for cell in cells if cell is not None}
+        needs_native = lossy or bad or inf or np.isnan(a).any() or len(variants) > 1 or (n and len(df) != n)
         a = on_frames(a, at, n)
         # a row has a reading when any of its values does, as checks/sensors.py counts it: a pressure map with one dead
         # cell still reads at every frame. A column with few readings is kept, NaN where it has none (write_signals
@@ -2277,20 +2303,42 @@ def recorded_signals(df, used, n: int, features: dict | None = None) -> Signals:
         has_reading = np.isfinite(a).any(axis=1)
         if not has_reading.any():
             out.left_out.append((str(c), "no reading at any frame"))
+            if needs_native:
+                _retain_table_native(out, str(c), cells, f)
             continue
         a = np.where(np.isfinite(a), a, np.nan)
         if a.shape[1] == 1 and is_named_clock(c, a[:, 0]):
             # a clock: kept for the sync check, not shown
             out.clocks[str(c)] = a[:n, 0] if n else a[:, 0]
+            out.clock_metadata[str(c)] = f
+            _retain_table_native(out, str(c), cells, f, bookkeeping=True)
             continue
-        if a.shape[1] == 1 and is_counter(a[:, 0]):
-            out.left_out.append((str(c), COUNTER_NOTE))
+        words = tokens(str(c))
+        counter_name = bool(words) and (words[-1] in {'seq', 'sequence', 'counter'}
+                                      or words[-2:] in [['sequence', 'number'], ['frame', 'id'], ['sample', 'id'], ['message', 'id']])
+        declared = any(key in f for key in ('unit', 'units', 'response_direction', 'calibration', 'coordinate_frame')) \
+            or sensor_representation(f) == 'signal'
+        raw = df[c].to_numpy()
+        counter_values = raw if raw.dtype.kind in 'iu' else a[:, 0]
+        if declared_bookkeeping or (counter_name and a.shape[1] == 1 and is_counter(counter_values) and not declared):
+            out.left_out.append((str(c), 'declared bookkeeping by source metadata' if declared_bookkeeping else COUNTER_NOTE))
+            if needs_native:
+                _retain_table_native(out, str(c), cells, f, bookkeeping=True)
             continue
-        f = features.get(c) or {}
+        if lossy:
+            retained = _retain_table_native(out, str(c), cells, f)
+            reason = ("inspect the retained typed source rows" if retained else
+                      "the typed retention limit withholds its originals; exact prepared inspection is unavailable")
+            out.left_out.append((str(c), "floating point projection cannot retain its readings exactly; " + reason))
+            continue
         shape = f.get("shape") if isinstance(f.get("shape"), (list, tuple)) and int(np.prod(f["shape"])) == a.shape[1] \
             else _cell_shape(df[c], a.shape[1])
         out.add(str(c), a[:n] if n else a, shape=shape, names=value_names(f.get("names"), a.shape[1]),
                 source="column " + str(c), metadata=f)
+        if len(variants) == 1:
+            out.meta[str(c)]['source_dtype'] = str(np.dtype(next(iter(variants))[1]))
+        if needs_native:
+            _retain_table_native(out, str(c), cells, f)
     return out
 
 
@@ -2343,19 +2391,100 @@ def bad_cells_issue(out: Signals, name: str, bad: int, rows: int, what: str) -> 
                        "what": f"{name} has {bad} of {rows} {what}; those frames are kept as missing readings"})
 
 
-def _image_cells(col):
-    """(rows, (h, w), how many images could not be read) of a column of small encoded images (PNG bytes, as LeRobot
-    stores an image feature), each read as grey values at the size most of them have; an image that does not decode
-    or has another size is a row of NaN, never a reason to drop the column. None when no image decodes."""
+def _image_value(cell):
+    """One original raster, without a visual conversion or a whole-column allocation."""
     import io
     from PIL import Image
-    got = []
-    for cell in col.to_numpy():
-        b = cell.get("bytes") if isinstance(cell, dict) else cell
-        try:
-            got.append(np.asarray(Image.open(io.BytesIO(bytes(b))).convert("L"), dtype=np.float64))
-        except Exception:
-            got.append(None)
+    payload = cell.get("bytes") if isinstance(cell, dict) else cell
+    try:
+        with Image.open(io.BytesIO(bytes(payload))) as image:
+            return np.asarray(image)
+    except Exception:
+        return None
+
+
+def _image_values(col):
+    """Decode original image channels and bit depth, without a display conversion."""
+    return [_image_value(cell) for cell in col.to_numpy()]
+
+
+def _native_table_cell(value):
+    try:
+        array = np.asarray(_nested(value))
+        return array if array.size and array.dtype.kind in "biuf" else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _native_table_rows(name, cells, metadata, budget):
+    """Owned typed source rows. Different recorded shapes or types stay separate, with explicit presence."""
+    groups = {}
+    for row, cell in enumerate(cells):
+        if cell is not None and cell.dtype.kind in "biuf":
+            groups.setdefault((cell.shape, cell.dtype.str), []).append((row, cell))
+    fields = []
+    for (shape, dtype), rows in sorted(groups.items(), key=lambda item: -len(item[1])):
+        size = len(rows) * (int(np.prod(shape)) * np.dtype(dtype).itemsize + 8)
+        if size > budget:
+            fields.append({"name": name, "metadata": dict(metadata), "source_shape": list(shape),
+                           "source_row_count": len(cells), "dtype": str(np.dtype(dtype)),
+                           "reason": f"typed source retention limit: {size} bytes exceed {max(0, budget)} available bytes"})
+            continue
+        values = np.stack([value for _, value in rows])
+        source_rows = np.array([row for row, _ in rows], dtype=np.int64)
+        budget -= size
+        fields.append({"name": name, "values": values, "source_rows": source_rows, "source_row_count": len(cells),
+                       "metadata": dict(metadata), "source_shape": list(shape)})
+    return fields
+
+
+def _retain_table_native(out, name, cells, metadata, *, bookkeeping=False):
+    frames_retained = any('values' in field for field in out.native_table_fields)
+    frame_bytes = out.native_table_frames.nbytes if not frames_retained and out.native_table_frames is not None else 0
+    budget = SIGNAL_EPISODE_BYTES - out.bytes - out.native_table_bytes - frame_bytes
+    fields = _native_table_rows(name, cells, metadata, budget)
+    retained = False
+    for field in fields:
+        field['bookkeeping'] = bookkeeping
+        if field.get('reason'):
+            out.issues.append({'kind': 'native_retention_limit', 'signal': name,
+                               'what': field['reason'] + '; original source values are not copied or claimed as exact prepared evidence.'})
+        else:
+            out.native_table_bytes += field['values'].nbytes + field['source_rows'].nbytes
+            retained = True
+    if retained:
+        out.native_table_bytes += frame_bytes
+    out.native_table_fields.extend(fields)
+    return retained
+
+
+def _table_projection_loses_values(cells, dtype):
+    """Check casts in bounded vector chunks. Small integer and non-narrowing float types are already exact."""
+    precision = np.finfo(dtype).nmant + 1
+    for cell in cells:
+        if cell is None or cell.dtype.kind == 'b':
+            continue
+        if cell.dtype.kind in 'iu':
+            limits = np.iinfo(cell.dtype)
+            if limits.min >= -(2**precision) and limits.max <= 2**precision:
+                continue
+        elif cell.dtype.kind == 'f' and np.finfo(cell.dtype).nmant <= np.finfo(dtype).nmant:
+            continue
+        flat = cell.ravel()
+        for start in range(0, len(flat), 65536):
+            values = flat[start:start + 65536]
+            with np.errstate(invalid='ignore', over='ignore'):
+                restored = values.astype(dtype).astype(cell.dtype)
+            if not np.array_equal(values, restored, equal_nan=True):
+                return True
+    return False
+
+
+def _image_cells(col, decoded=None):
+    """(rows, (h, w), how many images could not be read) of a column of small encoded images (PNG bytes, as LeRobot
+    stores an image feature), retaining its channels and bit depth at the size most of them have; an image that does not decode
+    or has another size is a row of NaN, never a reason to drop the column. None when no image decodes."""
+    got = _image_values(col) if decoded is None else decoded
     shapes = [a.shape for a in got if a is not None]
     if not shapes:
         return None
@@ -2461,6 +2590,28 @@ def write_signals(ep: Path, ctx: dict, signals: dict | None, t: np.ndarray | Non
     (Signals.left_out) is written to ctx["source"]["unused_signals"], so the report names it, and the problems with
     what it kept (Signals.issues) to ctx["reader_issues"] (add_issue)."""
     n = int(ctx.get("n_state_frames") or 0)
+    native = getattr(signals, "native_table_fields", []) or []
+    if native:
+        arrays, inventory = {}, []
+        frames = getattr(signals, "native_table_frames", None)
+        if frames is not None and any('values' in field for field in native):
+            arrays["frame_index"] = frames
+        for i, field in enumerate(native):
+            key, source_rows = f"f{i}", f"r{i}"
+            if field.get('reason'):
+                inventory.append({'name': field['name'], 'reason': field['reason'], 'bookkeeping': field['bookkeeping'],
+                                  'source_shape': field['source_shape'], 'dtype': field['dtype'],
+                                  'descriptor': field['metadata'], 'source_row_count': field['source_row_count']})
+                continue
+            arrays[key], arrays[source_rows] = field["values"], field["source_rows"]
+            inventory.append({"name": field["name"], "array": key, "source_rows": source_rows,
+                              "bookkeeping": field['bookkeeping'],
+                              "source_row_count": field["source_row_count"],
+                              "shape": list(field["values"].shape), "dtype": str(field["values"].dtype),
+                              "source_shape": field["source_shape"], "descriptor": field["metadata"],
+                              "source_frame_index": "frame_index" if frames is not None else None})
+        np.savez_compressed(ep / "recorded_table_fields.npz", **arrays)
+        ctx.update(recorded_table_fields="recorded_table_fields.npz", table_field_inventory=inventory)
     meta = getattr(signals, "meta", {}) or {}
     left = list(getattr(signals, "left_out", []) or [])
     keep = {}
@@ -2476,14 +2627,21 @@ def write_signals(ep: Path, ctx: dict, signals: dict | None, t: np.ndarray | Non
     clocks = getattr(signals, "clocks", None) or {}
     if len(clocks) >= 2 and n:
         # each clock's offset from the first, its median and spread in milliseconds (checks/sensors.py reads them)
-        names_ = list(clocks)
-        base = np.asarray(clocks[names_[0]][:n], dtype=np.float64)
-        to_s = _seconds_scale(base[:1000])
-        ctx["clocks"] = [{"name": k, "offset_ms": round(float(np.nanmedian((np.asarray(v[:n], dtype=np.float64) - base)
-                                                                          * to_s)) * 1000, 2),
-                          "spread_ms": round(float(np.nanstd((np.asarray(v[:n], dtype=np.float64) - base)
-                                                             * to_s)) * 1000, 2)}
-                         for k, v in clocks.items()]
+        valid, scales = {}, {}
+        for key, values in clocks.items():
+            scale, error = declared_clock_unit((getattr(signals, "clock_metadata", {}) or {}).get(key, {}))
+            if error:
+                add_issue(ctx, "clock_units_unresolved", f"{key}: {error}; clock comparison is not assigned.", signal=key)
+            else:
+                valid[key] = np.asarray(values[:n], dtype=np.float64)
+                if scale is not None:
+                    scales[key] = scale
+        normalized = _clocks_in_seconds(valid, declared_scales=scales)
+        if normalized:
+            base = next(iter(normalized.values()))
+            ctx["clocks"] = [{"name": key, "offset_ms": round(float(np.nanmedian(values - base)) * 1000, 2),
+                              "spread_ms": round(float(np.nanstd(values - base)) * 1000, 2)}
+                             for key, values in normalized.items()]
     if not keep:
         ctx.pop("signals", None)
         return
@@ -2492,7 +2650,7 @@ def write_signals(ep: Path, ctx: dict, signals: dict | None, t: np.ndarray | Non
     # past SIGNAL_EPISODE_BYTES together, the widest signals are kept as a summary per frame, a data issue each
     meta = {k: dict(m) for k, m in meta.items()}
     size = lambda v: int(np.prod(np.shape(v)[1:])) * n * np.asarray(v).dtype.itemsize
-    while sum(size(v) for v in keep.values()) > SIGNAL_EPISODE_BYTES:
+    while sum(size(v) for v in keep.values()) + getattr(signals, 'native_table_bytes', 0) > SIGNAL_EPISODE_BYTES:
         k = max((k for k in keep if np.shape(keep[k])[1] > len(SUMMARY_NAMES)), key=lambda k: np.shape(keep[k])[1],
                 default=None)
         if k is None:
@@ -2680,7 +2838,8 @@ def write_depth(ep: Path, ctx: dict, depth: dict | None, times: dict | None = No
         np.savez(ep / "depth_times.npz", **times)
     ctx["depth"] = {v: {"units": ("metres" if d.get("scale_m") else "relative"), "scale_m": d.get("scale_m"),
                         "kind": d.get("kind", "depth"), "source": d.get("source"),
-                        **{k: d[k] for k in ('storage', 'paired_camera', 'source_key') if k in d}} for v, d in depth.items()}
+                        **{k: d[k] for k in ('storage', 'paired_camera', 'source_key', 'source_dtype', 'source_shape',
+                                             'source_units', 'source_descriptor', 'source_row_count', 'encoding_clock', 'calibration_note') if k in d}} for v, d in depth.items()}
 
 
 def probe_depth(path: Path) -> dict:
@@ -4307,11 +4466,14 @@ def read_root(rdir: Path, rel: str) -> dict:
         return min(sh) if len(sh) == 2 else 0
     # an image feature smaller than CAMERA_MIN_PX on a side is a reading, not a camera (the Inspire hand's per-pad
     # pressure images of 3 x 3 to 14 x 8 cells): it is kept as a signal (recorded_signals)
-    image_signals = [k for k, f in feats.items() if f.get("dtype") == "image" and 0 < side(f) < CAMERA_MIN_PX]
+    image_depths = [k for k, f in feats.items() if f.get("dtype") == "image"
+                    and sensor_representation(f) in ('depth', 'disparity')]
+    image_signals = [k for k, f in feats.items() if f.get("dtype") == "image" and k not in image_depths
+                     and (sensor_representation(f) == 'signal' or 0 < side(f) < CAMERA_MIN_PX)]
     is_depth = lambda k, f: bool((f.get("info") or {}).get("video.is_depth_map")) or bool(DEPTH_TOPIC.search(k))
     depth_cams = [k for k, f in feats.items() if f.get("dtype") == "video" and is_depth(k, f)]
     cams = [k for k, f in feats.items() if f.get("dtype") == "video" and k not in depth_cams]
-    image_cams = [k for k, f in feats.items() if f.get("dtype") == "image" and k not in image_signals]
+    image_cams = [k for k, f in feats.items() if f.get("dtype") == "image" and k not in image_signals and k not in image_depths]
     if not cams:
         on_disk = sorted({p.parent.name for p in vids_v2} if not v3 else {p.parent.parent.name for p in vids_v3})
         if on_disk:
@@ -4336,7 +4498,7 @@ def read_root(rdir: Path, rel: str) -> dict:
     annotated, annot_src = annotated_instructions(rdir / "meta", reads)
     root = {"dir": str(rdir), "rel": rel, "info": info, "version": version, "v3": v3, "fps": fps,
             "robot_type": (info or {}).get("robot_type"), "features": feats, "cams": cams, "image_cams": image_cams,
-            "image_signals": image_signals, "depth_cams": depth_cams,
+            "image_signals": image_signals, "image_depths": image_depths, "depth_cams": depth_cams,
             "tasks_by_index": tasks_by_index, "annotated": annotated, "annot_src": annot_src,
             "used": used, "missing": missing, "episodes": [], "recordings": [],
             "metadata_read": reads["metadata_read"], "metadata_issues": reads["metadata_issues"],
@@ -4823,12 +4985,15 @@ def lerobot_annotations(ctx, root, df, data_path, *, image_clock=False):
     fps = ctx.get("fps") or root.get("fps")
     n = ctx.get("n_state_frames")
     mapped = None
-    offset = None
+    offset, image_scale = None, 1.0
     if image_clock and times is not None:
+        scale, error = declared_clock_unit((root.get("features") or {}).get("timestamp") or {})
+        image_scale = scale if scale is not None else 1.0
         try:
-            offset = -float(times[0])
-            if not np.isfinite(offset):
-                offset = None
+            if error is None:
+                offset = -float(times[0]) * image_scale
+                if not np.isfinite(offset):
+                    offset = None
         except (TypeError, ValueError, OverflowError):
             pass
     elif frames is not None and fps and n:
@@ -4855,9 +5020,10 @@ def lerobot_annotations(ctx, root, df, data_path, *, image_clock=False):
                     continue
                 step["raw_" + key] = step[key]
                 if offset is not None:
-                    step[key] += offset
+                    step[key] = step[key] * image_scale + offset
                     step["clock_offset_s"] = offset
-                    step["clock_mapping"] = "native row timestamp minus the image writer's first timestamp"
+                    step["clock_scale_to_seconds"] = image_scale
+                    step["clock_mapping"] = "native row timestamps in declared units, relative to the image writer's first row"
                 elif mapped is not None:
                     row = step["row_start"] if key == "t0" else step["row_end"] + 1
                     step[key] = mapped[row]
@@ -5086,6 +5252,149 @@ def archive_lerobot_state(ep: Path, ctx: dict, df, data_path) -> None:
         write_atomic(ep / "context.json", ctx, indent=1, default=str)
 
 
+def lerobot_image_depth(ep, ctx, root, df, signals, *, anchor_times=None, image_anchor=False):
+    """Stream declared scalar rasters losslessly; keep missing rows and uncertain RGB pairing explicit."""
+    keys = root.get('image_depths') or []
+    if df is None or not keys:
+        return signals
+    ep.mkdir(parents=True, exist_ok=True)
+    fps = float(ctx.get('fps') or root.get('fps') or 30.)
+    n = int(ctx['n_state_frames'])
+    ta = np.asarray(anchor_times, dtype=float) if anchor_times is not None else np.arange(n) / fps
+    native, recorded, clock_metadata, unit_error, _ = lerobot_image_clock(df, root, fps)
+    shown, clock_note = presentation_clock(recorded, root.get('fps'))
+    if unit_error:
+        add_issue(ctx, 'clock_units_unresolved', f'timestamp: {unit_error}; depth rows have no measured event timing.',
+                  signal='timestamp')
+    # Original native clocks belong to the complete owned table, not to a sparse depth stream.
+    clock_file = ep / (ctx.get('recorded_container_times') or {}).get('file', 'recorded_container_times.npz')
+    clocks, mapping, metadata = {}, {}, {}
+    if clock_file.exists():
+        with np.load(clock_file) as stored:
+            clocks = {key: stored[key] for key in stored.files}
+        declaration = ctx.get('recorded_container_times') or {}
+        mapping = dict(declaration.get('cameras') or {})
+        metadata = dict(declaration.get('clocks') or {})
+    if native is not None:
+        clocks['timestamp'] = native
+        metadata['timestamp'] = {'source': 'parquet timestamp column', **clock_metadata}
+    if 'frame_index' in df:
+        clocks['frame_index'] = df['frame_index'].to_numpy()
+        metadata['frame_index'] = {'source': 'parquet frame_index column', 'role': 'bookkeeping'}
+    if clocks:
+        keep_container_clocks(ep, ctx, clocks, mapping, metadata)
+    entries = json.loads((ep / 'depth.json').read_text()) if (ep / 'depth.json').exists() else {}
+    times = {}
+    if (ep / 'depth_times.npz').exists():
+        with np.load(ep / 'depth_times.npz') as stored:
+            times = {key: stored[key] for key in stored.files}
+    presentation = {}
+    if ctx.get('depth_presentation_times'):
+        with np.load(ep / ctx['depth_presentation_times']) as stored:
+            presentation = {key: stored[key] for key in stored.files}
+    at = None if image_anchor else frame_rows(df, n)
+    frame_rows_ = np.arange(len(df)) if at is None else at
+    for key in keys:
+        descriptor = root['features'].get(key) or {}
+        representation = sensor_representation(descriptor)
+        scale = depth_scale_metadata(descriptor) if representation == 'depth' else None
+        if key not in df:
+            add_issue(ctx, 'depth_not_read', f'The declared depth image column {key} is absent from this episode.', camera=key)
+            continue
+        streams, fallback, fallback_bytes, exceeded, missing = {}, [None] * len(df), 0, False, 0
+        fallback_types = set()
+        budget = max(0, SIGNAL_EPISODE_BYTES - signals.bytes - signals.native_table_bytes)
+        for row, cell in enumerate(df[key].to_numpy()):
+            value = _image_value(cell)
+            if value is None:
+                missing += 1
+                continue
+            if value.ndim == 3 and value.shape[-1] == 1:
+                value = value[..., 0]
+            scalar = value.ndim == 2 and (value.dtype == np.uint8 or
+                     value.dtype.kind in 'iuf' and value.dtype.itemsize in (2, 4, 8))
+            if not scalar:
+                fallback_types.add((value.shape, value.dtype.str))
+                size = value.nbytes + 8
+                if not exceeded and fallback_bytes + size <= budget:
+                    fallback[row] = value
+                    fallback_bytes += size
+                else:
+                    exceeded = True
+                    fallback = [None] * len(df)
+                continue
+            signature = (value.shape, value.dtype.str)
+            if signature not in streams:
+                view = available_depth_view('depth_stream1', entries | {item['view']: {} for item in streams.values()})
+                streams[signature] = {'view': view, 'writer': DepthWriter(ep / f'{view}.mkv'), 'rows': []}
+            stream = streams[signature]
+            # Matroska packets use millisecond ticks. Transport row order separately from native measurement time.
+            stream['writer'].add(row / 1000., value, scale)
+            stream['rows'].append(row)
+        if missing:
+            bad_cells_issue(signals, key, missing, len(df), 'missing or undecodable depth images')
+        if exceeded:
+            for shape, dtype in fallback_types:
+                signals.native_table_fields.append({'name': key, 'metadata': dict(descriptor),
+                    'source_shape': list(shape), 'source_row_count': len(df), 'dtype': str(np.dtype(dtype)),
+                    'bookkeeping': False, 'reason': 'typed source retention limit; source rasters exceed the available budget'})
+            signals.issues.append({'kind': 'native_retention_limit', 'signal': key,
+                'what': 'Multichannel source images exceeded the typed retention budget; original values are not claimed as retained.'})
+        elif any(value is not None for value in fallback):
+            _retain_table_native(signals, key, fallback, {**descriptor,
+                'representation_note': 'This raster has no supported scalar distance encoding; native values remain uncalibrated evidence.'})
+        if not streams:
+            if not exceeded and not any(value is not None for value in fallback):
+                add_issue(ctx, 'depth_not_read', f'No numeric raster of {key} could be decoded.', camera=key)
+            continue
+        for (shape, dtype), stream in streams.items():
+            writer, rows, view = stream['writer'], np.asarray(stream['rows'], dtype=np.int64), stream['view']
+            writer.close()
+            packets = probe_depth(writer.out)['pts']
+            if len(packets) != len(rows):
+                raise ValueError(f'{key}: encoded depth packets do not match owned source rows')
+            entry, clock = depth_entry(ep, view, writer.out, recorded[rows], ta, packets, scale, key)
+            # Exact table presence overrides nearest-time filling: a missing source row has no neighbouring reading.
+            km = np.full(n, -1, dtype=np.int64)
+            placed = frame_rows_[rows]
+            valid = (placed >= 0) & (placed < n)
+            km[placed[valid]] = np.flatnonzero(valid)
+            np.save(ep / entry['kmap'], km)
+            row_file = ep / f'{view}_source_rows.npy'
+            np.save(row_file, rows)
+            entry.update(kind=representation, paired_camera=None, source_key=key,
+                source_dtype=str(np.dtype(dtype)), source_shape=list(shape), source_descriptor=descriptor,
+                source_units=descriptor.get('units', descriptor.get('unit')), source_row_count=len(df),
+                source_row_map_file=str(row_file.resolve()), width=shape[1], height=shape[0], pix_fmt='gray16le',
+                encoding_clock='millisecond transport row ordinals, not measured source timestamps')
+            if representation == 'depth' and scale is None:
+                entry['calibration_note'] = 'No consistent supported metric scale is established; values remain stored readings.'
+            if writer.storage:
+                entry['storage'] = writer.storage
+            entries[view] = entry
+            times.update(clock)
+            mapping[view] = 'timestamp' if native is not None else 'frame_index'
+            ctx.setdefault('depth_camera_clock', {})[view] = {'method': 'owned table row placement',
+                'what': 'Depth presence follows owned table rows and frame indices. Native table clocks are retained; '
+                        'measured RGB synchronization and pixel registration are unverified.'}
+            if clock_note:
+                presentation[f'depth_{view}'] = shown[rows]
+                ctx['depth_camera_clock'][view]['source_clock_note'] = clock_note
+            depth_gap_issues(ctx, key, km, ta)
+    write_depth(ep, ctx, entries, times)
+    if presentation:
+        ctx['depth_presentation_times'] = 'depth_presentation_times.npz'
+        np.savez(ep / ctx['depth_presentation_times'], **presentation)
+    if clocks:
+        keep_container_clocks(ep, ctx, clocks, mapping, metadata)
+    return signals
+
+
+def lerobot_recorded_signals(ep, ctx, root, df, used, n, *, anchor_times=None):
+    signals = recorded_signals(df, set(used) | set(root.get('image_depths') or []), n, root['features'])
+    return lerobot_image_depth(ep, ctx, root, df, signals, anchor_times=anchor_times)
+
+
 def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(), *, native_adapter=None) -> dict:
     """hold_back: columns an adapter keeps out of the prompt (a publisher's own labels, kept to score against)."""
     r, row = item["root"], item["row"]
@@ -5096,11 +5405,8 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
     df = None
     if row.get("data") is not None:
         try:
-            need_images = [k for k in r["image_cams"]] if not any(k in row["videos"] for k in r["cams"]) else []
-            # every column, so the recording's other signals are kept too (recorded_signals); images only when the
-            # cameras are stored in the data file
-            df = _read_episode_table(row["data"], eidx, None,
-                                     exclude=[k for k in r["image_cams"] if k not in need_images])
+            # Both storage representations participate in the same camera policy.
+            df = _read_episode_table(row["data"], eidx, None)
             if not len(df):
                 df = None
         except Exception:
@@ -5150,7 +5456,7 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
         extra["instruction_note"] = "This instruction is the episode's task text in the dataset's LeRobot metadata."
 
     video_cams = [k for k in r["cams"] if k in row["videos"]]
-    if not video_cams and r["image_cams"] and df is not None:
+    if r["image_cams"] and df is not None:
         return _convert_image_episode(item, rig, ep, dataset, df, fps or 30.0, state, action, extra, notes,
                                       state_columns=state_columns, action_columns=action_columns,
                                       state_names=state_names, split_note=split_note, hold_back=hold_back, native_adapter=native_adapter)
@@ -5235,9 +5541,8 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
         lerobot_annotations(ctx, r, df, row.get("data"))
         write_depth(ep, ctx, *lerobot_depth(ep, r, row, vmap, fps, ctx["n_state_frames"], unused, ctx))
         ctx = finish_episode(ep, ctx, sources, state if kind != "none" else None, action,
-                              signals=recorded_signals(df, _used_columns(kind, state, action, state_columns,
-                                                       action_columns) | set(hold_back),
-                                                       ctx["n_state_frames"], feats))
+                              signals=lerobot_recorded_signals(ep, ctx, r, df, _used_columns(kind, state, action, state_columns,
+                                                       action_columns) | set(hold_back), ctx["n_state_frames"]))
         archive_lerobot_state(ep, ctx, df, row.get("data"))
         return ctx
     # one file per camera per episode (v2). LeRobot's timestamps are frame_index / fps and state rows follow
@@ -5288,9 +5593,9 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
     lerobot_annotations(ctx, r, df, row.get("data"))
     write_depth(ep, ctx, *lerobot_depth(ep, r, row, vmap, fps, ctx["n_state_frames"], unused, ctx))
     ctx = finish_episode(ep, ctx, sources, state if kind != "none" else None, action, times=times,
-                          signals=recorded_signals(df, _used_columns(kind, state, action, state_columns,
-                                                   action_columns) | set(hold_back),
-                                                   ctx["n_state_frames"], feats))
+                          signals=lerobot_recorded_signals(ep, ctx, r, df, _used_columns(kind, state, action, state_columns,
+                                                   action_columns) | set(hold_back), ctx["n_state_frames"],
+                                                   anchor_times=(times or {}).get(anchor)))
     archive_lerobot_state(ep, ctx, df, row.get("data"))
     return ctx
 
@@ -5467,72 +5772,132 @@ def _shown_size(p: Path) -> tuple[int, int]:
     return display.shown_size(g) if g["stored"][0] else (0, 0)
 
 
+def lerobot_image_clock(df, root, fps):
+    """Original table clock plus normalized row-relative seconds, without changing source values."""
+    fi = df["frame_index"].to_numpy() if "frame_index" in df.columns else np.arange(len(df))
+    native = df["timestamp"].to_numpy() if "timestamp" in df.columns else None
+    metadata = (root["features"].get("timestamp") or {})
+    scale, unit_error = declared_clock_unit(metadata)
+    origin = 0.0
+    if native is None:
+        t = np.asarray(fi, dtype=np.float64) / fps
+        t -= t[0]
+    elif unit_error:
+        t = np.full(len(df), np.nan)
+
+    else:
+        scale = scale if scale is not None else 1.0  # LeRobot's timestamp column defaults to seconds.
+        finite = np.flatnonzero(np.isfinite(native))
+        first = native[finite[0]] if len(finite) else 0
+        origin = float(first) * scale
+        # Subtract before float conversion so epoch integer clocks retain their low bits.
+        if native.dtype.kind == 'u':
+            below = native < first
+            relative = np.where(below, first - native, native - first).astype(np.float64)
+            relative[below] *= -1
+        else:
+            relative = np.asarray(native - first, dtype=np.float64)
+        t = relative * scale
+    return native, t, metadata, unit_error, origin
+
+
 def _convert_image_episode(item, rig, ep, dataset, df, fps, state, action, extra, notes,
                            *, state_columns=(), action_columns=(), state_names=None, split_note=None, hold_back=(),
                            native_adapter=None) -> dict:
-    """Cameras stored as encoded images inside the data file: each written to H.264 at its frame time."""
-    r = item["root"]
-    # a camera meta/info.json lists whose column is not in this episode's data file is listed, never a failure
-    absent = [k for k in r["image_cams"] if k not in df.columns]
-    vmap, unused = pick_cameras([k for k in r["image_cams"] if k in df.columns], rig, list(r["features"]))
-    not_shown = list(unused)
-    unused = unused + [f"{k} (listed in meta/info.json, not in the data file)" for k in absent]
+    """Select embedded images and video windows together without copying source movies."""
+    r, row = item["root"], item["row"]
     ep.mkdir(parents=True, exist_ok=True)
-    fi = df["frame_index"].to_numpy() if "frame_index" in df.columns else np.arange(len(df))
-    native = df["timestamp"].to_numpy() if "timestamp" in df.columns else None
-    t = np.asarray(native, dtype=np.float64) if native is not None else fi / fps
-    finite = np.flatnonzero(np.isfinite(t))
-    t = t - t[finite[0]] if len(finite) else t
+    extra = {**extra, "source": dict(extra.get("source") or {})}
+    absent = [k for k in r["image_cams"] if k not in df.columns]
+    image_keys = [k for k in r["image_cams"] if k in df.columns]
+    video_keys = [k for k in r["cams"] if k in row["videos"]]
+    candidates = image_keys + video_keys
+    initial, _ = pick_cameras(candidates, rig, list(r["features"])) if candidates else ({}, [])
+    view_of = {key: view for view, key in initial.items()}
+    native, t, metadata, unit_error, origin = lerobot_image_clock(df, r, fps)
+    if unit_error:
+        add_issue(extra, "clock_units_unresolved", f"timestamp: {unit_error}; embedded image placement uses "
+                  "declared cadence, not measured capture timing.", signal="timestamp")
     display_t, clock_note = presentation_clock(t, fps)
-    coarse = clock_note is not None
     encoded_t = display_t if clock_note and clock_note.get("clock_problem") else t
-    files, undecoded, written = {}, [], {}
-
-    def write(key, out):
-        # a frame for every row, black where its image is missing or does not decode (FrameWriter blank), so the
-        # state's rows stay one per frame
-        w = written[key] = FrameWriter(out, "", blank=True, fine_clock=coarse)
+    written, paths, prs, clocks, bases, broken = {}, {}, {}, {}, {}, {}
+    for index, key in enumerate(image_keys):
+        path = ep / (view_of.get(key) or f"image_camera_{index + 1}")
+        path = path.with_suffix('.mp4')
+        w = written[key] = FrameWriter(path, "", blank=True, fine_clock=clock_note is not None)
         for ts, cell in zip(encoded_t, df[key].to_numpy()):
-            b = cell.get("bytes") if isinstance(cell, dict) else cell
-            if isinstance(b, (bytes, bytearray)) and b:
-                w.add(float(ts), bytes(b))
+            payload = cell.get("bytes") if isinstance(cell, dict) else cell
+            if isinstance(payload, (bytes, bytearray)) and payload:
+                w.add(float(ts), bytes(payload))
             else:
                 w.missing(float(ts))
-        return w.close()
-    for v, key in vmap.items():
-        if not write(key, ep / f"{v}.mp4"):
-            # one camera whose images do not decode leaves the others, never fails the episode
-            undecoded.append(key)
-            unused.append(f"{key} (none of its images in the data file could be decoded)")
+        if not w.close():
+            broken[key] = "none of its images in the data file could be decoded"
             continue
-        files[v] = (key, ep / f"{v}.mp4")
-    if not files:
-        raise ValueError(f"the {', '.join(undecoded)} images in the data file could not be decoded")
-    extra = {**extra}
-    extra["source"]["unused_cameras"] = unused
-    # the cameras the model is not shown are written too, for the board (unshown_cameras)
+        paths[key], prs[key], clocks[key], bases[key] = path, probe(path), t, 0.0
+        bad_frames_issues(extra, key, w)
+
+    def video_facts(key):
+        if key in prs:
+            return
+        source = row["videos"][key]
+        path, base, stop = source if isinstance(source, tuple) else (source, 0.0, None)
+        facts = probe(Path(path))
+        if stop is not None:
+            seconds_ = facts["pts"].astype(np.float64) * float(facts["time_base"])
+            facts = {**facts, "pts": facts["pts"][(seconds_ >= base - 1e-7) & (seconds_ < stop - 1e-7)]}
+        if not len(facts["pts"]):
+            raise ValueError("no video packet covers the owned episode window")
+        paths[key], prs[key], bases[key] = Path(path), facts, float(base)
+        # LeRobot associates video and table rows by episode frame index. Encoded PTS are retained separately.
+        clocks[key] = np.arange(len(facts["pts"]), dtype=np.float64) / fps
+    for key in video_keys:
+        try:
+            video_facts(key)
+        except Exception as error:
+            broken[key] = plain_error(error)
+    note_broken_cameras(extra, broken, bool(paths))
+    vmap, unused = pick_cameras(list(paths), rig, list(r["features"]))
+    descs = colour_depth_views(r, row, vmap)
+    for key in descs:
+        video_facts(key)
+    extra["source"].setdefault("unused_cameras", []).extend(unused +
+        [f"{k} (listed in meta/info.json, not in the data file)" for k in absent] +
+        [f"{k} (no video of it for this episode is in the upload)" for k in r["cams"] if k not in video_keys])
+    files = {view: (key, paths[key]) for view, key in vmap.items()}
     un = []
-    for i, key in enumerate(not_shown):
-        n_u = write(key, ep / f"unshown{i + 1}.mp4")
-        w = written[key]
-        entry = unshown_entry(key, ep / f"unshown{i + 1}.mp4", unshown_why(key, rig, list(vmap.values())),
-                                      n_frames=n_u, start_s=w.pts[0] / TIME_BASE_DEN,
-                                      fps=measured_fps(np.asarray(w.pts, dtype=np.float64) / TIME_BASE_DEN)) if n_u else None
-        un.append((key, keep_unshown_clock(ep, entry, t, w.pts, fps)))
+    for index, key in enumerate(unused):
+        facts = prs[key]
+        shown, note_ = presentation_clock(clocks[key], fps)
+        entry = unshown_entry(key, paths[key], unshown_why(key, rig, list(vmap.values())),
+                              base_s=bases[key], n_frames=len(facts["pts"]), start_s=float(shown[0]),
+                              fps=measured_fps(shown) or fps)
+        name = f"unshown{index + 1}_times.npz"
+        np.savez(ep / name, capture=clocks[key], presentation=shown, pts=facts["pts"])
+        entry['camera_times'] = name
+        entry['source_descriptor'] = r['features'].get(key) or {}
+        if note_:
+            entry['camera_clock'] = note_
+        if key in written:
+            entry['placeholder_rows'] = written[key].placeholders()
+        un.append((key, entry))
     set_unshown(extra, un)
-    for key in undecoded:
-        add_issue(extra, "camera_not_decodable", f"None of the {key} images in the data file could be decoded, so the "
-                                                 "camera is not shown.", camera=key)
-    for key, w in written.items():
-        if w.pts:
-            bad_frames_issues(extra, key, w)
-        elif key not in undecoded:
-            unshown_not_decodable(extra, key)
     extra["source"]["images_in_parquet"] = True
-    lerobot_annotations(extra, r, df, item["row"].get("data"), image_clock=True)
+    extra["source"]["camera_timing"] = {key: (
+        "Embedded images follow table row timestamps using declared units or the LeRobot timestamp seconds contract; "
+        "original clocks are retained."
+        if key in written and native is not None and unit_error is None else
+        "Embedded images use declared cadence because their recorded timestamp units are unresolved."
+        if key in written and unit_error else
+        "Embedded images follow source frame indices at the declared cadence."
+        if key in written else
+        "Video rows use LeRobot episode frame index at declared cadence. Encoded PTS identify source packets; "
+        "measured capture timing and cross-camera synchronization are not asserted.") for key in paths}
     if native is not None:
-        keep_container_clocks(ep, extra, {"timestamp": native}, {v: "timestamp" for v in files},
-                              {"timestamp": {"source": "parquet timestamp column", "units": None}})
+        keep_container_clocks(ep, extra, {"timestamp": native},
+                              {v: "timestamp" for v, key in vmap.items() if key in written},
+                              {"timestamp": {"source": "parquet timestamp column", **metadata,
+                                             "units": metadata.get("units", metadata.get("unit"))}})
     kind, note, action, proof = lerobot_physical_state(
         state, action, rig, state_names if state_names is not None else state_value_names(r["features"], state),
         extra.get("state_value_roles"), r["features"], state_columns, action_columns, native_adapter)
@@ -5545,29 +5910,40 @@ def _convert_image_episode(item, rig, ep, dataset, df, fps, state, action, extra
         note = missing_lerobot_state(df)
         if split_note:
             note = StateNote(split_note, "layout")
-    # Each embedded image is written in table row order, so state rows use that same order.
-    state_rows = df.drop(columns=["frame_index"], errors="ignore")
-    state, action, kind, note, fixes = state_on_frames(state_rows, state, action, len(df), fps, kind, note)
-    for i in fixes:
-        add_issue(extra, **i)
-    # the table's other numbers go with the frames as they do beside videos (recorded_signals)
+    from label import episode as me
+    anchor = me.order_views(files)[0]
+    image_anchor = vmap[anchor] in written
+    state_rows = df.drop(columns=["frame_index"], errors="ignore") if image_anchor else df
+    count = len(prs[vmap[anchor]]["pts"])
+    state, action, kind, note, fixes = state_on_frames(state_rows, state, action, count, fps, kind, note)
+    for issue in fixes:
+        add_issue(extra, **issue)
     signals = recorded_signals(df, _used_columns(kind, state, action, state_columns, action_columns)
-                               | set(r["image_cams"]) | set(hold_back), 0, r["features"])
+                               | set(r["image_cams"]) | set(r.get("image_depths") or []) | set(hold_back),
+                               0 if image_anchor else count, r["features"])
     ctx = video_views_episode(ep, files, rig, dataset, extra, signals=signals,
-                              real={v: t for v in files} if coarse else None, nominal_fps=fps,
-                              placeholders={v: written[key].placeholders() for v, (key, _) in files.items()})
+                              prs={v: prs[key] for v, key in vmap.items()},
+                              real={v: clocks[key] for v, key in vmap.items()}, nominal_fps=fps,
+                              real_origin_s=origin if image_anchor else None, descs=descs,
+                              placeholders={v: written[key].placeholders() for v, key in vmap.items() if key in written})
+    sources = json.loads((ep / "sources.json").read_text())
+    for view, key in vmap.items():
+        sources[view]['base_s'] = bases[key]
+        ctx['cameras'][view]['source_descriptor'] = r['features'].get(key) or {}
+    with np.load(ep / ctx['real_times']) as stored:
+        times = {k: stored[k] for k in stored.files}
+    # The image writer owns table rows; video state retains the existing frame-index contract.
     if state is not None and kind != "none" and len(state) == ctx["n_state_frames"]:
         ctx["state_kind"] = kind
-        with np.load(ep / "times.npz") as clocks:
-            times = {k: clocks[k] for k in clocks.files}
-        return finish_episode(ep, ctx, json.loads((ep / "sources.json").read_text()), state, action,
-                              times=times, signals=signals, nominal_fps=fps)
-    if rig != "ego_head":
-        # no observation.state at all is a state not recorded, whatever the layout note says of its width
+    elif rig != "ego_head":
         no_state(ctx, note if note else StateNote(
-            "Labelled from the video: the recorded state and the image frames cannot be lined up.", "layout"))
-        archive_lerobot_state(ep, ctx, df, item["row"].get("data"))
-        write_atomic(ep / "context.json", ctx, indent=1, default=str)
+            "Labelled from the video: the recorded state and the camera frames cannot be lined up.", "layout"))
+    lerobot_annotations(ctx, r, df, row.get("data"), image_clock=image_anchor)
+    write_depth(ep, ctx, *lerobot_depth(ep, r, row, vmap, fps, count, unused, ctx))
+    signals = lerobot_image_depth(ep, ctx, r, df, signals, anchor_times=times[anchor], image_anchor=image_anchor)
+    ctx = finish_episode(ep, ctx, sources, state if kind != 'none' else None, action,
+                         times=times, signals=signals, nominal_fps=fps)
+    archive_lerobot_state(ep, ctx, df, row.get("data"))
     return ctx
 
 
@@ -5802,13 +6178,13 @@ def _clocks_in_seconds(raw: dict[str, np.ndarray], reference: str | None = None,
     return out
 
 
-def h5_clock_unit(ds) -> tuple[float | None, str | None]:
+def declared_clock_unit(metadata) -> tuple[float | None, str | None]:
     """Literal time units constrain normalization; unusable declarations cannot establish seconds."""
     scales = {'s': 1., 'sec': 1., 'secs': 1., 'second': 1., 'seconds': 1.,
               'ms': 1e-3, 'millisecond': 1e-3, 'milliseconds': 1e-3,
               'us': 1e-6, 'microsecond': 1e-6, 'microseconds': 1e-6,
               'ns': 1e-9, 'nanosecond': 1e-9, 'nanoseconds': 1e-9}
-    declarations = [ds.attrs[key] for key in ('unit', 'units') if key in ds.attrs]
+    declarations = [metadata[key] for key in ('unit', 'units') if key in metadata]
     if not declarations:
         return None, None
     found = []
@@ -5827,9 +6203,13 @@ def h5_clock_unit(ds) -> tuple[float | None, str | None]:
     return found[0], None
 
 
-def h5_sensor_representation(ds) -> str | None:
+def h5_clock_unit(ds) -> tuple[float | None, str | None]:
+    return declared_clock_unit(ds.attrs)
+
+
+def sensor_representation(metadata) -> str | None:
     """Only unambiguous scalar measurement declarations establish a depth representation."""
-    sensor_type = ds.attrs.get('sensor_type')
+    sensor_type = metadata.get('sensor_type')
     if sensor_type is None or np.asarray(sensor_type).ndim != 0:
         return None
     sensor_type = np.asarray(sensor_type).item()
@@ -5841,6 +6221,10 @@ def h5_sensor_representation(ds) -> str | None:
     if words & {'pressure', 'taxel', 'taxels', 'force', 'forces'}:
         families.add('signal')
     return next(iter(families)) if len(families) == 1 else 'signal' if families else None
+
+
+def h5_sensor_representation(ds) -> str | None:
+    return sensor_representation(ds.attrs)
 
 
 def h5_kind(name: str, ds) -> str | None:
@@ -6885,23 +7269,50 @@ def names_shown(files: dict) -> list[str]:
     return [nm for nm, _ in files.values()]
 
 
-def depth_scale_attr(ds) -> float | None:
-    """Metres per unit from a depth dataset's own attributes (depth_scale, units "mm" or "m"), else None."""
-    for k, v in ds.attrs.items():
-        if DEPTH_SCALE_KEY.search(str(k)):
+def depth_scale_metadata(metadata) -> float | None:
+    """Only mutually compatible scalar depth declarations establish metres per stored unit."""
+    scales = []
+    declarations = list(metadata.items())
+    for key, value in declarations:
+        if value is None:
+            continue
+        if key == 'info' and isinstance(value, dict):
+            declarations.extend(value.items())
+            continue
+        if key == 'scale_m' or DEPTH_SCALE_KEY.search(str(key).split('.')[-1]):
             try:
-                x = float(np.asarray(v).ravel()[0])
-                if 0 < x < 10:
-                    return x
-            except Exception:
-                pass
-        if str(k).lower() in ("unit", "units"):
-            u = (v.decode() if isinstance(v, bytes) else str(v)).strip().lower()
-            if u in ("mm", "millimeter", "millimeters", "millimetre", "millimetres"):
-                return 0.001
-            if u in ("m", "meter", "meters", "metre", "metres"):
-                return 1.0
-    return None
+                array = np.asarray(value)
+                scale = float(array.item()) if array.size == 1 and array.dtype.kind != 'b' else None
+                if scale is None or not np.isfinite(scale) or not 0 < scale < 10:
+                    return None
+                precision = array if array.dtype.kind == 'f' else np.asarray(scale)
+                rounding = abs(float(np.spacing(precision).item())) / 2
+                scales.append((scale, rounding, True))
+            except (TypeError, ValueError, OverflowError):
+                return None
+        elif str(key).lower() in ('unit', 'units'):
+            array = np.asarray(value)
+            if array.size != 1:
+                return None
+            value = array.item()
+            if not isinstance(value, (str, bytes)):
+                return None
+            unit = (value.decode() if isinstance(value, bytes) else value).strip().lower()
+            if unit in ('mm', 'millimeter', 'millimeters', 'millimetre', 'millimetres'):
+                scales.append((.001, abs(float(np.spacing(.001))) / 2, False))
+            elif unit in ('m', 'meter', 'meters', 'metre', 'metres'):
+                scales.append((1., abs(float(np.spacing(1.))) / 2, False))
+    if not scales:
+        return None
+    scale, rounding, _ = next((item for item in scales if item[2]), scales[0])
+    if any(abs(scale - other) > rounding + error for other, error, _ in scales):
+        return None
+    return scale
+
+
+def depth_scale_attr(ds) -> float | None:
+    """Metres per unit from a depth dataset's literal attributes, else None."""
+    return depth_scale_metadata(ds.attrs)
 
 
 def h5_has_camera(path: Path) -> bool:
@@ -10399,13 +10810,14 @@ def measure_depth_ranges(out: Path, ids: list[str]) -> dict:
             ep = me.load(d)
         except Exception:
             continue
-        for v, e in {**(ep.get("depth") or {}), **(ep.get('additional_depth') or {})}.items():
+        streams = {**(ep.get("depth") or {}), **(ep.get('additional_depth') or {})}
+        for v, e in streams.items():
             if e.get("scale_m") and e.get("kind") != "disparity":
                 continue
             key = ((ep['sources'].get(v) or {}).get('camera_key') or e.get('source') or v)
             n = int(ep["sources"][me.anchor(ep)]["n_frames"])
             ks = sorted({int(x) for x in np.linspace(0, max(n - 1, 0), DEPTH_RANGE_FRAMES)})
-            frames.setdefault(key, []).extend(dp.at_anchor(ep, ep["depth"], v, ks).values())
+            frames.setdefault(key, []).extend(dp.at_anchor(ep, streams, v, ks).values())
             where.setdefault(key, []).append((d, v))
     ranges = {}
     for key, fs in frames.items():

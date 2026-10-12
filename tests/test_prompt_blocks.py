@@ -155,6 +155,24 @@ def test_prompt_cases_request_only_their_available_evidence(name):
     assert bool("recorded motion" in fixed) == bool(blocks & {"state", "state_unaligned", "signals"})
     if ep["context"].get("instruction"):
         assert ep["context"]["instruction"] in prompt
+    if name == 'teleop_everything':
+        from prepare.formats import lerobot_metadata
+        source = '/srv/private-owner/collection'
+        metadata = {'fields': {'path': '/native/member', 'sensor_flag': 2**60 + 1},
+                    'calibration_note': 'Measured relative to the fixture origin.'}
+        lerobot_metadata(ep['context'], {'dir': source, 'info': metadata})
+        original = copy.deepcopy(ep['context'])
+        projected_fixed, projected_prompt = me.build_prompt(ep, pl, cell_w=448, cell_h=252)
+        assert projected_fixed == fixed
+        assert source not in projected_prompt
+        assert 'info.json' in projected_prompt and '/native/member' in projected_prompt
+        assert str(2**60 + 1) in projected_prompt and metadata['calibration_note'] in projected_prompt
+        assert 'operator' in projected_prompt and 'A' in projected_prompt
+        assert ep['context'] == original
+        explicit = 'Publisher explanation: the controller member is /native/publisher.'
+        ep['context']['uploader_annotation'] = explicit
+        _, explicit_prompt = me.build_prompt(ep, pl, cell_w=448, cell_h=252)
+        assert explicit in explicit_prompt
 
 
 @pytest.mark.parametrize("rig,evidence,given,session,window", [
@@ -237,6 +255,58 @@ def test_one_contribution_policy_reaches_runtime_requests(rig, evidence, given, 
                 assert f"only the first {duration:g} s of a 120 s recording" in episode
         prefixes.append(fixed)
     assert prefixes[0] == prefixes[1]
+
+
+@pytest.mark.parametrize("recorded", [False, True])
+@pytest.mark.parametrize("declaration", ["episode", "source_session", "legacy_session", "explicit_session"])
+def test_ego_session_keeps_annotation_claims_without_a_global_goal(recorded, declaration):
+    """Verify scope in assembled requests; metadata claims do not establish observed activities."""
+    from PIL import Image
+
+    ep, pl = case_ego_annotated_tracks()
+    ctx = ep["context"]
+    ctx["annotation_subtasks"] = [{"t0": 0.0, "t1": 4.0, "label": "chop the carrot"},
+                                  {"t0": 4.0, "t1": 10.0, "label": "wipe the work surface", "ok": False}]
+    ctx["annotation_note"] = "Publisher claims on the recording clock."
+    if not recorded:
+        ep.pop("signals")
+        ep.pop("signal_meta")
+    if declaration == "source_session":
+        ctx["task_mode"] = "session"
+    elif declaration == "legacy_session":
+        ctx["sessions"] = True
+    elif declaration == "explicit_session":
+        ctx["task_mode"] = "episode"
+        ctx["annotation_policy"] = policy.resolve(ctx, task_mode="session")
+
+    fixed, episode = me.build_prompt(ep, pl, cell_w=64, cell_h=36)
+    jpg = mf.to_jpeg(Image.new("RGB", (64, 36)), 64)
+    content, grids, image_bytes = mf.build_content(fixed, episode, [(0.0, [("head", jpg)])],
+                                                  ["head"], 4, "high", 80, 10, 20)
+    assert content[0] == {"type": "text", "text": fixed}
+    assert content[1] == {"type": "text", "text": episode}
+    assert grids == 1 and image_bytes > 0
+    assert any(part["type"] == "image_url" for part in content)
+    assert me.is_recorded(ep, pl) is recorded
+    assert prompts.EGO_SCHEMA in fixed
+    assert prompts.SESSION_RULES not in fixed
+    assert "goal_alignment" in fixed and "instruction_mismatch" in fixed
+    assert "Each failed\n  attempt is a key_event with outcome failure." in fixed
+    assert "Every failure and every\n  wasteful stretch in the timeline belongs to exactly one operator mistake" in fixed
+    assert "0.0-4.0s  chop the carrot" in episode
+    assert "4.0-10.0s  wipe the work surface  (marked unsuccessful)" in episode
+    assert "Publisher claims on the recording clock." in episode
+    if declaration == "episode":
+        assert prompts.EGO_ANNOTATION_RULES in fixed
+        assert prompts.EGO_SESSION_ANNOTATION_RULES not in fixed
+        assert "the clip is a task episode: its tasks are the steps of that goal" in fixed
+        assert '  goal: "chop the carrot"' in episode
+    else:
+        assert "the clip is a task episode: its tasks are the steps of that goal" not in fixed
+        assert "each activity's own end-state" in fixed
+        assert "independent activities" in fixed
+        assert '  recording context goal: "chop the carrot"' in episode
+        assert '  goal: "chop the carrot"' not in episode
 
 
 def _add(**ctx):

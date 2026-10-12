@@ -5,7 +5,7 @@ import copy
 import re
 from pathlib import Path
 
-from label.dictionary import effective
+from label.dictionary import effective, _digest
 
 
 def _owner(context, episode_id=None):
@@ -19,6 +19,18 @@ def _pointer_key(value):
 
 def _bound(context, field, binding):
     path = binding.get("context_path")
+    if field.get('kind') == 'native':
+        if not isinstance(path, str) or not re.fullmatch(r'table_field_inventory/\d+', path):
+            return False
+        index = int(path.split('/')[1])
+        fields = context.get('table_field_inventory') or []
+        if index >= len(fields):
+            return False
+        native = fields[index]
+        return (native.get('name') == field.get('name') and native.get('array') == binding.get('key')
+                and context.get('recorded_table_fields') == binding.get('file')
+                and native.get('dtype') == field.get('dtype') and native.get('source_shape') == field.get('shape')
+                and _digest(native.get('descriptor') or {}) == binding.get('source_descriptor_sha256'))
     if field.get("kind") == "signal":
         if not isinstance(path, str) or not re.fullmatch(r"signals/\d+", path):
             return False
@@ -113,15 +125,18 @@ def prepared_interpretation(context: dict, key: str, kind: str) -> dict:
     return field_interpretation(context, native_field_name(context, key, kind), kind, context_path=path)
 
 
-def field_interpretation(context: dict, name: str, kind="signal", *, context_path=None) -> dict:
+def field_interpretation(context: dict, name: str, kind="signal", *, context_path=None, source_identity=None) -> dict:
     """One exact bound field, or no interpretation when recorded identities are ambiguous."""
     overlay = context.get("data_dictionary") or {}
     owner = _owner(context)
     if owner != overlay.get("episode_id"):
         return {}
+    if kind == 'native' and (not source_identity or source_identity.get('missing')):
+        return {}
     matched = [field for field in overlay.get("fields", []) if field.get("name") == name and field.get("kind") == kind
                and any(binding.get("episode") == owner and _bound(context, field, binding)
                        and (context_path is None or binding.get("context_path") == context_path)
+                       and (kind != 'native' or binding.get('source_identity') == source_identity)
                        for binding in field.get("bindings", []))]
     if len(matched) != 1:
         return {}

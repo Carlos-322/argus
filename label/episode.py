@@ -110,7 +110,7 @@ def load(ep_dir: Path) -> dict:
     ctx = clock_context(ctx)
     from label.dictionary_editor import for_episode
     owner = (ctx.get("piece") or {}).get("of") or (ctx.get("data_dictionary") or {}).get("episode_id") or ep_dir.name
-    resolved = for_episode(ep_dir, owner)
+    resolved = for_episode(ep_dir, owner, private_bindings=True)
     if resolved is not None:
         ctx["data_dictionary"] = resolved
     src = json.loads((ep_dir / "sources.json").read_text())
@@ -187,6 +187,10 @@ def request_duration(ep: dict) -> float:
         # Legacy capture clocks may tie without opting into a separate display clock.
         # Bound their final stamp interval without rewriting the saved label instants.
         interval = float(np.median(positive)) if len(positive) else count / ep_fps(ep)
+        if 'last_frame_interval_s' in ep['sources'][view]:
+            interval = number(ep['sources'][view]['last_frame_interval_s'])
+            if interval is None or interval <= 0:
+                raise ValueError('recording has no usable final frame presentation interval')
         actual = max(0.0, float(times[-1]) + interval)
     else:
         actual = count / ep_fps(ep)
@@ -1761,8 +1765,9 @@ def ego_annotation_block(ctx: dict) -> str:
         return ("\nTHE DATASET'S ANNOTATION FOR THIS EPISODE: none; the dataset ships no task description for this "
                 "clip. Infer the activities from the footage alone and leave goal_alignment out.\n")
     lines = annotation_lines(ctx)
+    goal_label = "recording context goal" if policy.effective(ctx)["task_mode"] == "session" else "goal"
     return ("\nTHE DATASET'S ANNOTATION FOR THIS EPISODE (claims to check, see ABOUT THE DATASET'S ANNOTATION above):\n"
-            + (f"  goal: \"{goal}\"\n" if goal else "")
+            + (f"  {goal_label}: \"{goal}\"\n" if goal else "")
             + ("  subtasks, with the times the dataset gives:\n" + "\n".join(lines) + "\n" if lines else "")
             + (f"  about these annotations: {ctx['annotation_note'].strip()}\n" if ctx.get("annotation_note") else ""))
 
@@ -1973,9 +1978,15 @@ def _no_state_text(ep: dict, pl: dict) -> str:
 def _uploader_text(ep: dict, pl: dict) -> str:
     # notes the person who uploaded the episode sent with it (a note file beside a video, an annotation channel in an
     # MCAP), in whatever form they came
+    ctx = ep['context']
+    text = ctx['uploader_annotation'].strip()
+    from board.public_export import reader_annotation_projection
+    projected = reader_annotation_projection(text, ctx.get('uploader_notes'))
+    if projected is not None:
+        text = projected
     return ("\nTHE UPLOADER'S OWN NOTES FOR THIS EPISODE, as sent. They are claims to check against the "
             "video, not ground truth; where the video contradicts them, record it as a data issue:\n"
-            + ep["context"]["uploader_annotation"].strip() + "\n")
+            + text + "\n")
 
 
 def _metadata_issues(ep: dict, pl: dict) -> str:
