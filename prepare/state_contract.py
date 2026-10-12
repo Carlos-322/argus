@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 VERSION = 1
+ACTION_ROLES = frozenset({'command', 'target', 'observation', 'action/target_unknown'})
 GENERIC_PRODUCERS = frozenset({'prepare.formats:lerobot', 'prepare.formats:hdf5',
                               'prepare.formats:mcap-joints', 'prepare.mcap_pose:pose'})
 # Recorded adapter identity is preparation provenance, not a dataset-name heuristic.
@@ -28,12 +29,122 @@ def declared_contract(producer, kind, names, units, roles=None, action=None):
     return contract
 
 
-def native_contract(adapter, kind):
+def native_contract(adapter, kind, action_metadata=None):
     """Stamp an adapter selected by the preparation caller, never by an input dataset name."""
     if NATIVE_KINDS.get(adapter) != kind:
         return None
-    return {'version': VERSION, 'producer': 'prepare.' + adapter, 'kind': kind,
-            'native_contract': adapter}
+    result = {'version': VERSION, 'producer': 'prepare.' + adapter, 'kind': kind,
+              'native_contract': adapter}
+    if adapter in ('habit', 'molmo'):
+        result['action_semantics'] = declared_action_semantics('prepare.' + adapter, 'command')
+    elif adapter == 'fastumi':
+        result['action_semantics'] = declared_action_semantics('prepare.fastumi', 'target', relationship={
+            'kind': 'next_observation', 'field': 'state', 'row_offset': 1, 'terminal': 'repeat_last',
+            'scope': 'source_recording'})
+    publisher = publisher_action_semantics(action_metadata, 'prepare.' + adapter + ':publisher')
+    if publisher is not None:
+        result['publisher_action_semantics'] = publisher
+    return result
+
+
+def declared_action_semantics(producer, role, *, relationship=None):
+    """Source facts about an action array, independent of its physical column layout."""
+    if not isinstance(producer, str) or not producer or role not in ACTION_ROLES:
+        raise ValueError('Invalid source action semantics')
+    result = {'version': VERSION, 'producer': producer, 'role': role}
+    if relationship is not None:
+        if (role != 'target' or not isinstance(relationship, dict) or relationship.get('kind') != 'next_observation'
+                or relationship.get('field') != 'state' or type(relationship.get('row_offset')) is not int
+                or relationship['row_offset'] != 1 or relationship.get('terminal') != 'repeat_last'
+                or relationship.get('scope') != 'source_recording'):
+            raise ValueError('Invalid source action relationship')
+        result['relationship'] = dict(relationship)
+    return result
+
+
+def source_action_semantics(metadata, producer):
+    """Read an explicit publisher declaration, never infer semantics from names or values."""
+    import json
+    declaration = (metadata or {}).get('action_semantics')
+    try:
+        if isinstance(declaration, str):
+            declaration = json.loads(declaration)
+        if not isinstance(declaration, dict) or declaration.get('version') != VERSION:
+            return None
+        return declared_action_semantics(producer, declaration.get('role'),
+                                         relationship=declaration.get('relationship'))
+    except (ValueError, TypeError):
+        return None
+
+
+def publisher_action_semantics(metadata, producer):
+    """Retain explicit source declarations, including invalid ones, for conflict qualification."""
+    if not isinstance(metadata, dict) or 'action_semantics' not in metadata:
+        return None
+    return source_action_semantics(metadata, producer) or {
+        'producer': producer, 'source_declaration': metadata['action_semantics']}
+
+
+def action_semantics(context):
+    """Resolve checked preparation provenance; dictionary guesses cannot declare control commands."""
+    proof = context.get('state_contract') or {}
+    proof = proof if isinstance(proof, dict) else {}
+    action_proof = proof.get('action') or {}
+    action_proof = action_proof if isinstance(action_proof, dict) else {}
+    candidates = [context.get('action_semantics'), proof.get('action_semantics'),
+                  action_proof.get('action_semantics'), context.get('publisher_action_semantics'),
+                  proof.get('publisher_action_semantics')]
+    adapter = proof.get('native_contract')
+    if (isinstance(adapter, str) and adapter in NATIVE_KINDS and proof.get('version') == VERSION
+            and proof.get('producer') == 'prepare.' + adapter
+            and proof.get('kind') == context.get('state_kind') == NATIVE_KINDS[adapter]):
+        candidates.append(native_contract(adapter, proof['kind']).get('action_semantics'))
+    source = context.get('source') or {}
+    source_adapter = source.get('adapter') if isinstance(source, dict) else None
+    if (isinstance(source_adapter, str) and source_adapter in NATIVE_KINDS
+            and context.get('state_kind') == NATIVE_KINDS[source_adapter]):
+        if adapter and (proof.get('version') != VERSION or proof.get('producer') != 'prepare.' + str(adapter)
+                        or proof.get('kind') != context.get('state_kind')):
+            return {'role': 'action/target_unknown'}
+        candidates.append(native_contract(source_adapter, context['state_kind']).get('action_semantics'))
+    validated = []
+    for declaration in candidates:
+        if declaration is None:
+            continue
+        if not isinstance(declaration, dict) or declaration.get('version') != VERSION:
+            return {'role': 'action/target_unknown'}
+        try:
+            validated.append(declared_action_semantics(declaration.get('producer'), declaration.get('role'),
+                                                       relationship=declaration.get('relationship')))
+        except (ValueError, TypeError):
+            return {'role': 'action/target_unknown'}
+    if validated:
+        facts = [{k: v for k, v in declaration.items() if k != 'producer'} for declaration in validated]
+        if all(item == facts[0] for item in facts):
+            return validated[0]
+    return {'role': 'action/target_unknown'}
+
+
+def redundant_observation_target(episode):
+    """Verify an explicitly declared copy on available rows; similarity never supplies the role."""
+    import numpy as np
+    context = episode['context']
+    declaration = action_semantics(context)
+    if (declaration.get('relationship') or {}).get('kind') != 'next_observation':
+        return False
+    state, action = episode.get('state'), episode.get('action')
+    if (state is None or action is None or state.ndim != 2 or state.shape != action.shape
+            or state.size == 0 or len(state) < 2 or context.get('state_unaligned')):
+        return False
+    from label.episode import anchor
+    if (episode.get('sources') or {}).get(anchor(episode), {}).get('n_frames') != len(state):
+        return False
+    if not np.array_equal(action[:-1], state[1:], equal_nan=True):
+        return False
+    # A cut's final target can refer outside this request. Only an uncut source verifies its terminal row here.
+    if not context.get('piece') and not context.get('trimmed'):
+        return bool(np.array_equal(action[-1], state[-1], equal_nan=True))
+    return True
 
 
 def _generic(ctx):

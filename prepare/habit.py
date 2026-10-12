@@ -160,7 +160,10 @@ def write_episode(it: dict, r: dict, root: Path, out: Path, dataset: str) -> dic
                                  "sid": r.get("sid"), "unit_name": r.get("unit_name")})
     formats.drop_no_state(ctx)
     from prepare.state_contract import native_contract
+    publisher = (ctx.get('state_contract') or {}).get('publisher_action_semantics')
     ctx["state_contract"] = native_contract("habit", "ee_pose")
+    if publisher is not None:
+        ctx['state_contract']['publisher_action_semantics'] = publisher
     write_atomic(ep / "context.json", ctx, indent=1)
     return ctx
 

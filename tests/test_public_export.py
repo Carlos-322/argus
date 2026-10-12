@@ -113,3 +113,81 @@ def test_public_build_manifest_contains_counts_and_no_operational_locations():
     assert '/srv/private' not in json.dumps(public)
     assert 'future_private_field' not in public and 'qa' not in public and 'clips' not in public
     assert build == before
+
+
+def test_flattened_source_note_owners_are_private_but_native_fields_and_prose_survive():
+    from board.build import uploader_groups
+    private = '/srv/private-upload/metadata/info.json'
+    data = '/srv/private-upload/data/chunk-000/episode.parquet'
+    native = '/observations/right/force'
+    prose = 'Open /data/example, then type api_key.'
+    notes = {'recorded episode metadata': {private: {'source': private,
+              'fields': {native: 12, 'instruction': prose, 'path': native,
+                         'source': '/publisher/source_identifier',
+                         'unknown_extension_url': '/publisher/native_identity',
+                         'api_key': 'unusable-test-value',
+                         'credentials': {'access_id': 'unusable-other-value'},
+                         'token_count': 17, 'unknown_extension_token': 'native token identity'}}},
+             'recorded annotation data source': data,
+             'recorded annotation tables': {private: {'native_step_index': {'claims': {'0': [
+                 {'row': 0, 'source': private, 'fields': {'path': native,
+                  'source': '/publisher/source_identifier'}}]}}}}}
+    groups = uploader_groups(notes, None, 10)
+    before = copy.deepcopy(groups)
+    # Existing saved boards have only flattened name/value entries.
+    legacy = [{**g, 'items': [{k: v for k, v in item.items() if k != '_uploader_field_path'}
+                            for item in g['items']]} for g in groups]
+    for input_groups in (groups, legacy):
+        shown = project({'uploader_notes': input_groups})['uploader_notes']
+        assert private not in json.dumps(shown) and data not in json.dumps(shown)
+        assert native in json.dumps(shown) and prose in json.dumps(shown)
+        assert '/publisher/source_identifier' in json.dumps(shown)
+        assert '/publisher/native_identity' in json.dumps(shown)
+        assert 'unusable-test-value' not in json.dumps(shown)
+        assert 'unusable-other-value' not in json.dumps(shown)
+        assert 'native token identity' in json.dumps(shown)
+        assert any('info.json' in row['name'] for group in shown for row in group['items'])
+        assert project({'uploader_notes': shown}) == {'uploader_notes': shown}
+    assert groups == before and notes['recorded episode metadata'][private]['fields'][native] == 12
+    plain = project({'uploader_notes': uploader_groups(prose, None, 10)})
+    assert plain['uploader_notes'][0]['items'] == [{'name': 'note', 'value': prose}]
+
+
+def test_reader_metadata_limit_paths_use_typed_source_identity_without_rewriting_publisher_text(tmp_path, monkeypatch):
+    path = '/srv/private-upload/data/chunk-000/episode.parquet'
+    message = (path + ' and its recorded metadata exceed the prompt note limit; complete original rows '
+               'and source claims remain in the episode context and uploader notes.')
+    label = {'dataset_checks': {'reader_issues': [{'kind': 'metadata_limit', 'what': message,
+             'family': 'metadata-unreadable'}]}, 'publisher_labels': {'text': message}}
+    before = copy.deepcopy(label)
+    shown = project(label)
+    issue = shown['dataset_checks']['reader_issues'][0]
+    assert path not in issue['what'] and 'episode.parquet' in issue['what']
+    assert issue['kind'] == 'metadata_limit' and issue['family'] == 'metadata-unreadable'
+    assert shown['publisher_labels']['text'] == message and label == before
+    from prepare import formats
+    context = {}
+    for _ in range(2):
+        formats.add_issue(context, 'metadata_limit', 'episode.parquet exceeds the note limit.', source=path)
+    assert len(context['reader_issues']) == 1
+    assert context['reader_issues'][0]['source'] == path
+    formats.add_issue(context, 'metadata_limit', 'episode.parquet exceeds the note limit.',
+                      source='/srv/other-upload/episode.parquet')
+    assert len(context['reader_issues']) == 2
+    public = project({'dataset_checks': context})
+    assert path not in json.dumps(public)
+    # Exercise the actual annotation reader twice, not just its issue constructor.
+    import pandas as pd
+    (tmp_path / 'meta').mkdir()
+    data = tmp_path / 'episode.parquet'
+    frame = pd.DataFrame({'timestamp': [0., 1., 2.], 'frame_index': [0, 1, 2],
+                          'native_step': ['one', 'one', 'one']})
+    frame.to_parquet(data)
+    index = {'dir': tmp_path, 'fps': 1, 'metadata_read': set()}
+    context = {'episode_index': 0, 'fps': 1, 'n_state_frames': 3}
+    monkeypatch.setattr(formats, 'ANNOTATION_MAX_CHARS', 1)
+    for _ in range(2):
+        formats.lerobot_annotations(context, index, frame, data)
+    issues = [issue for issue in context['reader_issues']
+              if issue['kind'] == 'metadata_limit' and issue.get('source') == str(data)]
+    assert len(issues) == 1 and str(tmp_path) not in issues[0]['what']

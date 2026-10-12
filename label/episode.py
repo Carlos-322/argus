@@ -357,7 +357,9 @@ def plan(ep: dict) -> dict:
     checks = {"state_frames": T, "camera_frames": windows,
               "camera_windows_match_state": not ep["context"].get("state_unaligned")
               and windows[a] == T and not short_maps}
-    if ep.get("action") is not None and r == "teleop_arms" and kind == "joints" and ep["state"].shape[1] == 14:
+    from prepare.state_contract import action_semantics
+    if (ep.get("action") is not None and action_semantics(ep['context'])['role'] == 'command'
+            and r == "teleop_arms" and kind == "joints" and ep["state"].shape[1] == 14):
         # sped-up recording (the rig's loop ran below the rate its samples are stamped at): a report
         # field computed from the leader/follower joint lag, not a claim made to the model. It reads the 12 arm
         # joints of two arms (timebase.JOINTS), as measure_folder does, so a one-arm recording is not measured
@@ -2062,8 +2064,36 @@ def _has_sensor_evidence(ep: dict, pl: dict) -> bool:
     return bool((pl.get("sensor_evidence") or {}).get("sensors"))
 
 
+def _action_semantics_text(ep: dict, pl: dict) -> str:
+    from prepare.state_contract import action_semantics
+    semantics = action_semantics(ep['context'])
+    relationship = semantics.get('relationship') or {}
+    if relationship.get('kind') == 'next_observation':
+        detail = (f"The source defines action as the next observed state, {relationship['row_offset']} source row(s) "
+                  "ahead of state. The source declares that its final row repeats its observed state and its targets "
+                  "derive from observations. This declaration supplies no independent control-command evidence. The relationship describes "
+                  "the original source recording; at a cut the final target can refer to a state outside this request.")
+        from prepare.state_contract import redundant_observation_target
+        if not redundant_observation_target(ep):
+            detail += ' The available paired rows do not verify this relationship; inspect action values separately.'
+    elif semantics['role'] == 'command':
+        detail = "The preparation records the source action array as control commands."
+    elif semantics['role'] == 'target':
+        detail = "The source declares action values as targets; their derivation and control relationship are unspecified."
+    elif semantics['role'] == 'observation':
+        detail = "The source declares the action array as observations."
+    else:
+        detail = ("The source action semantics are unknown. The array name alone does not establish controller "
+                  "commands, observed motion, or the derivation of training targets.")
+    return ('\nRECORDED ACTION SEMANTICS: ' + detail + ' Preserve the recorded row times. Differences from state '
+            'alone do not establish control failure or physical latency. Source declarations take precedence '
+            'over dictionary interpretations.\n')
+
+
 BLOCKS = (
     Block("collection_note", "intro", _has_collection_note, _collection_text),
+    Block("action_semantics", "state", lambda ep, pl: ep.get('action') is not None and ep['action'].size > 0,
+          _action_semantics_text),
     Block("contact_views", "frames_detail", _has_contact_views, _contact_views_text),
     Block("coverage", "frames", _has_coverage, _coverage_note),
     Block("depth", "frames", _has_depth, lambda ep, pl: _depth_note(ep), checks=("sensor_checks",)),

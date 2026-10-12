@@ -14,6 +14,7 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 
 PRIVATE_KEYS = frozenset({
     '_run', '_replaced_label', '_supplements', '_verification', '_withheld_checks', '_carried_verdicts',
+    '_uploader_field_path',
 })
 # These are access mechanisms, not source identities or source-proof digests.
 _SECRETS = frozenset({
@@ -36,6 +37,16 @@ _LOCATIONS = frozenset({
 })
 _URL_QUERY_SECRETS = _SECRETS | {'signature', 'sig', 'keypairid', 'policy', 'googleaccessid'}
 _DROP = object()
+
+# These reader-owned note maps use source files as their keys. Keys inside the
+# recorded fields remain native identifiers, including absolute HDF paths.
+_NOTE_SOURCE_MAPS = frozenset({
+    'recordedepisodemetadata', 'recordedannotationtables', 'outsidefiles',
+    'unreadableannotationtablesources',
+})
+_NOTE_SOURCE_VALUES = frozenset({'recordedannotationdatasource'})
+_METADATA_LIMIT_SUFFIX = (' and its recorded metadata exceed the prompt note limit; complete original rows '
+                          'and source claims remain in the episode context and uploader notes.')
 
 
 def _name(key: str) -> str:
@@ -79,8 +90,79 @@ def _private_location(value: str) -> bool:
             or '..' in value.replace('\\', '/').split('/'))
 
 
+def _source_name(value: str) -> str:
+    """A source file's basename is useful identity; its access directory is private."""
+    value = unquote(value.strip())
+    if '://' in value or value.lower().startswith(('file:', 's3:', 'gs:', 'az:')):
+        value = urlsplit(value).path
+    return PureWindowsPath(value).name if '\\' in value else PurePosixPath(value).name
+
+
+def _uploader_item(item: dict) -> dict:
+    """Project the reader's flattened display schema using its original field path."""
+    result = dict(item)
+    parts = item.get('_uploader_field_path')
+    if not isinstance(parts, list) or not all(isinstance(p, str) for p in parts):
+        # Historical boards used this exact separator but retained no path array.
+        parts = str(item.get('name') or '').split(' / ')
+    shown = list(parts)
+    for i, part in enumerate(parts):
+        if any(_name(parent) == 'fields' for parent in parts[:i]):
+            break
+        if i and _name(parts[i - 1]) in _NOTE_SOURCE_MAPS and _private_location(part):
+            shown[i] = _source_name(part) or 'source file'
+    result['name'] = ' / '.join(shown) if shown else (item.get('name') or 'note')
+    if any(_name(part) in _SECRETS for part in parts):
+        result['value'] = 'withheld'
+        return result
+    value = item.get('value')
+    terminal = _name(parts[-1]) if parts else ''
+    # A reader source record owns its immediate source property. The fields
+    # below that record are the publisher's native schema, not access metadata.
+    native_fields = any(_name(part) == 'fields' for part in parts[:-1])
+    owner_property = (len(parts) >= 3 and _name(parts[-3]) in _NOTE_SOURCE_MAPS
+                      and terminal == 'source')
+    table_claim = (terminal == 'source' and 'recordedannotationtables' in [_name(p) for p in parts]
+                   and 'claims' in [_name(p) for p in parts[:-1]])
+    source_value = not native_fields and (owner_property or table_claim or terminal in _NOTE_SOURCE_VALUES)
+    if isinstance(value, str) and source_value and _private_location(value):
+        result.pop('value', None)
+        result['value'] = _source_name(value) or 'source file'
+    return result
+
+
+def _uploader_group(value: dict) -> dict:
+    if not isinstance(value.get('items'), list) or value.get('kind') not in ('notes', 'row'):
+        return value
+    result = dict(value)
+    result['items'] = [_uploader_item(item) if isinstance(item, dict) else item for item in value['items']]
+    title = value.get('title')
+    if isinstance(title, str) and title.startswith('Row of ') and _private_location(title[7:]):
+        result['title'] = 'Row of ' + (_source_name(title[7:]) or 'source file')
+    return result
+
+
+def _reader_issue(value: dict) -> dict:
+    """Only machine reader diagnostics receive source-location migration."""
+    result = dict(value)
+    what = value.get('what')
+    source = value.get('source')
+    if isinstance(what, str) and isinstance(source, str) and _private_location(source):
+        result['what'] = what.replace(source, _source_name(source) or 'source file')
+    elif (value.get('kind') == 'metadata_limit' and isinstance(what, str)
+          and what.endswith(_METADATA_LIMIT_SUFFIX)):
+        source = what[:-len(_METADATA_LIMIT_SUFFIX)]
+        if _private_location(source):
+            result['what'] = (_source_name(source) or 'Recorded annotation data') + _METADATA_LIMIT_SUFFIX
+    return result
+
+
 def _project(value, field: str = ''):
     if isinstance(value, dict):
+        if field == 'uploadernotes':
+            value = _uploader_group(value)
+        elif field == 'readerissues':
+            value = _reader_issue(value)
         result = {}
         for key, item in value.items():
             name = _name(key)

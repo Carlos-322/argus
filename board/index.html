@@ -1036,6 +1036,16 @@ aside.left .cam-row-grippers:has(.sensor-overlay-stack) .cam-cell.cam-exo { grid
 @media (max-width: 600px) {
   .sensor-overlay-stack { width: min(260px, 54%, calc(100% - var(--fx-left, 0px) - var(--fx-right, 0px) - 16px));
     left: calc(var(--fx-left, 0px) + 8px); }
+  .sensor-overlay-stack:has(.gf-pressure) {
+    width: min(260px, 70%, calc(100% - var(--fx-left, 0px) - var(--fx-right, 0px) - 24px)); }
+  /* Keep the observation and recorded chart together; supporting prose remains in the evidence panel. */
+  .sensor-overlay-stack.tight:has(.gf-pressure) .gf-detail { display: none; }
+  .sensor-overlay-stack.tight:has(.gf-pressure) .grip-finding-overlay { padding: 3px 8px; }
+  .sensor-overlay-stack.tight:has(.gf-pressure) .gf-copy { gap: 2px; }
+  .sensor-overlay-stack.tight:has(.gf-pressure) .gf-title { font-size: 12px; line-height: 1.3; }
+  .sensor-overlay-stack.tight:has(.gf-pressure) .gf-phase { padding: 1px 3px; }
+  .sensor-overlay-stack.tight:has(.gf-pressure) .gf-pressure { padding-top: 3px; }
+  .sensor-overlay-stack.tight:has(.gf-pressure) .gf-pressure-row svg { height: 14px; }
 }
 
 /* ---------- sensors: the recording's other signals and depth (board/sensors.py) ----------

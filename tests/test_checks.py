@@ -564,6 +564,8 @@ def _tb_episode(root: Path, name: str, idx: int, folder: str, lag: int) -> None:
     np.savez(d / "state.npz", state=np.roll(a, lag, axis=0), action=a)
     (d / "context.json").write_text(json.dumps({"profile": "teleop_arms", "state_kind": "joints",
                                                 "task_label": ["stack the cups"],
+                                                "action_semantics": {"version": 1, "producer": "controlled leader fixture",
+                                                                     "role": "command"},
                                                 "source": {"folder": folder, "episode_index": idx}}))
 
 

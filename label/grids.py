@@ -110,6 +110,19 @@ def joined_receipt(parts: list) -> dict | None:
             'parts': scope, 'unavailable_parts': [p for p in scope if not p['receipt_available']]}
 
 
+def _same_grid_inputs(saved: dict, current: dict) -> bool:
+    """Keep source/settings proof; final JPEG hashes verify historical image identity."""
+    from label import harness
+    identities = []
+    for identity in (saved, current):
+        if not isinstance(identity, dict) or not isinstance(identity.get('settings'), dict):
+            return False
+        # Annotation prose can change without changing any frame-grid bytes.
+        identities.append({**identity, 'settings': {key: value for key, value in identity['settings'].items()
+                           if key != 'request_semantics_sha256'}})
+    return harness.same_input_identity(*identities)
+
+
 def _one(record: dict, ep_dir: Path) -> list[dict]:
     from label import episode as me, harness
     saved = (record.get('config') or {}).get('request_images') or {}
@@ -138,7 +151,7 @@ def _one(record: dict, ep_dir: Path) -> list[dict]:
             max_tokens=settings['max_tokens'], cell_w=settings['cell_w'], example_dir=examples,
             sample_fps=selected.get('sample_fps'), task_mode=selected['task_mode'],
             dataset_note=selected.get('dataset_note'))
-        if not harness.same_input_identity(identity, current):
+        if not _same_grid_inputs(identity, current):
             raise GridError('the source, dictionary or request settings differ from the recorded request')
         req = me.build_request(ep_dir, cell_w=recipe['cell'][0], grid_cols=recipe['grid_cols'],
             grid_quality=recipe['grid_quality'], detail=recipe['detail'], example_dir=examples,

@@ -170,7 +170,8 @@ def test_direct_state_writers_retain_native_identity_before_discarding_metadata(
         (root / "meta/info.json").write_text(json.dumps(info))
         (root / "meta/episodes.jsonl").write_text(json.dumps({"episode_index": 0, "length": n, "tasks": ["move"]}))
         (root / "data").mkdir()
-        pd.DataFrame({"observation.state": list(data), "action": list(data),
+        target = np.concatenate([data[1:], data[-1:]])
+        pd.DataFrame({"observation.state": list(data), "action": list(target),
                       "frame_index": range(n)}).to_parquet(root / "data/episode_000000.parquet")
         for key in keys:
             _mp4(root / f"videos/{key}/episode_000000.mp4", n)
@@ -179,6 +180,54 @@ def test_direct_state_writers_retain_native_identity_before_discarding_metadata(
         path = out / fastumi.episode_dir_name("dual_arm/move/0")
     ep = me.load(path)
     np.testing.assert_array_equal(ep["state"], data)
+    if adapter == "packed":
+        from prepare.state_contract import action_semantics
+        assert action_semantics(ep["context"])["role"] == "command"
+        assert "timebase" in me.plan(ep)["checks"]
+        old_proof = {'version': 1, 'producer': 'prepare.molmo', 'kind': 'joints', 'native_contract': 'molmo'}
+        assert action_semantics({'state_kind': 'joints', 'state_contract': old_proof})['role'] == 'command'
+        old_proof = {'version': 1, 'producer': 'prepare.habit', 'kind': 'ee_pose', 'native_contract': 'habit'}
+        assert action_semantics({'state_kind': 'ee_pose', 'state_contract': old_proof})['role'] == 'command'
+        assert action_semantics({'state_kind': 'ee_pose', 'source': {'adapter': 'habit'}})['role'] == 'command'
+        from prepare.state_contract import native_contract
+        conflicting = native_contract('habit', 'ee_pose', {'action_semantics': {'version': 1, 'role': 'target'}})
+        assert action_semantics({'state_kind': 'ee_pose', 'state_contract': conflicting})['role'] == 'action/target_unknown'
+        old_proof['producer'] = 'unverified producer'
+        assert action_semantics({'state_kind': 'ee_pose', 'state_contract': old_proof})['role'] == 'action/target_unknown'
+    if adapter == "individual":
+        from label import evidence_access, dictionary
+        semantics = ep["context"]["action_semantics"]
+        assert semantics["role"] == "target"
+        assert semantics["relationship"] == {"kind": "next_observation", "field": "state",
+                                              "row_offset": 1, "terminal": "repeat_last", "scope": "source_recording"}
+        assert ep["action"].tobytes() == target.tobytes()
+        a = evidence_access.Access(ep, {})
+        field = next(f for f in a.inventory() if f["name"] == "action")
+        assert field["descriptor"]["recorded_role"] == "target"
+        assert field["descriptor"]["action_semantics"] == semantics
+        assert not evidence_access.needs_inspection(ep, {})
+        changed_target = ep['action'].copy()
+        changed_target[0, 0] += 1
+        assert evidence_access.needs_inspection({**ep, 'action': changed_target}, {})
+        assert evidence_access.needs_inspection({**ep, 'action': ep['action'][:-1]}, {})
+        assert evidence_access.needs_inspection({**ep, 'context': {**ep['context'], 'state_unaligned': True}}, {})
+        inventory = dictionary.inventory([path])
+        field = next(f for f in inventory["fields"] if f["kind"] == "action")
+        assert field["action_semantics"] == semantics
+        state_field = next(f for f in inventory['fields'] if f['kind'] == 'state')
+        assert 'recorded_role' not in state_field and 'action_semantics' not in state_field
+        from prepare.state_contract import action_semantics
+        old_proof = {'version': 1, 'producer': 'prepare.fastumi', 'kind': 'ee_pose', 'native_contract': 'fastumi'}
+        assert action_semantics({'state_kind': 'ee_pose', 'state_contract': old_proof}) == semantics
+        assert "next observed state" in me.build_prompt(ep, me.plan(ep), cell_w=320, cell_h=240)[1]
+        assert 'action_semantics' in json.dumps(dictionary._request(inventory))
+        info['features']['action'] = {'action_semantics': {'version': 1, 'role': 'command'}}
+        (root / 'meta/info.json').write_text(json.dumps(info))
+        fastumi.prepare_one('dual_arm/move/0', raw, out, True)
+        conflict = me.load(path)
+        assert action_semantics(conflict['context'])['role'] == 'action/target_unknown'
+        assert evidence_access.needs_inspection(conflict, {})
+        assert conflict['action'].tobytes() == target.tobytes()
     want = ["right", "left"] if known else UNKNOWN
     if not known and adapter == "individual":
         want = ["recorded gripper 1 (side unknown)", "recorded gripper 2 (side unknown)"]

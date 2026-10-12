@@ -148,6 +148,13 @@ def prepare_one(item: str, raw_root: Path, out_root: Path, force: bool) -> str:
         "stream_checks": {"frames_on_grid": grid, "episode_length_meta": int(meta.get("length", -1))},
     }
     from prepare import formats
+    from prepare.state_contract import declared_action_semantics, publisher_action_semantics
+    context['action_semantics'] = declared_action_semantics('prepare.fastumi', 'target', relationship={
+        'kind': 'next_observation', 'field': 'state', 'row_offset': 1, 'terminal': 'repeat_last',
+        'scope': 'source_recording'})
+    publisher = publisher_action_semantics(info['features'].get('action'), 'prepare.fastumi:publisher')
+    if publisher is not None:
+        context['publisher_action_semantics'] = publisher
     formats.record_state_identity(context, "observation.state",
                                   formats.value_names(info["features"].get("observation.state", {}).get("names"),
                                                       state.shape[1]), state.shape[1])

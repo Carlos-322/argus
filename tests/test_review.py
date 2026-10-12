@@ -247,6 +247,8 @@ def _episode(root: Path, idx: int, lag: int, task: str = "stack", adapter: bool 
     s = np.roll(a, lag, axis=0)                      # the follower trails the leader by `lag` frames
     np.savez(d / "state.npz", state=s, action=a)
     ctx = {"profile": "teleop_arms", "state_kind": "joints", "task_label": [task]}
+    from prepare.state_contract import declared_action_semantics
+    ctx['action_semantics'] = declared_action_semantics('controlled leader fixture', 'command')
     if adapter:                                      # a dataset's own adapter keeps the index in its source
         ctx["source"] = {"folder": "upload", "episode_index": idx, "adapter": "galaxea"}
     else:

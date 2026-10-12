@@ -517,7 +517,8 @@ def uploader_groups(notes, start_s, dur_s) -> list[dict]:
                      else f"{len(x)} values, {', '.join(str(i) for i in x[:4])}, ...")
             else:
                 v = str(x)
-            item = {"name": " / ".join(path) or "note", "value": v}
+            item = {"name": " / ".join(path) or "note", "value": v,
+                    "_uploader_field_path": list(path)}
             t = when(x)
             if t is not None:
                 item["t"] = t

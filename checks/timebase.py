@@ -240,9 +240,12 @@ def measure_folder(eps: Path) -> int:
     in the window (itself and two more), so a lone episode is measured, never flagged. Returns how many episodes
     got one; every episode also records how many neighbours it had (timebase_neighbours_in_upload)."""
     rows = []
+    from prepare.state_contract import action_semantics
     for d in sorted(Path(eps).glob("episode_*")):
         ctx = json.loads((d / "context.json").read_text())
         if ctx.get("profile") != "teleop_arms" or ctx.get("state_kind") != "joints" or not (d / "state.npz").exists():
+            continue
+        if action_semantics(ctx)['role'] != 'command':
             continue
         z = np.load(d / "state.npz")
         if "action" not in z.files or z["state"].shape[1] != 14:

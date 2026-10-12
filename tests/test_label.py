@@ -575,7 +575,7 @@ def _packed_episode(tmp_path):
     return ep, T
 
 
-def test_request_grid_receipt_rebuilds_actual_dense_inputs(tmp_path):
+def test_request_grid_receipt_rebuilds_actual_dense_inputs(tmp_path, monkeypatch):
     ep, _ = _packed_episode(tmp_path)
     result = harness.label_episode(ep, tmp_path / 'label.json', model='openai/gpt-6.1-sol',
         reasoning='high', api_key='dry-run', max_tokens=2000, timeout=60, cell_w=224,
@@ -588,6 +588,35 @@ def test_request_grid_receipt_rebuilds_actual_dense_inputs(tmp_path):
     assert len(rebuilt) == len(receipt['grid_images'])
     assert [grids.digest(g['jpeg']) for g in rebuilt] == [g['sha256'] for g in receipt['grid_images']]
     assert len(receipt['images']) > len(rebuilt), 'detail images are accounted for separately'
+    original_identity = harness.input_identity
+    def changed_annotation_identity(*args, **kwargs):
+        current = original_identity(*args, **kwargs)
+        current['settings']['request_semantics_sha256'] = '0' * 64
+        return current
+    with monkeypatch.context() as patch:
+        patch.setattr(harness, 'input_identity', changed_annotation_identity)
+        current = harness.input_identity(ep, model='openai/gpt-6.1-sol', reasoning='high',
+            max_tokens=2000, cell_w=224, example_dir=None, sample_fps=2)
+        assert not harness.same_input_identity(receipt['recipe']['input_identity'], current)
+        historical = grids.rebuild(result, ep)
+        assert [grids.digest(g['jpeg']) for g in historical] == [g['sha256'] for g in receipt['grid_images']]
+        for field, value in [('renderer_sha256', '0' * 64), ('views', ['different camera'])]:
+            changed = json.loads(json.dumps(result))
+            changed['config']['request_images']['recipe'][field] = value
+            with pytest.raises(grids.GridError):
+                grids.rebuild(changed, ep)
+        changed = json.loads(json.dumps(result))
+        changed['config']['request_images']['grid_images'][0]['sha256'] = '0' * 64
+        with pytest.raises(grids.GridError):
+            grids.rebuild(changed, ep)
+        changed = json.loads(json.dumps(result))
+        changed['config']['request_images']['recipe']['input_identity']['settings']['interpretation_sha256'] = '0' * 64
+        with pytest.raises(grids.GridError):
+            grids.rebuild(changed, ep)
+        changed = json.loads(json.dumps(result))
+        changed['config']['request_images']['recipe']['input_identity']['version'] = 1
+        with pytest.raises(grids.GridError):
+            grids.rebuild(changed, ep)
     from board import grids as bg
     idx = grids.write(tmp_path / 'grids' / 'episode', result, rebuilt)
     assert bg.matches(idx, to_board.convert(result, 'recorded'))

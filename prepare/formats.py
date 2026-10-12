@@ -189,12 +189,14 @@ def add_issue(ctx: dict, kind: str, what: str, camera: str | None = None, signal
               t0_s: float | None = None, t1_s: float | None = None,
               footage_complete: bool | None = None, unreadable_spans_s: list | None = None,
               clock_problem: str | None = None, source_rows: int | None = None,
-              camera_frames: int | None = None) -> dict:
+              camera_frames: int | None = None, source: str | None = None) -> dict:
     """One entry appended to ctx["reader_issues"] (the module docstring's No drop): kind, a short snake_case tag; what,
     one plain sentence for the board; the camera or signal it is about and its time span in seconds of the episode
     when known. An entry already there is not added twice, so a reader that writes an episode's context twice
     (finish_episode after video_views_episode) records each problem once."""
     entry = {"kind": str(kind), "what": str(what)}
+    if source is not None:
+        entry["source"] = str(source)
     for k, v in (("camera", camera), ("signal", signal)):
         if v is not None:
             entry[k] = str(v)
@@ -1933,7 +1935,7 @@ def qualified_lerobot_action(action, features, columns, rig, kind):
 
 def lerobot_preparation_contract(kind, names, roles, features, columns, action, action_columns):
     """Persist the exact generic state facts checked before source columns leave the signal inventory."""
-    from prepare.state_contract import declared_contract
+    from prepare.state_contract import declared_contract, source_action_semantics
     command = None
     if action is not None:
         action_names, action_roles = [], []
@@ -1945,6 +1947,10 @@ def lerobot_preparation_contract(kind, names, roles, features, columns, action, 
         command = declared_contract("prepare.formats:lerobot", kind, action_names,
                                     state_units(lerobot_state_units(features, action_columns, "action"),
                                                 action_names, len(action_names)), action_roles)
+        semantics = [source_action_semantics(features.get(column), 'prepare.formats:lerobot')
+                     for column in action_columns or ['action']]
+        if semantics and semantics[0] is not None and all(item == semantics[0] for item in semantics):
+            command['action_semantics'] = semantics[0]
     return declared_contract("prepare.formats:lerobot", kind, names,
                              state_units(lerobot_state_units(features, columns), names, len(names)), roles, command)
 
@@ -1961,7 +1967,7 @@ def lerobot_physical_state(state, action, rig, names, roles, features, columns, 
         if state is None or state.ndim != 2 or state.shape[1] != 14:
             return "none", "The native HABIT state does not have its supported two-arm layout.", None, None
         action = action if action is not None and action.shape == state.shape else None
-        return "ee_pose", None, action, native_contract("habit", "ee_pose")
+        return "ee_pose", None, action, native_contract("habit", "ee_pose", features.get('action'))
     kind, note = physical_state_layout(state.shape[1] if state is not None else 0, rig, names,
                                        value_roles=roles, metadata=lerobot_state_units(features, columns))
     action = qualified_lerobot_action(action, features, action_columns, rig, kind)
@@ -2057,7 +2063,7 @@ def summary_issue(name: str, values: int) -> dict:
 
 
 SIGNAL_METADATA_KEYS = ('unit', 'units', 'response_direction', 'calibration', 'coordinate_frame',
-                        'sensor_type', 'description')
+                        'sensor_type', 'description', 'action_semantics')
 
 
 def summary_metadata(metadata: dict) -> dict:
@@ -4897,8 +4903,9 @@ def lerobot_annotations(ctx, root, df, data_path, *, image_clock=False):
         notes["unreadable annotation table sources"] = failures
     set_uploader_notes(ctx, notes)
     if len(json.dumps(notes, ensure_ascii=False)) > ANNOTATION_MAX_CHARS:
-        add_issue(ctx, "metadata_limit", f"{data_path} and its recorded metadata exceed the prompt note limit; "
-                  "complete original rows and source claims remain in the episode context and uploader notes.")
+        add_issue(ctx, "metadata_limit", f"{Path(data_path).name} and its recorded metadata exceed the prompt note limit; "
+                  "complete original rows and source claims remain in the episode context and uploader notes.",
+                  source=str(data_path))
     retain_metadata(ctx, root, df, data_path)
 
 
@@ -4950,6 +4957,9 @@ def convert_lerobot_item(item: dict, rig: str, out: Path, dataset: str) -> dict:
         from prepare.state_contract import native_contract
         proof = native_contract(ctx["source"]["adapter"], ctx.get("state_kind"))
         if proof:
+            publisher = (ctx.get('state_contract') or {}).get('publisher_action_semantics')
+            if publisher is not None:
+                proof['publisher_action_semantics'] = publisher
             ctx["state_contract"] = proof
         if ctx.get("profile") != rig:
             ctx["source"]["rig_note"] = f"the upload was marked {rig}; this dataset's layout is {ctx.get('profile')}"
@@ -6564,7 +6574,7 @@ def h5_state(signals: Signals, rig: str, q: np.ndarray, files: list[str] | None 
     acts = [command(name, a.shape) for name, a, _ in arms]
     if identity_ctx is not None:
         record_state_groups(identity_ctx, [(source_claims[name], nm, a.shape[1]) for name, a, nm in arms])
-        from prepare.state_contract import declared_contract
+        from prepare.state_contract import declared_contract, source_action_semantics
         kind = state_layout(len(combined_names), rig, combined_names)[0]
         command = None
         if all(acts):
@@ -6572,6 +6582,9 @@ def h5_state(signals: Signals, rig: str, q: np.ndarray, files: list[str] | None 
             action_units = [unit for key in acts for unit in state_units(
                 meta[key], meta[key]["names"], len(meta[key]["names"]))]
             command = declared_contract("prepare.formats:hdf5", kind, action_names, action_units)
+            semantics = [source_action_semantics(meta[key], 'prepare.formats:hdf5') for key in acts]
+            if semantics[0] is not None and all(item == semantics[0] for item in semantics):
+                command['action_semantics'] = semantics[0]
         units = [unit for name, values, names in arms for unit in state_units(meta[name], names, values.shape[1])]
         identity_ctx["state_contract"] = declared_contract(
             "prepare.formats:hdf5", kind, combined_names, units, action=command)

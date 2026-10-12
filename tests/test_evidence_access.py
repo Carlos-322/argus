@@ -831,7 +831,8 @@ def test_native_mcap_inspection_keeps_selected_row_component_identities(tmp_path
     assert [hashlib.sha256(path.read_bytes()).hexdigest() for path in (source, archive)] == before
 
 
-def test_canonical_hdf_commands_reach_inspection_without_extra_sensors(tmp_path):
+@pytest.mark.parametrize('declared_role', [None, 'command', 'target', 'invalid'])
+def test_canonical_hdf_commands_reach_inspection_without_extra_sensors(tmp_path, declared_role):
     import h5py
     from prepare import formats
     from label import episode
@@ -846,6 +847,8 @@ def test_canonical_hdf_commands_reach_inspection_without_extra_sensors(tmp_path)
             field = demo.create_dataset(kind, data=values)
             field.attrs['names'] = names
             field.attrs['units'] = ['rad'] * 6 + ['fraction']
+            if kind == 'action' and declared_role is not None:
+                field.attrs['action_semantics'] = json.dumps({'version': 1, 'role': declared_role})
     report = formats.convert(root, 'teleop_arms', tmp_path / 'episodes', 'recorded sensors', 900)
     assert not report['failed']
     directory = tmp_path / 'episodes' / report['episodes'][0]['episode_id']
@@ -855,15 +858,30 @@ def test_canonical_hdf_commands_reach_inspection_without_extra_sensors(tmp_path)
     access = request['evidence_access']
     assert access is not None
     receipts = {}
-    for kind, role in [('state', 'observation'), ('action', 'command')]:
+    expected_role = declared_role if declared_role in ('command', 'target') else 'action/target_unknown'
+    for kind, role in [('state', 'observation'), ('action', expected_role)]:
         field = next(row for row in access.inventory() if row['name'] == kind and row['kind'] == 'numeric')
         assert field['descriptor']['recorded_role'] == role
+        if kind == 'action':
+            assert field['descriptor']['action_semantics']['role'] == expected_role
+            assert 'RECORDED ACTION SEMANTICS' in request['prompt']
         receipts[kind] = access.inspect({'field_id': field['id'], 'columns': [0, 6]})
         assert receipts[kind]['component_names'] == [names[0], names[6]]
         assert receipts[kind]['component_units'] == ['rad', 'fraction']
     assert receipts['state']['values'] == [[0, 0]] * 6
     assert receipts['action']['values'] == [[1, 1]] * 6
     assert receipts['action']['times_s'] == receipts['state']['times_s']
+    if declared_role == 'command':
+        from prepare.state_contract import action_semantics
+        ep['context']['action_semantics'] = {'version': 1, 'producer': 'another exact source', 'role': 'command'}
+        assert action_semantics(ep['context'])['role'] == 'command'
+        ep['context']['action_semantics']['role'] = 'target'
+        assert action_semantics(ep['context'])['role'] == 'action/target_unknown'
+        ep['context']['action_semantics'] = {'version': 1, 'producer': 'invalid source', 'role': 'command',
+            'relationship': {'kind': 'next_observation', 'field': 'state', 'row_offset': 1, 'terminal': 'repeat_last'}}
+        assert action_semantics(ep['context'])['role'] == 'action/target_unknown'
+        assert ea.needs_inspection(ep, {})
+        ep['context'].pop('action_semantics')
     ep['action'] = None
     assert not ea.needs_inspection(ep, {})
     ep['state'] = np.zeros((6, 0))
