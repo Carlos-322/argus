@@ -7208,6 +7208,12 @@ async function cmpEpisode(key, file) {
 // The line that stands in for the sections a model answers (key events, the outcome, recoveries, what changed, object
 // relationships, the inventory) on an episode whose own reply gave no labels.
 function noLabelsHtml(lf) {
+  if (lf && lf.status === 'no_reply' && lf.final_dispatch_outcome === 'not dispatched')
+    return `<p class="no-labels">The final annotation request was not sent, so this episode has no labels. `
+      + `Its footage, checks, sensors and the dataset's own labels are shown as recorded.</p>`;
+  if (lf && lf.status === 'no_reply' && ['claimed', 'unverified'].includes(lf.final_dispatch_outcome))
+    return `<p class="no-labels">The final response outcome is unknown, so this episode has no verified labels. `
+      + `Its footage, checks, sensors and the dataset's own labels are shown as recorded.</p>`;
   const why = lf && lf.status === 'cut_off' ? 'reply was cut off at the output limit'
     : lf && lf.status === 'unreadable' ? 'output file does not read'
     : lf && lf.status === 'no_part' ? 'replies gave no labels for any part of this long recording'
@@ -7236,8 +7242,14 @@ function cmpFailHtml(c, who, usage, own) {
       + ` to ${Number(g.t1_s).toFixed(1)} s: ${g.why}`).join('\n'))}</pre>${(c.parts || []).filter(g => g.raw_head)
       .map(g => `<div class="cf-k">Start of part ${esc(g.part)}'s response</div><pre>${esc(g.raw_head)}</pre>`)
       .join('')}</div>`;
-  // the board's own: the request got no reply (the spend cap reached, a request that could not be built), or its reply
-  // parsed but the board could not read it
+  if (c.status === 'no_reply' && c.final_dispatch_outcome === 'not dispatched')
+    return `<div class="cmp-fail"><h4>Annotation not sent to ${esc(who)}</h4><p>`
+      + `${c.no_reply_kind === 'spend_cap' ? 'The remaining spend cap was too small for this annotation request.'
+        : 'The final annotation request was not dispatched.'}${rest}</p></div>`;
+  if (c.status === 'no_reply' && ['claimed', 'unverified'].includes(c.final_dispatch_outcome))
+    return `<div class="cmp-fail"><h4>Response outcome unknown for ${esc(who)}</h4>`
+      + `<p>No verified final response is available.${rest}</p></div>`;
+  // Older outputs have no typed dispatch outcome. Their private diagnostic stays redacted in public transport.
   if (c.status === 'no_reply') return `<div class="cmp-fail"><h4>No response from ${esc(who)}</h4>
     <p>This episode got no response, so there are no labels to show.${rest}</p>
     ${c.why ? `<div class="cf-k">Why</div><pre>${esc(c.why)}</pre>` : ''}</div>`;

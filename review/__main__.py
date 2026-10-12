@@ -134,8 +134,12 @@ def file_identity(path: Path, *, context=False) -> dict:
 
 
 def source_identity(data: Path, job: Path) -> dict:
-    from prepare.formats import files_under
-    files = [data] if data.is_file() else files_under(data)
+    from prepare.formats import files_under, single_file_members
+    if data.is_file():
+        members = single_file_members(data)
+        files = list(dict.fromkeys(members['files'] + members['scope']))
+    else:
+        files = files_under(data)
     # In particular, a CLI job nested below its input is not another uploaded recording.
     if data.is_dir() and job.is_relative_to(data):
         files = [p for p in files if not p.resolve().is_relative_to(job)]
@@ -323,6 +327,9 @@ def main() -> int:
                                 "--max-spend", str(remaining), *timeout_args], env, ok_codes=(0, 1))
     else:
         print('label budget exhausted by prior spending or outstanding reservations', flush=True)
+        from label.harness import record_budget_refusal
+        for dry in sorted((job / 'dry').glob('episode_*.json')):
+            record_budget_refusal(run_dir / 'out' / dry.name, json.loads(dry.read_text()))
     spend = dictionary_stage.dictionary_spend(job)
     label_cost = dictionary_stage.label_spend(job)
     complete = spend['complete'] and dictionary_stage.label_spend_complete(job)

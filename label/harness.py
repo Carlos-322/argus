@@ -530,6 +530,22 @@ def persist_final_claim(path: Path, claim: dict) -> None:
         os.close(directory)
 
 
+def record_budget_refusal(path: Path, request: dict) -> bool:
+    """Record an unattempted final annotation without replacing any paid receipt."""
+    path = Path(path)
+    if billing_record(path.parent, path.name) is not None:
+        return False
+    if request.get('dry_run') is not True:
+        raise ValueError('a budget refusal needs the verified dry request')
+    fields = {key: request[key] for key in ('episode_dir', 'model', 'reasoning_effort',
+              'input_identity', 'annotation_policy') if key in request}
+    write_atomic(path.with_name('noreply_' + path.name), {
+        **fields, **_billing_fields(path), 'parse_ok': False,
+        'final_dispatch_outcome': 'not dispatched', 'final_reserved_usd': 0.0,
+        'no_reply_kind': 'spend_cap', 'no_reply': 'No remaining spend allowance for the final annotation.'})
+    return True
+
+
 def estimate_image_tokens(w: int, h: int) -> float:
     """Input tokens per image, fitted on 2,572 gpt-6-astra requests (about 1.1 tokens per 32x32 px patch plus 69
     per image). Used only for the dry-run estimate; billing always comes from the API's own usage."""
@@ -1077,35 +1093,64 @@ def run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurren
     total_cost = 0.0
     fails = []
     spent = {"usd": 0.0}
-    spend_lock = threading.Lock()
+    spend_lock = threading.Condition()
+    pending = {}
 
-    def work(ep):
-        if max_spend > 0:
-            with spend_lock:
-                if spent["usd"] >= max_spend:
-                    return ("skip", ep, f"spend cap ${max_spend:.2f} reached")
+    def allowance(ep, amount):
+        # Only live dispatches can release a temporary reservation. Settled costs and
+        # unknown charges from finished workers remain committed to the cap.
+        if max_spend > 0 and amount > max_spend:
+            return False, False
+        waited = False
+        while max_spend > 0 and spent['usd'] + amount > max_spend:
+            if not any(value > 0 for owner, value in pending.items() if owner != ep):
+                return False, waited
+            spend_lock.wait()
+            waited = True
+        return True, waited
+
+    def work_claimed(ep):
         prior_cost = episode_cost(_billing_fields(out_for(ep)))
         reserved = [0.0]
         selection_accounted = [0.0]
         def reserve_selection(amount):
             with spend_lock:
-                if max_spend > 0 and spent['usd'] + amount > max_spend:
+                pending[ep] = 0.0
+                spend_lock.notify_all()
+                allowed, _ = allowance(ep, amount)
+                if not allowed:
                     return False
                 spent['usd'] += amount
                 selection_accounted[0] += amount
+                pending[ep] = amount
                 return True
         def settle_selection(reserve, actual):
             with spend_lock:
                 spent['usd'] += actual - reserve
                 selection_accounted[0] += actual - reserve
+                pending[ep] = max(0.0, pending.get(ep, 0.0) - reserve)
+                spend_lock.notify_all()
         def reserve_final(amount, path, claim):
             with spend_lock:
+                pending[ep] = 0.0
+                spend_lock.notify_all()
                 new_amount = max(0.0, amount - selection_accounted[0] - prior_cost)
-                if max_spend > 0 and spent['usd'] + new_amount > max_spend:
+                allowed, waited = allowance(ep, new_amount)
+                if not allowed:
                     raise SpendCap(f"final request reserve ${new_amount:.2f} exceeds remaining spend cap")
+                if waited:
+                    current = input_identity(ep, model=label_kw.get('model'),
+                        reasoning=label_kw.get('reasoning'), max_tokens=label_kw.get('max_tokens', 64000),
+                        cell_w=label_kw.get('cell_w', 0), example_dir=label_kw.get('example_dir'),
+                        sample_fps=label_kw.get('sample_fps'), task_mode=label_kw.get('task_mode'),
+                        dataset_note=label_kw.get('dataset_note'))
+                    if not same_input_identity(claim.get('input_identity'), current) or any(
+                            item.get('missing') for item in current['source_proof']):
+                        raise RuntimeError('Request inputs changed while waiting for spend allowance; no dispatch.')
                 persist_final_claim(path, claim)
                 spent['usd'] += new_amount
                 reserved[0] = new_amount
+                pending[ep] = new_amount
         while True:
             key = pool.take() if not dry else "dry-run"
             if key is None:
@@ -1122,7 +1167,9 @@ def run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurren
             except KeyExhausted as e:
                 with spend_lock:
                     spent['usd'] -= reserved[0]
+                    pending[ep] = max(0.0, pending.get(ep, 0.0) - reserved[0])
                     reserved[0] = 0.0
+                    spend_lock.notify_all()
                 pool.retire(key, str(e))
                 continue
             except Truncated as e:
@@ -1138,7 +1185,15 @@ def run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurren
                         spent['usd'] += episode_cost(json.loads(failure.read_text())) - selection_accounted[0] - prior_cost
                 return ("fail", ep, f"{type(e).__name__}: {e}")
 
-    def no_reply(ep: Path, why: str | None) -> None:
+    def work(ep):
+        try:
+            return work_claimed(ep)
+        finally:
+            with spend_lock:
+                pending.pop(ep, None)
+                spend_lock.notify_all()
+
+    def no_reply(ep: Path, why: str | None, *, kind=None) -> None:
         """noreply_<episode>.json beside the outputs: why the episode got no reply (the spend cap reached, every key out
         of credit, a request that could not be built or a call that failed), so the board shows the episode and says
         why (board/to_board.py label_outputs). Removed once the episode has a reply; a dry run writes none."""
@@ -1164,13 +1219,17 @@ def run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurren
                     task_mode=label_kw.get('task_mode'), dataset_note=label_kw.get('dataset_note'))
             except (OSError, ValueError):
                 pass
-        write_atomic(p, {**previous, "episode_dir": str(ep), "model": label_kw.get("model"),
+        requested_model = (previous.get('model') or
+                           (previous.get('input_identity') or {}).get('settings', {}).get('model') or
+                           label_kw.get('model'))
+        write_atomic(p, {**previous, "episode_dir": str(ep), "model": requested_model,
+                         **({'no_reply_kind': kind} if kind else {}),
                          "parse_ok": False, "no_reply": why})
 
     with ThreadPoolExecutor(max_workers=concurrency) as ex:
         for f in as_completed([ex.submit(work, ep) for ep in todo]):
             status, ep, info = f.result()
-            no_reply(ep, None if status == "ok" else str(info))
+            no_reply(ep, None if status == "ok" else str(info), kind='spend_cap' if status == 'skip' else None)
             if status == "ok":
                 done += 1
                 total_cost += float(info or 0)
