@@ -765,6 +765,91 @@ def test_cut_artifacts_belong_to_their_explicit_source_boundary():
     assert not pieces.is_cut_artifact({**end, 't_s': 100.}, 2, 3, 100., 200., [100., 200.])
 
 
+@pytest.mark.parametrize('observed_outcome', ['failure', 'partial'])
+def test_stitch_preserves_observed_incidents_with_unfinished_recovery_at_cuts(tmp_path, monkeypatch, observed_outcome):
+    """A failed attempt and its recovery are one incident, even when a request cuts through it."""
+    import copy
+    monkeypatch.setattr(pieces, 'piece_max', lambda ctx: 1.0)
+    upload = tmp_path / 'upload'
+    recorder_folder(upload, n=90, duplicate_stamps=False)
+    report = f.convert(upload, 'ego_head', tmp_path / 'episodes', 'fixture', 900)
+    source = tmp_path / 'episodes' / report['episodes'][0]['episode_id']
+    parts = pieces.write_pieces(source, tmp_path / 'pieces')
+    contexts = [json.loads((part / 'context.json').read_text()) for part in parts]
+    records = [_part_result(part, 'Seat the cup in the holder') for part in parts]
+    assert len(parts) == 3
+    for i, (context, record) in enumerate(zip(contexts, records)):
+        duration = context['piece']['t1_s'] - context['piece']['t0_s']
+        boundary_issue = {'category': 'incomplete_task', 'severity': 'medium',
+            't_s': duration, 'end_s': duration, 'recovered': False,
+            'issue': 'The clip ends before the task can finish.', 'evidence': 'head camera, final frame'}
+        boundary_task = {'start_s': duration - .005, 'end_s': duration, 'task': 'Align the holder',
+            'objects': ['holder'], 'outcome': 'partial', 'completed_at_s': None,
+            'note': 'The clip ends while this task is still under way.'}
+        record['labels'].update(operator_mistakes=[boundary_issue], tasks=[boundary_task],
+                                timeline=[], key_events=[], recovery=[])
+        if i == 1:
+            # Incomplete structured output must not turn an independently described event into a cut artifact.
+            mixed = ['The clip ends mid-task after the cup falls and breaks.',
+                     'The clip ends before the operator can retrieve the cup that fell.']
+            record['labels']['operator_mistakes'] += [{**boundary_issue, 'issue': issue,
+                't_s': duration - .02, 'evidence': 'Head camera shows the cup on the floor.'} for issue in mixed]
+            record['labels']['tasks'] += [{**boundary_task, 'task': f'Recover the cup {j}',
+                'objects': ['cup'], 'outcome': 'failure', 'note': note} for j, note in enumerate(mixed)]
+        if i != 1:
+            failed_at = duration - .2
+            record['labels']['timeline'] = [{'start_s': failed_at, 'end_s': duration,
+                'hand': 'right', 'action': 'Try to seat the cup, then retrieve it',
+                'object': 'cup', 'contribution': 'wasteful', 'progress': .5,
+                'notes': 'The cup falls beside the holder; retrieval has not finished.'}]
+            record['labels']['key_events'] = [{'t_s': failed_at, 'label': 'The cup falls beside the holder',
+                'outcome': 'failure', 'note': 'Head camera shows the cup outside the intended holder.'}]
+            if i == 0:
+                record['labels']['key_events'] += [
+                    {'t_s': duration - .02, 'label': label, 'outcome': 'failure'} for label in (
+                        'The clip ends mid-task after the cup falls and breaks.',
+                        'The clip ends before the operator can retrieve the cup that fell.',
+                        'The clip ends before the task can finish.')]
+                record['labels']['key_events'].append({'t_s': duration - .02, 'outcome': 'failure',
+                    'label': 'The clip ends before the task can finish.',
+                    'note': 'Head camera shows the cup falling beside the holder.'})
+            record['labels']['recovery'] = [{'failure_t_s': failed_at, 'failure': 'The seating attempt fails',
+                'recovered': False, 'recovered_at_s': None, 'correction': None}]
+            record['labels']['operator_mistakes'].append({**boundary_issue,
+                't_s': failed_at, 'issue': 'The cup falls; recovery is still under way at the end.',
+                'evidence': 'Head camera shows the cup falling beside the holder.'})
+            record['labels']['operator_mistakes'].append({**boundary_issue,
+                't_s': failed_at, 'issue': 'The clip ends while recovery is still under way.',
+                'evidence': 'Head camera shows the failed seating attempt and the cup beside the holder.'})
+            record['labels']['tasks'].append({**boundary_task, 'task': 'Seat the cup',
+                'start_s': .05, 'objects': ['cup'], 'outcome': observed_outcome,
+                'note': 'The clip ends while recovery is still under way.'})
+    original = copy.deepcopy(records)
+    stitched = pieces.stitch(source, list(zip(contexts, records)))
+    labels = stitched['labels']
+    incidents = labels['operator_mistakes']
+    assert [incident['part'] for incident in incidents if incident['issue'].startswith('The cup falls')] == [1, 3]
+    assert [incident['part'] for incident in incidents if incident['issue'] == 'The clip ends before the task can finish.'] == [3]
+    assert [incident['part'] for incident in incidents if incident['issue'] == 'The clip ends while recovery is still under way.'] == [1, 3]
+    assert [incident['issue'] for incident in incidents if incident['part'] == 2] == mixed
+    tasks = labels['tasks']
+    assert [(task['source_piece']['index'], task['outcome']) for task in tasks if task['task'] == 'Seat the cup'] == [
+        (1, observed_outcome), (3, observed_outcome)]
+    assert [(task['source_piece']['index'], task['outcome']) for task in tasks if task['task'] == 'Align the holder'] == [
+        (1, 'continues_past_cut'), (2, 'continues_past_cut'), (3, 'partial')]
+    assert [task['outcome'] for task in tasks if task['task'].startswith('Recover the cup')] == ['failure', 'failure']
+    assert [event['outcome'] for event in labels['key_events']] == ['failure'] * 5
+    noted_event = next(event for event in labels['key_events'] if event.get('note') ==
+                       'Head camera shows the cup falling beside the holder.')
+    assert noted_event['label'] == 'The clip ends before the task can finish.'
+    assert noted_event['source_piece']['index'] == 1
+    assert len(labels['recovery']) == 2 and all(not row['recovered'] for row in labels['recovery'])
+    assert [row['list'] for row in labels['_excluded']].count('operator_mistakes') == 2
+    assert [row['label'] for row in labels['_excluded'] if row['list'] == 'key_events'] == [
+        'The clip ends before the task can finish.']
+    assert records == original
+
+
 def test_blanket_continuation_requires_the_adjacent_parts_to_describe_a_continuation():
     # The UMI pilot split blanket work at 304.833s. Retain that motivating join with explicit evidence.
     source = lambda index, lo, hi: {'index': index, 't0_s': lo, 't1_s': hi}

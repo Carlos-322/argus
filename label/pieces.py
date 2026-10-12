@@ -719,12 +719,63 @@ def _internal_boundary(source: dict, side: str, cuts_s: list[float]) -> float | 
     return next((cut for cut in cuts_s if edge is not None and abs(edge - cut) <= .001), None)
 
 
-def is_cut_artifact(iss: dict, part: int, count: int, t0: float, t1: float, cuts_s: list[float]) -> bool:
-    """A stated truncation at this part's internal start/end, never at the recording's original boundary."""
+def _boundary_only_text(text) -> bool:
+    """Require boundary assessments throughout the prose; mixed or unknown claims stay attributed."""
+    clauses = [clause.strip().lower() for clause in re.split(r'[;\n]|\.(?=\s|$)', str(text or ''))
+               if clause.strip()]
+    subject = r'(?:(?:the|this) )?(?:clip|part|video|recording|episode)'
+    activity = r'(?:(?:a|the|this) )?(?:task|activity|action|work|recovery)'
+    underway = r'(?:under way|underway|in progress)'
+    middle = r'(?:mid[- ](?:task|activity|action)|in the middle of ' + activity + r')'
+    # Full clause matching deliberately permits only abstract temporal statements.
+    # Extra causal, relative or physical-event clauses require keeping the source judgment.
+    temporal = re.compile('|'.join([
+        subject + r' (?:starts?|begins?|ends?|ended) ' + middle,
+        subject + r' (?:ends?|ended|cuts? off|is cut off) before ' + activity +
+        r' (?:can finish|finishes|is finished|is completed)',
+        subject + r' (?:ends?|ended|cuts? off|is cut off) before (?:(?:a|the|this) )?[a-z]+ can finish',
+        subject + r' (?:ends?|ended) while ' + activity + r' is still ' + underway,
+        r'(?:starts?|begins?) ' + middle,
+        r'already ' + underway + r' at (?:the )?(?:start|first frame)',
+        r'still ' + underway + r' at (?:the )?(?:end|last frame|cut)',
+        r'continues? (?:' + activity + r' )?from (?:the )?(?:previous|prior) (?:part|clip)',
+        r'continues across the internal request cut at [0-9]+(?:\.[0-9]+)?s']))
+    return bool(clauses) and all(temporal.fullmatch(clause) for clause in clauses)
+
+
+def _observed_incident(entry: dict, labels: dict, cuts_s: list[float]) -> bool:
+    """Structured failure or wasted-motion onset within this assessment is independent of its cut note."""
+    from label.episode import number
+    start = number(entry.get('start_s') if 'start_s' in entry else entry.get('t_s'))
+    end = number(entry.get('end_s'))
+    if start is None:
+        return False
+    end = start if end is None else end
+    owner = entry.get('source_piece') or {}
+
+    def within(row, key):
+        instant = number(row.get(key))
+        source = row.get('source_piece') or {}
+        return (instant is not None and start - .001 <= instant <= end + .001
+                and (not owner or not source or owner.get('index') == source.get('index')))
+
+    return (any(event.get('outcome') == 'failure' and within(event, 't_s')
+                and not is_cut_key_event(event, cuts_s) for event in labels.get('key_events') or [])
+            or any(step.get('contribution') == 'wasteful' and within(step, 'start_s')
+                   for step in labels.get('timeline') or [])
+            or any(row.get('failure') and within(row, 'failure_t_s')
+                   for row in labels.get('recovery') or []))
+
+
+def is_cut_artifact(iss: dict, part: int, count: int, t0: float, t1: float, cuts_s: list[float],
+                    labels: dict | None = None) -> bool:
+    """Only a boundary-only assessment at an internal edge, never an observed incident or original edge."""
     from label.episode import number
     cat = str((iss or {}).get("category") or "").lower()
     text = str((iss or {}).get("issue") or "").lower()
     if not any(tag in cat for tag in CUT_TAGS) and not any(w in text for w in ("cut off", "truncat", "starts mid", "ends mid")):
+        return False
+    if not _boundary_only_text(iss.get('issue')) or _observed_incident(iss, labels or {}, cuts_s):
         return False
     ts = number(iss.get("t_s"))
     if ts is not None and not t0 - .001 <= ts <= t1 + .001:
@@ -800,7 +851,7 @@ def join_across_cuts(tasks: list, cuts_s: list[float]) -> list:
     return tasks
 
 
-def mark_cut_tasks(tasks: list, cuts_s: list[float]) -> list:
+def mark_cut_tasks(tasks: list, cuts_s: list[float], labels: dict | None = None) -> list:
     """Qualify an explicitly unfinished task at its owning internal end, retaining the part's original judgment."""
     from label.episode import number
     out = []
@@ -810,6 +861,8 @@ def mark_cut_tasks(tasks: list, cuts_s: list[float]) -> list:
         cut = _internal_boundary(tail.get("source_piece") or {}, "end", cuts_s)
         if (cut is not None and end is not None and cut - JOIN_GUARD_S <= end <= cut + .001
                 and "end" in _cut_sides({"note": tail.get("note")})
+                and _boundary_only_text(tail.get('note'))
+                and not _observed_incident(tail, labels or {}, cuts_s)
                 and task.get("outcome") in ("partial", "failure", "unclear")
                 and number(task.get("goal_reached_at_s")) is None and number(task.get("undone_at_s")) is None):
             task = {**task, "outcome": "continues_past_cut", "outcome_in_part": task.get("outcome"),
@@ -831,6 +884,11 @@ def is_cut_key_event(event: dict, cuts_s: list[float]) -> bool:
         return False
     label = str(event.get("label") or "").strip().lower()
     # A real event with an incidental end-of-clip note keeps its label and outcome.
+    if not _boundary_only_text(label):
+        return False
+    if any(value is not None and str(value).strip() and not _boundary_only_text(value)
+           for value in (event.get('note'), event.get('evidence'))):
+        return False
     if not re.match(r"^(?:the )?(?:clip|part|video|recording|episode) (?:starts?|begins?|ends?|ended|cuts? off|is cut off)\b", label):
         return False
     for side in _cut_sides({"label": label}):
@@ -945,7 +1003,7 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
                     # an issue about a whole part, reported by several parts, is one issue about the recording
                     same["parts"] = sorted(set(same.get("parts") or [same["part"]]) | {i})
                     continue
-                if is_cut_artifact(iss, i, count, t0, t1, cuts_s):
+                if is_cut_artifact(iss, i, count, t0, t1, cuts_s, lab):
                     excluded.append({**iss, "list": k, "excluded_by": "piece_cut",
                                      "reason": "the labelling pipeline cut the recording into parts here; being cut "
                                                "off at this point describes our cut, not the recording"})
@@ -1006,7 +1064,7 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
                                     if missing else "")}
     for k in ("timeline",):
         L[k].sort(key=lambda s: (s.get("start_s") is None, s.get("start_s") or 0))      # an untimed step last
-    L["tasks"] = mark_cut_tasks(join_across_cuts(L["tasks"], cuts_s), cuts_s)
+    L["tasks"] = mark_cut_tasks(join_across_cuts(L["tasks"], cuts_s), cuts_s, L)
     events = []
     for event in L["key_events"]:
         if is_cut_key_event(event, cuts_s):

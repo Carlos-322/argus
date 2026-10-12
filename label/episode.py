@@ -394,7 +394,9 @@ def plan(ep: dict) -> dict:
         quiet = sg.quiet_spans({k: np.asarray(v)[:n] for k, v in ep["signals"].items()},
                                int(round(ms.MIN_STILL_S * fps)))
         sample_spans = quiet
-    ks = ms.sample_frames(n, sample_spans, fps=fps, moving_every_s=every, still_every_s=every)
+    presentation = (ep.get('times') or {}).get(a)
+    ks = ms.sample_frames(n, sample_spans, fps=fps, moving_every_s=every, still_every_s=every,
+                          times_s=np.asarray(presentation)[:n] if presentation is not None else None)
     zero = ep["context"].get("clock_zero_s")
     if zero is not None and ep.get("times") is not None:
         # a camera that started before the episode's clock (kept for an episode labelled already, board/clips.py
@@ -2276,6 +2278,15 @@ def _instants_line(ep: dict, pl: dict | None = None) -> str:
                  "the first frame after its end where available.")
         if pl.get("quiet_spans"):
             extra += " Signal quiet does not establish that an arm was still."
+    times = (ep.get('times') or {}).get(anchor(ep))
+    if times is not None:
+        times = np.asarray(times)[:pl['n']] if pl else np.asarray(times)
+        intervals = np.diff(times)
+        tolerance = max(1e-9, float(np.spacing(np.abs(times).max())) * 4) if len(times) else 1e-9
+        if (len(intervals) > 1 and np.all(intervals > 0)
+                and not np.allclose(intervals, intervals[0], rtol=1e-6, atol=tolerance)):
+            extra += (" Cadence targets select the nearest available source frames on this presentation clock. "
+                      "Gaps in that clock remain gaps; frames are not invented between recorded instants.")
     # when every camera's file ends before the episode does, the last instant is the last frame they have (frames)
     last = "frame and the last frame its cameras have" if ep.get("footage_end") is not None else "and last frame"
     cadence = ("within each stretch between boundaries" if spans else "for the whole episode")
