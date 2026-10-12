@@ -378,7 +378,12 @@ def reader_issues(ctx: dict, result: dict | None = None) -> list[dict]:
     if _FAMILIES is None:
         from board.families import Families
         _FAMILIES = Families()
-    found = list(ctx.get("reader_issues") or []) + label_failure(result)
+    from board.public_export import reader_failure_what
+    failures = label_failure(result)
+    for issue in failures:
+        if public_what := reader_failure_what(issue['kind']):
+            issue['_reader_public_what'] = public_what
+    found = list(ctx.get("reader_issues") or []) + failures
     found += [{"kind": "camera_decode_failed", **x} for x in (result or {}).get("decode_failed") or []
               if isinstance(x, dict)]
     return [{**x, "family": _FAMILIES.reader_family(str(x["kind"]))} for x in found
@@ -487,6 +492,7 @@ def uploader_groups(notes, start_s, dur_s) -> list[dict]:
     episode once its first frame's time clock_start_s is taken off) also carries that moment in the episode, so the
     board can jump to it. Only a recorder clock far from zero is read this way, so a count or an index is never taken
     for a time."""
+    from board.public_export import location_list_receipt
     if notes in (None, "", {}, []):
         return []
     near = start_s is not None and dur_s and abs(float(start_s)) > 100 * float(dur_s)
@@ -519,6 +525,8 @@ def uploader_groups(notes, start_s, dur_s) -> list[dict]:
                 v = str(x)
             item = {"name": " / ".join(path) or "note", "value": v,
                     "_uploader_field_path": list(path)}
+            if locations := location_list_receipt(path, x, UPLOADER_LIST_MAX):
+                item['_uploader_location_values'] = locations
             t = when(x)
             if t is not None:
                 item["t"] = t
@@ -858,7 +866,9 @@ def context_unreadable(why: str) -> dict:
     """The issue of an episode whose context.json the board could not use (kind context_unreadable): it is shown with
     the model's reply as it came, labels or not, and without what the context gives (its length, checks, the reader's
     issues and notes). The error is kept apart from the sentence, for whoever looks into it."""
+    from board.public_export import reader_failure_what
     return {"kind": "context_unreadable", "error": why,
+            "_reader_public_error": reader_failure_what('context_unreadable'),
             "what": "This episode's recorded details (its length, checks and the reader's notes) could not be read, so "
                     "they are not shown; the model's reply is shown as it came."}
 

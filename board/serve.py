@@ -47,6 +47,7 @@ import hashlib
 import html
 import http.server
 import json
+import logging
 import math
 import os
 import re
@@ -1078,7 +1079,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 got = footage(eid, t0, t1)
             except (RuntimeError, OSError, subprocess.SubprocessError, ValueError, KeyError) as e:
-                self._send(500, {"error": str(e)[:400]})
+                logging.getLogger(__name__).error("Footage preparation failed", exc_info=True)
+                self._send(500, {"error": "The requested footage could not be prepared.",
+                                 "stage": "footage preparation"})
                 return
             if got is None:
                 self._send(404, {"error": "no video for this episode and span"})

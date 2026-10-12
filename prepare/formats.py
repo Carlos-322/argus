@@ -4749,7 +4749,8 @@ def lerobot_metadata(ctx, root):
     if unassigned:
         ctx["unassigned_metadata"] = unassigned
         for claim in unassigned:
-            add_issue(ctx, "metadata_unreadable", f"{claim['source']} retains an unassigned metadata claim: {claim['why']}.")
+            add_issue(ctx, "metadata_unreadable", f"{claim['source']} retains an unassigned metadata claim: {claim['why']}.",
+                      source=str(claim['source']))
     previous = ctx.get("uploader_notes", ctx.get("uploader_annotation"))
     prompt_recorded = {}
     for path, value in recorded.items():
@@ -4809,13 +4810,14 @@ def lerobot_annotations(ctx, root, df, data_path, *, image_clock=False):
         ctx["instruction_note"] = "This instruction is constant recorded frame language in the episode data."
     if language and (not complete_language or len(set(language)) > 1):
         add_issue(ctx, "metadata_unreadable", f"{data_path} has changing, incomplete or competing frame language; "
-                  "original text rows are retained as attributed annotations, without an inferred instruction.")
+                  "original text rows are retained as attributed annotations, without an inferred instruction.",
+                  source=str(data_path))
     if not columns and not failures:
         return
     for path, table in failures.items():
         key = Path(path).relative_to(root["dir"]).as_posix()
         for issue in table["issues"]:
-            add_issue(ctx, "metadata_unreadable", f"{key} could not be fully read: {issue['why']}.")
+            add_issue(ctx, "metadata_unreadable", f"{key} could not be fully read: {issue['why']}.", source=str(path))
     times = df["timestamp"].tolist() if "timestamp" in df else None
     frames = df["frame_index"].tolist() if "frame_index" in df else None
     fps = ctx.get("fps") or root.get("fps")
@@ -4865,12 +4867,12 @@ def lerobot_annotations(ctx, root, df, data_path, *, image_clock=False):
                     step["timing_reason"] = "the recorded row clock has no established mapping to the camera clock"
             if step.get("timing_reason") and step["timing_reason"] != "no measured end boundary on the recorded clock":
                 add_issue(ctx, "metadata_unreadable", f"{column} in {data_path} retains an annotation with incomplete "
-                          f"timing: {step['timing_reason']}.")
+                          f"timing: {step['timing_reason']}.", source=str(data_path))
         for claim in missing:
             claim["data_source"] = str(data_path)
         if missing:
             add_issue(ctx, "metadata_unreadable", f"{column} in {data_path} has unresolved recorded annotation codes; "
-                      "all original rows and table claims are retained as uploader notes.")
+                      "all original rows and table claims are retained as uploader notes.", source=str(data_path))
         spans.extend(steps)
         unresolved.extend(missing)
         for (_, path), table in selected.items():
@@ -4880,7 +4882,7 @@ def lerobot_annotations(ctx, root, df, data_path, *, image_clock=False):
             table_notes.setdefault(path, {})[column] = original(table)
             if table["issues"]:
                 add_issue(ctx, "metadata_unreadable", f"{path} has unresolved {column} table claims; "
-                          "every recorded field and conflicting row is retained as uploader notes.")
+                          "every recorded field and conflicting row is retained as uploader notes.", source=str(path))
     ctx["annotation_subtasks"] = ctx.get("annotation_subtasks", []) + spans
     ctx["annotation_unresolved"] = unresolved
     ctx["annotation_tables"] = table_notes
