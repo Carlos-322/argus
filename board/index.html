@@ -6540,6 +6540,8 @@ function renderEp(d, opts) {
   if (vid && typeof ResizeObserver !== 'undefined') {
     const frameObserver = new ResizeObserver(layoutFrame);
     frameObserver.observe(vid);
+    // Compact captions change the cell height without resizing the video.
+    if (exoCell) frameObserver.observe(exoCell);
     window._epCleanup.push(() => frameObserver.disconnect());
   }
   const onResize = () => { layoutFrame(); alignHeads(); scheduleTopPlacement(); };
