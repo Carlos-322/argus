@@ -115,12 +115,36 @@ def test_public_build_manifest_contains_counts_and_no_operational_locations():
     assert build == before
 
 
-def test_flattened_source_note_owners_are_private_but_native_fields_and_prose_survive():
+def test_flattened_source_note_owners_are_private_but_native_fields_and_prose_survive(tmp_path):
     from board.build import uploader_groups
+    from prepare.formats import h5_text
+    import h5py
+    import numpy as np
     private = '/srv/private-upload/metadata/info.json'
     data = '/srv/private-upload/data/chunk-000/episode.parquet'
     native = '/observations/right/force'
     prose = 'Open /data/example, then type api_key.'
+    workstation = '/srv/publisher-workstation/recordings'
+    source = tmp_path / 'native.h5'
+    with h5py.File(source, 'w') as f:
+        f.attrs['source_directory'] = workstation
+        f.attrs['api_key'] = 'unusable-attribute-value'
+        f.attrs['source'] = native
+        f.attrs['source_url'] = 'file:///srv/private-env/source.h5'
+        f.attrs['description'] = prose
+        f.attrs['token_count'] = 17
+        f.attrs['env_args'] = np.array(('/srv/private-env/config.json',
+            'file:///srv/private-env/source.h5', native, prose), dtype=[
+            ('path', 'S64'), ('source_url', 'S64'), ('native_key', 'S64'), ('description', 'S80')])[()]
+        episode = f.create_group('episode')
+        episode.attrs['path'] = native
+        episode.attrs['source_location'] = np.array(([workstation],),
+            dtype=[('recording', 'S64', (1,))])[()]
+        episode.attrs['credentials'] = np.array(('unusable-attribute-access',),
+            dtype=[('access_id', 'S64')])[()]
+    source_before = source.read_bytes()
+    with h5py.File(source, 'r') as f:
+        _, attributes = h5_text(f, 'episode', [])
     notes = {'recorded episode metadata': {private: {'source': private,
               'fields': {native: 12, 'instruction': prose, 'path': native,
                          'source': '/publisher/source_identifier',
@@ -131,7 +155,8 @@ def test_flattened_source_note_owners_are_private_but_native_fields_and_prose_su
              'recorded annotation data source': data,
              'recorded annotation tables': {private: {'native_step_index': {'claims': {'0': [
                  {'row': 0, 'source': private, 'fields': {'path': native,
-                  'source': '/publisher/source_identifier'}}]}}}}}
+                  'source': '/publisher/source_identifier'}}]}}}},
+             **attributes}
     groups = uploader_groups(notes, None, 10)
     before = copy.deepcopy(groups)
     # Existing saved boards have only flattened name/value entries.
@@ -146,8 +171,23 @@ def test_flattened_source_note_owners_are_private_but_native_fields_and_prose_su
         assert 'unusable-test-value' not in json.dumps(shown)
         assert 'unusable-other-value' not in json.dumps(shown)
         assert 'native token identity' in json.dumps(shown)
+        assert workstation not in json.dumps(shown)
+        assert 'unusable-attribute-value' not in json.dumps(shown)
+        assert 'unusable-attribute-access' not in json.dumps(shown)
+        assert '/srv/private-env' not in json.dumps(shown)
+        assert any(row['name'] == 'file attribute token_count' and row['value'] == '17'
+                   for group in shown for row in group['items'])
         assert any('info.json' in row['name'] for group in shown for row in group['items'])
         assert project({'uploader_notes': shown}) == {'uploader_notes': shown}
+    raw = project({'recorded_metadata': {'native.h5': attributes}})['recorded_metadata']['native.h5']
+    assert workstation not in json.dumps(raw)
+    assert '/srv/private-env' not in json.dumps(raw)
+    assert raw['file attribute env_args']['native_key'] == native
+    assert raw['file attribute env_args']['description'] == prose
+    assert raw['file attribute source'] == native and raw['episode attribute path'] == native
+    assert raw['file attribute description'] == prose and raw['file attribute token_count'] == 17
+    assert 'file attribute api_key' not in raw and 'episode attribute credentials' not in raw
+    assert source.read_bytes() == source_before
     assert groups == before and notes['recorded episode metadata'][private]['fields'][native] == 12
     plain = project({'uploader_notes': uploader_groups(prose, None, 10)})
     assert plain['uploader_notes'][0]['items'] == [{'name': 'note', 'value': prose}]

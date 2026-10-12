@@ -31,7 +31,7 @@ _PRIVATE_LOCATIONS = frozenset({
 })
 _LOCATIONS = frozenset({
     'source', 'sources', 'path', 'paths', 'file', 'files', 'filename', 'directory', 'dir',
-    'root', 'packed', 'src', 'location', 'sourceroot', 'sourcepath', 'sourcefile',
+    'root', 'packed', 'src', 'location', 'sourceroot', 'sourcepath', 'sourcefile', 'sourcedirectory',
     'archivepath', 'archive', 'url', 'urls', 'uri', 'uris', 'href', 'link', 'links',
     'publicbase', 'publiccitation', 'citation',
 })
@@ -45,6 +45,7 @@ _NOTE_SOURCE_MAPS = frozenset({
     'unreadableannotationtablesources',
 })
 _NOTE_SOURCE_VALUES = frozenset({'recordedannotationdatasource'})
+_ATTRIBUTE_LOCATIONS = frozenset({'sourcedirectory', 'sourcelocation'})
 _METADATA_LIMIT_SUFFIX = (' and its recorded metadata exceed the prompt note limit; complete original rows '
                           'and source claims remain in the episode context and uploader notes.')
 
@@ -98,6 +99,18 @@ def _source_name(value: str) -> str:
     return PureWindowsPath(value).name if '\\' in value else PurePosixPath(value).name
 
 
+def _reader_attribute(key: str) -> str | None:
+    """Decode the exact file/episode attribute names emitted by formats.h5_text."""
+    for prefix in ('file attribute ', 'episode attribute '):
+        if key.startswith(prefix):
+            return key[len(prefix):]
+    return None
+
+
+def _location_field(field: str) -> bool:
+    return field in _LOCATIONS or field.endswith(('url', 'uri', 'path', 'paths', 'urls', 'uris'))
+
+
 def _uploader_item(item: dict) -> dict:
     """Project the reader's flattened display schema using its original field path."""
     result = dict(item)
@@ -112,7 +125,10 @@ def _uploader_item(item: dict) -> dict:
         if i and _name(parts[i - 1]) in _NOTE_SOURCE_MAPS and _private_location(part):
             shown[i] = _source_name(part) or 'source file'
     result['name'] = ' / '.join(shown) if shown else (item.get('name') or 'note')
-    if any(_name(part) in _SECRETS for part in parts):
+    attributes = [_name(attribute) for i, part in enumerate(parts)
+                  if not any(_name(parent) == 'fields' for parent in parts[:i])
+                  and (attribute := _reader_attribute(part)) is not None]
+    if any(_name(part) in _SECRETS for part in parts) or any(a in _SECRETS for a in attributes):
         result['value'] = 'withheld'
         return result
     value = item.get('value')
@@ -124,7 +140,11 @@ def _uploader_item(item: dict) -> dict:
                       and terminal == 'source')
     table_claim = (terminal == 'source' and 'recordedannotationtables' in [_name(p) for p in parts]
                    and 'claims' in [_name(p) for p in parts[:-1]])
-    source_value = not native_fields and (owner_property or table_claim or terminal in _NOTE_SOURCE_VALUES)
+    source_value = not native_fields and (owner_property or table_claim or terminal in _NOTE_SOURCE_VALUES
+                                         or any(a in _ATTRIBUTE_LOCATIONS for a in attributes)
+                                         or any(a not in ('source', 'path') and _location_field(a) for a in attributes)
+                                         or (bool(attributes) and _reader_attribute(parts[-1]) is None
+                                             and _location_field(terminal)))
     if isinstance(value, str) and source_value and _private_location(value):
         result.pop('value', None)
         result['value'] = _source_name(value) or 'source file'
@@ -157,8 +177,9 @@ def _reader_issue(value: dict) -> dict:
     return result
 
 
-def _project(value, field: str = ''):
+def _project(value, field: str = '', attribute_owner: str = '', native_fields: bool = False):
     if isinstance(value, dict):
+        native_fields = native_fields or field == 'fields'
         if field == 'uploadernotes':
             value = _uploader_group(value)
         elif field == 'readerissues':
@@ -166,18 +187,23 @@ def _project(value, field: str = ''):
         result = {}
         for key, item in value.items():
             name = _name(key)
+            attribute = _reader_attribute(key) if not native_fields else None
+            owner = _name(attribute) if attribute is not None else attribute_owner
             if (key in PRIVATE_KEYS or name in _SECRETS or name in _PRIVATE_LOCATIONS
+                    or (attribute is not None and owner in _SECRETS)
                     or name.endswith(('apikey', 'accesstoken', 'secretaccesskey'))
                     or (field == 'compare' and name in ('runid', 'code'))):
                 continue
-            shown = _project(item, name)
+            shown = _project(item, name, owner, native_fields)
             if shown is not _DROP:
                 result[key] = shown
         return result
     if isinstance(value, (list, tuple)):
         # Do not move sensor sample positions when a typed string is withheld.
-        return [None if (shown := _project(item, field)) is _DROP else shown for item in value]
+        return [None if (shown := _project(item, field, attribute_owner, native_fields)) is _DROP else shown for item in value]
     if isinstance(value, str):
+        if attribute_owner in _ATTRIBUTE_LOCATIONS and _private_location(value):
+            return _source_name(value) or 'source file'
         # An entire URL is a typed value even in an extension field. Do not scan
         # or rewrite URL fragments embedded in publisher prose.
         stripped = value.strip()
@@ -185,7 +211,10 @@ def _project(value, field: str = ''):
                 and not any(char.isspace() for char in stripped)
                 and _private_url(stripped)):
             return _DROP
-        location = (field in _LOCATIONS or field.endswith(('url', 'uri', 'path', 'paths', 'urls', 'uris')))
+        # Direct source/path attributes can name HDF members; nested access fields retain protection.
+        direct_attribute = attribute_owner in ('source', 'path') and field in (
+            'fileattribute' + attribute_owner, 'episodeattribute' + attribute_owner)
+        location = not direct_attribute and _location_field(field)
         # context_path is a JSON pointer; it is not a filesystem path.
         if field == 'contextpath':
             location = False
