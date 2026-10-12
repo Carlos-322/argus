@@ -278,7 +278,7 @@ def build(ep, pl, *, shown=None, images=None):
     shown = shown if shown is not None else {}
     for view, meta in (ctx.get('cameras') or {}).items():
         name = str(meta.get('name') or view)
-        entry = field_interpretation(ctx, name, 'camera')
+        entry = prepared_interpretation(ctx, view, 'camera')
         role = sg._role(entry.get('role'))
         eligible = role in ('tactile_image', 'optical_tactile', 'touch', 'tactile') or (not role and is_sensing(name))
         if role in sg.NON_TOUCH_ROLES or not eligible:
@@ -476,7 +476,7 @@ def merge(parts, ctx, ep_dir=None):
         stale_sensors = set()
         for sensor in doc.get('sensors') or []:
             if sensor.get('access_kind') != 'depth':
-                if sensor.get('access_kind') == 'image':
+                if sensor.get('kind') == 'image' and sensor.get('view') is not None:
                     interpretation = prepared_interpretation(ctx, sensor['view'], 'camera')
                 elif sensor.get('access_kind') and sensor['name'] in ('state', 'action'):
                     interpretation = prepared_interpretation(ctx, sensor['name'], sensor['name'])

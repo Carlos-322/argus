@@ -21,6 +21,57 @@ from test_formats import recorder_folder
 REPO = Path(__file__).resolve().parent.parent
 
 
+def test_review_keeps_mixed_nested_archives_immutable_and_reuses_preparation(tmp_path, monkeypatch):
+    import hashlib
+    import io
+    import zipfile
+    import h5py
+    from review import __main__ as rv
+    from label import harness
+
+    upload = tmp_path / 'collection'
+    upload.mkdir()
+    raw = io.BytesIO()
+    with h5py.File(raw, 'w') as source:
+        source.attrs['fps'] = 10
+        source.create_dataset('images/top', data=np.full((12, 36, 64, 3), 60, np.uint8))
+    (upload / 'loose.h5').write_bytes(raw.getvalue())
+    inner = io.BytesIO()
+    with zipfile.ZipFile(inner, 'w') as zipped:
+        zipped.writestr('take/recorded.h5', raw.getvalue())
+    with zipfile.ZipFile(upload / 'packed.zip', 'w') as zipped:
+        zipped.writestr('bundle/episode.zip', inner.getvalue())
+    publisher_partial = upload / 'bundle' / 'take' / 'recorded.h5.part'
+    publisher_partial.parent.mkdir(parents=True)
+    publisher_partial.write_bytes(b'Publisher-owned incomplete recording, preserved as supplied.')
+    (upload / 'dataset.json').write_text(json.dumps({'task_mode': 'session', 'collection_note': 'One intact recording per take.'}))
+
+    def source_files():
+        return {p.relative_to(upload).as_posix(): (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
+                for p in upload.rglob('*') if p.is_file()}
+
+    before = source_files()
+    job = tmp_path / 'job'
+    class ReachedChecks(Exception):
+        pass
+    monkeypatch.setattr(harness, 'call_model_once', lambda *a, **k: pytest.fail('unexpected provider call'))
+    monkeypatch.setattr(rv, 'run_step', lambda *a, **k: (_ for _ in ()).throw(ReachedChecks()))
+    monkeypatch.setattr(sys, 'argv', ['review', '--data', str(upload), '--rig', 'ego_head', '--out', str(job), '--free'])
+    with pytest.raises(ReachedChecks):
+        rv.main()
+    assert source_files() == before
+    receipt = (job / 'preparation_receipt.json').read_bytes()
+    report = json.loads((job / 'report.json').read_text())
+    assert len(report['episodes']) == 2 and not report['failed']
+    contexts = [json.loads(p.read_text()) for p in (job / 'episodes').glob('*/context.json')]
+    assert all(ctx['task_mode'] == 'session' for ctx in contexts)
+    assert all('One intact recording per take.' in ctx['collection_note'] for ctx in contexts)
+    with pytest.raises(ReachedChecks):
+        rv.main()
+    assert source_files() == before
+    assert (job / 'preparation_receipt.json').read_bytes() == receipt
+
+
 @pytest.mark.parametrize('extra,cap,expected', [(False, 20.0, 'skipped'),
                                                   (True, 20.0, 'success'),
                                                   (True, .001, 'skipped')])

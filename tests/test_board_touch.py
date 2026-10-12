@@ -49,7 +49,7 @@ def test_a_contacts_signals_keep_its_strength_in_the_sensors_file(tmp_path):
     assert "strength" in pmap and "strength" not in vel        # only a signal a contact is timed by
     got = sensors.dequantize(pmap["strength"], doc["n"])[:, 0]
     a = np.load(ep / "signals.npz")["s0"].astype(np.float64)
-    want = lc._strength(a, {})[::doc["stride"]]
+    want = lc._strength(a, {})[doc['sample_indices']]
     assert np.max(np.abs(got - want)) <= pmap["strength"]["step"][0] / 2 + 1e-9
     # the curve peaks inside each contact, as high as the contact's own peak strength
     for c in ctx["contacts"]:

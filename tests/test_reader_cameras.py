@@ -563,7 +563,8 @@ def test_depth_as_long_as_its_camera_reads_at_every_frame(tmp_path):
     assert (np.load(ep / "depth_kmap_exo.npy") == np.arange(30)).all()
     assert not _issues(ctx)
     note = me._depth_note({**me.load(ep), "depth": dp.load(ep)})
-    assert note.endswith("at that instant.")
+    assert dp.load(ep)['exo']['paired_camera'] == 'exo'
+    assert 'unpaired depth' not in note and 'assumed presentation times' not in note
 
 
 def test_depth_that_misses_only_an_edge_within_the_slack_reads_no_issue(tmp_path):

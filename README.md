@@ -108,6 +108,8 @@ uv run python -m board static site --board data/boards/mine --clips data/clips
 
 Live and static pages use the canonical `board/index.html` through `board.serve.render_index`. Refresh a board after changing its field dictionary before producing a static export. Local owner editing is enabled explicitly with `board serve --dictionary-job JOB`.
 
+Requests record ordered image hashes without storing duplicate image archives. `uv run python -m board grids data/boards/mine` reconstructs base frame grids only when their original inputs and image bytes can be verified. The viewer distinguishes answered requests from dry or unverified dispatches, keeps request-part clocks, and identifies unavailable parts. Detail and sensor images are counted in the receipt but are not reconstructed by this command. Legacy labels without input hashes remain unavailable.
+
 Model comparisons and frame-verified gate cases remain separate paid workflows:
 
 ```bash

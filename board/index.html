@@ -2065,6 +2065,18 @@ table.et a.et-o { font: 600 11px/1.2 var(--mono); text-decoration: none; white-s
   #ep-list { max-height: 36vh; }
 }
 
+
+/* Verified frame grids stay at their original pixel size inside a scrollable panel. */
+#ms-dialog { max-width:calc(100vw - 48px); max-height:calc(100vh - 48px); border:1px solid var(--line, #ddd); border-radius:8px; padding:20px; background:var(--bg, #fff); color:var(--ink, #222); }
+#ms-dialog::backdrop { background:rgba(0,0,0,.4); }
+.ms-head { display:flex; align-items:center; justify-content:space-between; gap:24px; }
+.ms-head h2 { font-size:15px; margin:0; }
+.ms-close { border:0; background:transparent; font-size:22px; cursor:pointer; }
+#ms-note { font-size:12px; max-width:680px; }
+.ms-grid { margin:16px 0 0; }
+.ms-grid figcaption { display:flex; gap:16px; font-size:12px; margin-bottom:6px; }
+.ms-grid-scroll { overflow:auto; max-width:calc(100vw - 92px); }
+.ms-grid img { display:block; max-width:none; height:auto; }
 </style>
 </head><body>
 <header class="page-head"><h1>__PAGE_TITLE__</h1><span class="ph-board">__BOARD_NAME__</span></header>
@@ -2136,6 +2148,8 @@ table.et a.et-o { font: 600 11px/1.2 var(--mono); text-decoration: none; white-s
               stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
             <div class="vd-menu" id="vd-menu" role="menu"></div>
           </div>
+          <button id="ms-btn" class="ep-head-dl" type="button" hidden
+            title="Verified frame grids at the size shown to the model">Frame grids shown to the model</button>
           <a id="dl-json" class="ep-head-dl" download
             title="this episode's full annotation and dataset checks as JSON">Episode JSON</a>
         </div>
@@ -2153,6 +2167,11 @@ table.et a.et-o { font: 600 11px/1.2 var(--mono); text-decoration: none; white-s
 </main>
 <section id="cmp-view" aria-label="Model comparison"></section>
 <div class="cmp-tip" id="cmp-tip" role="tooltip"></div>
+<dialog id="ms-dialog" aria-labelledby="ms-heading">
+  <div class="ms-head"><h2 id="ms-heading">Frame grids shown to the model</h2>
+    <button class="ms-close" id="ms-close" type="button" aria-label="Close frame grids">x</button></div>
+  <p id="ms-note"></p><div id="ms-body"></div>
+</dialog>
 <script>
 const currentEp = document.getElementById('current-ep');
 
@@ -2180,6 +2199,8 @@ function fmtT(t) { return Number.isFinite(t) ? t.toFixed(1) + 's' : '-'; }
 function kindName(k) { return String(k || '').replace(/_/g, ' ').trim(); }
 
 let _activeFile = null;
+
+
 // the files the rail lists, in order; the cards themselves are built in batches (renderRail), so anything that needs
 // the whole list (the exports) reads this
 let _railFiles = [];
@@ -2200,6 +2221,73 @@ let ALL_EPS = [];
 // (configs/models.json) by model id.
 const BOARD = __BOARD_CONFIG__;
 const STATIC = BOARD.mode === 'static';
+
+const msBtn = document.getElementById('ms-btn');
+const msDialog = document.getElementById('ms-dialog');
+let _msView = null, _msToken = 0, _msPending = null;
+const gridRequestUrl = () => location.protocol !== 'file:' && window.__GRID_REQUEST_URL;
+async function loadModelGrids(file, label) {
+  const token = ++_msToken;
+  _msView = null; _msPending = null; msBtn.hidden = true;
+  msBtn.disabled = false; msBtn.textContent = 'Frame grids shown to the model';
+  if (msDialog.open) msDialog.close();
+  document.getElementById('ms-body').replaceChildren();
+  const receipt = label && label.request_images;
+  const fingerprint = receipt && receipt.fingerprint;
+  if (!file || !fingerprint || !receipt.grid_images || !receipt.grid_images.length || SHOWN) return;
+  _msPending = {file, fingerprint};
+  if (gridRequestUrl()) msBtn.hidden = false;
+  if (!BOARD.grids || (STATIC && !(ALL_EPS.find(e => e.file === file) || {})._grids)) return;
+  const url = STATIC ? BOARD.data + 'grids/' + encodeURIComponent(file) : 'api/grids?file=' + encodeURIComponent(file) + '&fingerprint=' + encodeURIComponent(fingerprint);
+  const view = await fetchJson(url);
+  if (token !== _msToken || file !== _activeFile || !view || view.fingerprint !== fingerprint || !Array.isArray(view.grids) || !view.grids.length) return;
+  _msView = view; msBtn.hidden = false;
+  msBtn.textContent = view.grids.every(g => g.dispatch_status === 'response_received') ? 'Frame grids shown to the model' : 'Request frame grids';
+}
+async function showModelGrids() {
+  if (!_msView && _msPending && gridRequestUrl()) {
+    const pending = _msPending, token = _msToken;
+    msBtn.disabled = true; msBtn.textContent = 'Loading frame grids';
+    let view = null;
+    try {
+      const response = await fetch(gridRequestUrl(), {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(pending)});
+      if (response.ok) view = await response.json();
+    } catch (_) { /* unavailable inputs remain unavailable */ }
+    if (token !== _msToken || pending.file !== _activeFile) return;
+    msBtn.disabled = false;
+    if (!view || view.fingerprint !== pending.fingerprint || !Array.isArray(view.grids) || !view.grids.length) {
+      msBtn.textContent = 'Request frame grids';
+      document.getElementById('ms-heading').textContent = 'Request frame grids';
+      document.getElementById('ms-note').textContent = 'The original frame-grid inputs could not be verified.';
+      document.getElementById('ms-body').replaceChildren();
+      if (!msDialog.open) msDialog.showModal();
+      return;
+    }
+    _msView = view;
+  }
+  if (!_msView) return;
+  const answered = _msView.grids.every(g => g.dispatch_status === 'response_received');
+  const title = answered ? 'Frame grids shown to the model' : 'Request frame grids';
+  msBtn.textContent = title;
+  document.getElementById('ms-heading').textContent = title;
+  const extra = _msView.supplemental_images, unavailable = (_msView.unavailable_parts || []).length;
+  document.getElementById('ms-note').textContent = 'Each grid is shown at its original size.'
+    + (!answered ? ' These are intended request inputs. The dispatch status below does not confirm model consumption.' : '')
+    + (extra ? ` The request also included ${extra} detail or sensor image${extra === 1 ? '' : 's'}, which are not shown here.` : '')
+    + (unavailable ? ` Input receipts are unavailable for ${unavailable} other request part${unavailable === 1 ? '' : 's'}.` : '');
+  document.getElementById('ms-body').innerHTML = _msView.grids.map((g, i) => {
+    const src = STATIC && !/^(?:https?:\/\/|\/)/.test(g.src) ? BOARD.media + g.src : g.src;
+    const status = {response_received:'Response received', dry_run:'Dry run', not_dispatched:'Not dispatched', outcome_unknown:'Response outcome unknown', dispatch_claimed:'Dispatch outcome unknown'}[g.dispatch_status] || 'Dispatch outcome unknown';
+    return `<figure class="ms-grid"><figcaption><span>${g.part != null ? 'Part ' + esc(g.part) + ' ' : ''}Grid ${i + 1}</span>`
+      + `<span>${fmtT(g.t0_s)} to ${fmtT(g.t1_s)}</span><span>${esc(g.width)} x ${esc(g.height)} px</span><span>${esc(status)}</span></figcaption>`
+      + `<div class="ms-grid-scroll"><img src="${esc(src)}" width="${esc(g.width)}" height="${esc(g.height)}"`
+      + ` alt="Request frame grid ${i + 1}" loading="lazy"></div></figure>`;
+  }).join('');
+  if (!msDialog.open) msDialog.showModal();
+}
+msBtn.addEventListener('click', showModelGrids);
+document.getElementById('ms-close').addEventListener('click', () => msDialog.close());
+msDialog.addEventListener('click', e => { if (e.target === msDialog) msDialog.close(); });
 // the name of the model whose labels an episode file holds: its display name, else its id without the provider
 function modelName(id) {
   if (!id) return 'The model';
@@ -3479,6 +3567,8 @@ function selectEp(file, fromPop) {
   const swap = _lbSwapFile === file && file === _activeFile && !!document.getElementById('video');
   _lbSwapFile = null;
   _activeFile = file;
+  ++_msToken; _msView = null; _msPending = null; msBtn.hidden = true;
+  if (msDialog.open) msDialog.close();
   // Give every episode its own URL so it is shareable and reload-stable; the labeller rides along.
   if (!fromPop) {
     try {
@@ -3514,6 +3604,7 @@ function selectEp(file, fromPop) {
         rightCol.scrollTop = 0; document.getElementById('left-pane').scrollTop = 0;
       }
       renderSourceBar();
+      loadModelGrids(file, d);
     });
 }
 
@@ -3845,16 +3936,18 @@ function snDecode(doc) {
   ft[0] = ms / 1000;
   for (let i = 1; i < doc.frames; i++) { ms += doc.times.dur + tr.next(); ft[i] = ms / 1000; }
   out.t = new Float64Array(n);
-  for (let i = 0; i < n; i++) out.t[i] = ft[Math.min(doc.frames - 1, i * stride)];
+  const indices = doc.sample_indices || Array.from({length: n}, (_, i) => i * stride);
+  for (let i = 0; i < n; i++) out.t[i] = ft[Math.min(doc.frames - 1, indices[i])];
   const captures = out.playback && out.playback.captures;
   // Use the retained exact anchor clock for phase boundaries when it agrees with the rounded sensor clock.
   out.sampleTimes = captures && captures.length === doc.frames
-    && Array.from(out.t).every((t, i) => Number.isFinite(captures[i * stride]) && Math.abs(t - captures[i * stride]) <= .0011)
-    ? Float64Array.from(out.t, (_, i) => captures[i * stride]) : out.t;
+    && Array.from(out.t).every((t, i) => Number.isFinite(captures[indices[i]]) && Math.abs(t - captures[indices[i]]) <= .0011)
+    ? Float64Array.from(out.t, (_, i) => captures[indices[i]]) : out.t;
+  out.t = out.sampleTimes;
   for (const s of doc.signals) {
     if (s.no_reading) { out.none.push(s); continue; }
     if (s.constant) { out.constant.push(s); continue; }
-    const g = Object.assign({}, s);
+    const g = Object.assign({}, s, {sampling: doc.sampling || null});
     if (s.values) g.vals = snBlock(s.values, n, 16);
     if (s.activity) g.act = snBlock(s.activity, n, 16).v;
     if (s.strength) g.str = snBlock(s.strength, n, 16).v;
@@ -3944,6 +4037,9 @@ function snWhat(s) {
   else if (s.aligned_by) w += ', ' + placementText(s.aligned_by);
   if (s.camera_aligned_by === 'assumed camera clock' && s.aligned_by !== 'assumed camera clock')
     w += ', shown on an assumed camera presentation clock';
+  if (s.sampling && s.sampling.method === 'bucket extrema')
+    w += s.sampling.extrema_complete ? ', overview retains bucket extrema at their recorded times'
+      : ', bounded overview; not every extremum fits';
   return w;
 }
 // Mirror prepare.signal_alignment. Unknown placements remain qualified without claiming separate clocks.
@@ -3974,7 +4070,9 @@ function snPlot(s, ts, duration) {
   const y = v => (H - pad - (H - 2 * pad) * (v - lo) / (hi - lo)).toFixed(1);
   const paths = series.map((f, c) => {
     let d = '', pen = false;
+    const breaks = new Set((s.break_before || [])[c] || []);
     for (let i = 0; i < ts.length && ts[i] <= duration; i++) {
+      if (breaks.has(i)) pen = false;
       const v = f(i);
       if (!isFinite(v)) { pen = false; continue; }
       d += `${pen ? 'L' : 'M'}${x(ts[i])} ${y(v)}`;
@@ -3983,7 +4081,7 @@ function snPlot(s, ts, duration) {
     return d;
   });
   let svg = '';
-  if (!s.vals && paths[0]) {
+  if (!s.vals && paths[0] && !(s.break_before || []).some(xs => xs.length)) {
     const last = Math.min(ts.length, snIndexAt(ts, duration) + 1) - 1;
     svg += `<path class="area" d="${paths[0]}L${x(ts[Math.max(0, last)])} ${y(0)}L${x(ts[0])} ${y(0)}Z"></path>`;
   }
@@ -4145,7 +4243,9 @@ function setupSensors(file, duration, seek, on, vid, camName, order, hasContacts
       </div>`;
     const first = sigs.slice(0, SN_FIRST).map(lane).join('');
     const more = sigs.slice(SN_FIRST).map((s, j) => lane(s, j + SN_FIRST)).join('');
-    const signalsHtml = `${maps.length ? `<div class="sn-maps">${maps.map((s) => snMapHtml(s, sigs.indexOf(s)))
+    const overview = sigs.some(s => s.sampling && s.sampling.method === 'bucket extrema')
+      ? '<details class="se-method"><summary>Sampling</summary><p>Overview samples retain selected recorded rows. Lines connect samples, not proof of continuous readings. Source gaps break the lines; omitted overview rows are not missing source readings.</p></details>' : '';
+    const signalsHtml = `${overview}${maps.length ? `<div class="sn-maps">${maps.map((s) => snMapHtml(s, sigs.indexOf(s)))
         .join('')}</div>` : ''}
         ${first}
         ${more ? `<div class="ck-all"><div class="ck-all-in">${more}</div></div><button class="ck-more sn-more" `
@@ -4181,7 +4281,11 @@ function setupSensors(file, duration, seek, on, vid, camName, order, hasContacts
     const phs = [...slot.querySelectorAll('.sn-plot .lane-ph')];
     let last = -2;
     function draw(i) {
-      nows.forEach(el => { el.innerHTML = snReadout(sigs[+el.dataset.i], i); });
+      nows.forEach(el => {
+        const s = sigs[+el.dataset.i];
+        el.innerHTML = snReadout(s, i) + (s.sampling && s.sampling.method === 'bucket extrema' && i >= 0
+          ? `<span class="sn-note">sample at ${D.t[i].toFixed(3)}s</span>` : '');
+      });
       for (const m of mapEls) snMapDraw(m, i, ink);
     }
     function sync(t) {

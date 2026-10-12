@@ -16,6 +16,7 @@ import numpy as np
 from label.atomic import write_atomic
 from label.dictionary_context import _public_source, field_interpretation, native_field_name, prepared_interpretation
 from label import sensor_evidence as se
+from prepare.mcap_fields import SAMPLE_RATE_KEY
 
 MAX_COLUMNS = 8
 MAX_ROWS = 64
@@ -52,8 +53,9 @@ def needs_inspection(ep, sensor_evidence):
                  for detail in channel.get('field_details') or [])
     from label.source_eligibility import needs_extra_evidence
     metadata = needs_extra_evidence(ctx)
+    commands = ep.get('action') is not None and ep['action'].size > 0
     return bool(ep.get('depth') or ep.get('additional_depth') or ep.get('signals') or sensor_evidence.get('sensors')
-                or native or metadata or (ctx.get('state_unaligned') and ctx.get('signals')))
+                or commands or native or metadata or (ctx.get('state_unaligned') and ctx.get('signals')))
 
 
 def clean(value):
@@ -490,7 +492,12 @@ class Access:
             a = self.ep.get(kind)
             if a is not None and a.size:
                 name = native_field_name(ctx, kind, kind)
+                proof = ctx.get('state_contract') or {}
+                if kind == 'action':
+                    proof = proof.get('action') or {}
                 self.add('numeric', kind, a, {'source': name,
+                    'recorded_role': 'command' if kind == 'action' else 'observation',
+                    **{key: proof[key] for key in ('names', 'units') if key in proof},
                     'interpretation': prepared_interpretation(ctx, kind, kind)})
         for name, a in self.ep.get('signals', {}).items():
             meta = self.ep.get('signal_meta', {}).get(name, {})
@@ -569,15 +576,19 @@ class Access:
                             detail = {**detail, **matches[0]}
                             used.add(detail['array'])
                         shape, _, dtype, _ = header(path, detail['array'])
+                        row_names = detail.get('names') or []
+                        first_names = row_names[0] if row_names else None
+                        varying_names = any(labels != first_names for labels in row_names)
                         ident = self.add('native', name, None, {'shape': list(shape), 'dtype': str(dtype),
                                  'schema': channel.get('schema'), 'topic': channel['topic'], 'field': detail['field'],
-                                 'names': (detail.get('names') or [])[:1],
+                                 'names': first_names if not varying_names else None,
+                                 'names_vary_by_row': varying_names,
                                  'already_supplied': bool(detail.get('already_supplied'))}, path=path, key=detail['array'],
                                  channel=channel, detail=detail, archive_name=filename)
                         self.fields[ident]['public']['shape'] = list(shape)
                         modes = ['samples']
-                        if math.prod(shape[1:]) > 1 and any(d['field'].rsplit('.', 1)[-1] in
-                                ('sample_rate', 'sample_rate_hz', 'sampling_rate') for d in exact):
+                        if math.prod(shape[1:]) > 1 and any(SAMPLE_RATE_KEY.fullmatch(d['field'].rsplit('.', 1)[-1])
+                                for d in exact):
                             modes.append('spectrum')
                         self.fields[ident]['public']['available_modes'] = modes
                     except (OSError, KeyError, ValueError, zipfile.BadZipFile) as error:
@@ -852,6 +863,16 @@ class Access:
             result['limitations'].append('These sampled rows have no verified episode alignment; no episode timestamps assigned.')
         if packet:
             detail, channel = field['detail'], field['channel']
+            row_names = detail.get('names') or []
+            if row_names:
+                result['component_names_by_row'] = [
+                    [row_names[int(row)][col] if isinstance(row_names[int(row)], list)
+                     and col < len(row_names[int(row)]) else None for col in cols]
+                    if int(row) < len(row_names) else [None] * len(cols) for row in rows]
+                if field['descriptor'].get('names_vary_by_row'):
+                    result['limitations'].append('Component identities vary by source row. Read component_names_by_row '
+                        'with rows and columns; one column does not establish one anatomical location or measurement '
+                        'throughout the window. Null names are undeclared, not inherited from another row.')
             message_indices = array_rows(field['path'], detail['message_indices'], rows).ravel().astype(int)
             result['source_log_ns'] = clean(array_rows(field['path'], channel['log_ns'], message_indices).ravel())
             # Decoded mixed lists have typed leaves alongside the float projection.
@@ -911,10 +932,10 @@ class Access:
                 raise ValueError('spectrum requires retained waveform packets, not aligned summary values')
             rates = [d for d in field['channel'].get('exact_numeric_fields') or []
                      if d.get('array') and not d.get('shape') and
-                     d['field'].rsplit('.', 1)[-1] in ('sample_rate', 'sample_rate_hz', 'sampling_rate')]
+                     SAMPLE_RATE_KEY.fullmatch(d['field'].rsplit('.', 1)[-1])]
             if not rates:
                 rates = [d for d in field['channel'].get('field_details') or []
-                     if d['field'].rsplit('.', 1)[-1] in ('sample_rate', 'sample_rate_hz', 'sampling_rate')]
+                     if SAMPLE_RATE_KEY.fullmatch(d['field'].rsplit('.', 1)[-1])]
             if len(rates) != 1:
                 raise ValueError('no unique recorded sample rate for this source')
             rate_n = header(field['path'], rates[0]['message_indices'])[0][0]

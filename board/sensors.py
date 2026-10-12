@@ -23,8 +23,9 @@ One file:
    "times": {"ms0", "dur", "d"},           each anchor frame's time on the board clip's clock (the main camera's first
                                            frame is 0), in whole milliseconds: the first, then per frame its gap to
                                            the previous minus dur, as Base64 VLQ integers (board/hands.py's encoding)
-   "stride": S, "n": M,                    the page's samples are anchor frames 0, S, 2S, ... (M of them), at most
-                                           RATE_HZ a second
+   "stride": S, "n": M,                    legacy stride and overview row count; sample_indices gives native rows
+   "sample_indices": [i, ...],             bounded bucket extrema, in original order
+   "sampling": {"method", "extrema_complete"}, overview qualification, not an event detector
    "signals": [one per signal, in the dataset's order],
    "depth": {view: {"units", "scale_m", "kind", "ticks", "bar"}}}
 
@@ -231,7 +232,61 @@ def tactile_doc(a: np.ndarray, rest, swing: float, direction, shape: list) -> di
             "row": quantize(row), "col": quantize(col), "map": quantize(load, bits=8, per_value=False)}
 
 
-def signal_doc(meta: dict, a: np.ndarray, t: np.ndarray, stride: int, in_contact: bool = False) -> dict:
+def overview_indices(metas: list, arrays: dict, n: int, budget: int, touched: set | None = None) -> tuple[np.ndarray, dict]:
+    """Bounded shared native rows. Extrema describe plotted series, not inferred events."""
+    from label import signals as S
+    # Even a short scalar window can contain distinct endpoints, a minimum and a maximum.
+    budget = min(n, max(4, budget))
+    if budget >= n:
+        return np.arange(n), {"method": "native rows", "extrema_complete": True}
+    columns = []
+    for meta in metas:
+        if meta.get("key") not in arrays:
+            continue
+        a = pad(arrays[meta["key"]], n)
+        if a.ndim == 1:
+            a = a[:, None]
+        rest = np.asarray(meta["rest"]) if meta.get("rest") is not None else None
+        swing = meta.get("swing") or None
+        try:
+            plotted = a if a.shape[1] <= S.SMALL else np.asarray(_call(S.activity, a, rest, swing))[:, None]
+        except (ValueError, TypeError, IndexError):
+            continue  # signal_doc retains the named failure; one bad signal cannot remove the other lanes.
+        series = list(plotted.T)
+        if meta.get("name") in (touched or set()):
+            from label import contacts as lc
+            series.append(lc._strength(a, {"rest": rest, "swing": swing}))
+        for col in series:
+            finite = col[np.isfinite(col)]
+            if len(finite) and finite.min() != finite.max():
+                columns.append(col)
+    # Each bucket reserves its endpoints plus two extrema per changing plotted column.
+    width = 2 + 2 * len(columns)
+    buckets = max(1, budget // width)
+    wanted = {0, n - 1}
+    for block in np.array_split(np.arange(n), buckets):
+        if not len(block):
+            continue
+        wanted.update((int(block[0]), int(block[-1])))
+        for col in columns:
+            valid = block[np.isfinite(col[block])]
+            if len(valid):
+                wanted.update((int(valid[np.argmin(col[valid])]), int(valid[np.argmax(col[valid])])))
+    complete = len(wanted) <= budget
+    if not complete:
+        # An arbitrarily wide set of independent extrema cannot fit a fixed row budget.
+        # Keep the bound and disclose this case in the overview, never imply complete peak coverage.
+        ordered = sorted(wanted)
+        wanted = {ordered[i] for i in np.linspace(0, len(ordered) - 1, budget, dtype=int)}
+    for i in np.linspace(0, n - 1, budget, dtype=int):
+        if len(wanted) >= budget:
+            break
+        wanted.add(int(i))
+    return np.asarray(sorted(wanted), dtype=int), {"method": "bucket extrema", "buckets": buckets,
+                                                   "extrema_complete": complete}
+
+
+def signal_doc(meta: dict, a: np.ndarray, t: np.ndarray, stride: int, in_contact: bool = False, pick: np.ndarray | None = None) -> dict:
     """One signal's entry (module docstring); in_contact: one of the episode's contacts is timed by it, so its strength
     is kept too."""
     from label import signals as S
@@ -269,7 +324,7 @@ def signal_doc(meta: dict, a: np.ndarray, t: np.ndarray, stride: int, in_contact
     doc.update({"constant": False, "rests_and_rises": rr, "touch": touch,
                 "direction": _call(S.direction, a, rest, swing)})
     doc["spans"] = [[round(s, 3), round(e, 3)] for s, e in _spans(S, a, t, rest, swing)] if rr or touch else []
-    pick = np.arange(0, len(a), stride)
+    pick = np.arange(0, len(a), stride) if pick is None else pick
     if in_contact:
         from label import contacts as lc
         doc["strength"] = quantize(lc._strength(a, {"rest": rest, "swing": swing})[pick])
@@ -279,6 +334,13 @@ def signal_doc(meta: dict, a: np.ndarray, t: np.ndarray, stride: int, in_contact
         full_swing = swing if swing is not None else float(S.swing_of(a))
         if full_swing > 0:
             doc["tactile"] = tactile_doc(a, level, full_swing, doc["direction"], shape)
+    # Break chart segments when any native missing row lies between retained samples.
+    # Overview omission itself is not a source gap.
+    plotted_valid = np.isfinite(a) if d <= S.SMALL else np.isfinite(a).all(axis=1)[:, None]
+    missing = np.vstack((np.zeros((1, plotted_valid.shape[1]), dtype=int),
+                         np.cumsum(~plotted_valid, axis=0)))
+    doc["break_before"] = [(np.flatnonzero((missing[pick[1:] + 1, c] - missing[pick[:-1], c]) > 0) + 1).tolist()
+                           for c in range(plotted_valid.shape[1])]
     if d <= S.SMALL:
         doc["values"] = quantize(a[pick])
         return doc
@@ -359,15 +421,16 @@ def episode_doc(ep_dir: Path) -> dict | None:
         dt = float(np.median(np.diff(t))) if n > 1 else 1.0 / RATE_HZ
         stride = max(1, int(np.ceil((1.0 / max(dt, 1e-6)) / RATE_HZ - 1e-6)))
         touched = {nm for c in ctx.get("contacts") or [] for nm in c.get("signals") or []}
+        pick, sampling = overview_indices(metas, arrays, n, len(range(0, n, stride)), touched)
         docs, errors = [], []
         for m in metas:
             if m.get("key") not in arrays:
                 continue
             try:
-                docs.append(signal_doc(m, pad(arrays[m["key"]], n), t, stride, m["name"] in touched))
+                docs.append(signal_doc(m, pad(arrays[m["key"]], n), t, stride, m["name"] in touched, pick=pick))
             except Exception as err:  # noqa: BLE001 - this signal is named with the reason, the others are drawn
                 errors.append({"name": m["name"], "error": f"{type(err).__name__}: {err}"[:300]})
-        doc.update({"frames": n, "times": encode_times(t), "stride": stride, "n": len(range(0, n, stride)),
+        doc.update({"frames": n, "times": encode_times(t), "stride": stride, "n": len(pick), "sample_indices": pick.tolist(), "sampling": sampling,
                     "signals": docs, **({"errors": errors} if errors else {})})
         if (ep_dir / "times.npz").exists() and (ep_dir / "sources.json").exists():
             from board.clips import DISPLAY_TICKS_PER_S, display_ticks, main_cam, start_offsets

@@ -375,6 +375,7 @@ def open_archives(root: Path, dest: Path) -> tuple[Path, list[str]]:
     skipped, as are hidden files and __MACOSX; an upload holds at most UNPACK_MAX_FILES files and
     UNPACK_MAX_BYTES unpacked, counted from what each member really yields, so an archive whose members hold
     more than they declare stops at the limit."""
+    import tempfile
     root = Path(root)
     if root.is_file():
         if not ARCHIVE_RE.search(root.name):
@@ -418,10 +419,12 @@ def open_archives(root: Path, dest: Path) -> tuple[Path, list[str]]:
                 if target.exists():            # unpacked by an earlier run that stopped part way
                     continue
                 target.parent.mkdir(parents=True, exist_ok=True)
-                tmp = target.with_name(target.name + ".part")
+                tmp = None
                 got = 0
                 try:
-                    with opener() as src, open(tmp, "wb") as dst:
+                    with opener() as src, tempfile.NamedTemporaryFile(
+                            dir=target.parent, prefix='.unpack-', suffix='.part', delete=False) as dst:
+                        tmp = Path(dst.name)
                         while True:
                             buf = src.read(1 << 20)
                             if not buf:
@@ -437,7 +440,8 @@ def open_archives(root: Path, dest: Path) -> tuple[Path, list[str]]:
                 except Exception:
                     # a member cut short or damaged (a tar cut inside it, a zip member that fails its check) is left
                     # out by itself and named; the members before and after it are unpacked
-                    tmp.unlink(missing_ok=True)
+                    if tmp is not None:
+                        tmp.unlink(missing_ok=True)
                     bad.append(f"{'/'.join(parts)} (cut short or damaged)")
                     continue
                 total += got
@@ -2670,7 +2674,7 @@ def write_depth(ep: Path, ctx: dict, depth: dict | None, times: dict | None = No
         np.savez(ep / "depth_times.npz", **times)
     ctx["depth"] = {v: {"units": ("metres" if d.get("scale_m") else "relative"), "scale_m": d.get("scale_m"),
                         "kind": d.get("kind", "depth"), "source": d.get("source"),
-                        **{k: d[k] for k in ('storage', 'paired_camera') if k in d}} for v, d in depth.items()}
+                        **{k: d[k] for k in ('storage', 'paired_camera', 'source_key') if k in d}} for v, d in depth.items()}
 
 
 def probe_depth(path: Path) -> dict:
@@ -2999,6 +3003,8 @@ def video_views_episode(ep: Path, files: dict, rig: str, dataset: str, extra: di
                               'what': ' '.join(x for x in ((depth_notes.get(v) or {}).get('what'), d['alignment_note']) if x)}
         entry.update(width=pd_["width"], height=pd_["height"], pix_fmt=pd_["pix_fmt"])
         entry['paired_camera'] = d.get('paired_camera', v if v in files else None)
+        if d.get('source_key'):
+            entry['source_key'] = d['source_key']
         if d.get('storage'):
             entry['storage'] = d['storage']
             entry['height'], entry['width'] = d['storage']['shape']
@@ -5371,7 +5377,7 @@ def lerobot_depth(ep: Path, r: dict, row: dict, vmap: dict, fps: float, n: int, 
         scale = next((float(x) for k, x in info.items() if DEPTH_SCALE_KEY.search(str(k).split(".")[-1])
                       and isinstance(x, (int, float)) and 0 < x < 10), None)
         e, t = depth_entry(ep, v, Path(path), td, ta, pr["pts"][sel], scale, source, ctx, (cams or vmap)[camera])
-        e.update(width=pr["width"], height=pr["height"], pix_fmt=pr["pix_fmt"],
+        e.update(width=pr["width"], height=pr["height"], pix_fmt=pr["pix_fmt"], source_key=key,
                  paired_camera=camera if v == camera and source == key else None)
         dep[v] = e
         tz.update(t)
@@ -6724,6 +6730,7 @@ def convert_hdf5(item: dict, rig: str, out: Path, dataset: str, *, source_scope:
             if dw.close():
                 depth[v] = {"path": ep / f"depth_{v}.mkv", "real": t if coarse else None,
                             "capture_clock": coarse, "scale_m": dw.scale_m, "source": source,
+                            "source_key": d['name'],
                             "storage": dw.storage,
                             "kind": representation,
                             "paired_camera": camera if v == camera and source == d['name'] else None}
@@ -7686,7 +7693,7 @@ def _flat_numbers(m) -> list[tuple[str, float]] | None:
     return flat or None
 
 
-SAMPLE_RATE_KEY = re.compile(r"^(sample_?rate|sampling_?rate|sample_?freq(uency)?|fs)$", re.I)
+from prepare.mcap_fields import SAMPLE_RATE_KEY
 SAMPLES_MIN = 32           # a vector this long beside a sample rate is samples in time (audio), not channels
 MUX_MAX_VALUES = 8         # a field with at most this many integer values that keeps switching names the sensor
 VARIATION_MAX_VALUES = 64  # a fast signal this wide or narrower also gets its variation within each frame
@@ -10145,6 +10152,32 @@ def plain_error(e: Exception) -> str:
     return "it could not be opened (" + type(e).__name__ + ")"
 
 
+def archive_read_root(root: Path, out: Path) -> Path:
+    """Expand directory uploads in an owned tree, without writing beside source archives.
+
+    Ordinary source files stay linked rather than copied. Keep the original root
+    name and relative layout so publisher ownership and adjacent metadata agree.
+    Prepared references can use the expanded tree for the life of the job.
+    """
+    if not root.is_dir():
+        return root
+    staging = out.parent / 'upload_unpacked'
+    excluded = [out, staging]
+    files = [p for p in files_under(root)
+             if not any(p.is_relative_to(path) for path in excluded)]
+    if not any(ARCHIVE_RE.search(p.name) for p in files):
+        return root
+    import tempfile
+    staging.mkdir(parents=True, exist_ok=True)
+    expanded = Path(tempfile.mkdtemp(prefix='archives-', dir=staging)) / root.name
+    expanded.mkdir()
+    for source in files:
+        target = expanded / source.relative_to(root)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.symlink_to(source.resolve())
+    return expanded
+
+
 def convert(root: Path, rig: str, out: Path, dataset: str, max_seconds: float, grouping: dict | None = None,
             ownership_context: dict | None = None) -> dict:
     """Convert an upload into episode sidecars under out/, taking episodes in order until max_seconds of
@@ -10152,6 +10185,7 @@ def convert(root: Path, rig: str, out: Path, dataset: str, max_seconds: float, g
     if rig not in RIGS:
         raise ValueError(f"rig must be one of {RIGS}")
     root, out = Path(root), Path(out)
+    root = archive_read_root(root, out)
     root, opened = open_archives(root, out.parent / "upload_unpacked")
     from prepare.annotations import source_context, merge_source_contexts
     declared_context = source_context(root, rig)

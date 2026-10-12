@@ -26,7 +26,7 @@ _SECRETS = frozenset({
 # Source locations resolve private preparation trees before this projection runs.
 _PRIVATE_LOCATIONS = frozenset({
     'sourcelocation', 'rawpath', 'localpath', 'retainedroot', 'retainedevidenceroot',
-    'episodedir', 'jobdir', 'cachedir',
+    'episodedir', 'exampledir', 'jobdir', 'cachedir',
 })
 _LOCATIONS = frozenset({
     'source', 'sources', 'path', 'paths', 'file', 'files', 'filename', 'directory', 'dir',

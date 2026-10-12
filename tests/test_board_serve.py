@@ -293,6 +293,7 @@ def test_static_site(tmp_path):
     page = (site / "index.html").read_text()
     assert "<h1>Data Dashboard</h1>" in page and '"mode":"static"' in page and '"compare":false' in page
     assert '"data":"https://example.org/board/b1/data/"' in (site / "index.public.html").read_text()
+
     index = json.loads((site / "data" / "index.json").read_text())
     assert index["datasets"] == ["galaxea", "my_own_rig", "fastumi"] and len(index["eps"]) == 3
     lst = json.loads((site / "data" / "lists" / "fastumi.json").read_text())
@@ -300,6 +301,49 @@ def test_static_site(tmp_path):
     assert json.loads((site / "data" / "ep" / "episode_000001.json").read_text())["data_issues"][1]["counted"] is False
     build = json.loads((site / "BUILD.json").read_text())
     assert build["episodes"] == 3 and build["media"]["videos_no_source"] == build["media"]["videos"] == 6
+
+
+def test_verified_grids_have_the_same_served_and_static_bytes(tmp_path, monkeypatch):
+    import io
+    from PIL import Image
+    from board import grids as bg
+    from label import grids as lg
+    board = _board(tmp_path)
+    path = board / 'qa' / 'episode_000001.json'
+    record = json.loads(path.read_text())
+    raw = io.BytesIO()
+    Image.new('RGB', (40, 30), 'green').save(raw, format='JPEG')
+    jpg = raw.getvalue()
+    record['request_images'] = {'fingerprint': 'b' * 64,
+        'grid_images': [{'sha256': lg.digest(jpg)}], 'images': [{'sha256': lg.digest(jpg)}],
+        'supplemental_images': 2}
+    path.write_text(json.dumps(record))
+    lg.write(bg.grid_dir(board / 'grids', path.name), record,
+             [{'jpeg': jpg, 't0_s': 1.0, 't1_s': 2.0}])
+    clips = tmp_path / 'clips'
+    clips.mkdir()
+    httpd, url = _serve(monkeypatch, board, clips)
+    try:
+        status, _headers, body = _get(url + '/api/grids?file=' + path.name + '&fingerprint=' + 'b' * 64)
+        assert status == 200, 'the viewer must expose verified frame-grid inputs'
+        view = json.loads(body)
+        assert view['supplemental_images'] == 2
+        assert _get(url + '/' + view['grids'][0]['src'])[2] == jpg
+        assert _get(url + '/api/grids?file=../manifest.json')[0] == 404
+        assert _get(url + '/api/grids?file=' + path.name + '&fingerprint=' + 'c' * 64)[0] == 404
+        (board / 'grids' / path.stem / 'grid_01.jpg').write_bytes(b'replaced')
+        assert _get(url + '/api/grid?file=' + path.name + '&i=0&fingerprint=' + 'b' * 64)[0] == 404
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+    lg.write(bg.grid_dir(board / 'grids', path.name), record,
+             [{'jpeg': jpg, 't0_s': 1.0, 't1_s': 2.0}])
+    args = argparse.Namespace(board=board, qa=board / 'qa', clips=clips, compare=None,
+        hands=None, keypoints=None, out=tmp_path / 'site', build_id='verified', force=False,
+        public_base=None, title='Data Dashboard')
+    assert static.cmd_site(args) == 0
+    view = json.loads((args.out / 'verified' / 'data' / 'grids' / path.name).read_text())
+    assert (args.out / 'media' / view['grids'][0]['src']).read_bytes() == jpg
 
 
 # ---------------------------------------------------------------- a board built from runs, with a comparison

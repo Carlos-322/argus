@@ -529,6 +529,10 @@ def _git_commit() -> str:
 def build_id_for(qa: Path, files: list, compare: Path | None = None, hands: Path | None = None,
                  keypoints: Path | None = None, frames: list | None = None, sensors: Path | None = None, dictionary_job: Path | None = None) -> str:
     h = hashlib.sha1()
+    for f in files:
+        gp = qa.parent / 'grids' / Path(f).stem / 'grids.json'
+        if gp.is_file():
+            h.update(hashlib.sha256(gp.read_bytes()).digest())
     if sensors is not None:
         for f in ["index.json", *files]:
             sp = sensors / f
@@ -602,6 +606,7 @@ def cmd_site(a):
     (stage / "data/lists").mkdir(parents=True)
     (stage / "data/ep").mkdir(parents=True)
     datasets = []
+    grid_count = 0
     by_ds = defaultdict(list)
     idx_eps = []
     for e in eps:
@@ -617,9 +622,31 @@ def cmd_site(a):
             row.append(rec["episode_id"])
         idx_eps.append(row)
         # the page's view of the episode: each issue carries the family it is counted under
-        view = sa.episode_view(sa.current_label(json.loads((a.qa / rec["file"]).read_text()),
-                                               getattr(a, "dictionary_job", None), rec["file"]))
+        current = sa.current_label(json.loads((a.qa / rec["file"]).read_text()),
+                                   getattr(a, "dictionary_job", None), rec["file"])
+        view = sa.episode_view(current)
         (stage / "data/ep" / rec["file"]).write_text(dumps(view))
+        from board import grids as bg
+        grid_root = a.qa.parent / 'grids'
+        gidx = bg.read(grid_root, rec['file'], current)
+        if gidx is not None:
+            (stage / 'data/grids').mkdir(exist_ok=True)
+            (a.out / 'media/g').mkdir(parents=True, exist_ok=True)
+            rels = []
+            for g in gidx['grids']:
+                raw = bg.image_path(grid_root, rec['file'], g).read_bytes()
+                if len(raw) != g['bytes'] or hashlib.sha256(raw).hexdigest() != g['sha256']:
+                    raise ValueError('grid image changed while publishing')
+                rel = f"g/{g['sha256']}.jpg"
+                dest = a.out / 'media' / rel
+                if not dest.is_file() or hashlib.sha256(dest.read_bytes()).hexdigest() != g['sha256']:
+                    tmp = dest.with_suffix('.tmp')
+                    tmp.write_bytes(raw)
+                    tmp.replace(dest)
+                rels.append(rel)
+            (stage / 'data/grids' / rec['file']).write_text(dumps(bg.view(gidx, lambda i, g: rels[i])))
+            rec['_grids'] = len(rels)
+            grid_count += 1
     for ds, recs in by_ds.items():
         (stage / "data/lists" / f"{ds}.json").write_text(dumps(public_json(recs), separators=(",", ":")))
     (stage / "data/index.json").write_text(dumps(public_json({"build": bid, "datasets": datasets, "eps": idx_eps}),
@@ -705,7 +732,7 @@ def cmd_site(a):
     # has them (no request that can only fail)
     has = {"compare": compare is not None, "hands": bool(hands_res and hands_res["files"]),
            "keypoints": bool(kp_res and kp_res["files"]), "sensors": bool(sn_res and sn_res["files"]),
-           "labels_license": sa.labels_license(a.board)}
+           "labels_license": sa.labels_license(a.board), "grids": grid_count > 0}
     name = sa.board_name(a.board)
     header = sa.read_header(getattr(a, "header", None))
     (stage / "index.html").write_text(sa.render_index(

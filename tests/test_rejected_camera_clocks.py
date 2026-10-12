@@ -189,7 +189,8 @@ def test_invalid_side_clock_keeps_valid_anchor_depth_measured(tmp_path):
     assert 'exo' not in ctx['camera_clock'] and not ctx.get('depth_camera_clock')
     request = episode.build_request(ep)
     line = next(x for x in request['prompt'].splitlines() if x.startswith('DEPTH:'))
-    assert ' at that instant.' in line and 'unusable recorded clock' not in line
+    assert ctx['depth']['exo']['paired_camera'] == 'exo'
+    assert 'assumed presentation times' not in line and 'unusable recorded clock' not in line
     result = capture_qc.run_episode(ep)
     clocks = result['metrics']['clocks']
     assert clocks['anchor']['status'] == 'assessed'

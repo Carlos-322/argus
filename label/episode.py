@@ -885,6 +885,19 @@ def _depth_frames(ep: dict, pl: dict) -> dict:
     return out
 
 
+def depth_label(ep: dict, view: str) -> str:
+    """A camera pairing must be recorded; an anchor slot is only a display placement."""
+    entry = (ep.get('depth') or {}).get(view) or (ep.get('additional_depth') or {}).get(view) or {}
+    metadata = (ep['context'].get('depth') or {}).get(view) or {}
+    paired = entry.get('paired_camera', metadata.get('paired_camera'))
+    if paired is not None and paired in (ep['context'].get('cameras') or {}):
+        return cam_name(ep, paired) + ' depth'
+    source = str(entry.get('source_key') or metadata.get('source_key') or entry.get('source')
+                 or metadata.get('source') or view)
+    from label.dictionary_context import _public_source
+    return _public_source(source) + ' (unpaired depth)'
+
+
 def depth_stack(ep: dict, depth_at: dict, vs: list[str], k: int, label: str) -> bytes:
     """The depth pictures of cameras vs at instant k, coloured on each camera's episode scale (label/depth.py), at
     detail size, stacked top to bottom with a name strip that gives the scale."""
@@ -902,7 +915,7 @@ def depth_stack(ep: dict, depth_at: dict, vs: list[str], k: int, label: str) -> 
     dr = ImageDraw.Draw(g)
     y = 0
     for v, im in ims:
-        dr.text((6, y + 5), f"{cam_name(ep, v)} depth   {label}   t={frame_time(ep, k):.2f}s", fill=(255, 220, 0))
+        dr.text((6, y + 5), f"{depth_label(ep, v)}   {label}   t={frame_time(ep, k):.2f}s", fill=(255, 220, 0))
         g.paste(im, (0, y + strip))
         y += im.height + strip
     return dp.to_jpeg(g)
@@ -988,7 +1001,7 @@ def contact_image(ep: dict, c: dict, gate=None) -> tuple[bytes, dict] | None:
             if fr is not None:
                 im = dp.picture(fr, d[v], rng.get(v))
                 size = (PEAK_CELL_W, int(round(im.height * PEAK_CELL_W / im.width)))
-                peak.append((f"{cam_name(ep, v)} depth", im.resize(size, Image.NEAREST)))
+                peak.append((depth_label(ep, v), im.resize(size, Image.NEAREST)))
     for nm in c["signals"]:
         tile = _map_tile(ep, nm, kp)
         if tile is not None:
@@ -1252,10 +1265,13 @@ def _depth_note(ep: dict) -> str:
     d = ep.get("depth") or {}
     if not d:
         return ""
-    names = ", ".join(cam_name(ep, v) for v in order_views(d))
+    paired = [v for v in order_views(d) if d[v].get('paired_camera') is not None
+              and d[v]['paired_camera'] in (ep['context'].get('cameras') or {})]
+    unpaired = [v for v in order_views(d) if v not in paired]
+    names = ", ".join(cam_name(ep, d[v]['paired_camera']) for v in paired)
     # a depth stream that stops before its camera has no reading at the instants past it (prepare/formats.py
     # depth_kmap -1), where no depth view follows
-    gaps = [cam_name(ep, v) for v in order_views(d) if "km" in d[v] and (np.asarray(d[v]["km"]) < 0).any()]
+    gaps = [depth_label(ep, v) for v in order_views(d) if "km" in d[v] and (np.asarray(d[v]["km"]) < 0).any()]
     clocks = ep["context"].get("camera_clock") or {}
     depth_clocks = ep["context"].get("depth_camera_clock") or {}
     assumed = bool(clocks or depth_clocks)
@@ -1266,14 +1282,18 @@ def _depth_note(ep: dict) -> str:
         relevant = [clocks.get(anchor(ep)), *(clocks.get(v) for v in d), *depth_clocks.values()]
         assumed = any(relevant)
         invalid = any(isinstance(note, dict) and note.get("clock_problem") for note in relevant)
-    qualification = "".join(f" {cam_name(ep, v)} depth. {note['what']}" for v, note in depth_clocks.items()
+    qualification = "".join(f" {depth_label(ep, v)}. {note['what']}" for v, note in depth_clocks.items()
                             if v in d and isinstance(note, dict) and note.get("clock_problem"))
-    precision = (". Depth is paired using assumed presentation times. "
+    precision = (" Depth is placed using assumed presentation times. "
                  + ("An unusable recorded clock does not establish exact capture instants." if invalid else
-                    "Shared timestamps do not establish exact capture instants.") + qualification) if assumed else " at that instant."
-    return (f"\nDEPTH: {names} {'records' if len(d) == 1 else 'record'} depth as well as colour. Each detail view is "
-            "followed by the depth from the same "
-            + ("camera's depth sensor" if len(d) == 1 else "cameras' depth sensors")
+                    "Shared timestamps do not establish exact capture instants.") + qualification) if assumed else ""
+    description = (f"{names} {'records' if len(paired) == 1 else 'record'} depth as well as colour. " if paired else '')
+    if unpaired:
+        description += (', '.join(depth_label(ep, v) for v in unpaired)
+                        + (' has' if len(unpaired) == 1 else ' have')
+                        + ' no recorded RGB camera pairing. Display slots do not establish common sensors '
+                        'or image coordinates with the colour views. ')
+    return ("\nDEPTH: " + description + 'Detail views are followed by available recorded depth at the displayed instants.'
             + precision
             + (f" {', '.join(gaps)} {'has' if len(gaps) == 1 else 'have'} no depth for part of the episode; a detail "
                "view there is followed by no depth." if gaps else ""))
@@ -2383,9 +2403,9 @@ def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int 
             djpg = depth_stack(ep, depth_at, dv, k, what)
             extra_bytes += len(djpg)
             depth_sent.append(round(frame_time(ep, k), 3))
-            dn = ", ".join(cam_name(ep, v) for v in dv)
+            dn = ", ".join(depth_label(ep, v) for v in dv)
             content.append({"type": "text", "text": f"=== depth, {what}, t={frame_time(ep, k):.2f}s | "
-                                                    f"{'cameras' if len(dv) > 1 else 'camera'} {dn} ==="})
+                                                    f"{'streams' if len(dv) > 1 else 'stream'} {dn} ==="})
             content.append({"type": "image_url", "image_url": {
                 "url": "data:image/jpeg;base64," + base64.b64encode(djpg).decode("ascii"), "detail": detail}})
     contacts_sent, strips = [], {}

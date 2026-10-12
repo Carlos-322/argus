@@ -53,4 +53,12 @@ const mixed = T.snStillHtml({constant: [{name: 'qpos', dims: 2, value: [1, 2], n
   partial_reading_frames: 1, frames: 3}], none: []});
 check(!mixed.includes(':') && mixed.includes('no reading at 1 of 3 frames')
   && mixed.includes('partial reading at 1 of 3 frames'), 'mixed gaps preserve both counts without a colon');
+// The actual plot must not connect finite samples across omitted native missing rows.
+const P = new Function('const snOpacity = () => 1;' + piece('snIndexAt') + piece('snPlot') + 'return snPlot;')();
+const gapPlot = P({vals: {dims: 1, v: [0, 9, 0]}, break_before: [[2]]}, [0, .508333333, .75], 1);
+check(gapPlot.includes('M0.0 92.0L508.3 8.0M750.0 92.0'), 'native gaps break the plot at retained native times');
+const omittedPlot = P({vals: {dims: 1, v: [0, 9, 0]}, break_before: [[]]}, [0, .508333333, .75], 1);
+check(omittedPlot.includes('M0.0 92.0L508.3 8.0L750.0 92.0'), 'overview omission is not labeled as a source gap');
+check(T.snWhat({dims: 1, sampling: {method: 'bucket extrema', extrema_complete: false}})
+  .includes('not every extremum fits'), 'budget limits remain explicit');
 process.exit(bad ? 1 : 0);

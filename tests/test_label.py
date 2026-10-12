@@ -575,23 +575,178 @@ def _packed_episode(tmp_path):
     return ep, T
 
 
+def test_request_grid_receipt_rebuilds_actual_dense_inputs(tmp_path):
+    ep, _ = _packed_episode(tmp_path)
+    result = harness.label_episode(ep, tmp_path / 'label.json', model='openai/gpt-6.1-sol',
+        reasoning='high', api_key='dry-run', max_tokens=2000, timeout=60, cell_w=224,
+        dry_run=True, sample_fps=2)
+    receipt = (result.get('config') or {}).get('request_images')
+    assert receipt and receipt['images'], 'the final image input receipt must be retained'
+    assert receipt['dispatch_status'] == 'dry_run'
+    from label import grids
+    rebuilt = grids.rebuild(result, ep)
+    assert len(rebuilt) == len(receipt['grid_images'])
+    assert [grids.digest(g['jpeg']) for g in rebuilt] == [g['sha256'] for g in receipt['grid_images']]
+    assert len(receipt['images']) > len(rebuilt), 'detail images are accounted for separately'
+    from board import grids as bg
+    idx = grids.write(tmp_path / 'grids' / 'episode', result, rebuilt)
+    assert bg.matches(idx, to_board.convert(result, 'recorded'))
+    board = tmp_path / 'board'
+    (board / 'run' / 'out').mkdir(parents=True)
+    stored = {**result, 'dry_run': False, 'parse_ok': True, 'labels': {}}
+    (board / 'run' / 'out' / (ep.name + '.json')).write_text(json.dumps(stored))
+    (board / 'manifest.json').write_text(json.dumps({'datasets': [{'dataset': 'recorded',
+        'episodes': str(tmp_path), 'run': 'run'}]}))
+    built = bg.build(board, quiet=True)
+    assert built['rebuilt'] == 1 and built['failed'] == {}
+    assert bg.build(board, quiet=True)['kept'] == 1
+    changed = json.loads(json.dumps(result))
+    changed['config']['request_images']['grid_images'][0]['sha256'] = '0' * 64
+    assert not bg.matches(idx, to_board.convert(changed, 'recorded'))
+    context = json.loads((ep / 'context.json').read_text())
+    context['instruction'] = 'Different instruction with identical video.'
+    (ep / 'context.json').write_text(json.dumps(context))
+    with pytest.raises(grids.GridError):
+        grids.rebuild(result, ep)
+
+
+def test_grid_publication_rejects_replaced_or_escaping_images(tmp_path):
+    assert hasattr(mf, 'grid_jpegs'), 'the grid extractor must distinguish supplemental images'
+    from label import grids
+    from board import grids as bg
+    from PIL import Image
+    image = io.BytesIO()
+    Image.new('RGB', (40, 30), 'red').save(image, format='JPEG')
+    jpg = mf.compose_grid([(0.0, {'scene': image.getvalue()})], ['scene'], 80, 6, 22)
+    receipt = {'fingerprint': 'a' * 64, 'grid_images': [{'sha256': grids.digest(jpg)}],
+               'images': [{'sha256': grids.digest(jpg)}]}
+    result = {'config': {'request_images': receipt}}
+    root = tmp_path / 'grids'
+    folder = bg.grid_dir(root, 'episode.json')
+    grids.write(folder, result, [{'jpeg': jpg, 't0_s': 0.0, 't1_s': 0.0}])
+    record = {'request_images': receipt}
+    assert bg.read(root, 'episode.json', record)
+    (folder / 'grid_01.jpg').write_bytes(b'changed bytes')
+    assert bg.read(root, 'episode.json', record) is None
+
+    idx = json.loads((folder / 'grids.json').read_text())
+    idx['grids'][0]['file'] = '../outside.jpg'
+    (folder / 'grids.json').write_text(json.dumps(idx))
+    (root / 'outside.jpg').write_bytes(jpg)
+    assert bg.read(root, 'episode.json', record) is None
+
+
+def test_final_image_receipt_includes_selected_sensor_images(tmp_path, monkeypatch):
+    from PIL import Image
+    from label import evidence_access, grids
+    ep, _ = _packed_episode(tmp_path)
+    raw = io.BytesIO()
+    Image.new('RGB', (24, 18), 'magenta').save(raw, format='JPEG')
+    jpg = raw.getvalue()
+    extra = [{'type': 'text', 'text': 'Inspected sensor image'}, {'type': 'image_url',
+        'image_url': {'url': 'data:image/jpeg;base64,' + base64.b64encode(jpg).decode(), 'detail': 'high'}}]
+    def select(access, _content, _call, _cache, **_options):
+        doc = access.record()
+        doc.update(rounds=[], cost_usd=0.0)
+        return doc, extra
+    sent = []
+    def provider(content, *_args, **_options):
+        sent.append(content)
+        return {'choices': [{'finish_reason': 'stop', 'message': {'content': '{}'}}],
+                'usage': {'cost': 0.0}}
+    monkeypatch.setattr(evidence_access, 'discover', select)
+    monkeypatch.setattr(harness, 'call_model', provider)
+    result = harness.label_episode(ep, tmp_path / 'result.json', model='openai/gpt-6-astra',
+        reasoning='medium', api_key='sk-or-fixture', max_tokens=2000, timeout=60, cell_w=224)
+    assert len(sent) == 1
+    images = [base64.b64decode(p['image_url']['url'].split(',', 1)[1])
+              for p in sent[0] if p.get('type') == 'image_url']
+    receipt = result['config']['request_images']
+    assert [row['sha256'] for row in receipt['images']] == [grids.digest(image) for image in images]
+    assert receipt['images'][-1]['sha256'] == grids.digest(jpg)
+    assert receipt['images'][-1]['kind'] == 'supplemental'
+    assert receipt['dispatch_status'] == 'response_received'
+
+
+def test_multipart_grid_receipts_keep_each_request_origin(tmp_path, monkeypatch):
+    from label import grids, pieces
+    ep, _ = _packed_episode(tmp_path)
+    monkeypatch.setattr(pieces, 'piece_max', lambda ctx: 2.0)
+    parts = pieces.write_pieces(ep, tmp_path / 'parts')
+    results = []
+    for part in parts:
+        result = harness.label_episode(part, tmp_path / (part.name + '.json'),
+            model='openai/gpt-6.1-sol', reasoning='high', api_key='dry-run',
+            max_tokens=2000, timeout=60, cell_w=128, sample_fps=2, dry_run=True)
+        results.append((json.loads((part / 'context.json').read_text()), result))
+    joined = pieces.stitch(ep, results)
+    receipt = joined['config']['request_images']
+    rebuilt = grids.rebuild(joined)
+    assert [grids.digest(row['jpeg']) for row in rebuilt] == [g['sha256'] for g in receipt['grid_images']]
+    assert {g['part'] for g in rebuilt} == set(range(1, len(parts) + 1))
+    for row in rebuilt:
+        origin = joined['config']['pieces'][row['part'] - 1]['t0_s']
+        assert row['t0_s'] == pytest.approx(row['local_t0_s'] + origin, abs=.001)
+    partial = json.loads(json.dumps(joined))
+    last = partial['config']['pieces'][-1]
+    last['config'].pop('request_images')
+    last['final_dispatch_outcome'] = 'not dispatched'
+    private = str(tmp_path / 'private_examples')
+    last['example_dir'] = private
+    pieces._combine_request_config(partial['config'])
+    receipt = partial['config']['request_images']
+    assert receipt['coverage'] == 'available_part_receipts'
+    assert receipt['unavailable_parts'][-1]['dispatch_status'] == 'not_dispatched'
+    remaining = grids.rebuild(partial)
+    assert remaining and all(row['part'] != len(parts) for row in remaining)
+    assert [grids.digest(row['jpeg']) for row in remaining] == [g['sha256'] for g in receipt['grid_images']]
+    from board import grids as bg
+    idx = grids.write(tmp_path / 'partial_grids', partial, remaining)
+    view = bg.view(idx, lambda i, row: row['file'])
+    assert view['unavailable_parts'] and all(g['dispatch_status'] == 'dry_run' for g in view['grids'])
+    from board.public_export import project
+    assert private not in json.dumps(project(partial))
+
+
+
+def _accounted_evidence_selection(content):
+    from label.evidence_access import SELECTION
+    if not any(part.get('type') == 'text' and part.get('text', '').startswith(SELECTION) for part in content):
+        return None
+    return {'usage': {'cost': .004}, 'choices': [{'finish_reason': 'stop',
+            'message': {'content': '{"requests":[]}'}}]}
+
+
+def _assert_verified_selection_charge(record):
+    inspection = record['evidence_inspection']
+    assert inspection['status'] == 'complete'
+    assert inspection['cost_usd'] == pytest.approx(.004)
+    assert len(inspection['rounds']) == 1 and inspection['rounds'][0]['state'] == 'received'
+    assert inspection['rounds'][0]['response']['usage']['cost'] == pytest.approx(.004)
+
+
 def test_final_timeout_claim_survives_resume_without_second_dispatch(tmp_path, monkeypatch):
     ep, _ = _packed_episode(tmp_path)
     out = tmp_path / 'out'
     calls = []
-    def provider(*args, **options):
-        calls.append(options.get('attempts'))
+    def provider(content, *args, **options):
+        selection = _accounted_evidence_selection(content)
+        calls.append(('selection' if selection is not None else 'final', options.get('attempts')))
+        if selection is not None:
+            return selection
         raise TimeoutError('response outcome unknown')
     monkeypatch.setattr(harness, 'call_model', provider)
     args = dict(keys=['sk-or-fixture'], concurrency=1, force=False, model='openai/gpt-6-astra',
                 reasoning='medium', max_tokens=2000, timeout=1, cell_w=128, max_spend=20)
     assert harness.run_batch([ep], out, **args) == 1
     receipt = json.loads((out / f'noreply_{ep.name}.json').read_text())
-    assert calls == [1]
+    assert calls == [('selection', 1), ('final', 1)]
+    _assert_verified_selection_charge(receipt)
     assert receipt['final_dispatch_outcome'] == 'unverified'
     assert receipt['final_reserved_usd'] > 0
+    assert harness.episode_cost(receipt) == pytest.approx(receipt['final_reserved_usd'] + .004)
     assert harness.run_batch([ep], out, **args) == 0
-    assert calls == [1]
+    assert calls == [('selection', 1), ('final', 1)]
 
 
 @pytest.mark.parametrize('usage', [None, {}, {'prompt_tokens': 100},
@@ -637,8 +792,11 @@ def test_run_batch_does_not_replay_successful_reply_with_missing_usage(tmp_path,
     from label.dictionary_stage import label_spend, label_spend_complete
     ep, _ = _packed_episode(tmp_path)
     calls = []
-    def provider(*args, **kwargs):
-        calls.append(kwargs.get('attempts'))
+    def provider(content, *args, **kwargs):
+        selection = _accounted_evidence_selection(content)
+        calls.append(('selection' if selection is not None else 'final', kwargs.get('attempts')))
+        if selection is not None:
+            return selection
         return {'choices': [{'finish_reason': 'stop', 'message': {'content': '{}'}}]}
     monkeypatch.setattr(harness, 'call_model', provider)
     out = tmp_path / 'job' / 'run' / 'out'
@@ -648,18 +806,23 @@ def test_run_batch_does_not_replay_successful_reply_with_missing_usage(tmp_path,
     receipt = json.loads((out / f'{ep.name}.json').read_text())
     assert receipt['parse_ok'] is True
     assert receipt['final_dispatch_outcome'] == 'unverified'
-    assert calls == [1]
-    assert label_spend(tmp_path / 'job') >= receipt['final_reserved_usd']
+    assert calls == [('selection', 1), ('final', 1)]
+    _assert_verified_selection_charge(receipt)
+    assert label_spend(tmp_path / 'job') == pytest.approx(receipt['final_reserved_usd'] + .004)
     assert label_spend_complete(tmp_path / 'job') is False
     assert harness.run_batch([ep], out, **args) == 0
-    assert calls == [1]
+    assert calls == [('selection', 1), ('final', 1)]
+    assert label_spend(tmp_path / 'job') == pytest.approx(receipt['final_reserved_usd'] + .004)
 
 
 def test_final_claim_survives_worker_crash_and_budget_refusal_has_no_dispatch(tmp_path, monkeypatch):
     ep, _ = _packed_episode(tmp_path)
     calls = []
-    def crash(*args, **options):
-        calls.append(options.get('attempts'))
+    def crash(content, *args, **options):
+        selection = _accounted_evidence_selection(content)
+        calls.append(('selection' if selection is not None else 'final', options.get('attempts')))
+        if selection is not None:
+            return selection
         raise KeyboardInterrupt('worker stopped after dispatch')
     monkeypatch.setattr(harness, 'call_model', crash)
     args = dict(keys=['sk-or-fixture'], concurrency=1, force=False, model='openai/gpt-6-astra',
@@ -672,9 +835,11 @@ def test_final_claim_survives_worker_crash_and_budget_refusal_has_no_dispatch(tm
         harness.run_batch([ep], out, max_spend=20, **args)
     receipt = json.loads((out / f'noreply_{ep.name}.json').read_text())
     assert receipt['final_dispatch_outcome'] == 'claimed'
-    assert calls == [1]
+    _assert_verified_selection_charge(receipt)
+    assert harness.episode_cost(receipt) == pytest.approx(receipt['final_reserved_usd'] + .004)
+    assert calls == [('selection', 1), ('final', 1)]
     assert harness.run_batch([ep], out, max_spend=20, **args) == 0
-    assert calls == [1]
+    assert calls == [('selection', 1), ('final', 1)]
 
 
 def test_single_episode_cli_refuses_unreadable_no_reply_claim(tmp_path, monkeypatch):
@@ -809,8 +974,13 @@ def test_an_openai_key_sends_the_request_straight_to_openai(monkeypatch):
 
 def test_cut_off_reply_is_kept_beside_the_outputs_and_fails(tmp_path, monkeypatch):
     ep, _ = _packed_episode(tmp_path)
+    calls = []
 
     def fake_call(content, model, reasoning, api_key, max_tokens, timeout, **options):
+        selection = _accounted_evidence_selection(content)
+        calls.append('selection' if selection is not None else 'final')
+        if selection is not None:
+            return selection
         return {"choices": [{"message": {"content": '{"timeline": [[0.0, 1'}, "finish_reason": "length"}],
                 "usage": {"prompt_tokens": 1000, "completion_tokens": 64000, "cost": 0.5}, **SERVED}
 
@@ -825,23 +995,32 @@ def test_cut_off_reply_is_kept_beside_the_outputs_and_fails(tmp_path, monkeypatc
     # what the board shows of an episode with no labels: its checks and the stretches no camera decoded
     assert "dataset_checks" in failed and "decode_failed" in failed and "given_prompt" in failed
     # the cut-off reply was billed: it counts toward the run's cost and the spend cap
-    assert harness.episode_cost(failed) == 0.5 and lrun.billed_cost(tmp_path) == 0.5
+    _assert_verified_selection_charge(failed)
+    assert calls == ['selection', 'final']
+    assert harness.episode_cost(failed) == lrun.billed_cost(tmp_path) == pytest.approx(.504)
     with pytest.raises(harness.Truncated) as e:
         harness.label_episode(ep, out, model="m", reasoning="medium", api_key="sk-or-x", max_tokens=64000, timeout=60, cell_w=448)
-    assert e.value.cost == 1.0
+    assert e.value.cost == pytest.approx(1.004)
     retried = json.loads((out.parent / "failed_episode_000007.json").read_text())
     assert retried["usage"]["cost"] == 0.5
     assert len(retried["final_cost_history"]) == 1
-    assert harness.episode_cost(retried) == lrun.billed_cost(tmp_path) == 1.0
+    _assert_verified_selection_charge(retried)
+    assert calls == ['selection', 'final', 'final']
+    assert harness.episode_cost(retried) == lrun.billed_cost(tmp_path) == pytest.approx(1.004)
     # A successful third attempt retains both failed invoices. The old failed file remains for audit.
-    monkeypatch.setattr(harness, "call_model", lambda *a, **k: {
-        "choices": [{"message": {"content": json.dumps({"timeline": [], "operator_mistakes": [],
-            "completion": {"task_completed": "unclear"}})}, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 1000, "completion_tokens": 200, "cost": 0.25}, **SERVED})
+    def successful_final(content, *args, **options):
+        assert _accounted_evidence_selection(content) is None
+        calls.append('final')
+        return {"choices": [{"message": {"content": json.dumps({"timeline": [], "operator_mistakes": [],
+                "completion": {"task_completed": "unclear"}})}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1000, "completion_tokens": 200, "cost": 0.25}, **SERVED}
+    monkeypatch.setattr(harness, "call_model", successful_final)
     result = harness.label_episode(ep, out, model="m", reasoning="medium", api_key="sk-or-x",
                                    max_tokens=64000, timeout=60, cell_w=448)
     assert (out.parent / "failed_episode_000007.json").exists()
-    assert harness.episode_cost(result) == lrun.billed_cost(tmp_path) == 1.25
+    _assert_verified_selection_charge(result)
+    assert calls == ['selection', 'final', 'final', 'final']
+    assert harness.episode_cost(result) == lrun.billed_cost(tmp_path) == pytest.approx(1.254)
 
 
 def test_dry_run_from_the_command_line(tmp_path, monkeypatch, capsys):

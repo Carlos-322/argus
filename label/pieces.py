@@ -523,7 +523,8 @@ def stitch_run(job: Path, eps: Path, long_eps: dict, out: Path) -> dict:
                             'cache_write_tokens', 'latency_s', 'est_cost_usd'):
                     result['usage'][key] = round(result['usage'][key] + float(u.get(key) or 0), 4)
                 result['config']['pieces'][int(pc['piece']['index']) - 1].update(
-                    episode_dir=r.get('episode_dir'), cost_usd=u.get('est_cost_usd'),
+                    episode_dir=r.get('episode_dir'), example_dir=r.get('example_dir'),
+                    final_dispatch_outcome=r.get('final_dispatch_outcome'), cost_usd=u.get('est_cost_usd'),
                     annotation_policy=r.get('annotation_policy'),
                     usage=u, provider=r.get('provider'), generation_id=r.get('generation_id'),
                     finish_reason=r.get('finish_reason'), resolution_route=(r.get('config') or {}).get('resolution_route'),
@@ -570,6 +571,8 @@ def unlabelled(ep_dir: Path, failed: list[tuple[dict, dict | None]], missing: li
     cfg['resolution_route'] = {'parts': routes,
                                'cost_usd': round(sum(float(route.get('cost_usd') or 0) for route in routes), 6)}
     cfg['pieces'] = [{**pc.get('piece', {}), 'episode_dir': (r or {}).get('episode_dir'),
+                      'example_dir': (r or {}).get('example_dir'),
+                      'final_dispatch_outcome': (r or {}).get('final_dispatch_outcome'),
                       'annotation_policy': (r or {}).get('annotation_policy'),
                       'usage': (r or {}).get('usage') or {}, 'provider': (r or {}).get('provider'),
                       'generation_id': (r or {}).get('generation_id'), 'finish_reason': (r or {}).get('finish_reason'),
@@ -608,6 +611,11 @@ def _combine_request_config(cfg: dict) -> None:
                       for part, config in zip(parts, configs) for t in config.get(field) or []]
     cfg['n_timesteps'] = (len(cfg['timesteps_s']) if all('timesteps_s' in config for config in configs) else None)
     cfg['request_config_scope'] = 'available_part_records'
+    from label.grids import joined_receipt
+    receipt = joined_receipt(parts)
+    cfg.pop('request_images', None)
+    if receipt is not None:
+        cfg['request_images'] = receipt
 
 T_KEYS = ("t_s", "start_s", "end_s", "completed_at_s", "goal_reached_at_s", "undone_at_s", "failure_t_s",
           "recovered_at_s")
@@ -945,6 +953,8 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
         cfg = r.get("config") or {}
         still += _shift(r.get("arm_still_spans") or [], t0)
         part_info.append({"part": i, "t0_s": t0, "t1_s": t1, "episode_dir": r.get("episode_dir"),
+                          "example_dir": r.get("example_dir"),
+                          "final_dispatch_outcome": r.get("final_dispatch_outcome"),
                           **({'annotation_policy': copy.deepcopy(r['annotation_policy'])}
                              if r.get('annotation_policy') else {}),
                           'config': copy.deepcopy(cfg),

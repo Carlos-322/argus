@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import json
+import re
 import numpy as np
+
+
+SAMPLE_RATE_KEY = re.compile(r'^(?:sample_?rate|sampling_?rate|sample_?freq(?:uency)?|fs)(?:_hz)?$', re.I)
 
 
 PROTO_DTYPES = {1: 'float64', 2: 'float32', 3: 'int64', 4: 'uint64', 5: 'int32',

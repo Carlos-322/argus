@@ -811,7 +811,7 @@ def test_the_server_hands_out_the_video_and_each_camera_as_files(tmp_path):
 
 
 @pytest.mark.skipif(not (shutil.which("ffmpeg") and shutil.which("ffprobe")), reason="no ffmpeg")
-def test_an_extra_camera_is_cut_served_and_put_in_the_video_download(tmp_path):
+def test_an_extra_camera_is_cut_served_and_put_in_the_video_download(tmp_path, monkeypatch):
     from board import clips, static
     serve = _footage_board(tmp_path)
     assert clips.clip_path(tmp_path, "e", "extra1") == tmp_path / "extra1" / "e.mp4"
@@ -826,6 +826,36 @@ def test_an_extra_camera_is_cut_served_and_put_in_the_video_download(tmp_path):
     mp4, _ = serve.footage("episode_a")
     m = _cell_means(mp4, cells)
     assert [int(np.argmax(m[:, i])) for i in range(4)] == [45, 60, 30, 75]
+
+    # A retained scene camera is the player's main view even when the model's
+    # first camera is tactile. A stale withheld clip must not reappear in export.
+    qa = tmp_path / 'qa'
+    qa.mkdir()
+    monkeypatch.setattr(serve, 'HERE', qa)
+    monkeypatch.setattr(serve, 'DICTIONARY_JOB', None)
+    (serve.MP4_DIR / 'unshown1').mkdir()
+    (serve.MP4_DIR / 'unshown2').mkdir()
+    _flash_clip(serve.MP4_DIR / 'unshown1' / 'episode_a.mp4', 80, 60, 60, 15)
+    (serve.MP4_DIR / 'unshown2' / 'episode_a.mp4').hardlink_to(serve.MP4_DIR / 'extra1' / 'episode_a.mp4')
+    d = {'_meta': {'episode_id': 'episode_a'}, 'duration_s': 3.0,
+         'camera_views': ['exo', 'left', 'right', 'extra1'],
+         'camera_presentation': {'exo': {'role': 'tactile'}, 'unshown1': {'role': 'scene'},
+                                 'unshown2': {'role': 'scene'}},
+         'unshown_cameras': [{'view': 'unshown1', 'name': 'Retained scene', 'why': 'not selected'}]}
+    label = qa / 'dataset_episode_a.json'  # media identity need not equal the label filename
+    label.write_text(json.dumps(d))
+    expected = static.shown_cams(d)
+    assert [c for c, _ in serve.footage_cams(serve.MP4_DIR, 'episode_a')] == expected
+    sizes = [(80, 60), (80, 60), (80, 60), (80, 60), (60, 80)]
+    _, _, cells = serve.footage_layout(sizes)
+    scene_first, _ = serve.footage('episode_a')
+    m = _cell_means(scene_first, cells)
+    assert len(m) == 90  # the shorter retained scene does not shorten the recording
+    assert [int(np.argmax(m[:, i])) for i in range(5)] == [15, 60, 30, 75, 45]
+    assert scene_first != mp4  # changed camera order cannot reuse the previous composite
+    d['camera_presentation'] = {}  # unknown roles preserve the ordinary fallback order
+    label.write_text(json.dumps(d))
+    assert [c for c, _ in serve.footage_cams(serve.MP4_DIR, 'episode_a')] == ['exo', 'left', 'right', 'extra1', 'unshown1']
 
 
 def _rerun(runs: Path, name: str, slice_dir: Path, outcomes: dict) -> Path:
