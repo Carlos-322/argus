@@ -4,7 +4,7 @@ An episode is a sidecar folder written by a preparer (prepare/): context.json (t
 kind, fps, cameras and what each one is, the instruction or annotation), sources.json (per camera, the video
 file, the episode's offset in it and its frame count), state.npz (recorded state and action, absent for
 video-only rigs) and, where the dataset keeps real capture times, times.npz and a kmap per camera paired to the
-anchor camera by time. Nothing about the data is changed: the model sees the episode as the dataset ships it.
+anchor camera by time. Source and preparation boundaries are kept separate from sampled evidence.
 
 What the model is told about the episode, and where each fact comes from:
 - dataset, robot type, fps and camera resolution: recorded metadata and preparation facts (context.json).
@@ -2240,9 +2240,9 @@ def _intro_head(ep: dict) -> str:
     if ep.get("unavailable_instants"):
         return (f"You are labelling {kind_of.format(d=ctx.get('dataset'), w=what)}: {who}. You see the available "
                 "sampled footage; unavailable instants and replacement frames are named below.\n")
-    return (f"You are labelling {kind_of.format(d=ctx.get('dataset'), w=what)}: {who}. You see the episode exactly as "
-            "the dataset ships it, from its first recorded frame to its last; nothing was trimmed, cleaned or "
-            "edited.\n")
+    return (f"You are labelling {kind_of.format(d=ctx.get('dataset'), w=what)}: {who}. "
+            "You see sampled footage from the supplied recording. Source claims and any stated recording "
+            "or preparation boundaries are described below.\n")
 
 
 def _frames_head(ep: dict, cell_w: int, cell_h: int, native: tuple) -> str:
