@@ -744,6 +744,16 @@ def bind_camera_observations(rows, fields: dict) -> dict:
             result['withheld_observations'].append({'observation': copy.deepcopy(row), 'why': why})
         else:
             result['observations'].append({key: row[key] for key in ('view', 'content', 'evidence')})
+    if (result['withheld_observations'] or not supplied
+            or {row['view'] for row in result['observations']} != set(views)):
+        result['withheld_observations'].extend({'observation': row,
+            'why': 'Camera interpretation requires one valid observation for every supplied view ID.'}
+            for row in result['observations'])
+        result['observations'] = []
+        missing = [view for view in result['views'] if isinstance(view, str) and counts.get(view) != 1]
+        if missing:
+            result['withheld_observations'].append({'views': missing,
+                'why': 'Supplied view IDs are missing or do not have exactly one observation.'})
     return result
 
 

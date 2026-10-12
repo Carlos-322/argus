@@ -103,9 +103,17 @@
    ]
   },
   {
+   "slug": "camera-coverage-partial",
+   "list": "handling",
+   "name": "Camera covers part of the labeling anchor",
+   "reader_issues": [
+    "camera_coverage_partial"
+   ]
+  },
+  {
    "slug": "main-camera-short",
-   "list": "data",
-   "name": "Main camera covers less than the other cameras",
+   "list": "handling",
+   "name": "Labeling anchor covers less than other cameras",
    "reader_issues": [
     "main_camera_short"
    ]
@@ -132,8 +140,8 @@
   },
   {
    "slug": "signal-partial",
-   "list": "data",
-   "name": "Signal starts late or stops early",
+   "list": "handling",
+   "name": "Aligned signal readings cover part of the footage",
    "reader_issues": [
     "signal_partial_span"
    ]
@@ -396,8 +404,8 @@
   },
   {
    "slug": "signal-gap",
-   "list": "data",
-   "name": "Signal has missing readings",
+   "list": "handling",
+   "name": "Aligned signal readings have gaps",
    "reader_issues": [
     "signal_gap"
    ]

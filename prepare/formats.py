@@ -693,15 +693,10 @@ def edge_slack(span_s: float) -> float:
 
 
 def camera_span_issues(extra: dict, times: dict, anchor: str, names: dict, ctx: dict) -> None:
-    """Each camera's span against the episode's, as issues on extra; times {view: its frame times on the episode's
-    raw clock}, names {view: camera name}, ctx the episode's profile and cameras (board/clips.py camera_label names
-    them). The episode is the anchor camera's frames, from its first to one frame past its last. A camera that starts
-    or ends more than the edge slack (edge_slack) inside it is camera_short, with the stretch it shows nothing for. The
-    anchor stays the main camera even when it is the short one, since the views name the cameras' roles (a wrist
-    camera made the anchor would be taken for the scene camera): it is then main_camera_short, with the stretch the
-    other cameras cover past it, which the board shows and the labels do not. Markers are stored on the raw clock;
-    derived prose uses the explicit consumer origin when present, otherwise the anchor start as before."""
-    from board.clips import camera_label
+    """Record camera coverage relative to the reader-selected labeling anchor. The source need not declare that
+    anchor primary or require all cameras to share its span. Anchor coverage differences are handling notes, with
+    raw-clock spans retained; they do not establish a camera failure. Derived prose uses the explicit consumer origin
+    when present, otherwise the anchor start. Other camera spans are preserved without shortening the anchor."""
     step = lambda t: float(np.median(np.diff(t))) if len(t) > 1 else 1 / 30
     span = {v: (float(t[0]), float(t[-1]) + step(t)) for v, t in times.items() if len(t)}
     if anchor not in span:
@@ -710,22 +705,22 @@ def camera_span_issues(extra: dict, times: dict, anchor: str, names: dict, ctx: 
     origin = float(ctx.get("clock_zero_s", a0) or 0.0)
     found = {}
     slack = edge_slack(a1 - a0)
-    label = lambda v: camera_label(v, ctx)
+    label = lambda v: f"{(ctx.get('cameras') or {}).get(v, {}).get('key') or names[v]} camera"
     for v, (t0, t1) in span.items():
         if v == anchor:
             continue
         if t1 < a1 - slack:
-            add_issue(found, "camera_short", f"The {label(v)} video ends at {t1 - origin:.2f} s, before the episode ends at "
+            add_issue(found, "camera_coverage_partial", f"The {label(v)} video ends at {t1 - origin:.2f} s, before the episode ends at "
                                              f"{a1 - origin:.2f} s, so it shows nothing after that.",
                       camera=names[v], t0_s=t1 - origin, t1_s=a1 - origin)
         if t0 > a0 + slack:
-            add_issue(found, "camera_short", f"The {label(v)} video starts at {t0 - origin:.2f} s, after the episode "
+            add_issue(found, "camera_coverage_partial", f"The {label(v)} video starts at {t0 - origin:.2f} s, after the episode "
                                              "starts, so it shows nothing before that.",
                       camera=names[v], t0_s=0.0, t1_s=t0 - origin)
     later = [v for v, (_, t1) in span.items() if t1 > a1 + slack]
     if later:
         end = max(span[v][1] for v in later)
-        add_issue(found, "main_camera_short", f"The {label(anchor)} video, which the episode is labelled on, ends at "
+        add_issue(found, "main_camera_short", f"The {label(anchor)} video selected as the labeling anchor ends at "
                                               f"{a1 - origin:.2f} s, while the {_and_words([label(v) for v in later])} "
                                               f"{'goes' if len(later) == 1 else 'go'} on to {end - origin:.2f} s; that "
                                               "part is shown on the board but not labelled.",
@@ -733,7 +728,7 @@ def camera_span_issues(extra: dict, times: dict, anchor: str, names: dict, ctx: 
     earlier = [v for v, (t0, _) in span.items() if t0 < a0 - slack]
     if earlier:
         start = min(span[v][0] for v in earlier)
-        add_issue(found, "main_camera_short", f"The {label(anchor)} video, which the episode is labelled on, starts "
+        add_issue(found, "main_camera_short", f"The {label(anchor)} video selected as the labeling anchor starts "
                                               f"{a0 - start:.2f} s after the {_and_words([label(v) for v in earlier])}"
                                               "; what was recorded before it is not labelled or shown.",
                   camera=names[anchor], t0_s=start - origin, t1_s=0.0)
@@ -2564,12 +2559,10 @@ def span_on_footage(t0: float, t1: float, zero: float, length: float) -> tuple[f
 
 
 def signal_gaps(name: str, a: np.ndarray, t: np.ndarray) -> list[dict]:
-    """The data issues of a kept signal's frames with no reading (a row with no finite value), in seconds of the
-    episode (t, its frames' times): before its first reading or after its last one, when longer than the edge slack
-    (edge_slack), a signal_partial_span each (a sensor started late or stopped early), and every other frame
-    without a reading counted in one signal_gap with its longest run. A lead or a tail within the slack is a recorder
-    starting up or stopping, no issue: a camera's calibration first sent 0.2 s in had made a gap issue of every value
-    it holds."""
+    """Record where the camera-aligned signal has no finite reading. These are coverage notes, not proof of lost
+    source messages: sparse or event-driven sources need not publish near every camera frame. Lead/tail spans beyond
+    edge_slack become signal_partial_span; internal uncovered rows become signal_gap with the longest run. Native bad
+    cells and nonfinite values are reported separately by their source readers and write_signals."""
     none = ~np.isfinite(np.asarray(a)).any(axis=1)
     n = len(none)
     if not none.any() or none.all() or len(t) != n:
@@ -2581,13 +2574,13 @@ def signal_gaps(name: str, a: np.ndarray, t: np.ndarray) -> list[dict]:
     out = []
     if first and t[first] > slack:
         out.append({"kind": "signal_partial_span", "signal": name, "t0_s": 0.0, "t1_s": float(t[first]),
-                    "what": f"{name} has no reading before {t[first]:.1f} s, so it is missing over the start of the "
-                            "footage"})
+                    "what": f"{name} has no aligned reading before {t[first]:.1f} s of the footage; expected source "
+                            "coverage is not established"})
     none[:first] = False
     if last < n - 1 and t[-1] - t[last] > slack:
         out.append({"kind": "signal_partial_span", "signal": name, "t0_s": float(t[last]), "t1_s": float(t[-1]),
-                    "what": f"{name} has no reading after {t[last]:.1f} s, so it is missing over the end of the "
-                            "footage"})
+                    "what": f"{name} has no aligned reading after {t[last]:.1f} s of the footage; expected source "
+                            "coverage is not established"})
     none[last + 1:] = False
     if none.any():
         edges = np.diff(np.concatenate([[0], none.astype(np.int8), [0]]))
@@ -2595,7 +2588,7 @@ def signal_gaps(name: str, a: np.ndarray, t: np.ndarray) -> list[dict]:
         a0, a1 = max(runs, key=lambda r: r[1] - r[0])
         k = int(none.sum())
         out.append({"kind": "signal_gap", "signal": name, "t0_s": float(t[a0]), "t1_s": float(t[a1]),
-                    "what": f"{name} has no reading at {k} of its {n} frames"
+                    "what": f"{name} has no aligned reading at {k} of its {n} frames on the camera clock"
                             + (f"; the longest gap runs from {t[a0]:.2f} s to {t[a1]:.2f} s" if a1 > a0 else "")})
     return out
 
@@ -5084,8 +5077,18 @@ def lerobot_annotations(ctx, root, df, data_path, *, image_clock=False):
         for claim in missing:
             claim["data_source"] = str(data_path)
         if missing:
-            add_issue(ctx, "metadata_unreadable", f"{column} in {data_path} has unresolved recorded annotation codes; "
-                      "all original rows and table claims are retained as uploader notes.", source=str(data_path))
+            unavailable, invalid = False, False
+            for claim in missing:
+                try:
+                    no_mapping = column not in text_columns and recorded_index(claim["value"]) not in labels
+                except (TypeError, ValueError):
+                    no_mapping = False
+                unavailable |= no_mapping
+                invalid |= not no_mapping
+            for kind, present in (("metadata_limit", unavailable), ("metadata_unreadable", invalid)):
+                if present:
+                    add_issue(ctx, kind, f"{column} in {data_path} has unresolved recorded annotation codes; "
+                              "all original rows and table claims are retained as uploader notes.", source=str(data_path))
         spans.extend(steps)
         unresolved.extend(missing)
         for (_, path), table in selected.items():

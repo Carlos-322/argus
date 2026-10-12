@@ -4130,9 +4130,15 @@ def test_writing_bookkeeping_again_keeps_the_same_metadata():
         saved.close()
 
 
-def test_lerobot_task_tables_are_read_while_foreign_notes_stay_listed():
+def test_lerobot_task_tables_are_read_while_foreign_notes_stay_listed(monkeypatch):
+    import io
+    import json
     import numpy as np
     import pandas as pd
+    import pytest
+    import urllib.error
+    from prepare import fastumi
+    native_listing = fastumi.hub.ls
     with tempfile.TemporaryDirectory() as t:
         root = Path(t) / 'upload'
         _lerobot(root, {0: {'observation.state': [np.zeros(14)] * 10, 'task_index': [0] * 10}})
@@ -4144,6 +4150,82 @@ def test_lerobot_task_tables_are_read_while_foreign_notes_stay_listed():
         assert 'meta/tasks.parquet' not in unread, unread
         assert root / 'broken_meta.json' in f.opened_notes(items)
         assert root / 'ep99_meta.json' not in f.opened_notes(items)
+
+        for case, (tasks, table, unavailable, expected) in enumerate([
+                (['owned task'], True, False, 'owned task'), ([0], True, False, 'recorded task'),
+                ([], False, True, ''), ([], True, True, 'recorded task')]):
+            raw = Path(t) / str(case) / 'raw'
+            task = 'single_arm/example'
+            source = raw / task
+            values = np.arange(70, dtype=np.float32).reshape(10, 7)
+            _lerobot(source, {0: {'observation.state': list(values), 'action': list(values + 1),
+                                  'task_index': [0] * 10}})
+            info_path = source / 'meta' / 'info.json'
+            info = json.loads(info_path.read_text())
+            camera = 'observation.images.camera_rgb_image'
+            info['features'][camera] = info['features'].pop('observation.images.cam_high')
+            info_path.write_text(json.dumps(info))
+            (source / 'videos' / 'chunk-000' / 'observation.images.cam_high').rename(
+                source / 'videos' / 'chunk-000' / camera)
+            (source / 'meta' / 'episodes.jsonl').write_text(json.dumps(
+                {'episode_index': 0, 'length': 10, 'tasks': tasks}) + '\n')
+            if table:
+                pd.DataFrame({'task_index': [0], 'task': ['recorded task'], 'extra_payload': [73]}).to_parquet(
+                    source / 'meta' / 'tasks.parquet')
+            requested = []
+            def download(path, raw_root):
+                requested.append(path)
+                return raw_root / path
+            monkeypatch.setattr(fastumi, '_dl', download)
+            if unavailable:
+                def listing_failure(req, timeout):
+                    if table:
+                        raise urllib.error.URLError('offline listing')
+                    raise urllib.error.HTTPError(req.full_url, 404, 'Not Found', {}, io.BytesIO(b'{}'))
+                monkeypatch.setattr(fastumi.hub.urllib.request, 'urlopen', listing_failure)
+                monkeypatch.setattr(fastumi.hub.time, 'sleep', lambda _: None)
+                monkeypatch.setattr(fastumi.hub, 'ls', native_listing)
+            else:
+                monkeypatch.setattr(fastumi.hub, 'ls', lambda repo, path: [
+                    {'type': 'file', 'path': task + '/meta/tasks.parquet'}] if table else [])
+            out = raw.parent / 'out'
+            assert fastumi.prepare_one(task + '/0', raw, out, False) == 'ok'
+            prepared = out / fastumi.episode_dir_name(task + '/0')
+            ctx = json.loads((prepared / 'context.json').read_text())
+            assert ctx.get('instruction', '') == expected
+            assert (task + '/meta/tasks.parquet' in requested) == (table and not unavailable)
+            if unavailable:
+                with pytest.raises(fastumi.hub.HubReadError) as caught:
+                    native_listing(fastumi.REPO, task + '/meta')
+                assert isinstance(caught.value, RuntimeError)
+                assert isinstance(caught.value.__cause__, urllib.error.URLError)
+            if table:
+                span = ctx['annotation_subtasks'][0]
+                assert span['values'] == [0] * 10
+                assert span['raw_times'] == (np.arange(10) / 30).tolist()
+            else:
+                assert [claim['value'] for claim in ctx['annotation_unresolved']] == [0] * 10
+                assert [claim['raw_time'] for claim in ctx['annotation_unresolved']] == (np.arange(10) / 30).tolist()
+            assert ctx['recorded_metadata'][str(source / 'meta' / 'episodes.jsonl')][0]['fields']['tasks'] == tasks
+            kinds = {issue['kind'] for issue in ctx.get('reader_issues', [])}
+            assert ('metadata_unreadable' in kinds) == (tasks == [0])
+            assert ('metadata_limit' in kinds) == (not table or unavailable)
+            if table:
+                assert '73' in json.dumps(ctx['annotation_tables'])
+            with np.load(prepared / 'state.npz') as saved:
+                np.testing.assert_array_equal(saved['state'], values)
+                np.testing.assert_array_equal(saved['action'], values + 1)
+        def programmer_error(repo, path):
+            raise RuntimeError('broken listing implementation')
+        monkeypatch.setattr(fastumi.hub, 'ls', programmer_error)
+        with pytest.raises(RuntimeError, match='broken listing implementation'):
+            fastumi.prepare_one(task + '/0', raw, out, True)
+        class MalformedListing(io.BytesIO):
+            headers = {}
+        monkeypatch.setattr(fastumi.hub, 'ls', native_listing)
+        monkeypatch.setattr(fastumi.hub.urllib.request, 'urlopen', lambda *a, **k: MalformedListing(b'{broken'))
+        with pytest.raises(json.JSONDecodeError):
+            fastumi.prepare_one(task + '/0', raw, out, True)
 
 
 def _converted_notes(root, out):
@@ -4281,6 +4363,8 @@ def test_structured_notes_preserve_distinct_relative_paths_during_task_disagreem
 
 
 def test_metadata_failures_and_limits_have_visible_issue_families():
+    import hashlib
+    import json
     import numpy as np
     import pandas as pd
     from board.families import Families
@@ -4291,6 +4375,53 @@ def test_metadata_failures_and_limits_have_visible_issue_families():
         {'kind': 'metadata_unreadable'}, {'kind': 'metadata_limit'}]}})
     assert 'metadata-unreadable' in classified['counted']
     assert 'read-with-a-limit' in classified['not_counted']
+    with tempfile.TemporaryDirectory() as t:
+        for case in ('absent', 'partial', 'conflict', 'fractional', 'mixed'):
+            root = Path(t) / case / 'upload'
+            codes = [0] * 5 + [7] * 5 if case == 'partial' else [0.5 if case == 'fractional' else 7] * 10
+            if case == 'mixed':
+                codes = [7] * 5 + [0.5] * 5
+            _lerobot(root, {0: {'observation.state': [np.zeros(14)] * 10,
+                               'task_index': codes, 'mystery_signal': list(range(10))}})
+            (root / 'meta/episodes.jsonl').write_text(json.dumps({
+                'episode_index': 0, 'tasks': ['Owned episode goal'], 'length': 10}) + '\n')
+            table_path = root / 'meta/tasks.parquet'
+            if case != 'absent':
+                pd.DataFrame({'task_index': [7, 7] if case == 'conflict' else [0],
+                              'task': ['first claim', 'different claim'] if case == 'conflict' else ['mapped step'],
+                              'extra_payload': [73, 74] if case == 'conflict' else [73]}).to_parquet(table_path)
+            source = root / 'data/chunk-000/episode_000000.parquet'
+            original = hashlib.sha256(source.read_bytes()).hexdigest()
+            native = pd.read_parquet(source)
+            out = root.parent / 'out'
+            _, episodes = _converted_notes(root, out)
+            ctx, prompt = episodes[0]
+            assert ctx['instruction'] == 'Owned episode goal'
+            missing = ctx['annotation_unresolved']
+            expected_codes = codes[5:] if case == 'partial' else codes
+            assert [claim['value'] for claim in missing] == expected_codes
+            assert all(claim['raw_time'] == native['timestamp'].iloc[claim['row']] for claim in missing)
+            code_issues = [i for i in ctx['reader_issues'] if 'has unresolved recorded annotation codes' in i['what']]
+            expected = {'metadata_limit'} if case in ('absent', 'partial') else {'metadata_unreadable'}
+            if case == 'mixed':
+                expected.add('metadata_limit')
+            assert {i['kind'] for i in code_issues} == expected
+            groups = families.classify({'dataset_checks': {'reader_issues': code_issues}})
+            assert ('metadata-unreadable' in groups['counted']) == ('metadata_unreadable' in expected)
+            assert ('read-with-a-limit' in groups['not_counted']) == ('metadata_limit' in expected)
+            assert 'task_index' in prompt
+            signal = next(s for s in ctx['signals'] if s['name'] == 'mystery_signal')
+            folder = next(out.glob('episode_*'))
+            with np.load(folder / 'signals.npz') as signals:
+                assert np.array_equal(signals[signal['key']][:len(native)].reshape(-1), native['mystery_signal'])
+            if case != 'absent':
+                table = ctx['annotation_tables'][str(table_path)]['task_index']
+                assert next(iter(table['labels'].values()))['claims'][0]['fields']['extra_payload'] == 73
+            if case == 'partial':
+                step = ctx['annotation_subtasks'][0]
+                assert step['label'] == 'mapped step' and step['values'] == [0] * 5
+                assert step['raw_times'] == native['timestamp'].iloc[:5].tolist()
+            assert hashlib.sha256(source.read_bytes()).hexdigest() == original
     with tempfile.TemporaryDirectory() as t:
         root = Path(t) / 'upload'
         _lerobot(root, {0: {'observation.state': [np.zeros(14)] * 10, 'task_index': [0] * 10}})

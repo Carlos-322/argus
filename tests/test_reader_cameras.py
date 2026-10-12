@@ -149,7 +149,7 @@ def test_a_lerobot_episode_is_as_long_as_its_main_camera_and_a_short_camera_is_f
     rep = f.convert(root, "teleop_arms", tmp_path / "eps", "test", 900)
     ctx = _ctx(tmp_path / "eps", rep)
     assert ctx["n_state_frames"] == 30, ctx["n_state_frames"]
-    (short,) = _issues(ctx, "camera_short")
+    (short,) = _issues(ctx, "camera_coverage_partial")
     assert short["camera"] == "observation.images.cam_left_wrist"
     assert abs(short["t0_s"] - 0.3) < 0.05 and abs(short["t1_s"] - 1.0) < 0.05, short
 
@@ -216,7 +216,7 @@ def test_a_side_camera_that_ends_early_is_flagged(tmp_path):
     rep = f.convert(root, "teleop_arms", tmp_path / "eps", "test", 900)
     ctx = _ctx(tmp_path / "eps", rep)
     assert ctx["n_state_frames"] == 60
-    (short,) = _issues(ctx, "camera_short")
+    (short,) = _issues(ctx, "camera_coverage_partial")
     assert short["camera"] == "wrist_left" and abs(short["t0_s"] - 1.0) < 0.05 and abs(short["t1_s"] - 2.0) < 0.05
 
 
@@ -232,7 +232,7 @@ def test_a_main_camera_that_ends_early_is_flagged_with_what_the_others_cover_pas
     (short,) = _issues(ctx, "main_camera_short")
     assert short["camera"] == "top" and abs(short["t0_s"] - 1.0) < 0.05 and abs(short["t1_s"] - 2.0) < 0.05, short
     assert "wrist_left" in short["what"] or "left wrist" in short["what"]
-    assert not _issues(ctx, "camera_short")
+    assert not _issues(ctx, "camera_coverage_partial")
 
 
 def test_the_edge_a_camera_may_miss_without_an_issue_is_at_most_a_tenth_of_the_episode(tmp_path):
@@ -244,7 +244,7 @@ def test_the_edge_a_camera_may_miss_without_an_issue_is_at_most_a_tenth_of_the_e
         _mp4(root / "ep1" / "top.mp4", int(secs * 30))
         _mp4(root / "ep1" / "wrist_left.mp4", short)
         rep = f.convert(root, "teleop_arms", tmp_path / f"eps{secs:g}", "test", 900)
-        assert bool(_issues(_ctx(tmp_path / f"eps{secs:g}", rep), "camera_short")) is flagged, secs
+        assert bool(_issues(_ctx(tmp_path / f"eps{secs:g}", rep), "camera_coverage_partial")) is flagged, secs
 
 
 def test_a_paired_camera_keeps_its_span_when_it_ends_early_or_starts_late(tmp_path):

@@ -1066,13 +1066,20 @@ def test_an_hdf5_episode_says_why_it_has_no_state(tmp_path):
     assert "7 joints and no gripper" in ctx["state_note"] and ctx["state_why"] == "layout"
 
 
-def test_sensor_file_and_signal_span_issues_are_named_data_families():
+def test_sensor_faults_count_while_aligned_signal_coverage_remains_notes():
     from board.families import Families
     fam = Families()
-    slugs = {k: fam.reader_family(k) for k in ("mcap_file_damaged", "sensor_file_cut", "signal_partial_span")}
+    faults = ("mcap_file_damaged", "sensor_file_cut", "signal_bad_cells", "signal_not_finite")
+    coverage = ("signal_partial_span", "signal_gap")
+    slugs = {k: fam.reader_family(k) for k in faults + coverage}
     assert slugs["mcap_file_damaged"] == slugs["sensor_file_cut"] and not slugs["sensor_file_cut"].startswith("d:")
-    assert not slugs["signal_partial_span"].startswith("d:")
-    assert {fam.catalog()[s]["list"] for s in slugs.values()} == {"data"}
+    assert all(not slug.startswith("d:") for slug in slugs.values())
+    assert all(fam.catalog()[slugs[k]]["list"] == "data" for k in faults)
+    assert all(fam.catalog()[slugs[k]]["list"] == "handling" for k in coverage)
+    classified = fam.classify({"dataset_checks": {"reader_issues": [
+        {"kind": k, "what": "Retained recording evidence."} for k in faults + coverage]}})
+    assert set(classified["counted"]) == {slugs[k] for k in faults}
+    assert set(classified["not_counted"]) == {slugs[k] for k in coverage}
 
 
 @pytest.mark.parametrize("topic,blocked", [("/yam_left/joint_state", True),

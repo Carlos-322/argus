@@ -7,7 +7,7 @@
 An episode list has one <embodiment>/<task>/<episode index> per line (dual_arm/Fold_the_Jeans/12). `sample`
 downloads every task folder's meta/episodes.jsonl, draws --per-task random episodes from each (seeded per task)
 and writes LIST. `prepare` downloads, into RAW/<embodiment>/<task>/, the task's meta/info.json and
-meta/episodes.jsonl and the episode's parquet and camera mp4s, and writes EPISODES/episode_<embodiment>__<task>__
+meta/episodes.jsonl, recorded task tables and the episode's parquet and camera mp4s, and writes EPISODES/episode_<embodiment>__<task>__
 <index>/ with context.json, sources.json (pointing at the downloaded mp4s), state.npz and instruction.txt.
 
 The dataset is LeRobot v2.1: per task a folder with one parquet and one mp4 per camera per episode, 20 fps. A
@@ -98,19 +98,32 @@ def episode_dir_name(item: str) -> str:
 
 def prepare_one(item: str, raw_root: Path, out_root: Path, force: bool) -> str:
     import pandas as pd
+    from prepare import formats
+    from prepare.lerobot_labels import TABLE_COLUMNS
     task, eidx = item.rsplit("/", 1)
     eidx = int(eidx)
     name = episode_dir_name(item)
     ep_dir = out_root / name
     if not force and (ep_dir / "context.json").exists():
         return "skip"
-    info = json.loads(_dl(f"{task}/meta/info.json", raw_root).read_text())
+    info_path = _dl(f"{task}/meta/info.json", raw_root)
+    info = json.loads(info_path.read_text())
     fps = int(info["fps"])
     chunk = eidx // int(info.get("chunks_size", 1000))
-    lines = _dl(f"{task}/meta/episodes.jsonl", raw_root).read_text().splitlines()
-    meta = {json.loads(s)["episode_index"]: json.loads(s) for s in lines if s.strip()}[eidx]
+    _dl(f"{task}/meta/episodes.jsonl", raw_root)
     parq = _dl(f"{task}/" + info["data_path"].format(episode_chunk=chunk, episode_index=eidx), raw_root)
     df = pd.read_parquet(parq).sort_values("frame_index")
+    tables, lookup_unavailable = [], False
+    if any(column in df.columns for column in TABLE_COLUMNS.values()):
+        try:
+            tables = hub.ls(REPO, f"{task}/meta")
+        except hub.HubReadError:
+            lookup_unavailable = True
+    for entry in tables:
+        path = Path(entry["path"])
+        if (entry["type"] == "file" and path.parent == Path(task) / "meta"
+                and path.suffix in (".jsonl", ".parquet") and TABLE_COLUMNS.get(path.stem) in df.columns):
+            _dl(entry["path"], raw_root)
     state = np.stack(df["observation.state"].to_numpy()).astype(np.float32)
     action = np.stack(df["action"].to_numpy()).astype(np.float32)
     ep_dir.mkdir(parents=True, exist_ok=True)
@@ -129,7 +142,18 @@ def prepare_one(item: str, raw_root: Path, out_root: Path, force: bool) -> str:
                          "codec": vi.get("video.codec"), "desc": CAMERA_DESC[cname]}
     if not sources:
         raise RuntimeError(f"{item}: no known camera in {list(info['features'])}")
-    instruction = " ".join(str(t) for t in (meta.get("tasks") or [])).strip()
+    root = formats.read_root(info_path.parent.parent, task)
+    meta = next(row for row in root["episodes"] if row["eidx"] == eidx)
+    tasks = meta["tasks"]
+    instruction_note = ("This instruction is the episode's task text in the dataset's "
+                        "meta/episodes.jsonl; it is a recorded goal claim to check.")
+    if not tasks and "task_index" in df:
+        try:
+            tasks = formats.constant_index_task(df["task_index"], root["tasks_by_index"])
+        except (TypeError, ValueError):
+            tasks = []
+        instruction_note = "This instruction is constant recorded task_index resolved by the native task table."
+    instruction = " ".join(tasks).strip()
     context = {
         "dataset": REPO,
         "profile": "handheld_gripper",
@@ -141,13 +165,19 @@ def prepare_one(item: str, raw_root: Path, out_root: Path, force: bool) -> str:
         "fps": fps,
         "task_label": [task],
         "instruction": instruction,
-        "instruction_note": ("This instruction is the episode's task text in the dataset's "
-                             "meta/episodes.jsonl; it is the goal you grade against."),
+        "instruction_note": instruction_note,
         "n_state_frames": int(len(state)),
         "cameras": cameras,
-        "stream_checks": {"frames_on_grid": grid, "episode_length_meta": int(meta.get("length", -1))},
+        "stream_checks": {"frames_on_grid": grid, "episode_length_meta": meta["length"] if meta["length"] is not None else -1},
     }
-    from prepare import formats
+    formats.lerobot_annotations(context, root, df, parq)
+    if lookup_unavailable:
+        formats.add_issue(context, 'metadata_limit', 'The native task table listing was unavailable; available local '
+                          'tables and all recorded annotation codes were retained. Additional upstream tables may '
+                          'not be present in this cache.')
+    for issue in root["metadata_issues"]:
+        formats.add_issue(context, issue["kind"], issue["text"])
+    instruction = context.get("instruction", "")
     from prepare.state_contract import declared_action_semantics, publisher_action_semantics
     context['action_semantics'] = declared_action_semantics('prepare.fastumi', 'target', relationship={
         'kind': 'next_observation', 'field': 'state', 'row_offset': 1, 'terminal': 'repeat_last',

@@ -6397,7 +6397,7 @@ function renderEp(d, opts) {
         </div>`;
         }).join('')}
       </div>${unshownNote(d)}
-      ${gripOnly ? `<div class="grip-strip">${sideCams.length ? '' : `<p class="grip-note">A single-arm task: the dataset records one gripper camera.</p>`}${notesHtml}</div>` : ''}
+      ${gripOnly ? `<div class="grip-strip">${sideCams.length ? '' : `<p class="grip-note">One camera view is shown.</p>`}${notesHtml}</div>` : ''}
     </div>
     <div class="timeline" id="timeline">
       ${evidence.insights.map(f => `<span class="grip-span" style="left:${100 * onTl(f.start) / duration}%;width:${100 * (onTl(f.end) - onTl(f.start)) / duration}%" title="${esc(f.headline)} ${fmtT(f.start)} to ${fmtT(f.end)}"></span>`).join('')}

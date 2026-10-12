@@ -176,6 +176,7 @@ def test_direct_state_writers_retain_native_identity_before_discarding_metadata(
         for key in keys:
             _mp4(root / f"videos/{key}/episode_000000.mp4", n)
         monkeypatch.setattr(fastumi, "_dl", lambda rel, folder: folder / rel)
+        monkeypatch.setattr(fastumi.hub, "ls", lambda *args: pytest.fail("no recorded task codes need a manifest"))
         fastumi.prepare_one("dual_arm/move/0", raw, out, False)
         path = out / fastumi.episode_dir_name("dual_arm/move/0")
     ep = me.load(path)
@@ -205,11 +206,14 @@ def test_direct_state_writers_retain_native_identity_before_discarding_metadata(
         field = next(f for f in a.inventory() if f["name"] == "action")
         assert field["descriptor"]["recorded_role"] == "target"
         assert field["descriptor"]["action_semantics"] == semantics
-        assert not evidence_access.needs_inspection(ep, {})
+        assert evidence_access.needs_inspection(ep, {})
+        assert ep['context']['recorded_metadata'][str(root / 'meta/episodes.jsonl')][0]['fields']['tasks'] == ['move']
+        observed_only = {**ep, 'context': {k: v for k, v in ep['context'].items() if k != 'recorded_metadata'}}
+        assert not evidence_access.needs_inspection(observed_only, {})
         changed_target = ep['action'].copy()
         changed_target[0, 0] += 1
-        assert evidence_access.needs_inspection({**ep, 'action': changed_target}, {})
-        assert evidence_access.needs_inspection({**ep, 'action': ep['action'][:-1]}, {})
+        assert evidence_access.needs_inspection({**observed_only, 'action': changed_target}, {})
+        assert evidence_access.needs_inspection({**observed_only, 'action': ep['action'][:-1]}, {})
         assert evidence_access.needs_inspection({**ep, 'context': {**ep['context'], 'state_unaligned': True}}, {})
         inventory = dictionary.inventory([path])
         field = next(f for f in inventory["fields"] if f["kind"] == "action")

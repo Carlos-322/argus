@@ -20,7 +20,8 @@ def current_camera_observations(record: dict, ctx: dict, episode_dir: Path) -> l
             'config': {'views': record.get('views'), 'camera_observation_views': record.get('views'),
                        'schema_fields': ['camera_observations']},
             'input_identity': {'source_proof': record.get('source_proof')}})
-        valid = (not checked['withheld_observations'] and
+        valid = (not record.get('withheld_observations') and not checked['withheld_observations'] and
+                 bool(checked['observations']) and
                  same_source_proof(record.get('source_proof'), ctx, episode_dir))
         for part in record.get('parts') or []:
             owner = part.get('source_piece') or {}

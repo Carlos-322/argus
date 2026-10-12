@@ -14,6 +14,10 @@ import urllib.parse
 import urllib.request
 
 
+class HubReadError(RuntimeError):
+    """A Hub HTTP request failed at the transport boundary."""
+
+
 def token() -> str | None:
     return os.environ.get("HF_TOKEN") or None
 
@@ -36,12 +40,13 @@ def get(url: str, rng: tuple[int, int] | None = None, timeout: int = 300) -> tup
                 return r.read(), dict(r.headers)
         except urllib.error.HTTPError as e:
             if e.code < 500 and e.code not in (408, 429):
-                raise RuntimeError(f"GET {url} {rng or ''}: HTTP {e.code}") from e
+                raise HubReadError(f"GET {url} {rng or ''}: HTTP {e.code}") from e
             last = e
         except Exception as e:
             last = e
         time.sleep(3 * (attempt + 1))
-    raise RuntimeError(f"GET {url} {rng or ''}: {last}")
+    error_type = HubReadError if isinstance(last, (urllib.error.URLError, OSError, TimeoutError)) else RuntimeError
+    raise error_type(f"GET {url} {rng or ''}: {last}") from last
 
 
 def resolve(repo: str, rel: str) -> str:

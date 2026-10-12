@@ -207,7 +207,7 @@ def test_a_short_episode_uses_the_same_edge_slack_for_cameras_and_signals():
     formats.camera_span_issues(ctx, {"exo": times, "left": times[12:]}, "exo", {"exo": "top", "left": "wrist_left"}, {"profile": "teleop_arms"})
     signal = np.ones((30, 1))
     signal[:12] = np.nan
-    assert any(x["kind"] == "camera_short" for x in ctx["reader_issues"])
+    assert any(x["kind"] == "camera_coverage_partial" for x in ctx["reader_issues"])
     assert any(x["kind"] == "signal_partial_span" for x in formats.signal_gaps("force", signal, times))
     assert not formats.covers_footage(times[12], times[-1], times)
 
