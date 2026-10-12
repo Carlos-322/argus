@@ -54,6 +54,7 @@ from pathlib import Path
 
 from label import episode as me, policy
 from label.atomic import write_atomic
+from label.errors import KeyExhausted, SpendCap, Truncated
 from label.route import route_width
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -84,28 +85,6 @@ MAX_IMAGES = 500
 # concurrent decodes is bounded here, whatever the API concurrency. It does not change which frames are sent.
 _dg = os.environ.get("RDA_DECODE_CONCURRENCY")
 DECODE_GATE = threading.BoundedSemaphore(int(_dg) if (_dg or "").isdigit() and int(_dg) > 0 else 12)
-
-
-class KeyExhausted(RuntimeError):
-    """Only an explicit first-attempt HTTP rejection proves an unpaid, replay-safe refusal."""
-
-    def __init__(self, message, *, http_status=None, first_attempt=False):
-        super().__init__(message)
-        self.http_status = http_status
-        self.verified_unpaid = (type(http_status) is int and http_status in (401, 402)
-                               and first_attempt is True)
-
-
-class Truncated(RuntimeError):
-    """The reply was cut off at the output limit. It was billed, so it carries what the episode cost."""
-
-    def __init__(self, message: str, cost: float):
-        super().__init__(message)
-        self.cost = cost
-
-
-class SpendCap(RuntimeError):
-    """The final request cannot fit under the remaining batch budget."""
 
 
 def is_key_exhausted(code: int, body: str) -> bool:
@@ -350,6 +329,7 @@ def input_identity(ep_dir: Path, *, model: str, reasoning: str, max_tokens: int,
                     Path(__file__), Path(me.__file__), Path(policy.__file__),
                     Path(me.__file__).with_name('prompts.py'), Path(me.__file__).with_name('sensor_evidence.py'),
                     Path(me.__file__).with_name('optical_motion.py'),
+                    Path(me.__file__).with_name('errors.py'),
                     Path(me.__file__).with_name('lens.py'),
                     Path(me.__file__).parent.parent / 'prepare' / 'formats.py',
                     Path(me.__file__).with_name('dictionary_context.py')))).hexdigest()}

@@ -663,20 +663,21 @@ def test_request_grid_receipt_rebuilds_actual_dense_inputs(tmp_path, monkeypatch
         grids.rebuild(result, ep)
 
 
-@pytest.mark.parametrize('module_name', ['formats', 'dictionary_context', 'lens'])
+@pytest.mark.parametrize('module_name', ['formats', 'dictionary_context', 'lens', 'errors'])
 def test_prepare_helper_changes_invalidate_annotation_identity_without_changing_rgb(tmp_path, monkeypatch, module_name):
     from prepare import formats
-    from label import dictionary_context, lens
+    from label import dictionary_context, lens, errors
     folder, _ = _packed_episode(tmp_path)
     kwargs = dict(model='openai/gpt-6.1-sol', reasoning='high', max_tokens=2000,
                   cell_w=128, example_dir=None)
     before = harness.input_identity(folder, **kwargs)
     request = me.build_request(folder, cell_w=128)
     original = Path.read_bytes
-    watched = Path({'formats': formats, 'dictionary_context': dictionary_context, 'lens': lens}[module_name].__file__).resolve()
+    watched = Path({'formats': formats, 'dictionary_context': dictionary_context,
+                    'lens': lens, 'errors': errors}[module_name].__file__).resolve()
     def changed_bytes(path):
         data = original(path)
-        return data + b'\n# changed camera provenance helper\n' if path.resolve() == watched else data
+        return data + b'\n# changed request helper\n' if path.resolve() == watched else data
     with monkeypatch.context() as patch:
         patch.setattr(Path, 'read_bytes', changed_bytes)
         assert not harness.same_input_identity(before, harness.input_identity(folder, **kwargs))
