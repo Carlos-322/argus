@@ -786,7 +786,8 @@ def assess(feats: dict) -> dict:
             else:
                 R["native_camera_timestamp_gap"] = _na("no camera has a clock of its own besides the main one")
         else:
-            why = "the dataset has no capture clock, so frame times are the frame number divided by the frame rate"
+            why = ("the frame times supplied to this check use frame number divided by frame rate, "
+                   "so an independent capture clock is not assessed")
             R["state_time_non_monotonic_or_duplicate"] = _na(why)
             R["state_timestamp_gap"] = _na(why)
             R["native_camera_timestamp_gap"] = _na(why)
