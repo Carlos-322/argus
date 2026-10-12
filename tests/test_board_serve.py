@@ -90,7 +90,7 @@ def test_public_label_leaves_out_how_the_label_was_made():
     assert private.isdisjoint(serve.episode_view(dict(d)))
 
 
-def test_the_page_is_given_the_checks_a_rule_withheld_with_the_reason():
+def test_the_page_is_given_the_checks_a_rule_withheld_with_the_reason(tmp_path):
     """A check a manifest rule withheld (drop_check) is still on the page, named with the rule's reason; the check's
     stored result stays in the label file."""
     d = {"dataset": "molmo", "_withheld_checks": {"gripper_channels": {"reason": "one-armed tasks",
@@ -99,11 +99,21 @@ def test_the_page_is_given_the_checks_a_rule_withheld_with_the_reason():
     assert view["set_aside_checks"] == [{"check": "gripper_channels", "reason": "one-armed tasks", "status": "fired"}]
     assert "_withheld_checks" not in view
     assert "set_aside_checks" not in serve.episode_view({"_withheld_checks": [3]})
-    # a withheld check that stopped with an error says so, never clear
-    err = serve.episode_view({"_withheld_checks": {"recorded_jumps": {"reason": "r", "result": {
-        "error": "ValueError: boom", "flagged": False}}}})
-    assert err["set_aside_checks"] == [{"check": "recorded_jumps", "reason": "r", "status": "errored",
-                                        "error": "ValueError: boom"}]
+    # Keep actual reader details private while reporting that the withheld check failed.
+    try:
+        (tmp_path / "missing_context.json").read_text()
+    except FileNotFoundError as exc:
+        raw_error = f"{type(exc).__name__}: {exc}"
+    original = {"_withheld_checks": {"recorded_jumps": {"reason": "r", "result": {
+        "error": raw_error, "flagged": False}}}}
+    before = json.dumps(original, sort_keys=True)
+    err = serve.episode_view(original)
+    row, = err["set_aside_checks"]
+    assert {k: row[k] for k in ("check", "reason", "status")} == {
+        "check": "recorded_jumps", "reason": "r", "status": "errored"}
+    assert isinstance(row["error"], str) and row["error"] and row["error"] != raw_error
+    assert str(tmp_path) not in json.dumps(err)
+    assert json.dumps(original, sort_keys=True) == before
 
 
 def test_a_withheld_check_reads_as_what_it_found():
