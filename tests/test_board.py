@@ -965,7 +965,22 @@ def test_each_reader_issue_raises_its_family_at_any_severity(tmp_path):
     assert [(x["kind"], x["family"]) for x in d["dataset_checks"]["reader_issues"]] == [
         ("clip_frame_count", "clip-frames"), ("signal_gap", "signal-gap")]
     fam = Families()
-    assert set(fam.classify(d)["counted"]) == {"clip-frames", "signal-gap"}
+    assert set(fam.classify(d)["counted"]) == {"clip-frames"}
+    assert set(fam.classify(d)["not_counted"]) == {"signal-gap"}
+    # Sparse native updates and a reader-selected camera anchor do not assert lost source data.
+    mixed = {"dataset_checks": {"reader_issues": [
+        {"kind": "main_camera_short", "what": "The labeling anchor starts after another view."},
+        {"kind": "camera_coverage_partial", "what": "Another camera spans part of the selected anchor."},
+        {"kind": "camera_short", "what": "Only 20 of 30 declared source frames decode.", "clip_frames": 20, "episode_frames": 30},
+        {"kind": "signal_partial_span", "what": "Sparse environmental readings do not span all aligned rows."},
+        {"kind": "signal_gap", "what": "Event transforms have no update near some camera rows."},
+        {"kind": "unshown_camera_not_decodable", "what": "Recorded compressed images have empty payloads."},
+        {"kind": "signal_bad_cells", "what": "A recorded numeric cell is not a number."},
+        {"kind": "signal_not_finite", "what": "A recorded numeric cell is infinite."}]}}
+    classified = fam.classify(mixed)
+    assert set(classified["not_counted"]) == {"main-camera-short", "camera-coverage-partial", "signal-partial", "signal-gap"}
+    assert set(classified["counted"]) == {"camera-undecodable", "signal-bad-values", "clip-frames"}
+    assert len(mixed["dataset_checks"]["reader_issues"]) == 8
     assert fam.catalog()["camera-undecodable"] == {"name": "Camera video does not decode", "list": "data",
                                                    "check": True}
     none = {}
@@ -979,13 +994,14 @@ def test_each_reader_issue_raises_its_family_at_any_severity(tmp_path):
 READER_ISSUE_KINDS = {
     "data": ["camera_not_aligned", "camera_not_decodable", "camera_decode_failed", "clip_frame_count",
              "unshown_camera_not_decodable", "depth_not_read", "depth_not_decodable", "depth_clip_partial",
-             "signal_bad_cells", "signal_gap", "signal_not_finite", "signal_partial_span", "signal_alignment_assumed",
+             "signal_bad_cells", "signal_not_finite", "signal_alignment_assumed",
              "state_filled", "state_unaligned", "state_partial", "table_short", "table_long", "task_files_disagree"],
     "labelling": ["model_reply_unparsed", "model_reply_cut_off", "part_not_labelled", "label_output_unreadable",
                   "no_part_labelled", "model_no_reply", "model_reply_not_shown", "model_reply_off_schema",
                   "model_reply_fields_dropped"],
     "handling": ["table_downsampled", "signal_summarised", "camera_not_colour", "depth_clip_failed",
-                 "depth_clip_timing", "camera_offset", "context_unreadable"],
+                 "depth_clip_timing", "camera_offset", "context_unreadable", "main_camera_short",
+                 "signal_gap", "signal_partial_span", "camera_coverage_partial"],
 }
 
 

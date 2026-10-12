@@ -41,6 +41,38 @@ def test_observed_camera_content_uses_native_ids_and_current_roles_for_exports(t
     assert recorded['labels']['camera_observations'] == rows
     assert recorded['camera_observations']['observations'] == rows
     assert recorded['camera_observations']['source_proof'] == recorded['input_identity']['source_proof']
+    # The native YAM reply used a displayed alias instead of the supplied exo ID.
+    # Neither that reply nor an older saved partial envelope may promote its wrists.
+    for incomplete in ([{**rows[0], 'view': 'exo_cam'}, *rows[1:]], rows[1:]):
+        findings = [{'signal': 'recorded_force', 'observation': 'Recorded values change during the work.'}]
+        monkeypatch.setattr(harness, 'call_model_once', lambda *a, **k: {
+            'choices': [{'finish_reason': 'stop', 'message': {'content': json.dumps({
+                'timeline': [], 'camera_observations': incomplete,
+                'sensor_findings': findings})}}], 'usage': {'cost': 0.0}})
+        partial = harness.label_episode(folder, tmp_path / 'partial.json', model='openai/gpt-6.1-sol',
+            reasoning='high', api_key='offline', max_tokens=2000, timeout=1, cell_w=128)
+        assert partial['labels']['camera_observations'] == incomplete
+        assert partial['labels']['sensor_findings'] == findings
+        assert not partial['camera_observations']['observations']
+        assert partial['camera_observations']['withheld_observations']
+        projected = dictionary_projection.apply(to_board.convert(partial, 'native partial'), ctx, folder)
+        assert static.shown_cams(projected) == ['exo', 'left', 'right']
+        assert all(r.get('provenance') != 'observed' for r in projected['camera_presentation'].values())
+        legacy = to_board.convert(recorded, 'native legacy')
+        legacy['camera_observations']['observations'] = rows[1:]
+        legacy['camera_observations']['withheld_observations'] = []
+        projected = dictionary_projection.apply(legacy, ctx, folder)
+        assert projected['camera_observations']['source_current'] is False
+        assert not projected['camera_observations']['observations']
+        assert static.shown_cams(projected) == ['exo', 'left', 'right']
+        authoritative = copy.deepcopy(ctx)
+        authoritative['data_dictionary']['entries']['right'] = {'role': 'scene', 'provenance': 'human'}
+        authoritative['cameras']['exo']['role'] = 'sensor_view'
+        projected = dictionary_projection.apply(to_board.convert(partial, 'native partial'), authoritative, folder)
+        assert projected['camera_presentation']['right'] == {'role': 'scene'}
+        assert projected['camera_presentation']['exo'] == {'role': 'sensor'}
+    unclear = harness.bind_camera_observations([{**rows[0], 'content': 'unclear'}, *rows[1:]], fields)
+    assert len(unclear['observations']) == 3
     bound = harness.bind_camera_observations(rows, fields)
     result = {**fields, 'episode_dir': str(folder), 'parse_ok': True, 'labels': {'timeline': []},
               'camera_observations': bound}
@@ -79,14 +111,15 @@ def test_observed_camera_content_uses_native_ids_and_current_roles_for_exports(t
 
     malformed = rows + [{'view': 'missing', 'content': 'scene', 'evidence': 'An invented camera.'}, rows[-1]]
     checked = harness.bind_camera_observations(malformed, fields)
-    assert [r['view'] for r in checked['observations']] == ['exo', 'left']
-    assert len(checked['withheld_observations']) == 3
+    assert not checked['observations']
+    assert len(checked['withheld_observations']) >= 3
     unsolicited = copy.deepcopy(fields)
     unsolicited['config']['schema_fields'] = []
     assert not harness.bind_camera_observations(rows, unsolicited)['observations']
     unseen = copy.deepcopy(fields)
     unseen['config']['camera_observation_views'] = ['exo', 'left']
-    assert [r['view'] for r in harness.bind_camera_observations(rows, unseen)['observations']] == ['exo', 'left']
+    assert not harness.bind_camera_observations(rows, unseen)['observations']
+    assert [r['view'] for r in harness.bind_camera_observations(rows[:2], unseen)['observations']] == ['exo', 'left']
     unsupported = copy.deepcopy(fields)
     unsupported['input_identity']['source_proof'] = []
     assert not harness.bind_camera_observations(rows, unsupported)['observations']
@@ -221,6 +254,8 @@ assert.deepEqual(api.supportingCameras(interleaved).map(c=>c.view),['extra1','ex
   'sensor and tactile sections remain contiguous with stable order within each');
 const grippers={camera_views:['left','right'],camera_presentation:{left:{role:'scene'},right:{role:'scene'}}};
 assert.equal(api.sceneFirstLayout(grippers),false,'ordinary RGB-only gripper layout is preserved');
+assert(src.includes('<p class="grip-note">One camera view is shown.</p>'));
+assert(!src.includes('A single-arm task: the dataset records one gripper camera.'));
 assert.equal(api.cameraCaption({...mixed,camera_labels:['opaque sensor','pad','workbench']},'right'),'opaque sensor');
 assert.equal(api.cameraCaption({...grippers,camera_mounting:{right:'fixed'}},'right'),'right camera');
 assert.equal(api.cameraCaption({...grippers,camera_mounting:{right:'wrist'}},'right'),'right wrist');

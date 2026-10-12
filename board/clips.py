@@ -866,6 +866,7 @@ def surviving_video_clock(ep_dir: Path, ctx: dict, src: dict, main: str) -> floa
             raise ValueError(f'{view}: no video presentation timestamps cover its owned source window')
         if len(owned) < int(source['n_frames']):
             ctx.setdefault('reader_issues', []).append({'kind': 'camera_short', 'camera': view,
+                'native_available_frames': len(owned), 'native_expected_frames': int(source['n_frames']),
                 'what': f'{view} has {len(owned)} available video timestamps for {source["n_frames"]} declared frames; '
                         'the available source frames are retained.'})
             source['n_frames'] = len(owned)
@@ -1007,7 +1008,7 @@ def drop_cameras(ep_dir: Path, views, keep_clock: bool = False) -> tuple[str | N
     return main, issues
 
 
-SPAN_KINDS = ("camera_short", "main_camera_short")    # the reader's camera span issues (camera_span_issues)
+SPAN_KINDS = ("camera_short", "camera_coverage_partial", "main_camera_short")    # the reader's camera span issues (camera_span_issues)
 
 
 def respan(ep_dir: Path, ctx: dict, src: dict) -> None:
@@ -1029,7 +1030,9 @@ def respan(ep_dir: Path, ctx: dict, src: dict) -> None:
     if set(t) != set(cams):
         t = {v: np.arange(int(src[v]["n_frames"])) / fps for v in cams}
     extra = {"reader_issues": [x for x in ctx.get("reader_issues") or []
-                               if not (isinstance(x, dict) and x.get("kind") in SPAN_KINDS and "clip_frames" not in x)]}
+                               if not (isinstance(x, dict) and x.get("kind") in SPAN_KINDS
+                                       and not any(key in x for key in ("clip_frames", "episode_frames", "native_expected_frames"))
+                                       and (x.get("kind") != "camera_short" or {"t0_s", "t1_s"} <= x.keys()))]}
     camera_span_issues(extra, t, cams[0], {v: src[v].get("camera_key") or v for v in cams}, ctx)
     if extra["reader_issues"]:
         ctx["reader_issues"] = extra["reader_issues"]
@@ -1247,7 +1250,7 @@ def clip_end_s(ep_dir: Path, ctx: dict, src: dict, cam: str, got: int) -> float:
 def is_end(x: dict, zero_s: float = 0.0) -> bool:
     """Whether a camera_short issue is one of a camera that ends early (its stretch starts inside the episode), not
     one that starts late (its stretch starts at the stored clock origin)."""
-    return x.get("kind") == CAMERA_SHORT and float(x.get("t0_s") or 0.0) > zero_s
+    return x.get("kind") in (CAMERA_SHORT, "camera_coverage_partial") and float(x.get("t0_s") or 0.0) > zero_s
 
 
 def record_cameras(ep_dir: Path, short: dict, broken: dict, cut, keep_clock: bool = False) -> str | None:

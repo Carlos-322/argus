@@ -62,7 +62,7 @@ def test_hdf_native_tied_clock_is_retained_without_losing_side_camera_frames(tmp
     assert unshown.get("camera_times")
     assert any(i["kind"] == "camera_timestamp_repeated" and i.get("camera") == "infrared"
                for i in ctx.get("reader_issues", []))
-    assert not any(i["kind"] in ("camera_short", "main_camera_short") for i in ctx.get("reader_issues", []))
+    assert not any(i["kind"] in ("camera_short", "camera_coverage_partial", "main_camera_short") for i in ctx.get("reader_issues", []))
     request = episode.build_request(ep)
     assert "assumed presentation" in request["prompt"]
     assert "The times are exact: use them, do not invent your own." not in request["prompt"]

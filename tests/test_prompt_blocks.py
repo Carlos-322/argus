@@ -532,6 +532,9 @@ def test_camera_content_observation_block_is_gated_by_exact_authoritative_roles(
     text = me.build_prompt(ep, pl, cell_w=224, cell_h=126)[1]
     assert 'exo: top' in text and 'left: left' in text and 'right: right' in text
     assert '"content": "scene|sensor|unclear"' in text
+    assert 'exactly one observation for every supplied view ID' in text
+    assert 'Aliases are not valid view IDs' in text
+    assert 'Use unclear' in text
     for view in ep['context']['cameras']:
         ep['context']['cameras'][view]['content_role'] = 'scene_camera'
     assert 'camera_observations' not in me.requested_schema(ep, pl)
@@ -556,6 +559,19 @@ def test_camera_content_observation_block_is_gated_by_exact_authoritative_roles(
     assert 'camera_observations' in me.requested_schema(ep, pl)
     single, one_pl = CASES['ego_plain']()
     assert 'camera_observations' not in me.requested_schema(single, one_pl)
+
+
+@pytest.mark.parametrize('base', [case_teleop_joints, case_handheld_pose])
+def test_runtime_instruction_keeps_initially_satisfied_states_without_inventing_coverage_claims(base):
+    ep, pl = base()
+    ep['context']['instruction'] = 'Complete the required states in the specified order.'
+    fixed, episode = me.build_prompt(ep, pl, cell_w=224, cell_h=126)
+    assert 'record the step the demonstration never shows as an instruction_mismatch' not in fixed
+    assert 'Absence of that motion alone is not an instruction_mismatch' in fixed
+    assert 'explicitly asserts its occurrence within this recording or declared timed coverage' in ' '.join(fixed.split())
+    assert 'An instruction can say HOW as well as WHAT' in fixed
+    assert 'part of the end state that holds, not part of the goal that never happened' in fixed
+    assert 'Complete the required states in the specified order.' in episode
 
 
 def test_a_video_only_rig_with_two_wrist_cameras_is_not_told_its_views_follow_a_recorded_motion():

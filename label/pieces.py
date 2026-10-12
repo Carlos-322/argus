@@ -993,6 +993,9 @@ def merge_camera_observations(ep_dir: Path, parts: list[tuple[dict, dict]], miss
     ep_dir = Path(ep_dir)
     ctx = ep['context']
     views = me.views(ep)
+    views = [view for view in views if any(
+        isinstance(record.get('camera_observations'), dict)
+        and view in (record['camera_observations'].get('views') or []) for _, record in parts)]
     result = {'version': 1, 'views': views, 'source_proof': source_proof(ctx, ep_dir),
               'observations': [], 'withheld_observations': [], 'parts': [],
               'provenance': {'method': 'agreement of source-bound final annotation parts'}}
@@ -1023,6 +1026,11 @@ def merge_camera_observations(ep_dir: Path, parts: list[tuple[dict, dict]], miss
         else:
             result['withheld_observations'].append({'view': view,
                 'why': 'Request parts disagree or do not all supply a verified observation for this view.'})
+    if result['withheld_observations']:
+        result['withheld_observations'].extend({'observation': row,
+            'why': 'Camera interpretation requires agreement for every supplied view ID.'}
+            for row in result['observations'])
+        result['observations'] = []
     return result
 
 

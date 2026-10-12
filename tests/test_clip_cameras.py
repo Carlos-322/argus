@@ -178,6 +178,7 @@ def test_a_main_camera_taken_out_with_no_capture_times_leaves_the_state_unaligne
     """The new main camera was paired to the old one by time (its kmap), and the capture times are gone: nothing can
     place the state on its frames, so the state and signals are not used and the episode says why. The checks that
     compare the state with the video are not assessed; those on the state alone still run."""
+    from board.families import Families
     from checks import capture_qc
     from checks import stream_pairing as sp
     eps, ep = _recording(tmp_path)
@@ -186,14 +187,21 @@ def test_a_main_camera_taken_out_with_no_capture_times_leaves_the_state_unaligne
     ctx.pop("real_times", None)
     (ep / "context.json").write_text(json.dumps(ctx))
     (ep / "times.npz").unlink()
+    sources = json.loads((ep / "sources.json").read_text())
+    _video(Path(sources["left"]["packed"]), 10)
+    sources["left"]["n_frames"] = 20
+    (ep / "sources.json").write_text(json.dumps(sources))
     (eps.parent / "up" / "top.mp4").write_bytes(b"not a video at all" * 50)
     assert _clips(eps, tmp_path / "clips").returncode == 0
     ctx = json.loads((ep / "context.json").read_text())
     assert ctx["state_unaligned"]
     kinds = [x["kind"] for x in ctx["reader_issues"]]
-    # measured again on the left camera, now main, by frame index: the right one goes on 0.5 s past it
-    assert kinds == ["main_camera_short", "camera_not_decodable", "state_unaligned"]
-    assert "main camera" in ctx["reader_issues"][2]["what"]
+    # The actual surviving video has 10 native frames despite 20 declared. Recovery must retain this source fault.
+    assert set(kinds) == {"camera_short", "main_camera_short", "camera_not_decodable", "state_unaligned"}
+    (deficit,) = [x for x in ctx["reader_issues"] if x["kind"] == "camera_short"]
+    assert deficit["native_available_frames"] == 10 and deficit["native_expected_frames"] == 20
+    assert "clip-frames" in Families().classify({"dataset_checks": {"reader_issues": [deficit]}})["counted"]
+    assert "main camera" in next(x["what"] for x in ctx["reader_issues"] if x["kind"] == "state_unaligned")
     e = me.load(ep)
     assert not me.plan(e)["state_usable"] and not e["signals"]
     req = me.build_request(ep)
@@ -257,7 +265,7 @@ def test_the_cameras_spans_are_measured_again_on_the_new_main_camera(tmp_path):
     eps = tmp_path / "episodes"
     rep = formats.convert(up, "teleop_arms", eps, "mine", float("inf"), grouping={})
     ep = eps / rep["episodes"][0]["episode_id"]
-    assert [x["kind"] for x in json.loads((ep / "context.json").read_text())["reader_issues"]] == ["camera_short"]
+    assert [x["kind"] for x in json.loads((ep / "context.json").read_text())["reader_issues"]] == ["camera_coverage_partial"]
     assert _clips(eps, tmp_path / "clips").returncode == 0
     ctx = json.loads((ep / "context.json").read_text())
     assert [x["kind"] for x in ctx["reader_issues"]] == ["camera_not_decodable"], ctx["reader_issues"]
@@ -268,7 +276,7 @@ def test_a_camera_that_ends_early_is_one_issue_whichever_step_finds_it(tmp_path)
     fewer frames still: both had been recorded, under two kinds, for one camera that shows nothing past a time. It is
     one camera_short issue, at the end the clip has."""
     rep, eps, ep = _upload(tmp_path, {"top": 60, "wrist_left": 30})
-    assert [x["kind"] for x in json.loads((ep / "context.json").read_text())["reader_issues"]] == ["camera_short"]
+    assert [x["kind"] for x in json.loads((ep / "context.json").read_text())["reader_issues"]] == ["camera_coverage_partial"]
     _video(Path(json.loads((ep / "sources.json").read_text())["left"]["packed"]), 20)
     assert _clips(eps, tmp_path / "clips").returncode == 0
     (short,) = json.loads((ep / "context.json").read_text())["reader_issues"]

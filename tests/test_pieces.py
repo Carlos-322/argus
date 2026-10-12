@@ -532,8 +532,25 @@ def test_camera_content_consensus_keeps_part_source_proof_and_abstains_at_gaps(t
     conflicting = copy.deepcopy(records)
     conflicting[1]['camera_observations']['observations'][-1]['content'] = 'sensor'
     mixed = pieces.stitch(source, list(zip(contexts, conflicting)))
-    assert 'right' not in {r['view'] for r in mixed['camera_observations']['observations']}
+    assert not mixed['camera_observations']['observations']
     assert mixed['camera_observations']['withheld_observations']
+    projected = dictionary_projection.apply(to_board.convert(mixed, 'conflicting parts'), ctx, source)
+    assert not projected['camera_observations']['observations']
+    assert static.shown_cams(projected) == ['exo', 'left', 'right']
+    incomplete = copy.deepcopy(records)
+    incomplete[1]['camera_observations']['observations'].pop(0)
+    joined_partial = pieces.stitch(source, list(zip(contexts, incomplete)))
+    assert not joined_partial['camera_observations']['observations']
+    assert joined_partial['labels']['timeline'] and joined_partial['camera_observations']['parts']
+    # A retained camera with no supplied images is not added to the observation contract.
+    subset = copy.deepcopy(records)
+    for record in subset:
+        record['config']['camera_observation_views'] = ['left', 'right']
+        record['camera_observations'] = harness.bind_camera_observations(
+            record['camera_observations']['observations'][1:], record)
+    supplied_only = pieces.stitch(source, list(zip(contexts, subset)))
+    assert supplied_only['camera_observations']['views'] == ['left', 'right']
+    assert len(supplied_only['camera_observations']['observations']) == 2
     missing = [{'part': 2, 't0_s': contexts[1]['piece']['t0_s'],
                 't1_s': contexts[1]['piece']['t1_s'], 'why': 'no parsed labels'}]
     gapped = pieces.stitch(source, [(contexts[i], records[i]) for i in (0, 2)], missing)

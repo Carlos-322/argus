@@ -268,6 +268,8 @@ def camera_observation_block(views: list[tuple[str, str]]) -> str:
     """Optional pixel-grounded content descriptions using exact supplied view identities."""
     names = '; '.join(f'{view}: {alias}' for view, alias in views)
     return ('\nOBSERVED CAMERA CONTENT. The supplied view IDs and image-row labels are: ' + names + '. '
+            'Include exactly one observation for every supplied view ID, including views whose content seems obvious. '
+            'Aliases are not valid view IDs. Use unclear when the visible content is uncertain; do not omit that view. '
             'Add "camera_observations" to the final JSON, as a list of '
             '{"view": "<exact supplied view ID>", "content": "scene|sensor|unclear", '
             '"evidence": "<brief description of the visible content>"}. '
@@ -799,7 +801,9 @@ what a policy learns the instruction means, so it follows the instruction:
   itself (which face of a block is up, which object ends where) is part of the end state, not manner.
   A step whose result already holds at the first frame (a cap already off, a plug already in) is
   part of the end state that holds, not part of the goal that never happened: keep the relation
-  aligned, and record the step the demonstration never shows as an instruction_mismatch.
+  aligned. Absence of that motion alone is not an instruction_mismatch unless the source explicitly asserts
+  its occurrence within this recording or declared timed coverage. Keep that unobserved motion as a coverage
+  limitation; still report observed task, method or order violations and missing required end states.
 - Judge quantity and completion from the instruction's actual constraints. When its goal is satisfied
   and the operator repeats it or performs compatible additional activity, relation narrower can describe
   that added scope. Extra activity that preserves the requested result and violates no explicit constraint
