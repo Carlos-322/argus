@@ -8,6 +8,8 @@ import numpy as np
 import pytest
 
 from label import episode as me
+from label import frames as mf
+from label import policy, prompts
 from label import state as ms
 
 
@@ -153,6 +155,88 @@ def test_prompt_cases_request_only_their_available_evidence(name):
     assert bool("recorded motion" in fixed) == bool(blocks & {"state", "state_unaligned", "signals"})
     if ep["context"].get("instruction"):
         assert ep["context"]["instruction"] in prompt
+
+
+@pytest.mark.parametrize("rig,evidence,given,session,window", [
+    ("teleop_arms", "rgb", False, False, "whole"),
+    ("teleop_arms", "recorded", True, False, "piece"),
+    ("teleop_arms", "touch", False, True, "trimmed"),
+    ("teleop_arms", "depth", True, True, "piece"),
+    ("handheld_gripper", "rgb", True, False, "trimmed"),
+    ("handheld_gripper", "recorded", False, True, "piece"),
+    ("handheld_gripper", "touch", True, True, "whole"),
+    ("handheld_gripper", "depth", False, False, "piece"),
+    ("ego_head", "rgb", False, True, "piece"),
+    ("ego_head", "recorded", True, False, "trimmed"),
+    ("ego_head", "touch", False, False, "whole"),
+    ("ego_head", "depth", True, True, "piece"),
+])
+def test_one_contribution_policy_reaches_runtime_requests(rig, evidence, given, session, window):
+    """Verify request assembly and evidence scope, not model classifications of actions."""
+    base = {"teleop_arms": case_teleop_joints, "handheld_gripper": case_handheld_pose,
+            "ego_head": case_ego_plain}
+    ep, pl = (case_ego_annotated_tracks() if rig == "ego_head" and evidence == "recorded" else base[rig]())
+    ctx = ep["context"]
+    ctx["instruction"] = "Complete the recorded task." if given else ""
+    ctx["task_mode"] = "session" if session else "episode"
+    if evidence != "recorded":
+        _drop_state(ep, pl)
+    if evidence == "touch":
+        _add_contact(ep, pl)
+    elif evidence == "depth":
+        _add_depth(ep, pl)
+    duration = len(ep["state"]) / ctx["fps"]
+    ctx["duration_s"] = duration
+    if window == "piece":
+        ctx["piece"] = {"index": 2, "count": 3, "t0_s": 30.0, "t1_s": 30.0 + duration}
+    elif window == "trimmed":
+        ctx["trimmed"] = {"to_s": duration, "of_s": 120.0}
+
+    prefixes = []
+    for model in (policy.ASTRA, policy.SOL61):
+        ctx["annotation_policy"] = policy.resolve(ctx, model=model)
+        fixed, episode = me.build_prompt(ep, pl, cell_w=448, cell_h=252)
+        content, grids, image_bytes = mf.build_content(fixed, episode, [], ["camera"], 4, "high", 80, 10, 20)
+        assert content == [{"type": "text", "text": fixed}, {"type": "text", "text": episode}]
+        assert grids == image_bytes == 0
+        # Reject the superseded policy in actual dispatched text before checking the shared helper.
+        assert "only the try that finally works is advancing" not in fixed
+        assert "operator could have left the step out" not in fixed
+        assert "step's result does not last or is never used" not in fixed
+        assert "a step whose result lasts and is\n  used is advancing" not in fixed
+        assert "failed or repeated grasps" not in fixed
+        assert "goal reached and then undone by the demonstration itself" not in fixed.replace("\n  ", " ")
+        shared = prompts.contribution_rules(rig)
+        assert fixed.count(shared) == 1
+        assert shared not in episode
+        actor = {"teleop_arms": "arm", "handheld_gripper": "gripper", "ego_head": "hand"}[rig]
+        assert f'"idle": the {actor} is not engaged in the task.' in shared
+        assert "internal request cut" in shared
+        assert "unseen continuation" in shared.lower()
+        assert '"timeline_columns":' in fixed and '"operator_mistakes":' in fixed
+        assert "Each failed\n  attempt is a key_event with outcome failure." in fixed
+        assert "Every failure and every\n  wasteful stretch in the timeline belongs to exactly one operator mistake" in fixed
+        assert "a brief recovered\n  fumble remains a mistake. Inclusion is independent of severity." in fixed
+        assert '"recovery":' in fixed and '"recovered":' in fixed
+        if rig == "ego_head":
+            assert "object between the jaws" not in fixed
+        else:
+            assert "success_then_undone" in fixed
+        assert me.is_recorded(ep, pl) is (evidence == "recorded")
+        window_note = me.recording_window_note(ep)
+        if window == "whole":
+            assert window_note == ""
+        else:
+            assert window_note in episode
+            assert "Judge only the supplied window" in episode
+            assert "Use unknown when an outcome lies outside this window" in episode
+            if window == "piece":
+                assert "part 2 of 3, from 30 to" in episode
+                assert "displayed times start on the part's own clock" in episode
+            else:
+                assert f"only the first {duration:g} s of a 120 s recording" in episode
+        prefixes.append(fixed)
+    assert prefixes[0] == prefixes[1]
 
 
 def _add(**ctx):

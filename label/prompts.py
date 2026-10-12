@@ -35,6 +35,31 @@ VIDEO_ONLY_CONTRACT_WORDING = [
      "and breaks the link\n  between what is seen and what is asked"),
 ]
 
+
+def contribution_rules(r: str) -> str:
+    """One contribution policy, with only the acting part's name changing between rigs."""
+    actor = {"teleop_arms": "arm", "handheld_gripper": "gripper", "ego_head": "hand"}[r]
+    return f"""- contribution is judged by a step's visible effect on the operator's evident current aim, using the
+  whole available trajectory. Infer the aim from the actions and their context, not from an imagined task or
+  an ideal route. Later actions are evidence of how a result was used, not categorical proof of success or failure.
+    "advancing": achieves the current aim, makes useful intermediate progress, or effectively supports the work.
+      Temporary results, preparation, repositioning, exploration and recovery can advance when the footage
+      supports their useful role. A successful action stays advancing even if it is slow or indirect.
+    "wasteful": an observed failed attempt, an unintended outcome, or a clearly unnecessary portion of motion.
+      Establish what aim was unmet, what happened unintentionally, or what visible evidence makes that portion
+      redundant. Motion toward an aim is not success when the attempted effect fails. A failed attempt stays
+      wasteful even when the operator later recovers; judge the effective correction separately as advancing.
+    "idle": the {actor} is not engaged in the task. Lack of object contact alone does not establish idle:
+      necessary approach, repositioning, search or waiting can serve the task when the footage supports that role.
+  Repeated failed attempts at the same aim are wasteful, but repetition alone is not evidence of failure.
+  Intentional undo, disassembly, reset or a new activity does not retroactively make useful work wasteful.
+  Assess each step's effect within the activity it served, whether or not the whole activity ultimately succeeds.
+  Do not excuse an observed failure by inventing learning or exploration, or invent inefficiency from a
+  hypothetical shorter route. If only part of an action is demonstrably unnecessary, identify that portion.
+  Treat unseen continuation after a recording boundary or internal request cut as unknown, not proof that a result
+  was unused or an attempt failed. When the evidence does not settle contribution, explain the uncertainty in notes.
+"""
+
 # The output schema of the robot rigs. Tags are offered for reuse, so one kind of problem gets one tag across
 # episodes; they are never a closed list. Each timeline segment is a positional row, so its keys are not
 # repeated hundreds of times.
@@ -120,26 +145,9 @@ Rules:
 - Name objects by what you actually see. There is no fixed vocabulary.
   If you cannot tell what something is, describe it by shape/colour.
 - Only claim what the frames show; when unsure, say so in notes rather than guessing.
-- contribution and progress are judged IN CONTEXT of the whole episode so far
-  and the overall goal, NEVER as an isolated snapshot. You see the entire video,
-  so reason over the full trajectory: what state had the task reached by this
-  step, and does this step move it toward the goal FROM THERE.
-- contribution says what a stretch did for what the operator was trying to do at that moment, judged by
-  its effect, not by how the motion looks. The aim is the operator's own, read from what they do: what the
-  motion is directed at, and above all what they do next. Retrying the same thing, fetching an object back
-  or putting something back supports a failed-attempt interpretation; building on the result and
-  moving on supports success. These are evidence of intent, not categorical proof. Where there is no outside goal, the operator's own aims are all there is; never
-  judge a stretch against a task you imagine for them.
-    "advancing": gets, or moves toward, what the operator was aiming at. This includes recovering after a
-      failure and indirect but effective means (bracing an object so the other arm can work).
-    "wasteful": motion that serves no aim that is met: every try at an aim except the one that works,
-      whether or not the tries differ; a fumble; a detour; motion the operator later undoes; hesitating
-      with an object in hand.
-    "idle": the arm is not engaged in the task.
-  A motion that gets what it was aimed at is never wasteful, however unusual or slow it looks (a regrasp to
-  change an object's orientation, setting one object down to free a gripper, a probe or tilt to look), and
-  imprecision the operator leaves may be intentional. Check the visible result and declared goal rather than
-  assuming either error or success from the absence of a correction.
+- progress is judged with the whole available video in view, NEVER as an isolated snapshot.
+  Ask what state the task had reached by this step and whether this step moves it toward the goal FROM THERE.
+""" + contribution_rules("teleop_arms") + """
 - A failure is an attempt that does not get what it was aimed at, or an outcome nobody aimed at: an object
   that unintentionally slips, falls, rolls or is knocked is a failure, even if it is recovered afterwards.
   An intentionally released, dropped or rolled object is judged against its evident aim. Each failed
@@ -242,8 +250,6 @@ Rules:
 # gripper lowered or set down rather than an arm parked.
 HANDHELD_WORDING = [
     ("<free-form verb phrase for what the arm does>", "<free-form verb phrase for what the gripper does>"),
-    ("so the other arm can work", "so the other gripper can work"),
-    ('"idle": the arm is not engaged in the task.', '"idle": the gripper is not engaged in the task.'),
     ("It is NOT when the arms finish moving.", "It is NOT when the grippers finish moving."),
     ("retracting, parking, returning the arms home,\n  withdrawing the hands,",
      "lowering, setting down or pointing away a gripper,\n  withdrawing the hands,"),
@@ -264,6 +270,7 @@ def schema(r: str, recorded: bool = True) -> str:
     tags = DATA_ISSUE_TAGS if recorded else _replace_once(DATA_ISSUE_TAGS, *VIDEO_ONLY_TAG)
     s = SCHEMA.replace("<<ISSUE_TAGS>>", tags).replace("<<MISTAKE_TAGS>>", OPERATOR_MISTAKE_TAGS)
     if r == "handheld_gripper":
+        s = _replace_once(s, contribution_rules("teleop_arms"), contribution_rules(r))
         for old, new in HANDHELD_WORDING:
             s = _replace_once(s, old, new)
     return s
@@ -355,31 +362,14 @@ Rules:
 - Name objects by what you actually see. There is no fixed vocabulary.
   If you cannot tell what something is, describe it by shape/colour.
 - Only claim what the frames show; when unsure, say so in notes rather than guessing.
-- contribution and progress are judged IN CONTEXT of the whole episode so far
-  and the overall goal, NEVER as an isolated snapshot. You see the entire video,
-  so reason over the full trajectory: what state had the task reached by this
-  step, and does this step move it toward the goal FROM THERE.
-- contribution says what a stretch did for what the operator was trying to do at that moment, judged by
-  its effect, not by how the motion looks. The aim is the operator's own, read from what they do: what the
-  motion is directed at, and above all what they do next. Retrying the same thing, fetching an object back
-  or putting something back supports a failed-attempt interpretation; building on the result and
-  moving on supports success. These are evidence of intent, not categorical proof. Where there is no outside goal, the operator's own aims are all there is; never
-  judge a stretch against a task you imagine for them.
-    "advancing": gets, or moves toward, what the operator was aiming at. This includes recovering after a
-      failure and indirect but effective means (bracing an object so the other arm can work).
-    "wasteful": motion that serves no aim that is met: every try at an aim except the one that works,
-      whether or not the tries differ; a fumble; a detour; motion the operator later undoes; hesitating
-      with an object in hand.
-    "idle": the hand is not engaged in the task.
-  A motion that gets what it was aimed at is never wasteful, however unusual or slow it looks (a regrasp to
-  change an object's orientation, setting one object down to free a hand, a probe or tilt to look), and
-  imprecision the operator leaves may be intentional. Check the visible result and declared goal rather than
-  assuming either error or success from the absence of a correction.
+- progress is judged with the whole available video in view, NEVER as an isolated snapshot.
+  Ask what state the task had reached by this step and whether this step moves it toward the goal FROM THERE.
+""" + contribution_rules("ego_head") + """
 - A failure is an attempt that does not get what it was aimed at, or an outcome nobody aimed at: an object
   that unintentionally slips, falls, rolls or is knocked is a failure, even if it is recovered afterwards.
   An intentionally released, dropped or rolled object is judged against its evident aim. Each failed
   attempt is a key_event with outcome failure. A step succeeded only when the frames show its result (the
-  object between the jaws in the frames after, the things meant to meet meeting, the object staying where
+  object held by the hand in the frames after, the things meant to meet meeting, the object staying where
   it was put); when they do not show it, it is not a success, even when the instruction asks for that step.
 - progress is per step, 0..1, toward the CURRENT sub-task the operator is working on
   (see tasks below), NOT the whole session: 0 when they start a sub-task, 1.0 when
@@ -580,25 +570,30 @@ _MAP = {
 
 _MISTAKES = {
     "teleop_arms": (
-        "performance are operator mistakes, and they go in operator_mistakes: failed or repeated grasps, drops,\n"
-        "  knock-overs, collisions, fumbling, detours that serve the task in no way, long hesitations mid-task, the\n"
-        "  goal reached and then undone by the demonstration itself (a scene reset after the task is a data issue,\n"
-        "  above), the task given up while the recording continues."),
+        "performance are operator mistakes, and they go in operator_mistakes under the shared contribution\n"
+        "  rule's evidence of failure or wasted motion: failed grasps, repeated failed attempts at the same evident\n"
+        "  aim, unintended drops, knock-overs or collisions, fumbling, detours or hesitation demonstrably serving\n"
+        "  no aim, unintended loss of an achieved goal within the current activity, or an evident task given up\n"
+        "  while the recording continues. Intentional later reset is not itself a mistake (a scene reset after\n"
+        "  the task is a data issue, above)."),
     "handheld_gripper": (
-        "performance are operator mistakes, and they go in operator_mistakes: missed or slipped grasps, drops,\n"
-        "  knock-overs, fumbling, detours that serve the task in no way, long hesitations mid-task, the goal\n"
-        "  reached and then undone by the demonstration itself (a scene reset after the task is a data issue,\n"
-        "  above), the task given up while the recording continues. A person with handheld grippers often waves\n"
+        "performance are operator mistakes, and they go in operator_mistakes under the shared contribution\n"
+        "  rule's evidence of failure or wasted motion: missed or slipped grasps, repeated failed attempts at the\n"
+        "  same evident aim, unintended drops, knock-overs or collisions, fumbling, detours or hesitation\n"
+        "  demonstrably serving no aim, unintended loss of an achieved goal within the current activity, or an\n"
+        "  evident task given up while the recording continues. Intentional later reset is not itself a mistake\n"
+        "  (a scene reset after the task is a data issue, above). A person with handheld grippers often waves\n"
         "  a gripper at the start so its tracking can initialise, tests the jaws, shifts their grip on a\n"
         "  handle, sets one gripper down while working with the other, and lowers the grippers or points them\n"
-        "  away at the end; these are how the rig is used, not mistakes, and a static view from a gripper that\n"
-        "  has been set down is not a frozen camera."),
+        "  away at the end; these uses alone are not mistakes, and observed failures or wasted motion still\n"
+        "  follow the shared rule. A static view from a gripper that has been set down is not a frozen camera."),
     "ego_head": (
         "work are operator mistakes, and they go in operator_mistakes. Moving a part from one hand to the other,\n"
         "  re-gripping, putting a tool down and picking it up again, and taking something apart so it can be worked\n"
-        "  on are how people work, not mistakes, and switching to another job when the work calls for it is not\n"
-        "  giving up."),
+        "  on are normal uses. These uses alone are not mistakes; observed failures or wasted motion still follow\n"
+        "  the shared rule. Switching to another job when the work calls for it is not giving up."),
 }
+
 
 _SLACK_EGO = """- OPERATOR MISTAKES ARE THE FAILURES AND WASTEFUL STRETCHES, GROUPED AND GRADED. Every failure and every
   wasteful stretch in the timeline belongs to exactly one operator mistake, recovered or not, and every
@@ -606,7 +601,8 @@ _SLACK_EGO = """- OPERATOR MISTAKES ARE THE FAILURES AND WASTEFUL STRETCHES, GRO
   between them, a drop and fetching the object back, or one stretch of motion that serves no aim. t_s and
   end_s span the whole incident. deliberate says whether the incident looks staged; it never removes an
   incident or lowers its severity. Setup or settling in the first and last few seconds, brief pauses to look
-  with nothing in hand, and idle stretches are not mistakes."""
+  with nothing in hand, and idle stretches alone are not mistakes; observed failures or demonstrably wasted
+  motion within them still follow the shared contribution rule."""
 
 
 # The shared contract in the head camera's words: a video and its annotation, where the robot rigs have cameras,
@@ -681,7 +677,8 @@ _DATA_CONTRACT_BASE = """- WHY YOU ARE LABELLING THIS. These labels decide what 
   between them, a drop and fetching the object back, or one stretch of motion that serves no aim. t_s and
   end_s span the whole incident. deliberate says whether the incident looks staged; it never removes an
   incident or lowers its severity. Setup or settling in the first and last few seconds, brief pauses to look
-  with nothing in hand, and idle stretches are not mistakes.
+  with nothing in hand, and idle stretches alone are not mistakes; observed failures or demonstrably wasted
+  motion within them still follow the shared contribution rule.
 - SEVERITY IS TRAINING IMPACT, not how visible or dramatic something looks, in both lists. It comes from
   two things together: how much of the episode the problem touches, and how directly it corrupts what a
   model takes from the episode (what the cameras show, what the recorded motion says, what the instruction
@@ -746,15 +743,14 @@ not as the truth about the video. The label uses it in two different ways, for t
 purposes. The timeline describes the trajectory, so it follows what the operator is ACTUALLY,
 demonstrably doing (your independently-inferred task_summary), not the given goal. The outcome is
 what a policy learns the instruction means, so it follows the instruction:
-- contribution (advancing/wasteful/idle) measures competence toward the operator's OWN evident
-  objective. "wasteful" means genuinely wasted motion (fumbles, dead-ends, redundant
-  repositioning, dropped grasps), NOT motion that simply fails to serve the given goal.
+- contribution follows the shared rule in the schema, against the operator's evident activity,
+  never simply against whether the step serves the given instruction.
 - progress, like the outcome, is measured against the given goal: how much of what was ASKED
   holds at that instant. It reaches 1.0 only when success_predicate holds, so a demo that never
   reaches the given goal never reaches 1.0, however well it does its own task.
 - CRITICAL: if the operator is clearly performing a different-but-coherent task than the given
-  instruction, do NOT mark their competent, purposeful actions wasteful. Grade those steps as
-  advancing toward the task they are actually doing, and record the divergence in goal_alignment
+  instruction, apply the same contribution rule and record
+  the divergence in goal_alignment
   and as an instruction_mismatch data issue. A competent demonstration is good data even when it
   is mislabeled; the dense timeline must stay a faithful description of the real behavior.
 - An instruction can say HOW as well as WHAT: a direction, a hand, a grip, the order of steps. A
@@ -904,8 +900,8 @@ emit them as a top-level "tasks" list, in time order:
   the rest of that task's span: the last action that puts the task's objects into their final state, not when the
   grippers move on. null if the end-state is never reached.
 - progress in the timeline is toward the CURRENT task, not the whole session: 0 when a task starts, 1.0 when its
-  end-state is reached, then it resets for the next task. contribution is judged against the task the
-  demonstrator is working on at that step.
+  end-state is reached, then it resets for the next task. contribution follows the shared rule in the schema
+  within the activity each step served.
 - task_summary is one sentence summarising the session's activities. instruction_variants rephrase the activity
   that fills most of the recording.
 - completion: there is no single goal, so set task_completed, success_predicate, completed_at_s,
