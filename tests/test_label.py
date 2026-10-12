@@ -512,17 +512,41 @@ def test_batch_finishes_when_a_key_runs_out(tmp_path, monkeypatch):
 
 
 def test_spend_cap_stops_new_episodes(tmp_path, monkeypatch):
-    def fake_label(ep, out, *, api_key, **kw):
-        out.write_text(json.dumps({"parse_ok": True, "usage": {"est_cost_usd": 1.0}}))
-        return {"usage": {"est_cost_usd": 1.0}}
-
-    monkeypatch.setattr(harness, "label_episode", fake_label)
-    harness.run_batch(_dirs(tmp_path, 10), tmp_path / "out", keys=["sk-or-a"], concurrency=1, force=False,
-                      max_spend=3.0)
-    assert len(list((tmp_path / "out").glob("episode_*.json"))) == 3
-    # every episode the cap stopped says so, for the board (board/to_board.py label_outputs)
-    left = sorted((tmp_path / "out").glob("noreply_episode_*.json"))
-    assert len(left) == 7 and json.loads(left[0].read_text())["no_reply"] == "spend cap $3.00 reached"
+    import shutil
+    from label.dictionary_stage import output_spend, output_spend_complete
+    native, _ = _packed_episode(tmp_path)
+    with np.load(native / 'state.npz') as stored:
+        state = stored['state']
+    np.savez(native / 'state.npz', state=state)
+    episodes = []
+    for index in range(10):
+        ep = tmp_path / f'episode_budget_{index:06d}'
+        ep.mkdir()
+        for name in ('context.json', 'sources.json', 'state.npz'):
+            shutil.copyfile(native / name, ep / name)
+        episodes.append(ep)
+    # All recordings reference the same immutable encoded source, not copies of its pixels.
+    request = me.build_request(episodes[0], cell_w=128, inspect_evidence=True)
+    assert request.get('evidence_access') is None
+    bound = harness.final_cost_bound(request['content'], 100)
+    cap = bound + .025
+    calls = []
+    def provider(*args, **kwargs):
+        calls.append(1)
+        return {'usage': {'cost': .01}, 'choices': [{'finish_reason': 'stop',
+                'message': {'content': '{"timeline": []}'}}]}
+    monkeypatch.setattr(harness, 'call_model', provider)
+    out = tmp_path / 'out'
+    assert harness.run_batch(episodes, out, keys=['sk-or-a'], concurrency=1, force=False,
+        max_spend=cap, model=harness.DEFAULT_MODEL, reasoning='medium', max_tokens=100,
+        timeout=1, cell_w=128) == 0
+    assert len(calls) == len(list(out.glob('episode_*.json'))) == 3
+    left = sorted(out.glob('noreply_episode_*.json'))
+    assert len(left) == 7
+    assert all(json.loads(path.read_text())['no_reply_kind'] == 'spend_cap' and
+               json.loads(path.read_text())['final_dispatch_outcome'] == 'not dispatched' for path in left)
+    assert output_spend(out) == pytest.approx(.03) and output_spend(out) <= cap
+    assert output_spend_complete(out)
 
 
 def test_an_episode_that_got_no_reply_says_why_until_it_gets_one(tmp_path, monkeypatch):

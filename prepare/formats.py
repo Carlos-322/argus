@@ -3434,18 +3434,23 @@ def depth_videos(rels: list[str]) -> dict[str, str]:
     return out
 
 
+def frame_time_files(video: Path, depth: bool = False) -> list[Path]:
+    """Timestamp sidecars named for this camera, shared by reading and direct-file ownership."""
+    cam = set(tokens(video.stem)) - GENERIC_VIDEO_WORDS - (NON_COLOUR if depth else set())
+    return [p for p in sorted(video.parent.glob('*.npy'))
+            if p.is_file() and (tk := set(tokens(p.stem)))
+            and any(t.startswith(('time', 'stamp')) for t in tk) and cam <= tk]
+
+
 def frame_times(video: Path, n: int, depth: bool = False, native: bool = False) -> np.ndarray | tuple | None:
     """A video's frames' capture times in seconds on its recorder's clock, from the per-frame timestamp array a
     recorder writes beside it (exo_cam-rgb-timestamp.npy beside exo_cam-images-rgb.mp4): a .npy in its folder whose
     name says time and has the video's camera words, holding n rising numbers (seconds, or ms, us or ns, read
     from their size). Colour over depth when both fit, and depth over colour for a depth video (depth=True, whose
     stamps exo_cam-depth-timestamp.npy are its own). None when there is none."""
-    cam = set(tokens(video.stem)) - GENERIC_VIDEO_WORDS - (NON_COLOUR if depth else set())
     cands = []
-    for p in sorted(video.parent.glob("*.npy")):
+    for p in frame_time_files(video, depth):
         tk = set(tokens(p.stem))
-        if not any(t.startswith(("time", "stamp")) for t in tk) or not cam <= tk:
-            continue
         try:
             a = np.load(p, allow_pickle=False)
         except Exception:
@@ -10578,13 +10583,41 @@ def plain_error(e: Exception) -> str:
     return "it could not be opened (" + type(e).__name__ + ")"
 
 
+def single_file_members(root: Path) -> dict[str, list[Path]]:
+    """The named source, its owned notes and clocks, and existing shared scope declarations.
+
+    Neighboring recordings, generic task notes and unrelated per-recording metadata
+    are outside a direct-file input. Scope uses the same recorded declarations as
+    preparation. Review snapshots every included member before reusing preparation.
+    """
+    root = Path(root)
+    if ARCHIVE_RE.search(root.name):
+        return {'files': [root], 'scope': []}
+    listing = files_by_name(root.parent)
+    notes = [path for extension in NOTE_OWN_EXT
+             for path in listing.get((root.stem + extension).lower(), []) if path != root]
+    clocks = frame_time_files(root) if root.suffix.lower() in VIDEO_EXT else []
+    from prepare.annotations import scope_records
+    return {'files': list(dict.fromkeys([root, *notes, *clocks])),
+            'scope': [path for path, _ in scope_records(root)]}
+
+
 def archive_read_root(root: Path, out: Path) -> Path:
-    """Expand directory uploads in an owned tree, without writing beside source archives.
+    """Stage selected files and directory archives in an owned tree without writing to sources.
 
     Ordinary source files stay linked rather than copied. Keep the original root
     name and relative layout so publisher ownership and adjacent metadata agree.
     Prepared references can use the expanded tree for the life of the job.
     """
+    if root.is_file() and not ARCHIVE_RE.search(root.name):
+        import tempfile
+        staging = out.parent / 'upload_selected'
+        staging.mkdir(parents=True, exist_ok=True)
+        selected = Path(tempfile.mkdtemp(prefix='file-', dir=staging)) / ownership_root_name(root.parent, None)
+        selected.mkdir()
+        for source in single_file_members(root)['files']:
+            (selected / source.name).symlink_to(source.resolve())
+        return selected
     if not root.is_dir():
         return root
     staging = out.parent / 'upload_unpacked'
@@ -10611,10 +10644,11 @@ def convert(root: Path, rig: str, out: Path, dataset: str, max_seconds: float, g
     if rig not in RIGS:
         raise ValueError(f"rig must be one of {RIGS}")
     root, out = Path(root), Path(out)
+    selected_file = root if root.is_file() and not ARCHIVE_RE.search(root.name) else None
     root = archive_read_root(root, out)
     root, opened = open_archives(root, out.parent / "upload_unpacked")
     from prepare.annotations import source_context, merge_source_contexts
-    declared_context = source_context(root, rig)
+    declared_context = source_context(selected_file or root, rig)
     try:
         det, items = plan(root, grouping, ownership_context)
     except ValueError as e:
@@ -10669,7 +10703,8 @@ def convert(root: Path, rig: str, out: Path, dataset: str, max_seconds: float, g
             ctx['collection_note'] = '\n'.join(notes)
         if len(scope) > 1:
             from prepare.annotations import represented_scope
-            it['scope_metadata_read'] = represented_scope(ctx, [root.parent if root.is_file() else root,
+            it['scope_metadata_read'] = represented_scope(ctx, [selected_file.parent if selected_file else
+                                    root.parent if root.is_file() else root,
                                     *([Path(item_root)] if item_root else [])])
             write_atomic(out / ctx['episode_id'] / 'context.json', ctx, indent=1, default=str)
         if it.get("side_notes"):

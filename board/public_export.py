@@ -504,6 +504,10 @@ def _reader_issue(value: dict) -> dict:
 
 def _label_failure(value: dict) -> dict:
     result = dict(value)
+    for key, allowed in (('final_dispatch_outcome', ('claimed', 'unverified', 'not dispatched')),
+                         ('no_reply_kind', ('spend_cap',))):
+        if value.get('status') != 'no_reply' or value.get(key) not in allowed:
+            result.pop(key, None)
     if value.get('status') in ('unreadable', 'not_shown') and 'error' in value:
         result['error'] = 'The recorded model output could not be read; original reader details are retained privately.'
     elif value.get('status') == 'no_reply' and 'why' in value:

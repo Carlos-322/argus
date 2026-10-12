@@ -21,6 +21,103 @@ from test_formats import recorder_folder
 REPO = Path(__file__).resolve().parent.parent
 
 
+@pytest.mark.parametrize('kind', ['video', 'mcap', 'hdf5'])
+def test_review_direct_file_retains_owned_metadata_without_reading_neighbor_recordings(tmp_path, monkeypatch, kind):
+    import hashlib
+    import h5py
+    from review import __main__ as rv
+    from prepare import formats
+    from label import episode, harness
+    from test_formats import _camera_mcap, _clip
+
+    upload = tmp_path / 'collection'
+    upload.mkdir()
+    suffix = {'video': '.mp4', 'mcap': '.mcap', 'hdf5': '.h5'}[kind]
+    source = upload / ('selected_clip' + suffix)
+    clock = None
+    if kind == 'video':
+        _clip(source, 12)
+        clock = upload / 'selected_clip-timestamps.npy'
+        recorded_times = np.r_[np.arange(6) / 30, .2 + np.arange(6) / 3]
+        np.save(clock, recorded_times)
+        np.save(upload / 'other_clip-timestamps.npy', np.arange(18) / 15)
+        corrupt_clock = upload / 'selected_clip-timestamp-corrupt.npy'
+        corrupt_clock.write_bytes(b'Unusable publisher clock data.')
+        (upload / 'selected_clip-timestamp-directory.npy').mkdir()
+    elif kind == 'mcap':
+        _camera_mcap(source, ['/top/image/compressed'], n=12)
+    else:
+        with h5py.File(source, 'w') as container:
+            container.attrs['fps'] = 10
+            container.attrs['recording_serial'] = 'selected-native-serial'
+            container.create_dataset('images/top', data=np.full((12, 36, 64, 3), 70, np.uint8))
+    _clip(upload / 'other_clip.mp4', 18)
+    (upload / 'other_clip.txt').write_text('Handle the unrelated object.')
+    (upload / 'task.txt').write_text('An ambiguous task for the surrounding collection.')
+    own_note = upload / 'selected_clip.txt'
+    own_note.write_text('Lift the selected object.')
+    scope = upload / 'dataset.json'
+    scope.write_text(json.dumps({'task_mode': 'session', 'collection_note': 'Recorded source collection.'}))
+    before = {p.name: (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
+              for p in upload.iterdir() if p.is_file()}
+
+    class ReachedChecks(Exception):
+        pass
+    monkeypatch.setattr(harness, 'call_model_once', lambda *a, **k: pytest.fail('unexpected provider call'))
+    monkeypatch.setattr(rv, 'run_step', lambda *a, **k: (_ for _ in ()).throw(ReachedChecks()))
+    job = tmp_path / 'job'
+    monkeypatch.setattr(sys, 'argv', ['review', '--data', str(source), '--rig', 'ego_head', '--out', str(job), '--free'])
+    with pytest.raises(ReachedChecks):
+        rv.main()
+    report = json.loads((job / 'report.json').read_text())
+    assert len(report['episodes']) == 1 and not report['failed'] and not report['skipped']
+    path = next((job / 'episodes').glob('episode_*'))
+    context = json.loads((path / 'context.json').read_text())
+    assert context['instruction'] == 'Lift the selected object.'
+    assert context['task_mode'] == 'session' and 'Recorded source collection.' in context['collection_note']
+    assert 'other_clip' not in json.dumps(context) and 'ambiguous task' not in json.dumps(context)
+    receipt = json.loads((job / 'preparation_receipt.json').read_text())
+    assert set(receipt['source']) == {source.name, own_note.name, scope.name} | (
+        {clock.name, corrupt_clock.name} if clock else set())
+    if kind == 'video':
+        native = json.loads((path / 'sources.json').read_text())
+        assert {view['packed'] for view in native.values()} == {str(source.resolve())}
+    elif kind == 'hdf5':
+        assert context['recorded_hdf5_metadata']['source_path'] == str(source.resolve())
+        assert 'selected-native-serial' in json.dumps(context)
+    loaded = episode.load(path)
+    if clock:
+        np.testing.assert_allclose(loaded['times'][episode.anchor(loaded)], recorded_times)
+    selected = episode.plan(loaded)['ks']
+    assert episode._decode_view(loaded, episode.anchor(loaded), selected)
+    assert before == {p.name: (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
+                      for p in upload.iterdir() if p.is_file()}
+    saved = (job / 'preparation_receipt.json').read_bytes()
+    with pytest.raises(ReachedChecks):
+        rv.main()
+    assert (job / 'preparation_receipt.json').read_bytes() == saved
+    # A changed unrelated recording note does not invalidate this file's preparation.
+    (upload / 'other_clip.txt').write_text('Changed unrelated instructions.')
+    with pytest.raises(ReachedChecks):
+        rv.main()
+    if clock:
+        np.save(clock, recorded_times * 2)
+        with pytest.raises(SystemExit, match='fresh job'):
+            rv.main()
+        np.save(clock, recorded_times)
+        np.save(corrupt_clock, recorded_times * 2)
+        with pytest.raises(SystemExit, match='fresh job'):
+            rv.main()
+        corrupt_clock.write_bytes(b'Unusable publisher clock data.')
+    own_note.write_text('Changed selected instructions.')
+    with pytest.raises(SystemExit, match='fresh job'):
+        rv.main()
+    own_note.write_text('Lift the selected object.')
+    scope.write_text(json.dumps({'task_mode': 'session', 'collection_note': 'Changed recorded scope.'}))
+    with pytest.raises(SystemExit, match='fresh job'):
+        rv.main()
+
+
 def test_review_keeps_mixed_nested_archives_immutable_and_reuses_preparation(tmp_path, monkeypatch):
     import hashlib
     import io

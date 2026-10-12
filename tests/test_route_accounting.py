@@ -251,12 +251,101 @@ def test_concurrent_routes_cannot_dispatch_beyond_reserved_budget(tmp_path, monk
         future = executor.submit(harness.run_batch, eps, job / 'run' / 'out',
             keys=['sk-or-fixture'], concurrency=2, force=False, max_spend=.04, **args())
         try:
-            assert entered.wait(2) and refused.wait(2)
+            assert entered.wait(2)
         finally:
             release.set()
         assert future.result(timeout=2) == 1
+    assert refused.is_set()
     assert calls == [1]
     assert label_spend(job) == pytest.approx(.004)
+
+
+@pytest.mark.parametrize('first_reply', ['received', 'unknown', 'changed_input'])
+def test_parallel_final_waits_for_live_reservation_but_preserves_unknown_charge(tmp_path, monkeypatch, first_reply):
+    from types import SimpleNamespace
+    entered, waiting, release = threading.Event(), threading.Event(), threading.Event()
+    class ObservedCondition(threading.Condition):
+        def wait(self, timeout=None):
+            waiting.set()
+            return super().wait(timeout)
+    monkeypatch.setattr(harness, 'threading', SimpleNamespace(Condition=ObservedCondition, Lock=threading.Lock))
+    eps = []
+    for name in ('a', 'b'):
+        root = tmp_path / name
+        root.mkdir()
+        ep = observed_packed_episode(root)
+        ep = ep.rename(root / ('episode_' + name))
+        eps.append(ep)
+    job = tmp_path / 'job'
+    out = job / 'run' / 'out'
+    bounds, calls = [], []
+    original_bound = harness.final_cost_bound
+    def bound(content, tokens):
+        value = original_bound(content, tokens)
+        bounds.append(value)
+        return value
+    def provider(*a, **kw):
+        calls.append(1)
+        assert len(calls) <= 2
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(5)
+            if first_reply == 'unknown':
+                raise TimeoutError('final charge is unknown')
+            if first_reply == 'changed_input':
+                claimed = {p.name.removeprefix('noreply_').removesuffix('.json') for p in out.glob('noreply_*.json')}
+                pending = next(ep for ep in eps if ep.name not in claimed)
+                path = pending / 'context.json'
+                ctx = json.loads(path.read_text())
+                ctx['instruction'] = 'A changed publisher instruction during the budget wait.'
+                path.write_text(json.dumps(ctx))
+        return {'usage': {'cost': .01}, 'choices': [{'finish_reason': 'stop',
+                'message': {'content': '{"timeline": []}'}}]}
+    monkeypatch.setattr(harness, 'final_cost_bound', bound)
+    monkeypatch.setattr(harness, 'call_model', provider)
+    cap = max(original_bound(harness.me.build_request(ep, cell_w=128)['content'], 100) for ep in eps) + .02
+    with ThreadPoolExecutor(1) as executor:
+        future = executor.submit(harness.run_batch, eps, out, keys=['sk-or-fixture'], concurrency=2,
+            force=False, max_spend=cap, **dict(args(cell_w=128), model=None))
+        try:
+            assert entered.wait(5) and waiting.wait(5)
+            assert calls == [1]
+        finally:
+            release.set()
+        assert future.result(timeout=5) == (0 if first_reply == 'received' else 1)
+    assert len(calls) == (2 if first_reply == 'received' else 1)
+    assert label_spend(job) == pytest.approx(.02 if first_reply == 'received' else
+        bounds[0] if first_reply == 'unknown' else .01)
+    assert label_spend_complete(job) is (first_reply != 'unknown')
+    assert len(list(out.glob('episode_*.json'))) == (2 if first_reply == 'received' else 1 if first_reply == 'changed_input' else 0)
+    for path in out.glob('noreply_episode_*.json'):
+        receipt = json.loads(path.read_text())
+        assert receipt['model'] == receipt['input_identity']['settings']['model']
+        if first_reply == 'unknown' and receipt['final_dispatch_outcome'] == 'not dispatched':
+            assert receipt['no_reply_kind'] == 'spend_cap'
+
+
+def test_exhausted_review_budget_retains_new_request_identity_and_prior_unknown_charge(tmp_path, monkeypatch):
+    ep = observed_packed_episode(tmp_path)
+    job = tmp_path / 'job'
+    out = job / 'run' / 'out' / (ep.name + '.json')
+    request = harness.label_episode(ep, tmp_path / 'dry.json', api_key='dry-run', dry_run=True,
+                                    **args(cell_w=128))
+    monkeypatch.setattr(harness, 'call_model', lambda *a, **kw: pytest.fail('budget refusal dispatched'))
+    assert harness.record_budget_refusal(out, request)
+    refusal = out.with_name('noreply_' + out.name)
+    receipt = json.loads(refusal.read_text())
+    assert receipt['model'] == request['model']
+    assert receipt['input_identity'] == request['input_identity']
+    assert receipt['final_dispatch_outcome'] == 'not dispatched' and receipt['no_reply_kind'] == 'spend_cap'
+    assert label_spend(job) == 0 and label_spend_complete(job)
+    # A previous dispatched request is authoritative even if a later Review has no allowance.
+    receipt.update(final_dispatch_outcome='unverified', final_reserved_usd=6.4)
+    refusal.write_text(json.dumps(receipt))
+    prior = refusal.read_bytes()
+    assert not harness.record_budget_refusal(out, request)
+    assert refusal.read_bytes() == prior
+    assert label_spend(job) == 6.4 and not label_spend_complete(job)
 
 
 def test_same_task_route_cost_belongs_only_to_the_dispatched_episode(tmp_path, monkeypatch):

@@ -64,7 +64,10 @@ def label_failed(result: dict) -> dict | None:
     if result.get("unreadable"):
         return {"status": "unreadable", "error": str(result["unreadable"])[:RAW_HEAD]}
     if result.get("no_reply"):
-        return {"status": "no_reply", "why": str(result["no_reply"])[:RAW_HEAD]}
+        return {"status": "no_reply", "why": str(result["no_reply"])[:RAW_HEAD],
+                **({'final_dispatch_outcome': result['final_dispatch_outcome']}
+                   if result.get('final_dispatch_outcome') in ('claimed', 'unverified', 'not dispatched') else {}),
+                **({'no_reply_kind': 'spend_cap'} if result.get('no_reply_kind') == 'spend_cap' else {})}
     if result.get("board_error"):
         raw = str(result.get("raw") or "")
         return {"status": "not_shown", "error": str(result["board_error"])[:RAW_HEAD], "raw_head": raw[:RAW_HEAD],

@@ -7,6 +7,68 @@ import pytest
 from board.public_export import project, public_build_manifest
 
 
+@pytest.mark.parametrize('outcome,kind,heading,reason', [
+    ('not dispatched', 'spend_cap', 'Annotation not sent', 'remaining spend cap'),
+    ('not dispatched', None, 'Annotation not sent', None),
+    ('claimed', None, 'Response outcome unknown', None),
+    ('unverified', None, 'Response outcome unknown', None),
+    (None, None, 'No response from Astra', None),
+    ('private /srv/request?token=secret', 'private /srv/request?token=secret', 'No response from Astra', None),
+])
+def test_billing_refusal_reaches_viewer_without_exposing_private_error(outcome, kind, heading, reason):
+    import shutil
+    import subprocess
+    from pathlib import Path
+    from board.to_board import convert
+
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('no node')
+    record = {'episode_dir': '/srv/private/episode_demo_00', 'model': 'openai/gpt-6-astra',
+              'reasoning_effort': 'medium', 'parse_ok': False,
+              'no_reply': 'final request reserve $6.44 exceeds remaining spend cap /srv/private?token=secret',
+              'final_reserved_usd': 0.0, 'final_dispatch_outcome': outcome, 'no_reply_kind': kind,
+              'evidence_inspection': {'version': 1, 'cost_usd': 0.021, 'status': 'complete'}}
+    before = copy.deepcopy(record)
+    shown = project(convert(record, 'numeric'))
+    assert record == before
+    assert shown['_meta']['model'] == 'openai/gpt-6-astra'
+    assert shown['evidence_inspection']['cost_usd'] == 0.021
+    failure = shown['_label_failed']
+    assert failure['status'] == 'no_reply'
+    assert failure['why'] == 'No verified model reply was recorded.'
+    if outcome in ('claimed', 'unverified', 'not dispatched'):
+        assert failure['final_dispatch_outcome'] == outcome
+    else:
+        assert 'final_dispatch_outcome' not in failure
+    assert ('no_reply_kind' in failure) == (kind == 'spend_cap')
+    # Projection also validates typed status fields on older directly written board files.
+    assert project({'_label_failed': {'status': 'no_reply', 'why': record['no_reply'],
+                    'final_dispatch_outcome': outcome, 'no_reply_kind': kind}})['_label_failed'] == failure
+    program = """
+const {piece} = require('./tests/page_functions')('./board/serve.py');
+const render = new Function(piece('esc') + piece('fmtDur') + piece('cmpFailHtml')
+  + piece('noLabelsHtml') + 'return {cmpFailHtml, noLabelsHtml};')();
+const d = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+console.log(JSON.stringify({card:render.cmpFailHtml(d._label_failed,'Astra',d._usage,true),
+                           sections:render.noLabelsHtml(d._label_failed)}));
+"""
+    repo = Path(__file__).resolve().parent.parent
+    completed = subprocess.run([node, '-e', program], input=json.dumps(shown), cwd=repo,
+                               capture_output=True, text=True, check=True)
+    rendered = json.loads(completed.stdout)
+    assert heading in rendered['card']
+    if reason:
+        assert reason in rendered['card']
+    if outcome == 'not dispatched':
+        assert 'No response' not in rendered['card'] and 'got no reply' not in rendered['sections']
+    if outcome in ('claimed', 'unverified'):
+        assert 'unknown' in rendered['sections'] and 'Annotation not sent' not in rendered['card']
+    assert 'footage, checks and sensors' in rendered['card']
+    assert 'token=secret' not in completed.stdout and '/srv/private' not in completed.stdout
+    assert 'not called' not in completed.stdout
+
+
 def test_nested_access_is_private_without_changing_source_or_annotation():
     label = {
         'publisher_labels': {'text': 'Open /data/example, then type api_key.',
