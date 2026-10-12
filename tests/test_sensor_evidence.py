@@ -6,6 +6,38 @@ from pathlib import Path
 import pytest
 
 
+def test_duplicate_camera_names_keep_exact_sensor_owner_across_request_and_stitch(tmp_path):
+    import json
+    import hashlib
+    from test_label import _packed_episode
+    from label import episode, sensor_evidence
+    ep_dir, _ = _packed_episode(tmp_path)
+    path = ep_dir / 'context.json'
+    ctx = json.loads(path.read_text())
+    views = ['exo', 'left']
+    for view in views:
+        ctx['cameras'].setdefault(view, dict(ctx['cameras']['exo']))
+        ctx['cameras'][view]['name'] = 'recorded camera'
+    ctx['data_dictionary'] = {'schema': 1, 'episode_id': ep_dir.name, 'status': 'success',
+        'fields': [{'id': view, 'kind': 'camera', 'name': 'recorded camera',
+                    'bindings': [{'episode': ep_dir.name, 'context_path': 'cameras/' + view}]} for view in views],
+        'entries': {'exo': {'role': 'scene', 'provenance': 'human'},
+                    'left': {'role': 'tactile_image', 'provenance': 'human'}}}
+    path.write_text(json.dumps(ctx))
+    media = {Path(source['packed']) for source in json.loads((ep_dir / 'sources.json').read_text()).values()}
+    assert media and all(p.is_file() for p in media)
+    before = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in media}
+    ep = episode.load(ep_dir)
+    plan = episode.plan(ep)
+    evidence = sensor_evidence.build(ep, plan, shown={v: plan['ks'] for v in views})
+    assert [(s['id'], s['view'], s['interpretation']['role']) for s in evidence['sensors']] == [
+        ('camera:left', 'left', 'tactile_image')]
+    merged = sensor_evidence.merge([({**ctx, 'piece': {'index': 1, 't0_s': 0, 't1_s': 4}},
+                                      {'sensor_evidence': evidence})], ctx)
+    assert [(s['view'], s['interpretation']['role']) for s in merged['sensors']] == [('left', 'tactile_image')]
+    assert {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in media} == before
+
+
 @pytest.mark.skipif(not shutil.which('node'), reason='no node')
 def test_sensor_evidence_presentation():
     root = Path(__file__).resolve().parents[1]

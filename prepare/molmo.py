@@ -270,6 +270,11 @@ def prepare_episode(row: dict, raw_root: Path, out_root: Path, instruction: str,
     for view, cam in context["cameras"].items():
         cam["desc"] = CAMERA_DESC[view]
     from prepare import formats
+    from prepare.state_contract import declared_action_semantics, publisher_action_semantics
+    context['action_semantics'] = declared_action_semantics('prepare.molmo', 'command')
+    publisher = publisher_action_semantics(feats.get('action'), 'prepare.molmo:publisher')
+    if publisher is not None:
+        context['publisher_action_semantics'] = publisher
     formats.record_state_identity(context, "observation.state",
                                   formats.value_names(feats.get("observation.state", {}).get("names"),
                                                       state.shape[1]), state.shape[1])

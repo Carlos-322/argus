@@ -47,6 +47,7 @@ import hashlib
 import html
 import http.server
 import json
+import logging
 import math
 import os
 import re
@@ -265,12 +266,38 @@ _FOOTAGE_LOCKS: dict = {}
 _FOOTAGE_LOCKS_LOCK = threading.Lock()
 
 
-def footage_cams(clips: Path, eid: str) -> list:
-    """[(cam, clip)] of the episode's clips on disk, the main camera first: the fixed or head camera, else the first
-    gripper camera, as the page shows them."""
+def footage_label(eid: str) -> dict:
+    """Current label owning this media identity; label filenames can include a dataset prefix."""
+    for path in sorted(HERE.glob('*.json')):
+        if not _under(HERE, path):
+            continue
+        try:
+            label = json.loads(path.read_text())
+            if not isinstance(label, dict) or ((label.get('_meta') or {}).get('episode_id') or path.stem) != eid:
+                continue
+            return current_label(label, DICTIONARY_JOB, path.name)
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+    return {}
+
+
+def footage_cams(clips: Path, eid: str, label: dict | None = None) -> list:
+    """Playable cameras in the current episode's presentation order, with legacy discovery as fallback."""
     extra = sorted((d.name for d in clips.iterdir() if d.is_dir() and EXTRA_CAM.fullmatch(d.name)),
                    key=lambda n: (n.startswith("unshown"), int(re.sub(r"\D", "", n)))) if clips.is_dir() else []
-    return [(c, clip_path(clips, eid, c)) for c in ("exo", "left", "right", *extra) if clip_path(clips, eid, c).is_file()]
+    cams = [(c, clip_path(clips, eid, c)) for c in ("exo", "left", "right", *extra)
+            if clip_path(clips, eid, c).is_file()]
+    label = footage_label(eid) if label is None else label
+    if label.get('camera_views'):
+        from board.static import shown_cams
+        order = shown_cams(label)
+        # The same current camera_presentation drives the player and static
+        # export. Files from a withheld view are not evidence of availability.
+        cams = [(cam, clip) for cam, clip in cams if cam in order]
+        roles = label.get('camera_presentation') or {}
+        if any((roles.get(cam) or {}).get('role') == 'scene' for cam, _ in cams):
+            cams.sort(key=lambda item: order.index(item[0]))
+    return cams
 
 
 def footage_layout(sizes: list, gap: int = FOOTAGE_GAP) -> tuple:
@@ -356,11 +383,18 @@ def footage_command(inputs: list, t0: float, t1: float, out: Path, threads: int 
 def footage(eid: str, t0: float = 0.0, t1: float | None = None) -> tuple | None:
     """(file, download name) of the episode's video from t0 to t1 s (the whole episode by default), made now if it
     was not made before; None when the episode has no clip. Raises RuntimeError when ffmpeg fails."""
-    cams = footage_cams(MP4_DIR, eid)
+    label = footage_label(eid)
+    cams = footage_cams(MP4_DIR, eid, label)
     if not cams or not FFMPEG:
         return None
     probes = [_probe(p) for _, p in cams]
-    dur = probes[0][2]
+    # Presentation order never selects a new recording clock. Old boards without
+    # a measured duration keep the prepared input anchor or legacy camera order.
+    clocks = label.get('camera_views') or ['exo', 'left', 'right']
+    anchor = next((cam for cam in clocks if any(c == cam for c, _ in cams)), cams[0][0])
+    dur = label.get('duration_s')
+    if type(dur) not in (int, float) or not math.isfinite(dur) or dur <= 0:
+        dur = next(pr[2] for (cam, _), pr in zip(cams, probes) if cam == anchor)
     t0 = round(max(0.0, min(float(t0), dur)), 3)
     t1 = round(dur if t1 is None else max(0.0, min(float(t1), dur)), 3)
     if t1 - t0 < 1.0 / FOOTAGE_FPS:
@@ -879,6 +913,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # them (no request that can only fail)
             cfg = {"mode": "api", "compare": (COMPARE_DIR / "index.json").is_file(), "hands": HANDS_DIR.is_dir(),
                    "sensors": (SENSORS_DIR / "index.json").is_file(),
+                   "grids": (HERE.parent / "grids").is_dir(),
                    "footage": FFMPEG is not None, "dictionary_url": "api/dictionary",
                    "keypoints": (KEYPOINTS_DIR / "index.json").is_file(), "labels_license": labels_license(HERE.parent)}
             self._send(200, render_index(PAGE_TITLE, cfg, BOARD_NAME, HEADER), "text/html; charset=utf-8")
@@ -948,6 +983,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             self._send(200, public_json(json.loads(p.read_text())), "application/json")
             return
+        if parsed.path in ("/api/grids", "/api/grid"):
+            from board import grids as bg
+            q = urllib.parse.parse_qs(parsed.query)
+            fname = (q.get('file') or [''])[0]
+            p = HERE / fname
+            if not fname or Path(fname).name != fname or not _under(HERE, p) or not p.is_file():
+                return self._send(404, {'error': 'no verified frame grids'})
+            try:
+                record = current_label(json.loads(p.read_text()), DICTIONARY_JOB, p.name)
+                expected = (q.get('fingerprint') or [''])[0]
+                if not expected or expected != (record.get('request_images') or {}).get('fingerprint'):
+                    return self._send(404, {'error': 'frame grids belong to a different request'})
+                idx = bg.read(HERE.parent / 'grids', fname, record)
+                if idx is None:
+                    return self._send(404, {'error': 'no verified frame grids'})
+                if parsed.path == '/api/grids':
+                    quoted = urllib.parse.quote(fname, safe='')
+                    return self._send(200, bg.view(idx, lambda i, g: f'api/grid?file={quoted}&i={i}&fingerprint={expected}'))
+                n = (q.get('i') or [''])[0]
+                if not n.isdigit() or int(n) >= len(idx['grids']):
+                    return self._send(404, {'error': 'no such frame grid'})
+                entry = idx['grids'][int(n)]
+                image = bg.image_path(HERE.parent / 'grids', fname, entry).read_bytes()
+                from label.grids import digest
+                if len(image) != entry['bytes'] or digest(image) != entry['sha256']:
+                    return self._send(404, {'error': 'no verified frame grids'})
+                return self._send(200, image, 'image/jpeg')
+            except (OSError, ValueError, KeyError, TypeError):
+                return self._send(404, {'error': 'no verified frame grids'})
         if parsed.path == "/api/sensors":
             # one episode's other signals and depth (board/sensors.py), or index.json for the list; read only by the
             # page's sensors panel and depth switches, never listed or exported
@@ -1015,7 +1079,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 got = footage(eid, t0, t1)
             except (RuntimeError, OSError, subprocess.SubprocessError, ValueError, KeyError) as e:
-                self._send(500, {"error": str(e)[:400]})
+                logging.getLogger(__name__).error("Footage preparation failed", exc_info=True)
+                self._send(500, {"error": "The requested footage could not be prepared.",
+                                 "stage": "footage preparation"})
                 return
             if got is None:
                 self._send(404, {"error": "no video for this episode and span"})

@@ -432,6 +432,43 @@ def test_float_depth_survives_hdf5_preparation_without_quantization_or_invented_
         assert clips.clip_frames(preview) == 6
 
 
+def test_unmatched_hdf_depth_keeps_its_source_identity_in_annotation(tmp_path, monkeypatch):
+    from PIL import ImageDraw
+    root = tmp_path / 'upload'
+    root.mkdir()
+    pixels = np.full((6, 64, 80), 500, dtype=np.uint16)
+    with h5py.File(root / 'sensor_capture.hdf5', 'w') as source:
+        demo = source.create_group('data/demo_0')
+        demo.create_dataset('images_top', data=np.full((6, 64, 80, 3), [70, 110, 130], dtype=np.uint8))
+        demo.create_dataset('timestamps', data=10**12 + np.arange(6, dtype=np.int64) * 100_000_000)
+        depth = demo.create_dataset('depth_wrist', data=pixels)
+        depth.attrs['units'] = 'mm'
+    report = formats.convert(root, 'ego_head', tmp_path / 'episodes', 'recorded sensors', 900)
+    assert not report['failed']
+    ep = me.load(tmp_path / 'episodes' / report['episodes'][0]['episode_id'])
+    assert ep['depth']['exo']['paired_camera'] is None
+    assert ep['depth']['exo']['source_key'] == ep['context']['depth']['exo']['source_key'] == 'depth_wrist'
+    decoded = dp.at_anchor(ep, ep['depth'], 'exo', [0, 5])
+    assert all(frame.tobytes() == pixels[row].tobytes() for row, frame in decoded.items())
+    note = me._depth_note(ep)
+    assert 'depth_wrist' in note and 'no recorded RGB camera pairing' in note
+    assert "same camera's depth sensor" not in note and 'head records depth' not in note
+    assert me.depth_label(ep, 'exo') == 'depth_wrist (unpaired depth)'
+    headers = []
+    original_text = ImageDraw.ImageDraw.text
+    def record_header(self, xy, text, *args, **kwargs):
+        headers.append(text)
+        return original_text(self, xy, text, *args, **kwargs)
+    monkeypatch.setattr(ImageDraw.ImageDraw, 'text', record_header)
+    request = me.build_request(ep['dir'], inspect_evidence=True)
+    assert any('depth_wrist (unpaired depth)' in text for text in headers)
+    assert request['depth_s']
+    assert any('stream depth_wrist (unpaired depth)' in part.get('text', '') for part in request['content'])
+    ep['depth']['exo']['paired_camera'] = 'exo'
+    assert me.depth_label(ep, 'exo') == 'head depth'
+    assert 'head records depth as well as colour' in me._depth_note(ep)
+
+
 def test_a_sensor_faster_than_the_camera_is_summarised_per_frame():
     q = np.arange(30) / 30.0
     t = np.arange(900) / 900.0

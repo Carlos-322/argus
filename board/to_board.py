@@ -19,6 +19,8 @@ import json
 import math
 from pathlib import Path
 
+from label.grids import public_receipt
+
 
 def _time(x) -> float | None:
     try:
@@ -271,6 +273,8 @@ def convert(result: dict, dataset: str | None = None) -> dict:
         "dataset_checks": result.get("dataset_checks"),
         "task_label": result.get("task_label"),
         "timesteps_s": (result.get("config") or {}).get("timesteps_s"),
+        "request_images": public_receipt(
+            (result.get('config') or {}).get('request_images')),
         # which cameras the episode has and their dataset names (FastUMI has no top camera), so the
         # board lays out only the streams that exist
         **({"jaw_evidence": copy.deepcopy(result["jaw_evidence"])} if result.get("jaw_evidence") else {}),

@@ -113,3 +113,416 @@ def test_public_build_manifest_contains_counts_and_no_operational_locations():
     assert '/srv/private' not in json.dumps(public)
     assert 'future_private_field' not in public and 'qa' not in public and 'clips' not in public
     assert build == before
+
+
+def test_flattened_source_note_owners_are_private_but_native_fields_and_prose_survive(tmp_path):
+    from board.build import uploader_groups
+    from prepare.formats import h5_text
+    import h5py
+    import numpy as np
+    private = '/srv/private-upload/metadata/info.json'
+    data = '/srv/private-upload/data/chunk-000/episode.parquet'
+    native = '/observations/right/force'
+    prose = 'Open /data/example, then type api_key.'
+    workstation = '/srv/publisher-workstation/recordings'
+    signed = 'https://example.org/asset?X-Amz-Signature=unusable-url-test'
+    citation = 'https://example.org/public-paper'
+    source = tmp_path / 'native.h5'
+    with h5py.File(source, 'w') as f:
+        f.attrs['source_directory'] = workstation
+        f.attrs['source_location'] = 'SSH:user:unusable-uri-credential@private-host'
+        f.attrs['api_key'] = 'unusable-attribute-value'
+        f.attrs['source'] = native
+        f.attrs['source_url'] = 'file:///srv/private-env/source.h5'
+        f.attrs['description'] = prose
+        f.attrs['token_count'] = 17
+        f.attrs['asset_urls'] = [signed, citation]
+        f.attrs['env_args'] = np.array(('/srv/private-env/config.json',
+            'file:///srv/private-env/source.h5', native, prose), dtype=[
+            ('path', 'S64'), ('source_url', 'S64'), ('native_key', 'S64'), ('description', 'S80')])[()]
+        episode = f.create_group('episode')
+        episode.attrs['path'] = native
+        episode.attrs['source_location'] = np.array(([workstation],),
+            dtype=[('recording', 'S64', (1,))])[()]
+        episode.attrs['credentials'] = np.array(('unusable-attribute-access',),
+            dtype=[('access_id', 'S64')])[()]
+    source_before = source.read_bytes()
+    with h5py.File(source, 'r') as f:
+        _, attributes = h5_text(f, 'episode', [])
+    notes = {'recorded episode metadata': {private: {'source': private,
+              'fields': {native: 12, 'instruction': prose, 'path': native,
+                         'source': '/publisher/source_identifier',
+                         'unknown_extension_url': '/publisher/native_identity',
+                         'api_key': 'unusable-test-value',
+                         'credentials': {'access_id': 'unusable-other-value'},
+                         'paths': [native, '/observations/left/force'],
+                         'token_count': 17, 'unknown_extension_token': 'native token identity'}}},
+             'recorded annotation data source': data,
+             'recorded annotation tables': {private: {'native_step_index': {'claims': {'0': [
+                 {'row': 0, 'source': private, 'fields': {'path': native,
+                  'source': '/publisher/source_identifier'}}]}}}},
+             **attributes}
+    groups = uploader_groups(notes, None, 10)
+    before = copy.deepcopy(groups)
+    # Existing saved boards have only flattened name/value entries.
+    legacy = [{**g, 'items': [{k: v for k, v in item.items() if k != '_uploader_field_path'}
+                            for item in g['items']]} for g in groups]
+    for input_groups in (groups, legacy):
+        shown = project({'uploader_notes': input_groups})['uploader_notes']
+        assert private not in json.dumps(shown) and data not in json.dumps(shown)
+        assert native in json.dumps(shown) and prose in json.dumps(shown)
+        assert '/publisher/source_identifier' in json.dumps(shown)
+        assert '/publisher/native_identity' in json.dumps(shown)
+        assert 'unusable-test-value' not in json.dumps(shown)
+        assert 'unusable-other-value' not in json.dumps(shown)
+        assert 'native token identity' in json.dumps(shown)
+        assert '/observations/left/force' in json.dumps(shown)
+        assert workstation not in json.dumps(shown)
+        assert 'unusable-uri-credential' not in json.dumps(shown)
+        assert 'unusable-attribute-value' not in json.dumps(shown)
+        assert 'unusable-attribute-access' not in json.dumps(shown)
+        assert signed not in json.dumps(shown) and citation in json.dumps(shown)
+        assert '/srv/private-env' not in json.dumps(shown)
+        assert any(row['name'] == 'file attribute token_count' and row['value'] == '17'
+                   for group in shown for row in group['items'])
+        assert any('info.json' in row['name'] for group in shown for row in group['items'])
+        assert project({'uploader_notes': shown}) == {'uploader_notes': shown}
+    raw = project({'recorded_metadata': {'native.h5': attributes}})['recorded_metadata']['native.h5']
+    assert workstation not in json.dumps(raw)
+    assert 'unusable-uri-credential' not in json.dumps(raw)
+    assert '/srv/private-env' not in json.dumps(raw)
+    assert raw['file attribute env_args']['native_key'] == native
+    assert raw['file attribute env_args']['description'] == prose
+    assert raw['file attribute source'] == native and raw['episode attribute path'] == native
+    assert raw['file attribute description'] == prose and raw['file attribute token_count'] == 17
+    assert 'file attribute api_key' not in raw and 'episode attribute credentials' not in raw
+    native_map = project({'recorded_metadata': {private: {'fields': {'path': native,
+        'source': '/publisher/source_identifier', 'instruction': prose}}}})['recorded_metadata']
+    assert private not in json.dumps(native_map)
+    assert native_map['info.json']['fields']['path'] == native
+    assert native_map['info.json']['fields']['source'] == '/publisher/source_identifier'
+    assert native_map['info.json']['fields']['instruction'] == prose
+    import hashlib
+    collision = 'info.json#' + hashlib.sha256(private.encode()).hexdigest()[:12]
+    owners = [(private, {'value': 1}), ('info.json', {'value': 2}),
+              (collision, {'value': 3}), (data.rsplit('/', 1)[0] + '/info.json', {'value': 4})]
+    for order in (owners, list(reversed(owners))):
+        value = {'recorded_metadata': dict(order)}
+        public = project(value)
+        assert len(public['recorded_metadata']) == 4
+        assert {row['value'] for row in public['recorded_metadata'].values()} == {1, 2, 3, 4}
+        assert project(public) == public
+    assert source.read_bytes() == source_before
+    large = uploader_groups({'asset_urls': [signed, citation] * 20}, None, 1)
+    receipt = large[0]['items'][0]['_uploader_location_values']
+    assert receipt['count'] == 40 and len(receipt['values']) == 4
+    assert signed not in json.dumps(project({'uploader_notes': large}))
+    large[0]['items'][0].pop('_uploader_location_values')
+    large[0]['items'][0].pop('_uploader_field_path')
+    assert signed not in json.dumps(project({'uploader_notes': large}))
+    assert '40 values' in project({'uploader_notes': large})['uploader_notes'][0]['items'][0]['value']
+    locations = uploader_groups({'source_paths': [private, data]}, None, 1)
+    displayed = project({'uploader_notes': locations})
+    assert private not in json.dumps(displayed) and 'info.json' in json.dumps(displayed)
+    assert groups == before and notes['recorded episode metadata'][private]['fields'][native] == 12
+    plain = project({'uploader_notes': uploader_groups(prose, None, 10)})
+    assert plain['uploader_notes'][0]['items'] == [{'name': 'note', 'value': prose}]
+    upper_signed = signed.replace('https://', 'HTTPS://')
+    uri_notes = {'native': {'fields': {'references': [upper_signed, citation],
+                                     'links': [upper_signed, citation],
+                                     'asset_urls': [upper_signed, native, citation],
+                                     'primitive_values': [upper_signed, 0, True, native, citation],
+                                     'protocol_relative': [upper_signed.removeprefix('HTTPS:'), native, citation]}},
+                 'asset_urls': [upper_signed, native, citation],
+                 'publisher_note': 'Read ' + upper_signed + ' for the task.'}
+    original_uri_notes = copy.deepcopy(uri_notes)
+    uri_groups = uploader_groups(uri_notes, None, 1)
+    original_uri_groups = copy.deepcopy(uri_groups)
+    uri_public = project({'uploader_notes': uri_groups})
+    for group in uri_public['uploader_notes']:
+        for item in group['items']:
+            if item['name'] == 'publisher_note':
+                assert item['value'] == uri_notes['publisher_note']
+            else:
+                assert upper_signed not in item['value'] and citation in item['value']
+                if item['name'].endswith(('asset_urls', 'primitive_values', 'protocol_relative')):
+                    assert native in item['value']
+                if item['name'].endswith('primitive_values'):
+                    assert '0, True' in item['value']
+                assert 'X-Amz-Signature' not in item['value']
+    assert uri_notes == original_uri_notes and uri_groups == original_uri_groups
+    legacy_uri = uploader_groups({'native': {'fields': {'references': [upper_signed, citation],
+                              'mixed': [upper_signed, native, citation]}}}, None, 1)
+    for group in legacy_uri:
+        for item in group['items']:
+            item.pop('_uploader_location_values', None)
+            item.pop('_uploader_field_path', None)
+    legacy_public = project({'uploader_notes': legacy_uri})
+    legacy_items = {item['name']: item['value'] for group in legacy_public['uploader_notes'] for item in group['items']}
+    assert upper_signed not in legacy_items['native / fields / references']
+    assert upper_signed not in legacy_items['native / fields / mixed']
+    assert native in legacy_items['native / fields / mixed']
+    uri_large = uploader_groups({'native': {'fields': {'references': [upper_signed, native, citation] * 20}}}, None, 1)
+    uri_receipt = uri_large[0]['items'][0]['_uploader_location_values']
+    assert uri_receipt['count'] == 60 and len(uri_receipt['values']) == 4
+    assert upper_signed not in json.dumps(project({'uploader_notes': uri_large}))
+    assert native in json.dumps(project({'uploader_notes': uri_large}))
+    for group in uri_large:
+        for item in group['items']:
+            item.pop('_uploader_location_values', None)
+            item.pop('_uploader_field_path', None)
+    legacy_large = project({'uploader_notes': uri_large})
+    assert upper_signed not in json.dumps(legacy_large) and native in json.dumps(legacy_large)
+    assert '60 values' in json.dumps(legacy_large)
+    access_uris = ['  ' + upper_signed + '  ', '//example.org/asset?X-Amz-Signature=unusable-url-test',
+                   'FILE:/srv/private/source.h5', 'S3://private-bucket/source.h5',
+                   'GS://private-bucket/source.h5', 'AZ://private-container/source.h5',
+                   'ABFS://private-container/source.h5', 'SSH://private-host/source.h5',
+                   'SFTP://private-host/source.h5', 'FTP://private-host/source.h5']
+    assert project({'extension': access_uris}) == {'extension': [None] * len(access_uris)}
+    native_identifiers = [native, 'urn:publisher:source', 'publisher:source_identity', citation,
+                          'Open FILE:/srv/private/source.h5 for the task.']
+    assert project({'extension': native_identifiers}) == {'extension': native_identifiers}
+    opaque_uris = ['SSH:user:unusable-uri-credential@private-host',
+                   'FTP:user:unusable-uri-credential@private-host',
+                   'FILE:unusable-uri-credential', 'S3:unusable-uri-credential',
+                   'GS:unusable-uri-credential', 'AZ:unusable-uri-credential',
+                   'ABFS:unusable-uri-credential', 'SFTP:unusable-uri-credential',
+                   'SSH%3Auser%3Aunusable-uri-credential%40private-host',
+                   'SSH%3Auser%3Aunusable-uri-credential%20encoded%40private-host',
+                   'HTTPS%3A%2F%2Fexample.org%2Fasset%3FX-Amz-Signature%3Dunusable-uri-credential']
+    opaque_groups = uploader_groups({'native': {'fields': {'references': [*opaque_uris, native, citation]}}}, None, 1)
+    for historical in (False, True):
+        value = copy.deepcopy(opaque_groups)
+        if historical:
+            for group in value:
+                for item in group['items']:
+                    item.pop('_uploader_location_values', None)
+                    item.pop('_uploader_field_path', None)
+        public = project({'uploader_notes': value})
+        assert 'unusable-uri-credential' not in json.dumps(public)
+        assert native in json.dumps(public) and citation in json.dumps(public)
+    for uri in [*opaque_uris, 'HTTP://[', 'SSH://[']:
+        raw_owner = {'recorded_metadata': {uri: {'source': uri, 'fields': {'path': native}}},
+                     'file attribute source_directory': uri}
+        public = project(raw_owner)
+        assert 'unusable-uri-credential' not in json.dumps(public)
+        assert native in json.dumps(public)
+        assert project(public) == public
+
+
+def test_reader_metadata_limit_paths_use_typed_source_identity_without_rewriting_publisher_text(tmp_path, monkeypatch):
+    path = '/srv/private-upload/data/chunk-000/episode.parquet'
+    message = (path + ' and its recorded metadata exceed the prompt note limit; complete original rows '
+               'and source claims remain in the episode context and uploader notes.')
+    label = {'dataset_checks': {'reader_issues': [{'kind': 'metadata_limit', 'what': message,
+             'family': 'metadata-unreadable'}]}, 'publisher_labels': {'text': message}}
+    unresolved = (f'task_index in {path} has unresolved recorded annotation codes; '
+                  'all original rows and table claims are retained as uploader notes.')
+    label['dataset_checks']['reader_issues'].append({'kind': 'metadata_unreadable',
+        'what': unresolved, 'family': 'metadata-unreadable'})
+    label['publisher_labels']['unresolved_native_text'] = unresolved
+    before = copy.deepcopy(label)
+    shown = project(label)
+    issue = shown['dataset_checks']['reader_issues'][0]
+    assert path not in issue['what'] and 'episode.parquet' in issue['what']
+    assert issue['kind'] == 'metadata_limit' and issue['family'] == 'metadata-unreadable'
+    assert shown['publisher_labels']['text'] == message and label == before
+    annotation_issue = shown['dataset_checks']['reader_issues'][1]
+    assert path not in annotation_issue['what'] and 'task_index in episode.parquet' in annotation_issue['what']
+    assert annotation_issue['kind'] == 'metadata_unreadable'
+    assert shown['publisher_labels']['unresolved_native_text'] == unresolved
+    for head, detail in [('meta/codes.jsonl could not be fully read: ', 'table read failed ('),
+                         (path + ' retains an unassigned metadata claim: ', 'metadata table read failed (')]:
+        native = head + detail + "[Errno 2] '/srv/other-cache/input.json')."
+        issue = {'kind': 'metadata_unreadable', 'what': native, 'source': path}
+        public = project({'dataset_checks': {'reader_issues': [issue]}, 'publisher_labels': {'text': native}})
+        assert '/srv/other-cache' not in public['dataset_checks']['reader_issues'][0]['what']
+        assert public['publisher_labels']['text'] == native
+    from prepare import formats
+    context = {}
+    for _ in range(2):
+        formats.add_issue(context, 'metadata_limit', 'episode.parquet exceeds the note limit.', source=path)
+    assert len(context['reader_issues']) == 1
+    assert context['reader_issues'][0]['source'] == path
+    formats.add_issue(context, 'metadata_limit', 'episode.parquet exceeds the note limit.',
+                      source='/srv/other-upload/episode.parquet')
+    assert len(context['reader_issues']) == 2
+    public = project({'dataset_checks': context})
+    assert path not in json.dumps(public)
+    # Exercise the actual annotation reader twice, not just its issue constructor.
+    import pandas as pd
+    (tmp_path / 'meta').mkdir()
+    data = tmp_path / 'episode.parquet'
+    frame = pd.DataFrame({'timestamp': [0., 1., 2.], 'frame_index': [0, 1, 2],
+                          'native_step': ['one', 'one', 'one'], 'task_index': [91, 91, 92]})
+    frame.to_parquet(data)
+    index = {'dir': tmp_path, 'fps': 1, 'metadata_read': set()}
+    context = {'episode_index': 0, 'fps': 1, 'n_state_frames': 3}
+    monkeypatch.setattr(formats, 'ANNOTATION_MAX_CHARS', 1)
+    for _ in range(2):
+        formats.lerobot_annotations(context, index, frame, data)
+    issues = [issue for issue in context['reader_issues']
+              if issue['kind'] == 'metadata_limit' and issue.get('source') == str(data)]
+    assert len(issues) == 1 and str(tmp_path) not in issues[0]['what']
+    unresolved_issues = [issue for issue in context['reader_issues']
+        if 'has unresolved recorded annotation codes' in issue['what']]
+    assert len(unresolved_issues) == 1 and unresolved_issues[0].get('source') == str(data)
+    assert str(data) in unresolved_issues[0]['what']
+    assert str(data) not in json.dumps(project({'dataset_checks': {'reader_issues': context['reader_issues']}}))
+
+
+def test_actual_reader_and_check_errors_keep_private_details_and_public_identity(tmp_path):
+    from board import build, clips, serve
+    from checks import capture_qc, sensors, stream_pairing
+    from prepare import annotations, formats
+    episode = tmp_path / 'episode'
+    episode.mkdir()
+    (episode / 'context.json').mkdir()
+    _, why = build.read_context(episode)
+    context_issue = build.context_unreadable(why)
+    try:
+        (tmp_path / 'private-source' / 'missing_depth.mkv').read_bytes()
+    except OSError as error:
+        depth_issue = clips.depth_failed(tmp_path, 'exo', error)
+    meta = tmp_path / 'metadata'
+    meta.mkdir()
+    (meta / 'unreadable.jsonl').mkdir()
+    _, claims = annotations.episode_metadata(meta, formats.read_jsonl)
+    context = {'episode_index': 0}
+    formats.lerobot_metadata(context, {'dir': tmp_path, 'unassigned_metadata': claims})
+    groups = build.uploader_groups(context['uploader_notes'], None, 1)
+    missing = tmp_path / 'missing_episode'
+    qc = capture_qc.run_episode(missing)
+    _, sensor, _ = sensors._safe(str(missing))
+    _, pairing, _ = stream_pairing._safe('pairing', str(missing))
+    label = {'dataset_checks': {'reader_issues': [context_issue, depth_issue],
+        'capture_qc': qc, 'sensor_checks': sensor, 'stream_pairing': pairing,
+        'fired_with_supplement': {'status': 'fired', 'why': 'Three gaps were measured.', 'error': why, 'rows': [1, 2]},
+        'fired_partial': {'status': 'fired', 'why': 'Native check reason. It was not run on every camera, as the check stopped with an error (' + why + ').',
+                          'unchecked': 'it was not run on every camera, as the check stopped with an error (' + why + ')',
+                          'rows': [3, 4]},
+        'decode_flag': {'check': 'video_decode_failure', 'camera': 'left', 't_s': 2.0,
+                        'evidence': 'camera left fails to decode: ' + why},
+        'camera_metrics': {'exo': {'decoded': 30, 'mean': 0}, 'left': {'decode_error': why}}},
+        'set_aside_checks': [{'check': 'stream_pairing', **serve.withheld_status(pairing)}],
+        'uploader_notes': groups, 'native_context': context['uploader_notes'],
+        '_label_failed': {'status': 'not_shown', 'error': why, 'raw_head': 'Native model prose.'},
+        'data_dictionary': {'fields': [{'id': 'original-field-id', 'source': 'native source',
+            'bindings': [{'episode': 'episode', 'context_path': 'recorded_metadata/~1srv~1private~1info.json/fields/key',
+                          'file': 'signals.npz', 'key': '/observations/right/force'},
+                         {'episode': 'episode', 'context_path': 'native/fields/~1observations~1right~1force'}]}]},
+        'publisher_labels': {'text': why, 'status': 'errored', 'error': why,
+            'fields': {'dataset_checks': {'status': 'errored', 'error': why,
+                'why': 'it was not run on every camera, as the check stopped with an error (' + why + ')'},
+                'reader_issues': [{'kind': 'depth_clip_failed', 'what': why}],
+                'uploader_notes': [{'kind': 'notes', 'items': [{'name': 'file attribute source_directory', 'value': why}]}]}}}
+    before = copy.deepcopy(label)
+    for historical in (False, True):
+        value = copy.deepcopy(label)
+        if historical:
+            for issue in value['dataset_checks']['reader_issues']:
+                for key in ('_reader_public_what', '_reader_public_error'):
+                    issue.pop(key, None)
+            for group in value['uploader_notes']:
+                for item in group['items']:
+                    item.pop('_uploader_field_path', None)
+        shown = project(value)
+        assert str(tmp_path) not in json.dumps({key: item for key, item in shown.items() if key != 'publisher_labels'})
+        assert shown['publisher_labels'] == label['publisher_labels']
+        assert shown['dataset_checks']['reader_issues'][1]['camera'] == 'exo'
+        assert shown['set_aside_checks'][0]['status'] == 'errored'
+        assert shown['dataset_checks']['fired_with_supplement']['why'] == 'Three gaps were measured.'
+        assert shown['dataset_checks']['fired_with_supplement']['rows'] == [1, 2]
+        assert shown['dataset_checks']['fired_partial']['status'] == 'fired'
+        assert shown['dataset_checks']['fired_partial']['rows'] == [3, 4]
+        assert shown['dataset_checks']['fired_partial']['why'].startswith('Native check reason.')
+        assert shown['dataset_checks']['decode_flag']['camera'] == 'left'
+        assert shown['dataset_checks']['decode_flag']['t_s'] == 2.0
+        assert shown['dataset_checks']['decode_flag']['evidence'].startswith('camera left fails to decode;')
+        assert shown['dataset_checks']['camera_metrics']['exo'] == {'decoded': 30, 'mean': 0}
+        assert shown['_label_failed']['raw_head'] == 'Native model prose.'
+        field = shown['data_dictionary']['fields'][0]
+        assert field['id'] == 'original-field-id' and field['source'] == 'native source'
+        assert field['bindings'][0] == {'episode': 'episode', 'file': 'signals.npz', 'key': '/observations/right/force'}
+        assert field['bindings'][1]['context_path'] == 'native/fields/~1observations~1right~1force'
+    assert label == before and str(tmp_path) in context_issue['error']
+
+
+def test_actual_hdf_dictionary_credentials_keep_descriptors_and_native_signal_values(tmp_path):
+    import hashlib
+    import io
+    import h5py
+    import numpy as np
+    from PIL import Image
+    from prepare import formats
+    from label import dictionary, dictionary_context, dictionary_editor
+    upload = tmp_path / 'upload'
+    upload.mkdir()
+    source = upload / 'native.h5'
+    image = io.BytesIO()
+    Image.new('RGB', (64, 64), (40, 90, 160)).save(image, format='JPEG')
+    pixels = np.frombuffer(image.getvalue(), np.uint8)
+    with h5py.File(source, 'w') as f:
+        f.attrs['api_key'] = 94281376
+        f.attrs['token'] = [77, 81, 89]
+        f.attrs['token_count'] = 17
+        f.attrs['sampling_frequency'] = 30
+        group = f.create_group('data/demo_0')
+        group.attrs['credentials'] = np.array((94281376,), dtype=[('access_id', 'i8')])[()]
+        camera = group.create_dataset('rgb_images_jpeg', (3,), dtype=h5py.vlen_dtype(np.dtype('uint8')))
+        for row in range(3):
+            camera[row] = pixels
+        group.create_dataset('timestamps', data=np.arange(3) / 30)
+    original = hashlib.sha256(source.read_bytes()).hexdigest()
+    report = formats.convert(upload, 'ego_head', tmp_path / 'episodes', 'native_attributes', 900)
+    assert not report['failed'] and len(report['episodes']) == 1
+    owner = report['episodes'][0]['episode_id']
+    episode = tmp_path / 'episodes' / owner
+    context = json.loads((episode / 'context.json').read_text())
+    # A scientific signal named token has a signal binding, not credential ownership.
+    np.savez(episode / 'signals.npz', token=np.array([[2.], [3.], [4.]]),
+             credentials=np.array([[8.], [9.], [10.]]))
+    context['signals'] = [{'name': 'token', 'file': 'signals.npz', 'key': 'token'}]
+    (episode / 'context.json').write_text(json.dumps(context))
+    inventory = dictionary.inventory([episode])
+    secrets = {field['id'] for field in inventory['fields'] if any(
+        binding.get('context_path', '').startswith(('uploader_notes/file attribute api_key',
+            'uploader_notes/file attribute token/', 'uploader_notes/file attribute token',
+            'uploader_notes/episode attribute credentials/'))
+        and 'token_count' not in binding.get('context_path', '')
+        for binding in field['bindings'])}
+    assert len(secrets) >= 3
+    entries = {field['id']: {'meaning': 'Recorded numeric value ' + str(field.get('summary', {}).get('mean', '')),
+                            'role': 'bookkeeping'} for field in inventory['fields']}
+    record = {'schema': 1, 'status': 'complete', 'inventory': inventory,
+              'entries': entries, 'inventory_digest': inventory['digest']}
+    (tmp_path / 'dictionary.json').write_text(json.dumps(record))
+    overlay = dictionary_context.apply_context(context, record, episode_id=owner)['data_dictionary']
+    private_views = [dictionary_editor.context_dictionary(overlay), dictionary_editor.public_dictionary(tmp_path, owner)]
+    before = copy.deepcopy(private_views)
+    for private in private_views:
+        public = project(private)
+        public_fields = {field['id']: field for field in public['fields']}
+        for field in private['fields']:
+            shown = public_fields[field['id']]
+            if field['id'] in secrets:
+                assert 'summary' in field and 'summary' not in shown
+                for key in ('id', 'name', 'source', 'kind', 'shape', 'dtype'):
+                    if key in field:
+                        assert shown[key] == field[key]
+                assert field['id'] not in public['entries']
+                assert field['id'] not in public.get('machine_entries', {})
+            else:
+                assert shown.get('summary') == field.get('summary')
+                assert public['entries'][field['id']] == private['entries'][field['id']]
+        assert any(field['name'] == 'token' and field['summary']['mean'] == 3 for field in public['fields'])
+        if any(field['name'] == 'credentials' for field in private['fields']):
+            assert any(field['name'] == 'credentials' and field['summary']['mean'] == 9 for field in public['fields'])
+        assert any('token_count' in field['name'] and field['summary']['mean'] == 17 for field in public['fields'])
+        assert '94281376' not in json.dumps(public)
+        assert project(public) == public
+    assert private_views == before
+    assert any(field['name'] == 'credentials' and field['summary']['mean'] == 9
+               for field in project(private_views[1])['fields'])
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == original

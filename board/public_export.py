@@ -6,6 +6,7 @@ Keep original inputs and operational build receipts in private storage.
 """
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import re
 from pathlib import PurePosixPath, PureWindowsPath
@@ -14,6 +15,7 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 
 PRIVATE_KEYS = frozenset({
     '_run', '_replaced_label', '_supplements', '_verification', '_withheld_checks', '_carried_verdicts',
+    '_uploader_field_path', '_uploader_location_values', '_reader_private_error', '_reader_public_what', '_reader_public_error',
 })
 # These are access mechanisms, not source identities or source-proof digests.
 _SECRETS = frozenset({
@@ -26,16 +28,31 @@ _SECRETS = frozenset({
 # Source locations resolve private preparation trees before this projection runs.
 _PRIVATE_LOCATIONS = frozenset({
     'sourcelocation', 'rawpath', 'localpath', 'retainedroot', 'retainedevidenceroot',
-    'episodedir', 'jobdir', 'cachedir',
+    'episodedir', 'exampledir', 'jobdir', 'cachedir',
 })
 _LOCATIONS = frozenset({
     'source', 'sources', 'path', 'paths', 'file', 'files', 'filename', 'directory', 'dir',
-    'root', 'packed', 'src', 'location', 'sourceroot', 'sourcepath', 'sourcefile',
+    'root', 'packed', 'src', 'location', 'sourceroot', 'sourcepath', 'sourcefile', 'sourcedirectory',
     'archivepath', 'archive', 'url', 'urls', 'uri', 'uris', 'href', 'link', 'links',
     'publicbase', 'publiccitation', 'citation',
 })
 _URL_QUERY_SECRETS = _SECRETS | {'signature', 'sig', 'keypairid', 'policy', 'googleaccessid'}
+_ACCESS_URI_PREFIXES = ('file:', 's3:', 'gs:', 'az:', 'abfs:', 'ssh:', 'sftp:', 'ftp:')
 _DROP = object()
+
+# These reader-owned note maps use source files as their keys. Keys inside the
+# recorded fields remain native identifiers, including absolute HDF paths.
+_NOTE_SOURCE_MAPS = frozenset({
+    'recordedmetadata', 'recordedepisodemetadata', 'recordedannotationtables', 'outsidefiles',
+    'unreadableannotationtablesources',
+})
+_NOTE_SOURCE_VALUES = frozenset({'recordedannotationdatasource'})
+_NOTE_CLAIMS = frozenset({'unassigneddatasetmetadataclaims'})
+_ATTRIBUTE_LOCATIONS = frozenset({'sourcedirectory', 'sourcelocation'})
+_METADATA_LIMIT_SUFFIX = (' and its recorded metadata exceed the prompt note limit; complete original rows '
+                          'and source claims remain in the episode context and uploader notes.')
+_ANNOTATION_CODES_SUFFIX = (' has unresolved recorded annotation codes; '
+                            'all original rows and table claims are retained as uploader notes.')
 
 
 def _name(key: str) -> str:
@@ -67,9 +84,13 @@ def _private_url(value: str) -> bool:
     return False
 
 
+def _location_value(value: str) -> str:
+    return unquote(value.strip())
+
+
 def _private_location(value: str) -> bool:
-    value = unquote(value.strip())
-    if value.lower().startswith(('file:', 's3:', 'gs:', 'az:', 'abfs:', 'ssh:', 'sftp:', 'ftp:')):
+    value = _location_value(value)
+    if value.lower().startswith(_ACCESS_URI_PREFIXES):
         return True
     if '://' in value or value.startswith('//'):
         return _private_url(value if not value.startswith('//') else 'https:' + value)
@@ -79,31 +100,358 @@ def _private_location(value: str) -> bool:
             or '..' in value.replace('\\', '/').split('/'))
 
 
-def _project(value, field: str = ''):
+def _source_name(value: str) -> str:
+    """A source file's basename is useful identity; its access directory is private."""
+    value = _location_value(value)
+    if '://' in value or value.startswith('//') or value.lower().startswith(_ACCESS_URI_PREFIXES):
+        try:
+            path = urlsplit(value).path
+        except ValueError:
+            return ''
+        if not path.startswith('/'):
+            return ''
+        value = path
+    return PureWindowsPath(value).name if '\\' in value else PurePosixPath(value).name
+
+
+def _reader_attribute(key: str) -> str | None:
+    """Decode the exact file/episode attribute names emitted by formats.h5_text."""
+    for prefix in ('file attribute ', 'episode attribute '):
+        if key.startswith(prefix):
+            return key[len(prefix):]
+    return None
+
+
+def _location_field(field: str) -> bool:
+    return field in _LOCATIONS or field.endswith(('url', 'uri', 'path', 'paths', 'urls', 'uris'))
+
+
+def _whole_uri(value) -> bool:
+    if not isinstance(value, str):
+        return False
+    token = value.strip()
+    if not token or any(char.isspace() for char in token):
+        return False
+    token = _location_value(token)
+    return (bool(re.match(r'^[a-z][a-z0-9+.-]*://', token, re.I)) or token.startswith('//')
+            or token.lower().startswith(_ACCESS_URI_PREFIXES))
+
+
+def _filesystem_list(parts) -> bool:
+    if not parts or any(_name(part) == 'fields' for part in parts):
+        return False
+    field = _name(_reader_attribute(parts[-1]) or parts[-1])
+    return (field in ('sources', 'paths', 'files') or field.endswith('paths')
+            or any(_name(_reader_attribute(part) or '') in _ATTRIBUTE_LOCATIONS for part in parts))
+
+
+def location_list_receipt(path, values, limit):
+    """Retain only the existing preview of a typed location list, never arbitrary arrays."""
+    if not isinstance(values, list):
+        return None
+    preview = values if len(values) <= limit else values[:4]
+    filesystem = _filesystem_list(path)
+    private = any(isinstance(v, str) and (_whole_uri(v) or filesystem) and _private_location(v) for v in preview)
+    return {'values': list(preview), 'count': len(values)} if private else None
+
+
+def _table_error(value):
+    if isinstance(value, str) and value.endswith(')'):
+        for prefix in ('table read failed (', 'metadata table read failed ('):
+            if value.startswith(prefix):
+                return prefix[:-2] + '; original reader error retained privately'
+    return value
+
+
+def _partial_coverage(value: str) -> str:
+    marker = 'it was not run on every camera, as the check stopped with an error ('
+    position = value.lower().find(marker)
+    if position >= 0 and value.rstrip('. ').endswith(')'):
+        return value[:position] + 'It was not run on every camera; original camera reader details are retained privately.'
+    return value
+
+
+def _source_keys(value: dict) -> dict:
+    reserved = {key for key in value if not _private_location(key)}
+    used, keys = set(), {}
+    for key in value:
+        public = key
+        if _private_location(key):
+            base = _source_name(key) or 'source file'
+            public = base
+            if public in reserved or public in used:
+                suffix = hashlib.sha256(key.encode()).hexdigest()
+                public = base + '#' + suffix[:12]
+                index = 1
+                while public in reserved or public in used:
+                    public = base + '#' + suffix + '.' + str(index)
+                    index += 1
+        keys[key] = public
+        used.add(public)
+    return keys
+
+
+def _uploader_item(item: dict) -> dict:
+    """Project the reader's flattened display schema using its original field path."""
+    result = dict(item)
+    parts = item.get('_uploader_field_path')
+    if not isinstance(parts, list) or not all(isinstance(p, str) for p in parts):
+        # Historical boards used this exact separator but retained no path array.
+        parts = str(item.get('name') or '').split(' / ')
+    shown = list(parts)
+    for i, part in enumerate(parts):
+        if any(_name(parent) == 'fields' for parent in parts[:i]):
+            break
+        if i and _name(parts[i - 1]) in _NOTE_SOURCE_MAPS and _private_location(part):
+            shown[i] = _source_name(part) or 'source file'
+    result['name'] = ' / '.join(shown) if shown else (item.get('name') or 'note')
+    attributes = [_name(attribute) for i, part in enumerate(parts)
+                  if not any(_name(parent) == 'fields' for parent in parts[:i])
+                  and (attribute := _reader_attribute(part)) is not None]
+    if any(_name(part) in _SECRETS for part in parts) or any(a in _SECRETS for a in attributes):
+        result['value'] = 'withheld'
+        return result
+    value = item.get('value')
+    terminal = _name(parts[-1]) if parts else ''
+    locations = item.get('_uploader_location_values')
+    if not isinstance(locations, dict) and isinstance(value, str):
+        summary = re.fullmatch(r'([0-9]+) values, (.+), \.\.\.', value)
+        tokens = (summary[2] if summary else value).split(', ', 24)
+        count = int(summary[1]) if summary else len(tokens)
+        # The reader's exact display delimiter lets whole URI members retain
+        # their type. Other members stay display strings, never guessed values.
+        if (len(tokens) <= (4 if summary else 24) and any(_whole_uri(token) for token in tokens)
+                and count >= len(tokens)):
+            locations = {'values': tokens, 'count': count}
+    if isinstance(locations, dict) and isinstance(locations.get('values'), list):
+        filesystem = _filesystem_list(parts)
+        projected = [_project(v, 'urls' if _whole_uri(v) or filesystem else '') for v in locations['values']]
+        for i, original in enumerate(locations['values']):
+            if (projected[i] is _DROP and isinstance(original, str)
+                    and not _whole_uri(original)):
+                projected[i] = _source_name(original) or 'source file'
+        display = ', '.join('withheld' if v is _DROP else str(v) for v in projected)
+        count = locations.get('count', len(projected))
+        result['value'] = display if count == len(projected) else f'{count} values, {display}, ...'
+        return result
+    # A reader source record owns its immediate source property. The fields
+    # below that record are the publisher's native schema, not access metadata.
+    native_fields = any(_name(part) == 'fields' for part in parts[:-1])
+    names = [_name(part) for part in parts]
+    reader_claim = any(name in _NOTE_CLAIMS for name in names)
+    reader_issue = any(name in _NOTE_SOURCE_MAPS for name in names) and 'issues' in names
+    if not native_fields and (reader_claim or reader_issue) and terminal == 'why':
+        result['value'] = value = _table_error(value)
+    owner_property = (len(parts) >= 3 and _name(parts[-3]) in _NOTE_SOURCE_MAPS
+                      and terminal == 'source')
+    table_claim = (terminal == 'source' and 'recordedannotationtables' in [_name(p) for p in parts]
+                   and 'claims' in [_name(p) for p in parts[:-1]])
+    source_value = not native_fields and (owner_property or table_claim or terminal in _NOTE_SOURCE_VALUES
+                                         or (terminal == 'source' and (reader_claim or reader_issue))
+                                         or any(a in _ATTRIBUTE_LOCATIONS for a in attributes)
+                                         or any(a not in ('source', 'path') and _location_field(a) for a in attributes)
+                                         or (bool(attributes) and _reader_attribute(parts[-1]) is None
+                                             and _location_field(terminal)))
+    if isinstance(value, str) and source_value and _private_location(value):
+        result.pop('value', None)
+        result['value'] = _source_name(value) or 'source file'
+    return result
+
+
+def _uploader_group(value: dict) -> dict:
+    if not isinstance(value.get('items'), list) or value.get('kind') not in ('notes', 'row'):
+        return value
+    result = dict(value)
+    result['items'] = [_uploader_item(item) if isinstance(item, dict) else item for item in value['items']]
+    title = value.get('title')
+    if isinstance(title, str) and title.startswith('Row of ') and _private_location(title[7:]):
+        result['title'] = 'Row of ' + (_source_name(title[7:]) or 'source file')
+    return result
+
+
+def reader_failure_what(kind: str) -> str | None:
+    """Public availability wording for typed reader failures, including historical ones."""
+    failures = {
+        'context_unreadable': 'Recorded episode details could not be read.',
+        'depth_not_decodable': 'The recorded depth video does not decode; the page shows no depth for this camera.',
+        'depth_clip_failed': 'Depth could not be drawn for the board; the page shows no depth for this camera.',
+        'model_no_reply': 'No verified model reply was recorded; footage, checks and sensors remain available.',
+        'model_reply_not_shown': 'The model reply could not be read by the board; its original content is retained.',
+        'label_output_unreadable': 'The labelling output file could not be read; footage, checks and sensors remain available.',
+        'no_part_labelled': 'No part of this recording has labels; footage, checks and sensors remain available.',
+        'part_not_labelled': 'This recording part has no labels; labels come from the other parts.',
+    }
+    return failures.get(kind) if isinstance(kind, str) else None
+
+
+def _reader_issue(value: dict) -> dict:
+    """Only machine reader diagnostics receive source-location migration."""
+    result = dict(value)
+    kind = value.get('kind')
+    safe = value.get('_reader_public_what')
+    if isinstance(safe, str):
+        result['what'] = safe
+    elif kind != 'context_unreadable' and reader_failure_what(kind):
+        result['what'] = reader_failure_what(kind)
+    if kind == 'context_unreadable' and 'error' in result:
+        result['error'] = value.get('_reader_public_error') or reader_failure_what(kind)
+    what = result.get('what')
+    source = value.get('source')
+    if isinstance(what, str) and isinstance(source, str) and _private_location(source):
+        result['what'] = what.replace(source, _source_name(source) or 'source file')
+    elif (value.get('kind') == 'metadata_limit' and isinstance(what, str)
+          and what.endswith(_METADATA_LIMIT_SUFFIX)):
+        source = what[:-len(_METADATA_LIMIT_SUFFIX)]
+        if _private_location(source):
+            result['what'] = (_source_name(source) or 'Recorded annotation data') + _METADATA_LIMIT_SUFFIX
+    elif value.get('kind') == 'metadata_unreadable' and isinstance(what, str):
+        # Historical annotation diagnostics retained the source in their exact generated sentence.
+        if what.endswith(_ANNOTATION_CODES_SUFFIX):
+            column, separator, source = what[:-len(_ANNOTATION_CODES_SUFFIX)].rpartition(' in ')
+            if separator and _private_location(source):
+                result['what'] = column + separator + (_source_name(source) or 'source file') + _ANNOTATION_CODES_SUFFIX
+    what = result.get('what')
+    if kind == 'metadata_unreadable' and isinstance(what, str):
+        for marker in (' could not be fully read: ', ' retains an unassigned metadata claim: '):
+            head, separator, detail = what.partition(marker)
+            if separator:
+                public_detail = _table_error(detail[:-1] if detail.endswith('.') else detail)
+                if public_detail != (detail[:-1] if detail.endswith('.') else detail):
+                    if marker.startswith(' retains') and _private_location(head):
+                        head = _source_name(head) or 'source file'
+                    result['what'] = head + separator + public_detail + '.'
+    return result
+
+
+def _label_failure(value: dict) -> dict:
+    result = dict(value)
+    if value.get('status') in ('unreadable', 'not_shown') and 'error' in value:
+        result['error'] = 'The recorded model output could not be read; original reader details are retained privately.'
+    elif value.get('status') == 'no_reply' and 'why' in value:
+        result['why'] = 'No verified model reply was recorded.'
+    elif value.get('status') == 'no_part' and isinstance(value.get('parts'), list):
+        result['parts'] = [{**part, 'why': 'No verified labels were recorded for this part.'}
+                           if isinstance(part, dict) and 'why' in part else part for part in value['parts']]
+    return result
+
+
+def _private_binding_pointer(value) -> bool:
+    if not isinstance(value, str):
+        return False
+    parts = [part.replace('~1', '/').replace('~0', '~') for part in value.split('/')]
+    for i, part in enumerate(parts[:-1]):
+        if _name(part) == 'fields':
+            break
+        if (_name(part) in _NOTE_SOURCE_MAPS
+                and _private_location(parts[i + 1])):
+            return True
+    return False
+
+
+def _credential_binding(binding: dict) -> bool:
+    # Array bindings identify recorded channels; an exact native key named token
+    # is not a context credential attribute.
+    if binding.get('file') and binding.get('key') is not None:
+        return False
+    value = binding.get('context_path')
+    if not isinstance(value, str):
+        return False
+    parts = [part.replace('~1', '/').replace('~0', '~') for part in value.split('/')]
+    for i, part in enumerate(parts):
+        if i and _name(parts[i - 1]) in _NOTE_SOURCE_MAPS:
+            continue
+        if _name(_reader_attribute(part) or part) in _SECRETS:
+            return True
+    return False
+
+
+def _dictionary_values(value: dict) -> dict:
+    fields = value.get('fields')
+    if not isinstance(fields, list):
+        return value
+    secret_ids = {field['id'] for field in fields if isinstance(field, dict) and isinstance(field.get('id'), str)
+                  and any(_credential_binding(binding)
+                          for binding in field.get('bindings') or [] if isinstance(binding, dict))}
+    if not secret_ids:
+        return value
+    channels = {'summary', 'value', 'values', 'preview', 'minimum', 'maximum', 'mean',
+                'standard_deviation', 'finite_fraction'}
+    result = {**value, 'fields': [{key: item for key, item in field.items() if key not in channels}
+              if isinstance(field, dict) and field.get('id') in secret_ids else field for field in fields]}
+    for key in ('entries', 'machine_entries'):
+        if isinstance(value.get(key), dict):
+            result[key] = {ident: entry for ident, entry in value[key].items() if ident not in secret_ids}
+    return result
+
+
+def _project(value, field: str = '', attribute_owner: str = '', native_fields: bool = False,
+             note_owner: str = '', machine_checks: bool = False):
+    native_fields = native_fields or field in ('fields', 'publisherlabels')
+    note_owner = field if field in _NOTE_SOURCE_MAPS | _NOTE_CLAIMS else note_owner
+    machine_checks = (machine_checks or field in ('datasetchecks', 'setasidechecks')) and field != 'readerissues' and not native_fields
     if isinstance(value, dict):
+        if not native_fields:
+            value = _dictionary_values(value)
+        if field == 'uploadernotes' and not native_fields:
+            value = _uploader_group(value)
+        elif field == 'readerissues' and not native_fields:
+            value = _reader_issue(value)
+        if machine_checks:
+            status = value.get('status')
+            errors = [key for key in ('error', 'decode_error') if isinstance(value.get(key), str)]
+            if errors:
+                value = {**value, **{key: 'Original reader error details are retained privately.' for key in errors}}
+            if status in ('errored', 'error') and 'why' in value:
+                value = {**value, 'why': 'The check could not complete; original reader details are retained privately.'}
+            elif status is None and errors and isinstance(value.get('why'), str):
+                why = value['why']
+                if why.lower().startswith('the check stopped with an error (') and why.rstrip('. ').endswith(')'):
+                    value = {**value, 'why': 'The check could not complete; original reader details are retained privately.'}
+            if value.get('check') == 'video_decode_failure' and isinstance(value.get('evidence'), str):
+                camera, separator, _error = value['evidence'].partition(' fails to decode: ')
+                if separator and camera.startswith('camera '):
+                    value = {**value, 'evidence': camera + ' fails to decode; original camera reader details are retained privately.'}
         result = {}
+        source_keys = _source_keys(value) if field in _NOTE_SOURCE_MAPS and not native_fields else {}
         for key, item in value.items():
+            if field == 'bindings' and _name(key) == 'contextpath' and _private_binding_pointer(item):
+                continue
+            if key == '_label_failed' and isinstance(item, dict) and not native_fields:
+                item = _label_failure(item)
             name = _name(key)
+            attribute = _reader_attribute(key) if not native_fields else None
+            owner = _name(attribute) if attribute is not None else attribute_owner
             if (key in PRIVATE_KEYS or name in _SECRETS or name in _PRIVATE_LOCATIONS
+                    or (attribute is not None and owner in _SECRETS)
                     or name.endswith(('apikey', 'accesstoken', 'secretaccesskey'))
                     or (field == 'compare' and name in ('runid', 'code'))):
                 continue
-            shown = _project(item, name)
+            shown = _project(item, name, owner, native_fields, note_owner, machine_checks)
             if shown is not _DROP:
-                result[key] = shown
+                result[source_keys.get(key, key)] = shown
         return result
     if isinstance(value, (list, tuple)):
         # Do not move sensor sample positions when a typed string is withheld.
-        return [None if (shown := _project(item, field)) is _DROP else shown for item in value]
+        return [None if (shown := _project(item, field, attribute_owner, native_fields, note_owner, machine_checks))
+                is _DROP else shown for item in value]
     if isinstance(value, str):
+        if machine_checks and field in ('why', 'unchecked'):
+            value = _partial_coverage(value)
+        if note_owner and not native_fields and field == 'source' and _private_location(value):
+            return _source_name(value) or 'source file'
+        if note_owner and not native_fields and field == 'why':
+            value = _table_error(value)
+        if attribute_owner in _ATTRIBUTE_LOCATIONS and _private_location(value):
+            return _source_name(value) or 'source file'
         # An entire URL is a typed value even in an extension field. Do not scan
         # or rewrite URL fragments embedded in publisher prose.
         stripped = value.strip()
-        if (stripped.lower().startswith(('http://', 'https://'))
-                and not any(char.isspace() for char in stripped)
-                and _private_url(stripped)):
+        if _whole_uri(stripped) and _private_location(stripped):
             return _DROP
-        location = (field in _LOCATIONS or field.endswith(('url', 'uri', 'path', 'paths', 'urls', 'uris')))
+        # Direct source/path attributes can name HDF members; nested access fields retain protection.
+        direct_attribute = attribute_owner in ('source', 'path') and field in (
+            'fileattribute' + attribute_owner, 'episodeattribute' + attribute_owner)
+        location = not direct_attribute and not (native_fields and note_owner) and _location_field(field)
         # context_path is a JSON pointer; it is not a filesystem path.
         if field == 'contextpath':
             location = False

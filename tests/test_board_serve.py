@@ -90,7 +90,7 @@ def test_public_label_leaves_out_how_the_label_was_made():
     assert private.isdisjoint(serve.episode_view(dict(d)))
 
 
-def test_the_page_is_given_the_checks_a_rule_withheld_with_the_reason():
+def test_the_page_is_given_the_checks_a_rule_withheld_with_the_reason(tmp_path):
     """A check a manifest rule withheld (drop_check) is still on the page, named with the rule's reason; the check's
     stored result stays in the label file."""
     d = {"dataset": "molmo", "_withheld_checks": {"gripper_channels": {"reason": "one-armed tasks",
@@ -99,11 +99,21 @@ def test_the_page_is_given_the_checks_a_rule_withheld_with_the_reason():
     assert view["set_aside_checks"] == [{"check": "gripper_channels", "reason": "one-armed tasks", "status": "fired"}]
     assert "_withheld_checks" not in view
     assert "set_aside_checks" not in serve.episode_view({"_withheld_checks": [3]})
-    # a withheld check that stopped with an error says so, never clear
-    err = serve.episode_view({"_withheld_checks": {"recorded_jumps": {"reason": "r", "result": {
-        "error": "ValueError: boom", "flagged": False}}}})
-    assert err["set_aside_checks"] == [{"check": "recorded_jumps", "reason": "r", "status": "errored",
-                                        "error": "ValueError: boom"}]
+    # Keep actual reader details private while reporting that the withheld check failed.
+    try:
+        (tmp_path / "missing_context.json").read_text()
+    except FileNotFoundError as exc:
+        raw_error = f"{type(exc).__name__}: {exc}"
+    original = {"_withheld_checks": {"recorded_jumps": {"reason": "r", "result": {
+        "error": raw_error, "flagged": False}}}}
+    before = json.dumps(original, sort_keys=True)
+    err = serve.episode_view(original)
+    row, = err["set_aside_checks"]
+    assert {k: row[k] for k in ("check", "reason", "status")} == {
+        "check": "recorded_jumps", "reason": "r", "status": "errored"}
+    assert isinstance(row["error"], str) and row["error"] and row["error"] != raw_error
+    assert str(tmp_path) not in json.dumps(err)
+    assert json.dumps(original, sort_keys=True) == before
 
 
 def test_a_withheld_check_reads_as_what_it_found():
@@ -293,6 +303,7 @@ def test_static_site(tmp_path):
     page = (site / "index.html").read_text()
     assert "<h1>Data Dashboard</h1>" in page and '"mode":"static"' in page and '"compare":false' in page
     assert '"data":"https://example.org/board/b1/data/"' in (site / "index.public.html").read_text()
+
     index = json.loads((site / "data" / "index.json").read_text())
     assert index["datasets"] == ["galaxea", "my_own_rig", "fastumi"] and len(index["eps"]) == 3
     lst = json.loads((site / "data" / "lists" / "fastumi.json").read_text())
@@ -300,6 +311,49 @@ def test_static_site(tmp_path):
     assert json.loads((site / "data" / "ep" / "episode_000001.json").read_text())["data_issues"][1]["counted"] is False
     build = json.loads((site / "BUILD.json").read_text())
     assert build["episodes"] == 3 and build["media"]["videos_no_source"] == build["media"]["videos"] == 6
+
+
+def test_verified_grids_have_the_same_served_and_static_bytes(tmp_path, monkeypatch):
+    import io
+    from PIL import Image
+    from board import grids as bg
+    from label import grids as lg
+    board = _board(tmp_path)
+    path = board / 'qa' / 'episode_000001.json'
+    record = json.loads(path.read_text())
+    raw = io.BytesIO()
+    Image.new('RGB', (40, 30), 'green').save(raw, format='JPEG')
+    jpg = raw.getvalue()
+    record['request_images'] = {'fingerprint': 'b' * 64,
+        'grid_images': [{'sha256': lg.digest(jpg)}], 'images': [{'sha256': lg.digest(jpg)}],
+        'supplemental_images': 2}
+    path.write_text(json.dumps(record))
+    lg.write(bg.grid_dir(board / 'grids', path.name), record,
+             [{'jpeg': jpg, 't0_s': 1.0, 't1_s': 2.0}])
+    clips = tmp_path / 'clips'
+    clips.mkdir()
+    httpd, url = _serve(monkeypatch, board, clips)
+    try:
+        status, _headers, body = _get(url + '/api/grids?file=' + path.name + '&fingerprint=' + 'b' * 64)
+        assert status == 200, 'the viewer must expose verified frame-grid inputs'
+        view = json.loads(body)
+        assert view['supplemental_images'] == 2
+        assert _get(url + '/' + view['grids'][0]['src'])[2] == jpg
+        assert _get(url + '/api/grids?file=../manifest.json')[0] == 404
+        assert _get(url + '/api/grids?file=' + path.name + '&fingerprint=' + 'c' * 64)[0] == 404
+        (board / 'grids' / path.stem / 'grid_01.jpg').write_bytes(b'replaced')
+        assert _get(url + '/api/grid?file=' + path.name + '&i=0&fingerprint=' + 'b' * 64)[0] == 404
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+    lg.write(bg.grid_dir(board / 'grids', path.name), record,
+             [{'jpeg': jpg, 't0_s': 1.0, 't1_s': 2.0}])
+    args = argparse.Namespace(board=board, qa=board / 'qa', clips=clips, compare=None,
+        hands=None, keypoints=None, out=tmp_path / 'site', build_id='verified', force=False,
+        public_base=None, title='Data Dashboard')
+    assert static.cmd_site(args) == 0
+    view = json.loads((args.out / 'verified' / 'data' / 'grids' / path.name).read_text())
+    assert (args.out / 'media' / view['grids'][0]['src']).read_bytes() == jpg
 
 
 # ---------------------------------------------------------------- a board built from runs, with a comparison

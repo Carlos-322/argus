@@ -291,6 +291,8 @@ def test_every_blocks_checks_are_keys_of_a_real_dataset_checks_dict(tmp_path):
     from board import build as bb
     ep, given = CASES["teleop_joints"]()
     ep.update(dir=None, action=ep["state"].copy(), times=None, kmap={})
+    from prepare.state_contract import declared_action_semantics
+    ep["context"]["action_semantics"] = declared_action_semantics("tests:teleop_commands", "command")
     ep["sources"] = {v: {"n_frames": 900} for v in ep["sources"]}
     d = {"dataset_checks": me.plan(ep)["checks"]}
     ctx = {"profile": "teleop_arms", "fps": 30, "contacts": [dict(CONTACT)], "capture_qc": {"checks": []},

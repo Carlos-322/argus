@@ -189,12 +189,14 @@ def add_issue(ctx: dict, kind: str, what: str, camera: str | None = None, signal
               t0_s: float | None = None, t1_s: float | None = None,
               footage_complete: bool | None = None, unreadable_spans_s: list | None = None,
               clock_problem: str | None = None, source_rows: int | None = None,
-              camera_frames: int | None = None) -> dict:
+              camera_frames: int | None = None, source: str | None = None) -> dict:
     """One entry appended to ctx["reader_issues"] (the module docstring's No drop): kind, a short snake_case tag; what,
     one plain sentence for the board; the camera or signal it is about and its time span in seconds of the episode
     when known. An entry already there is not added twice, so a reader that writes an episode's context twice
     (finish_episode after video_views_episode) records each problem once."""
     entry = {"kind": str(kind), "what": str(what)}
+    if source is not None:
+        entry["source"] = str(source)
     for k, v in (("camera", camera), ("signal", signal)):
         if v is not None:
             entry[k] = str(v)
@@ -375,6 +377,7 @@ def open_archives(root: Path, dest: Path) -> tuple[Path, list[str]]:
     skipped, as are hidden files and __MACOSX; an upload holds at most UNPACK_MAX_FILES files and
     UNPACK_MAX_BYTES unpacked, counted from what each member really yields, so an archive whose members hold
     more than they declare stops at the limit."""
+    import tempfile
     root = Path(root)
     if root.is_file():
         if not ARCHIVE_RE.search(root.name):
@@ -418,10 +421,12 @@ def open_archives(root: Path, dest: Path) -> tuple[Path, list[str]]:
                 if target.exists():            # unpacked by an earlier run that stopped part way
                     continue
                 target.parent.mkdir(parents=True, exist_ok=True)
-                tmp = target.with_name(target.name + ".part")
+                tmp = None
                 got = 0
                 try:
-                    with opener() as src, open(tmp, "wb") as dst:
+                    with opener() as src, tempfile.NamedTemporaryFile(
+                            dir=target.parent, prefix='.unpack-', suffix='.part', delete=False) as dst:
+                        tmp = Path(dst.name)
                         while True:
                             buf = src.read(1 << 20)
                             if not buf:
@@ -437,7 +442,8 @@ def open_archives(root: Path, dest: Path) -> tuple[Path, list[str]]:
                 except Exception:
                     # a member cut short or damaged (a tar cut inside it, a zip member that fails its check) is left
                     # out by itself and named; the members before and after it are unpacked
-                    tmp.unlink(missing_ok=True)
+                    if tmp is not None:
+                        tmp.unlink(missing_ok=True)
                     bad.append(f"{'/'.join(parts)} (cut short or damaged)")
                     continue
                 total += got
@@ -1929,7 +1935,7 @@ def qualified_lerobot_action(action, features, columns, rig, kind):
 
 def lerobot_preparation_contract(kind, names, roles, features, columns, action, action_columns):
     """Persist the exact generic state facts checked before source columns leave the signal inventory."""
-    from prepare.state_contract import declared_contract
+    from prepare.state_contract import declared_contract, source_action_semantics
     command = None
     if action is not None:
         action_names, action_roles = [], []
@@ -1941,6 +1947,10 @@ def lerobot_preparation_contract(kind, names, roles, features, columns, action, 
         command = declared_contract("prepare.formats:lerobot", kind, action_names,
                                     state_units(lerobot_state_units(features, action_columns, "action"),
                                                 action_names, len(action_names)), action_roles)
+        semantics = [source_action_semantics(features.get(column), 'prepare.formats:lerobot')
+                     for column in action_columns or ['action']]
+        if semantics and semantics[0] is not None and all(item == semantics[0] for item in semantics):
+            command['action_semantics'] = semantics[0]
     return declared_contract("prepare.formats:lerobot", kind, names,
                              state_units(lerobot_state_units(features, columns), names, len(names)), roles, command)
 
@@ -1957,7 +1967,7 @@ def lerobot_physical_state(state, action, rig, names, roles, features, columns, 
         if state is None or state.ndim != 2 or state.shape[1] != 14:
             return "none", "The native HABIT state does not have its supported two-arm layout.", None, None
         action = action if action is not None and action.shape == state.shape else None
-        return "ee_pose", None, action, native_contract("habit", "ee_pose")
+        return "ee_pose", None, action, native_contract("habit", "ee_pose", features.get('action'))
     kind, note = physical_state_layout(state.shape[1] if state is not None else 0, rig, names,
                                        value_roles=roles, metadata=lerobot_state_units(features, columns))
     action = qualified_lerobot_action(action, features, action_columns, rig, kind)
@@ -2053,7 +2063,7 @@ def summary_issue(name: str, values: int) -> dict:
 
 
 SIGNAL_METADATA_KEYS = ('unit', 'units', 'response_direction', 'calibration', 'coordinate_frame',
-                        'sensor_type', 'description')
+                        'sensor_type', 'description', 'action_semantics')
 
 
 def summary_metadata(metadata: dict) -> dict:
@@ -2670,7 +2680,7 @@ def write_depth(ep: Path, ctx: dict, depth: dict | None, times: dict | None = No
         np.savez(ep / "depth_times.npz", **times)
     ctx["depth"] = {v: {"units": ("metres" if d.get("scale_m") else "relative"), "scale_m": d.get("scale_m"),
                         "kind": d.get("kind", "depth"), "source": d.get("source"),
-                        **{k: d[k] for k in ('storage', 'paired_camera') if k in d}} for v, d in depth.items()}
+                        **{k: d[k] for k in ('storage', 'paired_camera', 'source_key') if k in d}} for v, d in depth.items()}
 
 
 def probe_depth(path: Path) -> dict:
@@ -2999,6 +3009,8 @@ def video_views_episode(ep: Path, files: dict, rig: str, dataset: str, extra: di
                               'what': ' '.join(x for x in ((depth_notes.get(v) or {}).get('what'), d['alignment_note']) if x)}
         entry.update(width=pd_["width"], height=pd_["height"], pix_fmt=pd_["pix_fmt"])
         entry['paired_camera'] = d.get('paired_camera', v if v in files else None)
+        if d.get('source_key'):
+            entry['source_key'] = d['source_key']
         if d.get('storage'):
             entry['storage'] = d['storage']
             entry['height'], entry['width'] = d['storage']['shape']
@@ -4737,7 +4749,8 @@ def lerobot_metadata(ctx, root):
     if unassigned:
         ctx["unassigned_metadata"] = unassigned
         for claim in unassigned:
-            add_issue(ctx, "metadata_unreadable", f"{claim['source']} retains an unassigned metadata claim: {claim['why']}.")
+            add_issue(ctx, "metadata_unreadable", f"{claim['source']} retains an unassigned metadata claim: {claim['why']}.",
+                      source=str(claim['source']))
     previous = ctx.get("uploader_notes", ctx.get("uploader_annotation"))
     prompt_recorded = {}
     for path, value in recorded.items():
@@ -4797,13 +4810,14 @@ def lerobot_annotations(ctx, root, df, data_path, *, image_clock=False):
         ctx["instruction_note"] = "This instruction is constant recorded frame language in the episode data."
     if language and (not complete_language or len(set(language)) > 1):
         add_issue(ctx, "metadata_unreadable", f"{data_path} has changing, incomplete or competing frame language; "
-                  "original text rows are retained as attributed annotations, without an inferred instruction.")
+                  "original text rows are retained as attributed annotations, without an inferred instruction.",
+                  source=str(data_path))
     if not columns and not failures:
         return
     for path, table in failures.items():
         key = Path(path).relative_to(root["dir"]).as_posix()
         for issue in table["issues"]:
-            add_issue(ctx, "metadata_unreadable", f"{key} could not be fully read: {issue['why']}.")
+            add_issue(ctx, "metadata_unreadable", f"{key} could not be fully read: {issue['why']}.", source=str(path))
     times = df["timestamp"].tolist() if "timestamp" in df else None
     frames = df["frame_index"].tolist() if "frame_index" in df else None
     fps = ctx.get("fps") or root.get("fps")
@@ -4853,12 +4867,12 @@ def lerobot_annotations(ctx, root, df, data_path, *, image_clock=False):
                     step["timing_reason"] = "the recorded row clock has no established mapping to the camera clock"
             if step.get("timing_reason") and step["timing_reason"] != "no measured end boundary on the recorded clock":
                 add_issue(ctx, "metadata_unreadable", f"{column} in {data_path} retains an annotation with incomplete "
-                          f"timing: {step['timing_reason']}.")
+                          f"timing: {step['timing_reason']}.", source=str(data_path))
         for claim in missing:
             claim["data_source"] = str(data_path)
         if missing:
             add_issue(ctx, "metadata_unreadable", f"{column} in {data_path} has unresolved recorded annotation codes; "
-                      "all original rows and table claims are retained as uploader notes.")
+                      "all original rows and table claims are retained as uploader notes.", source=str(data_path))
         spans.extend(steps)
         unresolved.extend(missing)
         for (_, path), table in selected.items():
@@ -4868,7 +4882,7 @@ def lerobot_annotations(ctx, root, df, data_path, *, image_clock=False):
             table_notes.setdefault(path, {})[column] = original(table)
             if table["issues"]:
                 add_issue(ctx, "metadata_unreadable", f"{path} has unresolved {column} table claims; "
-                          "every recorded field and conflicting row is retained as uploader notes.")
+                          "every recorded field and conflicting row is retained as uploader notes.", source=str(path))
     ctx["annotation_subtasks"] = ctx.get("annotation_subtasks", []) + spans
     ctx["annotation_unresolved"] = unresolved
     ctx["annotation_tables"] = table_notes
@@ -4891,8 +4905,9 @@ def lerobot_annotations(ctx, root, df, data_path, *, image_clock=False):
         notes["unreadable annotation table sources"] = failures
     set_uploader_notes(ctx, notes)
     if len(json.dumps(notes, ensure_ascii=False)) > ANNOTATION_MAX_CHARS:
-        add_issue(ctx, "metadata_limit", f"{data_path} and its recorded metadata exceed the prompt note limit; "
-                  "complete original rows and source claims remain in the episode context and uploader notes.")
+        add_issue(ctx, "metadata_limit", f"{Path(data_path).name} and its recorded metadata exceed the prompt note limit; "
+                  "complete original rows and source claims remain in the episode context and uploader notes.",
+                  source=str(data_path))
     retain_metadata(ctx, root, df, data_path)
 
 
@@ -4944,6 +4959,9 @@ def convert_lerobot_item(item: dict, rig: str, out: Path, dataset: str) -> dict:
         from prepare.state_contract import native_contract
         proof = native_contract(ctx["source"]["adapter"], ctx.get("state_kind"))
         if proof:
+            publisher = (ctx.get('state_contract') or {}).get('publisher_action_semantics')
+            if publisher is not None:
+                proof['publisher_action_semantics'] = publisher
             ctx["state_contract"] = proof
         if ctx.get("profile") != rig:
             ctx["source"]["rig_note"] = f"the upload was marked {rig}; this dataset's layout is {ctx.get('profile')}"
@@ -5371,7 +5389,7 @@ def lerobot_depth(ep: Path, r: dict, row: dict, vmap: dict, fps: float, n: int, 
         scale = next((float(x) for k, x in info.items() if DEPTH_SCALE_KEY.search(str(k).split(".")[-1])
                       and isinstance(x, (int, float)) and 0 < x < 10), None)
         e, t = depth_entry(ep, v, Path(path), td, ta, pr["pts"][sel], scale, source, ctx, (cams or vmap)[camera])
-        e.update(width=pr["width"], height=pr["height"], pix_fmt=pr["pix_fmt"],
+        e.update(width=pr["width"], height=pr["height"], pix_fmt=pr["pix_fmt"], source_key=key,
                  paired_camera=camera if v == camera and source == key else None)
         dep[v] = e
         tz.update(t)
@@ -6558,7 +6576,7 @@ def h5_state(signals: Signals, rig: str, q: np.ndarray, files: list[str] | None 
     acts = [command(name, a.shape) for name, a, _ in arms]
     if identity_ctx is not None:
         record_state_groups(identity_ctx, [(source_claims[name], nm, a.shape[1]) for name, a, nm in arms])
-        from prepare.state_contract import declared_contract
+        from prepare.state_contract import declared_contract, source_action_semantics
         kind = state_layout(len(combined_names), rig, combined_names)[0]
         command = None
         if all(acts):
@@ -6566,6 +6584,9 @@ def h5_state(signals: Signals, rig: str, q: np.ndarray, files: list[str] | None 
             action_units = [unit for key in acts for unit in state_units(
                 meta[key], meta[key]["names"], len(meta[key]["names"]))]
             command = declared_contract("prepare.formats:hdf5", kind, action_names, action_units)
+            semantics = [source_action_semantics(meta[key], 'prepare.formats:hdf5') for key in acts]
+            if semantics[0] is not None and all(item == semantics[0] for item in semantics):
+                command['action_semantics'] = semantics[0]
         units = [unit for name, values, names in arms for unit in state_units(meta[name], names, values.shape[1])]
         identity_ctx["state_contract"] = declared_contract(
             "prepare.formats:hdf5", kind, combined_names, units, action=command)
@@ -6724,6 +6745,7 @@ def convert_hdf5(item: dict, rig: str, out: Path, dataset: str, *, source_scope:
             if dw.close():
                 depth[v] = {"path": ep / f"depth_{v}.mkv", "real": t if coarse else None,
                             "capture_clock": coarse, "scale_m": dw.scale_m, "source": source,
+                            "source_key": d['name'],
                             "storage": dw.storage,
                             "kind": representation,
                             "paired_camera": camera if v == camera and source == d['name'] else None}
@@ -7686,7 +7708,7 @@ def _flat_numbers(m) -> list[tuple[str, float]] | None:
     return flat or None
 
 
-SAMPLE_RATE_KEY = re.compile(r"^(sample_?rate|sampling_?rate|sample_?freq(uency)?|fs)$", re.I)
+from prepare.mcap_fields import SAMPLE_RATE_KEY
 SAMPLES_MIN = 32           # a vector this long beside a sample rate is samples in time (audio), not channels
 MUX_MAX_VALUES = 8         # a field with at most this many integer values that keeps switching names the sensor
 VARIATION_MAX_VALUES = 64  # a fast signal this wide or narrower also gets its variation within each frame
@@ -10145,6 +10167,32 @@ def plain_error(e: Exception) -> str:
     return "it could not be opened (" + type(e).__name__ + ")"
 
 
+def archive_read_root(root: Path, out: Path) -> Path:
+    """Expand directory uploads in an owned tree, without writing beside source archives.
+
+    Ordinary source files stay linked rather than copied. Keep the original root
+    name and relative layout so publisher ownership and adjacent metadata agree.
+    Prepared references can use the expanded tree for the life of the job.
+    """
+    if not root.is_dir():
+        return root
+    staging = out.parent / 'upload_unpacked'
+    excluded = [out, staging]
+    files = [p for p in files_under(root)
+             if not any(p.is_relative_to(path) for path in excluded)]
+    if not any(ARCHIVE_RE.search(p.name) for p in files):
+        return root
+    import tempfile
+    staging.mkdir(parents=True, exist_ok=True)
+    expanded = Path(tempfile.mkdtemp(prefix='archives-', dir=staging)) / root.name
+    expanded.mkdir()
+    for source in files:
+        target = expanded / source.relative_to(root)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.symlink_to(source.resolve())
+    return expanded
+
+
 def convert(root: Path, rig: str, out: Path, dataset: str, max_seconds: float, grouping: dict | None = None,
             ownership_context: dict | None = None) -> dict:
     """Convert an upload into episode sidecars under out/, taking episodes in order until max_seconds of
@@ -10152,6 +10200,7 @@ def convert(root: Path, rig: str, out: Path, dataset: str, max_seconds: float, g
     if rig not in RIGS:
         raise ValueError(f"rig must be one of {RIGS}")
     root, out = Path(root), Path(out)
+    root = archive_read_root(root, out)
     root, opened = open_archives(root, out.parent / "upload_unpacked")
     from prepare.annotations import source_context, merge_source_contexts
     declared_context = source_context(root, rig)

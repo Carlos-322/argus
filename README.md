@@ -61,9 +61,9 @@ Labels include action phases marked advancing, wasteful or idle; key events, pro
 
 Prepared episodes retain native arrays, clocks, calibration and attributed publisher claims. Unresolved ownership or conflicting annotations remain qualified. Motion checks require declared physical roles, suitable units and usable clocks; a vector's width alone does not establish joints or poses. Pressure, optical motion, jaw movement and relative depth can support observations, but force, slip, physical distance and contact timing require suitable calibration and timing evidence.
 
-The board keeps the episode navigation and existing action, progress, recovery, depth and hand-pose controls. It distinguishes recording faults from model or processing failures. Useful sensor conclusions appear with their readings, reasoning, confidence, alternatives and limitations. An inspection can return no additional finding.
+The board keeps the episode navigation and existing action, progress, recovery, depth and hand-pose controls. It distinguishes recording faults from model or processing failures. Useful sensor conclusions appear with their readings, reasoning, confidence, alternatives and limitations. An inspection can return no additional finding. Source-declared action meanings stay attributed; training targets are not automatically treated as control commands.
 
-Episode JSON, filtered JSON Lines and static exports retain annotations and substantive evidence. Public projection withholds private access descriptors and infrastructure locations. Human field interpretations take precedence, including an explicitly blank role; stale conclusions are withheld when the source or interpretation no longer supports them. Keep uploaded footage under its own access policy and license when sharing a board.
+Episode JSON, filtered JSON Lines and static exports retain annotations and substantive evidence. Public projection withholds private access descriptors and infrastructure locations. Human field interpretations take precedence over model guesses, including an explicitly blank role; stale conclusions are withheld when the source or interpretation no longer supports them. Keep uploaded footage under its own access policy and license when sharing a board.
 
 ## Advanced stages
 
@@ -107,6 +107,8 @@ uv run python -m board static site --board data/boards/mine --clips data/clips
 ```
 
 Live and static pages use the canonical `board/index.html` through `board.serve.render_index`. Refresh a board after changing its field dictionary before producing a static export. Local owner editing is enabled explicitly with `board serve --dictionary-job JOB`.
+
+Requests record ordered image hashes without storing duplicate image archives. `uv run python -m board grids data/boards/mine` reconstructs base frame grids only when their original inputs and image bytes can be verified. The viewer distinguishes answered requests from dry or unverified dispatches, keeps request-part clocks, and identifies unavailable parts. Detail and sensor images are counted in the receipt but are not reconstructed by this command. Legacy labels without input hashes remain unavailable.
 
 Model comparisons and frame-verified gate cases remain separate paid workflows:
 

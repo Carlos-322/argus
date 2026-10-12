@@ -761,16 +761,131 @@ def test_unaligned_state_is_inspectable_without_invented_timestamps(tmp_path):
     assert 'times_s' not in r
 
 
-def test_spectrum_joins_rate_to_source_message_not_packet_row(tmp_path):
+@pytest.mark.parametrize('rate_field', ['sample_rate', 'fs', 'sample_frequency', 'sample_rate_hz'])
+def test_spectrum_joins_rate_to_source_message_not_packet_row(tmp_path, rate_field):
+    from mcap.writer import Writer
+    from prepare import formats
     rate, n = 48000, 1024
-    np.savez(tmp_path / 'native.npz', samples=np.sin(2*np.pi*3000*np.arange(n)/rate)[None, :],
-             wave_indices=[1], rate_indices=[0, 1], rates=[[1000], [48000]], log=[10, 20])
-    channel = {'topic': '/sensor', 'log_ns': 'log', 'field_details': [
-        {'field': 'data', 'array': 'samples', 'width': n, 'message_indices': 'wave_indices'},
-        {'field': 'sample_rate', 'array': 'rates', 'width': 1, 'message_indices': 'rate_indices'}]}
-    a = access(tmp_path, recorded_mcap_fields='native.npz', mcap_field_inventory=[channel])
+    samples = np.sin(2*np.pi*3000*np.arange(n)/rate).tolist()
+    source = tmp_path / 'waveforms.mcap'
+    with source.open('wb') as stream:
+        writer = Writer(stream)
+        writer.start()
+        schema = writer.register_schema('recorded.waveform', 'jsonschema', b'{}')
+        for topic, additional in [('/sensor', {}), ('/ambiguous', {'sampling_rate': rate})]:
+            channel = writer.register_channel(topic, 'json', schema)
+            for row, record in enumerate([{rate_field: 1000}, {rate_field: rate, 'data': samples, **additional}]):
+                stamp = 10**18 + row * 10**8
+                writer.add_message(channel, stamp, json.dumps(record).encode(), stamp)
+        writer.finish()
+    ctx = {'state_kind': 'none', 'fps': 10}
+    formats.retain_mcap_fields(source, tmp_path, ctx)
+    a = access(tmp_path, **ctx)
     f = next(f for f in a.inventory() if f['name'] == '/sensor data')
-    assert a.inspect({'field_id': f['id'], 'mode': 'spectrum'})['sample_rate_hz'] == 48000
+    assert 'spectrum' in f['available_modes']
+    receipt = a.inspect({'field_id': f['id'], 'mode': 'spectrum'})
+    assert receipt['sample_rate_hz'] == rate and receipt['dominant_frequency_hz'] == 3000
+    ambiguous = next(f for f in a.inventory() if f['name'] == '/ambiguous data')
+    with pytest.raises(ValueError, match='unique recorded sample rate'):
+        a.inspect({'field_id': ambiguous['id'], 'mode': 'spectrum'})
+
+
+@pytest.mark.parametrize('changing_names', [False, True])
+def test_native_mcap_inspection_keeps_selected_row_component_identities(tmp_path, changing_names):
+    import hashlib
+    from mcap.writer import Writer
+    from prepare import formats
+    names = [['index_finger', 'middle_finger']] * 4
+    if changing_names:
+        names = [names[0], ['middle_finger', 'index_finger'], ['ring_finger', 'little_finger'], []]
+    records = [{'name': labels, 'pressure': values} for labels, values in
+               zip(names, [[10, 20], [21, 11], [30, 40], [50, 60]])]
+    source = tmp_path / 'glove.mcap'
+    with source.open('wb') as stream:
+        writer = Writer(stream)
+        writer.start()
+        schema = writer.register_schema('named.readings', 'jsonschema', b'{}')
+        channel = writer.register_channel('/glove', 'json', schema)
+        for row, record in enumerate(records):
+            writer.add_message(channel, 10**18 + row * 10**8, json.dumps(record).encode(),
+                               10**18 + row * 10**8)
+        writer.finish()
+    ctx = {'episode_id': 'episode_glove', 'state_kind': 'none', 'fps': 10}
+    formats.retain_mcap_fields(source, tmp_path, ctx)
+    archive = tmp_path / ctx['recorded_mcap_fields']
+    before = [hashlib.sha256(path.read_bytes()).hexdigest() for path in (source, archive)]
+    a = access(tmp_path, **ctx)
+    f = next(f for f in a.inventory() if f['name'] == '/glove pressure')
+    r = a.inspect({'field_id': f['id'], 'start_row': 1, 'end_row': 4, 'columns': [1, 0]})
+    assert r['rows'] == [1, 2, 3]
+    assert r['values'] == [[11, 21], [40, 30], [60, 50]]
+    expected = [[labels[1], labels[0]] if labels else [None, None] for labels in names[1:]]
+    assert r['component_names_by_row'] == expected
+    if changing_names:
+        assert not f['descriptor'].get('names') and f['descriptor']['names_vary_by_row']
+        assert 'component_names' not in r
+        assert any('Component identities vary' in note for note in r['limitations'])
+    else:
+        assert f['descriptor']['names'] == names[0]
+        assert r['component_names'] == expected[0]
+    assert [hashlib.sha256(path.read_bytes()).hexdigest() for path in (source, archive)] == before
+
+
+@pytest.mark.parametrize('declared_role', [None, 'command', 'target', 'invalid'])
+def test_canonical_hdf_commands_reach_inspection_without_extra_sensors(tmp_path, declared_role):
+    import h5py
+    from prepare import formats
+    from label import episode
+    root = tmp_path / 'upload'
+    root.mkdir()
+    names = [f'joint{i}_rad' for i in range(1, 7)] + ['gripper_fraction']
+    with h5py.File(root / 'canonical.hdf5', 'w') as recording:
+        demo = recording.create_group('data/demo_0')
+        demo.create_dataset('images_top', data=np.full((6, 64, 80, 3), [70, 110, 130], dtype=np.uint8))
+        demo.create_dataset('timestamps', data=10**12 + np.arange(6, dtype=np.int64) * 100_000_000)
+        for kind, values in [('qpos', np.zeros((6, 7))), ('action', np.ones((6, 7)))]:
+            field = demo.create_dataset(kind, data=values)
+            field.attrs['names'] = names
+            field.attrs['units'] = ['rad'] * 6 + ['fraction']
+            if kind == 'action' and declared_role is not None:
+                field.attrs['action_semantics'] = json.dumps({'version': 1, 'role': declared_role})
+    report = formats.convert(root, 'teleop_arms', tmp_path / 'episodes', 'recorded sensors', 900)
+    assert not report['failed']
+    directory = tmp_path / 'episodes' / report['episodes'][0]['episode_id']
+    ep = episode.load(directory)
+    assert not ep['signals'] and ep['action'] is not None
+    request = episode.build_request(directory, inspect_evidence=True)
+    access = request['evidence_access']
+    assert access is not None
+    receipts = {}
+    expected_role = declared_role if declared_role in ('command', 'target') else 'action/target_unknown'
+    for kind, role in [('state', 'observation'), ('action', expected_role)]:
+        field = next(row for row in access.inventory() if row['name'] == kind and row['kind'] == 'numeric')
+        assert field['descriptor']['recorded_role'] == role
+        if kind == 'action':
+            assert field['descriptor']['action_semantics']['role'] == expected_role
+            assert 'RECORDED ACTION SEMANTICS' in request['prompt']
+        receipts[kind] = access.inspect({'field_id': field['id'], 'columns': [0, 6]})
+        assert receipts[kind]['component_names'] == [names[0], names[6]]
+        assert receipts[kind]['component_units'] == ['rad', 'fraction']
+    assert receipts['state']['values'] == [[0, 0]] * 6
+    assert receipts['action']['values'] == [[1, 1]] * 6
+    assert receipts['action']['times_s'] == receipts['state']['times_s']
+    if declared_role == 'command':
+        from prepare.state_contract import action_semantics
+        ep['context']['action_semantics'] = {'version': 1, 'producer': 'another exact source', 'role': 'command'}
+        assert action_semantics(ep['context'])['role'] == 'command'
+        ep['context']['action_semantics']['role'] = 'target'
+        assert action_semantics(ep['context'])['role'] == 'action/target_unknown'
+        ep['context']['action_semantics'] = {'version': 1, 'producer': 'invalid source', 'role': 'command',
+            'relationship': {'kind': 'next_observation', 'field': 'state', 'row_offset': 1, 'terminal': 'repeat_last'}}
+        assert action_semantics(ep['context'])['role'] == 'action/target_unknown'
+        assert ea.needs_inspection(ep, {})
+        ep['context'].pop('action_semantics')
+    ep['action'] = None
+    assert not ea.needs_inspection(ep, {})
+    ep['state'] = np.zeros((6, 0))
+    assert not ea.needs_inspection(ep, {})
 
 
 def test_each_selection_respects_media_caps_before_dispatch(tmp_path):

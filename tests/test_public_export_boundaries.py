@@ -40,6 +40,14 @@ def public_sources(tmp_path, monkeypatch):
                   'source': {'key': '/observations/force'}, 'public_citation': CITATION}
     label = {'dataset': 'synthetic', 'episode_id': 'ep', 'episode_prompt': 'Place the cup.',
              'duration_s': 1, 'publisher_labels': {'label': 'public label'},
+             'uploader_notes': [{'title': 'Notes in the files', 'kind': 'notes', 'items': [
+                 {'name': 'recorded episode metadata / ' + PRIVATE_PATH + ' / source', 'value': PRIVATE_PATH},
+                 {'name': 'recorded episode metadata / ' + PRIVATE_PATH + ' / fields / path',
+                  'value': '/observations/force'},
+                 {'name': 'recorded annotation data source', 'value': PRIVATE_PATH}]}],
+             'dataset_checks': {'reader_issues': [{'kind': 'metadata_limit', 'what': PRIVATE_PATH
+                 + ' and its recorded metadata exceed the prompt note limit; complete original rows '
+                 + 'and source claims remain in the episode context and uploader notes.'}]},
              'data_dictionary': {'fields': [descriptor]},
              'evidence_inspection': {'parts': [{'source_location': PRIVATE_PATH, 'record': descriptor}]},
              'sensor_evidence': {'sensors': [descriptor]},

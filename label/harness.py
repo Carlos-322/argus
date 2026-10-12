@@ -685,6 +685,28 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
                      reserve_selection=None, settle_selection=None) -> dict:
     """Send one request (or, in a dry run, record exactly what would be sent) and write the result."""
     fields = {**fields, **(_billing_fields(out_path) if 'final_cost_history' not in fields else {})}
+    def verify_inputs():
+        saved = fields.get('input_identity')
+        if saved is None:
+            return  # Raw request callers may have no prepared-source identity.
+        try:
+            settings = saved['settings']
+            selected = settings['annotation_policy']
+            current = input_identity(ep_dir, model=model, reasoning=reasoning, max_tokens=max_tokens,
+                cell_w=settings['cell_w'], example_dir=fields.get('example_dir'),
+                sample_fps=selected.get('sample_fps'), task_mode=selected['task_mode'],
+                dataset_note=selected.get('dataset_note'))
+            valid = same_input_identity(saved, current) and not any(item.get('missing') for item in current['source_proof'])
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError):
+            valid = False
+        if not valid:
+            reason = 'Request inputs changed during assembly or inspection; no final annotation was dispatched.'
+            write_atomic(Path(out_path).with_name(f'noreply_{Path(out_path).name}'), {
+                'episode_dir': str(ep_dir), 'model': model, 'reasoning_effort': reasoning, **fields,
+                'parse_ok': False, 'no_reply': reason, 'final_dispatch_outcome': 'not dispatched',
+                'final_reserved_usd': 0.0})
+            raise RuntimeError(reason)
+    verify_inputs()
     if img_bytes * IMAGE_SIZE_INFLATION > IMAGE_LIMIT_BYTES:
         raise RuntimeError(f"payload {img_bytes} B exceeds the image-size cap; refusing to send")
     if evidence_access is not None:
@@ -756,10 +778,16 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
             content = content + addition
             img_bytes += extra_bytes
             prompt_text += '\n' + '\n'.join(p['text'] for p in addition if p.get('type') == 'text')
+    verify_inputs()
     n_images = sum(1 for c in content if c.get("type") == "image_url")
     if n_images > MAX_IMAGES:
         raise RuntimeError(f"{n_images} images exceeds the {MAX_IMAGES}-image cap; refusing to send")
+    from label import grids as input_grids
+    fields = copy.deepcopy(fields)
+    fields.setdefault('config', {})['request_images'] = input_grids.receipt(content,
+        {**fields, 'model': model, 'reasoning_effort': reasoning})
     if dry_run:
+        fields['config']['request_images']['dispatch_status'] = 'dry_run'
         import io
         from PIL import Image
         est_img = 0.0
@@ -777,6 +805,7 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
         return result
     bound = final_cost_bound(content, max_tokens)
     claim_path = Path(out_path).with_name(f'noreply_{Path(out_path).name}')
+    fields['config']['request_images']['dispatch_status'] = 'dispatch_claimed'
     claim = {"episode_dir": str(ep_dir), "model": model, "reasoning_effort": reasoning, **fields,
              "parse_ok": False, "no_reply": "final model call has no verified response",
              "final_dispatch_outcome": "claimed", "final_reserved_usd": bound}
@@ -786,6 +815,7 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
         try:
             reserve_final(episode_cost(claim), claim_path, claim)
         except SpendCap as error:
+            fields['config']['request_images']['dispatch_status'] = 'not_dispatched'
             write_atomic(claim_path, {**claim, "no_reply": str(error),
                                       "final_dispatch_outcome": "not dispatched", "final_reserved_usd": 0.0})
             raise
@@ -793,15 +823,18 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
     try:
         resp = call_model_once(content, model, reasoning, api_key, max_tokens, timeout)
     except KeyExhausted:
+        fields['config']['request_images']['dispatch_status'] = 'not_dispatched'
         write_atomic(claim_path, {**claim, 'final_dispatch_outcome': 'not dispatched',
                                   'final_reserved_usd': 0.0, 'no_reply': 'final key has no credit'})
         raise
     except Exception as error:
+        fields['config']['request_images']['dispatch_status'] = 'outcome_unknown'
         failed = dict(claim, no_reply=f"{type(error).__name__}: {error}",
                       final_dispatch_outcome="unverified")
         write_atomic(claim_path, failed)
         raise
     elapsed = time.time() - t_start
+    fields['config']['request_images']['dispatch_status'] = 'response_received'
 
     choice = (resp.get("choices") or [{}])[0]
     finish = choice.get("finish_reason") or choice.get("native_finish_reason")

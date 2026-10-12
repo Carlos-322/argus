@@ -30,6 +30,57 @@ def args(**changes):
                 timeout=1, **changes)
 
 
+def observed_packed_episode(root):
+    """A recording with observed joints only, for isolated route/final invoice contracts."""
+    import numpy as np
+    from test_label import _packed_episode
+    from label import episode as me, evidence_access
+    ep, _ = _packed_episode(root)
+    with np.load(ep / 'state.npz') as stored:
+        observed = stored['state']
+    np.savez(ep / 'state.npz', state=observed)
+    loaded = me.load(ep)
+    assert loaded['action'] is None
+    assert not evidence_access.needs_inspection(loaded, {})
+    return ep
+
+
+@pytest.mark.parametrize('stage', ['build', 'inspection'])
+def test_changed_source_during_request_assembly_cannot_dispatch_stale_annotation(tmp_path, monkeypatch, stage):
+    from test_label import _packed_episode, _accounted_evidence_selection
+    ep = observed_packed_episode(tmp_path) if stage == 'build' else _packed_episode(tmp_path)[0]
+    out = tmp_path / 'out' / f'{ep.name}.json'
+    calls = []
+    def change_instruction():
+        path = ep / 'context.json'
+        ctx = json.loads(path.read_text())
+        ctx['instruction'] = 'A new publisher instruction while the request is being assembled.'
+        path.write_text(json.dumps(ctx))
+    original = harness.me.build_request
+    def build_request(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if stage == 'build':
+            change_instruction()
+        return result
+    def provider(content, *args, **kwargs):
+        selection = _accounted_evidence_selection(content)
+        assert selection is not None, 'A final annotation must not use changed source interpretation.'
+        calls.append('selection')
+        change_instruction()
+        return selection
+    monkeypatch.setattr(harness.me, 'build_request', build_request)
+    monkeypatch.setattr(harness, 'call_model_once', provider)
+    with pytest.raises(RuntimeError, match='inputs changed'):
+        harness.label_episode(ep, out, model='openai/gpt-6-astra', reasoning='medium', api_key='sk-or-fixture',
+                              max_tokens=2000, timeout=1, cell_w=128, dry_run=stage == 'build')
+    assert not out.exists()
+    receipt = json.loads(out.with_name('noreply_' + out.name).read_text())
+    assert receipt['final_dispatch_outcome'] == 'not dispatched'
+    assert receipt['final_reserved_usd'] == 0
+    assert calls == ([] if stage == 'build' else ['selection'])
+    assert harness.episode_cost(receipt) == pytest.approx(0 if stage == 'build' else .004)
+
+
 def test_paid_route_survives_request_build_failure_and_resume(tmp_path, monkeypatch):
     ep = episode(tmp_path)
     job = tmp_path / 'job'
@@ -261,8 +312,7 @@ def test_routing_guards_make_no_paid_call(tmp_path, monkeypatch, mode):
 
 @pytest.mark.parametrize('route_usage, complete', [({'cost': .004}, True), ({}, False)])
 def test_successful_final_retains_routing_invoice_and_width(tmp_path, monkeypatch, route_usage, complete):
-    from test_label import _packed_episode
-    ep, _ = _packed_episode(tmp_path)
+    ep = observed_packed_episode(tmp_path)
     job = tmp_path / 'job'
     out = job / 'run' / 'out' / f'{ep.name}.json'
     calls = []
@@ -286,8 +336,7 @@ def test_successful_final_retains_routing_invoice_and_width(tmp_path, monkeypatc
 
 @pytest.mark.parametrize('final_reply', ['truncated', 'unparseable', 'key_exhausted'])
 def test_final_retry_reuses_paid_route_receipt(tmp_path, monkeypatch, final_reply):
-    from test_label import _packed_episode
-    ep, _ = _packed_episode(tmp_path)
+    ep = observed_packed_episode(tmp_path)
     job = tmp_path / 'job'
     out = job / 'run' / 'out'
     calls = []
@@ -327,8 +376,7 @@ def test_final_retry_reuses_paid_route_receipt(tmp_path, monkeypatch, final_repl
 
 @pytest.mark.parametrize('refresh', ['explicit', 'max_tokens', 'task'])
 def test_forced_refresh_preserves_prior_bills_and_remaining_cap(tmp_path, monkeypatch, refresh):
-    from test_label import _packed_episode
-    ep, _ = _packed_episode(tmp_path)
+    ep = observed_packed_episode(tmp_path)
     job = tmp_path / 'job'
     out = job / 'run' / 'out'
     calls = []
@@ -381,8 +429,7 @@ def test_forced_refresh_preserves_prior_bills_and_remaining_cap(tmp_path, monkey
 
 
 def test_forced_legacy_unknown_final_retains_reservation_before_routing(tmp_path, monkeypatch):
-    from test_label import _packed_episode
-    ep, _ = _packed_episode(tmp_path)
+    ep = observed_packed_episode(tmp_path)
     job = tmp_path / 'job'
     out = job / 'run' / 'out'
     out.mkdir(parents=True)
@@ -506,8 +553,7 @@ def test_cache_only_inspection_does_not_consume_remaining_cap_again(tmp_path, mo
 
 @pytest.mark.parametrize('unknown', [False, True])
 def test_dry_run_preserves_prior_paid_invoices(tmp_path, monkeypatch, unknown):
-    from test_label import _packed_episode
-    ep, _ = _packed_episode(tmp_path)
+    ep = observed_packed_episode(tmp_path)
     job = tmp_path / 'job'
     out = job / 'run' / 'out'
     calls = []
@@ -532,8 +578,7 @@ def test_dry_run_preserves_prior_paid_invoices(tmp_path, monkeypatch, unknown):
 
 
 def test_new_route_claim_is_latest_after_dry_output(tmp_path, monkeypatch):
-    from test_label import _packed_episode
-    ep, _ = _packed_episode(tmp_path)
+    ep = observed_packed_episode(tmp_path)
     job = tmp_path / 'job'
     out = job / 'run' / 'out' / f'{ep.name}.json'
     def provider(content, model, *a, **kw):
@@ -560,8 +605,7 @@ def test_new_route_claim_is_latest_after_dry_output(tmp_path, monkeypatch):
 
 
 def test_request_build_failure_without_routing_remains_resumable(tmp_path, monkeypatch):
-    from test_label import _packed_episode
-    ep, _ = _packed_episode(tmp_path)
+    ep = observed_packed_episode(tmp_path)
     job = tmp_path / 'job'
     out = job / 'run' / 'out'
     original = harness.me.build_request

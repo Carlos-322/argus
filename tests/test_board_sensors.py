@@ -129,7 +129,8 @@ def test_an_episode_file_keeps_what_label_signals_reads(tmp_path):
     doc = sensors.episode_doc(ep)
     assert doc["format"] == sensors.FORMAT and doc["frames"] == 300
     # 30 frames a second sampled every second frame: at most 15 a second, on the clip's clock (first frame 0)
-    assert doc["stride"] == 2 and doc["n"] == 150
+    assert doc["stride"] == 2 and doc["n"] <= 150
+    pick = np.asarray(doc["sample_indices"])
     t = sensors.decode_times(doc["times"])
     assert t[0] == 0.0 and t[-1] == pytest.approx(299 / 30, abs=1e-3)
     force, pmap, health = doc["signals"]
@@ -139,15 +140,17 @@ def test_an_episode_file_keeps_what_label_signals_reads(tmp_path):
     # Independent frame boundaries from the fixture's two recorded presses.
     assert force["spans"] == [[2.0, 2.967], [6.667, 7.967]]
     v = sensors.dequantize(force["values"], doc["n"])
-    assert np.max(np.abs(v[:, 0] - a[::2, 0])) <= force["values"]["step"][0] / 2 + 1e-9
+    assert np.max(np.abs(v[:, 0] - a[pick, 0])) <= force["values"]["step"][0] / 2 + 1e-9
     # the pressure map behaves like touch: falls when pressed, drawn as a heatmap against its rest and swing
     assert pmap["touch"] is True and pmap["direction"] == "down" and pmap["shape"] == [4, 4]
     assert np.allclose(pmap["rest"], 3072.0, atol=10) and pmap["swing_from"] == "episode" and pmap["swing"] > 0
     m = sensors.dequantize(pmap["map"], doc["n"], bits=8)
     raw = np.load(ep / "signals.npz")["s1"].astype(np.float64)
-    assert m.shape == (150, 16) and abs(m[110, 10] - raw[220, 10]) <= pmap["map"]["step"] / 2 + 1e-6
+    assert m.shape == (doc["n"], 16)
+    assert np.max(np.abs(m - raw[pick])) <= pmap["map"]["step"] / 2 + 1e-6
     act = sensors.dequantize(pmap["activity"], doc["n"])[:, 0]
-    assert act[10] == 0 and act[110] > act[40] > 0
+    assert np.median(act[pick < 60]) == 0
+    assert np.median(act[(pick >= 200) & (pick < 240)]) > np.median(act[(pick >= 60) & (pick < 90)]) > 0
 
 
 def test_the_uploads_rest_and_swing_are_used_when_prepare_measured_them(tmp_path):
@@ -174,11 +177,12 @@ def test_each_signal_keeps_its_own_length_and_its_gaps(tmp_path):
     force[:10] = np.nan
     _resave(ep, s0=force)
     doc = sensors.episode_doc(ep)
-    assert doc["frames"] == 300 and doc["n"] == 150
+    assert doc["frames"] == 300 and doc["n"] <= 150
+    pick = np.asarray(doc["sample_indices"])
     f = next(s for s in doc["signals"] if s["name"] == "fingertip force")
     v = sensors.dequantize(f["values"], doc["n"])[:, 0]
-    assert np.isnan(v[125:]).all() and np.isnan(v[50:60]).all() and np.isnan(v[:5]).all()
-    assert np.isfinite(v[30:50]).all() and np.isfinite(v[60:120]).all()
+    missing = (pick >= 250) | ((pick >= 100) & (pick < 120)) | (pick < 10)
+    assert np.isnan(v[missing]).all() and np.isfinite(v[~missing]).all()
 
 
 def test_a_signal_that_cannot_be_drawn_is_named_and_the_others_are_drawn(tmp_path, monkeypatch):
@@ -712,3 +716,57 @@ def test_small_contact_map_keeps_full_rate_metrics():
     doc = sensors.signal_doc({'name':'right_pressure', 'dims':4, 'shape':[2,2],
                              'rest':np.zeros(4), 'swing':2}, a, np.arange(30)/30, 3, True)
     assert doc['tactile']['n'] == 30 and doc['tactile']['shape'] == [2,2]
+
+
+def test_overview_keeps_a_between_stride_peak_and_native_gap(tmp_path):
+    ep = _episode(tmp_path, n=120, fps=120)
+    ctx = json.loads((ep / 'context.json').read_text())
+    ctx['signals'] = [{'name': 'publisher_event_flag', 'key': 's0', 'dims': 1}]
+    (ep / 'context.json').write_text(json.dumps(ctx))
+    a = np.zeros((120, 1), dtype=np.float32)
+    a[61] = 9
+    a[62:64] = np.nan
+    _resave(ep, s0=a)
+    doc = sensors.episode_doc(ep)
+    pick = np.asarray(doc.get('sample_indices', list(range(0, 120, doc['stride']))))
+    value = sensors.dequantize(doc['signals'][0]['values'], doc['n'])[:, 0]
+    assert 61 in pick and value[np.flatnonzero(pick == 61)[0]] == pytest.approx(9)
+    assert len(pick) <= 15 and np.all(np.diff(pick) > 0)
+    assert doc['sampling']['method'] == 'bucket extrema'
+    assert doc['signals'][0]['break_before'][0]
+    crowded = np.zeros((120, 4))
+    for c in range(4):
+        crowded[20 + c, c] = 1
+    limited, qualification = sensors.overview_indices([{'name': 'vector', 'key': 'v'}], {'v': crowded}, 120, 3)
+    assert len(limited) <= 4 and qualification['extrema_complete'] is False
+    assert doc['playback']['captures'][61] == pytest.approx(61 / 120)
+    # A real encoded recording, reduced through the production native-clock window helper.
+    import av
+    from prepare.formats import trim_episode
+    short = _episode(tmp_path / 'short', n=60, fps=30)
+    _video(short / 'exo.mp4', 60, 'libx264', 'yuv420p',
+           lambda k: av.VideoFrame.from_ndarray(np.full((24, 32, 3), k, np.uint8), format='rgb24'))
+    source_bytes = (short / 'exo.mp4').read_bytes()
+    context = json.loads((short / 'context.json').read_text())
+    context.update(state_kind='none', real_times='times.npz', clock_zero_s=0)
+    np.savez(short / 'times.npz', exo=np.arange(60) / 30, exo_pts=np.arange(60) * 512)
+    context['signals'] = [{'name': 'publisher_signal', 'key': 's0', 'dims': 1}]
+    (short / 'context.json').write_text(json.dumps(context))
+    readings = np.zeros((60, 1), np.float32)
+    readings[1], readings[2] = 9, -4
+    _resave(short, s0=readings)
+    trim_episode(short, 4 / 30)
+    tiny = sensors.episode_doc(short)
+    assert tiny['frames'] == 4 and tiny['sample_indices'] == [0, 1, 2, 3]
+    decoded = sensors.dequantize(tiny['signals'][0]['values'], tiny['n'])[:, 0]
+    assert decoded.max() == pytest.approx(9) and decoded.min() == pytest.approx(-4)
+    assert (short / 'exo.mp4').read_bytes() == source_bytes
+    if shutil.which('node'):
+        script = "const {src,piece}=require('./tests/page_functions')();"
+        script += "const decode=new Function(src.slice(src.indexOf('const HP_B64 = '),src.indexOf('const HP_COLOR = '))+piece('hpReader')+piece('snBlock')+piece('snDecode')+'return snDecode;')();"
+        script += "const d=decode(" + json.dumps(doc) + ");"
+        script += "const i=d.signals[0].vals.v.indexOf(9);console.log(JSON.stringify({t:d.t[i],n:d.t.length}));"
+        result = subprocess.run(['node', '-e', script], cwd=Path(__file__).parents[1],
+                                capture_output=True, text=True, check=True, timeout=10)
+        native = json.loads(result.stdout)
+        assert native['t'] == pytest.approx(61 / 120, abs=1e-12) and native['n'] <= 15

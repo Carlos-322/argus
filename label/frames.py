@@ -252,3 +252,16 @@ def build_content(fixed: str, episode: str, timesteps: list, cam_labels: list[st
         content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": detail}})
         n_grids += 1
     return content, n_grids, total_bytes
+
+
+def grid_jpegs(content: list) -> list[bytes]:
+    """Only images immediately preceded by a frame-grid caption, in request order."""
+    out, caption = [], ''
+    for part in content:
+        if part.get('type') == 'text':
+            caption = part.get('text') or ''
+        elif part.get('type') == 'image_url':
+            if caption.startswith('=== grid t='):
+                out.append(base64.b64decode(part['image_url']['url'].split(',', 1)[1], validate=True))
+            caption = ''
+    return out

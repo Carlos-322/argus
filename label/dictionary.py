@@ -166,7 +166,7 @@ def inventory(episodes: list[Path]) -> dict:
         descriptor = {"name": str(name), "kind": kind, "shape": shape, "dtype": dtype,
                       "names": meta.get("names") or [], "rate_hz": meta.get("rate_hz"),
                       "source": _relative(meta.get("source") or (file or "context.json") + "#" + context_path, ep)}
-        descriptor.update({k: meta[k] for k in ('unit', 'units', 'response_direction', 'calibration', 'coordinate_frame', 'sensor_type', 'description') if k in meta})
+        descriptor.update({k: meta[k] for k in ('unit', 'units', 'response_direction', 'calibration', 'coordinate_frame', 'sensor_type', 'description', 'action_semantics', 'recorded_role') if k in meta})
         ident = _digest(descriptor)
         field = fields.setdefault(ident, {"id": ident, **descriptor, "episodes": [], "bindings": [], "limitations": []})
         if ep.name not in field["episodes"]:
@@ -244,6 +244,11 @@ def inventory(episodes: list[Path]) -> dict:
                     names = [name for item in ctx.get("state_identities", []) for name in item.get("names", [])]
                 meta = {"name": source.get(kind) or kind, "names": names, "source": source.get(kind),
                         "rate_hz": ctx.get("recorded_rate_hz")}
+                from prepare.state_contract import action_semantics
+                semantics = action_semantics(ctx) if kind == 'action' else None
+                if semantics:
+                    meta['recorded_role'] = semantics['role']
+                    meta['action_semantics'] = semantics
                 numeric(ep, meta, kind, kind, "state.npz", kind)
                 claimed["state.npz"].add(kind)
         for i, meta in enumerate(ctx.get("signals") or []):
@@ -317,12 +322,14 @@ def inventory(episodes: list[Path]) -> dict:
 
 def _request(inventory: dict):
     """Only descriptors and five numeric aggregates reach the text model."""
-    keys = ("id", "name", "kind", "shape", "dtype", "names", "rate_hz", "source", "episodes", "limitations", 'unit', 'units', 'response_direction', 'calibration', 'coordinate_frame', 'sensor_type', 'description')
+    keys = ("id", "name", "kind", "shape", "dtype", "names", "rate_hz", "source", "episodes", "limitations", 'unit', 'units', 'response_direction', 'calibration', 'coordinate_frame', 'sensor_type', 'description', 'action_semantics', 'recorded_role')
     fields = [{key: field[key] for key in keys if key in field} for field in inventory["fields"]]
     for descriptor, field in zip(fields, inventory["fields"]):
         if "summary" in field:
             descriptor["summary"] = {key: field["summary"][key] for key in SUMMARY_KEYS}
     prompt = ('Interpret recorded field descriptors without inventing names, units, clocks or measurements. '
+              'Preserve source action_semantics declarations when assigning a role. A next-observation target '
+              'does not establish recorded control commands. Unknown action semantics must stay qualified. '
               'Reply with JSON {"entries"' + ': [{"id": "exact field id", "meaning": "one line", "role": "short role", '
               '"layout": [{"start": 0, "count": 7, "name": "group"}]}]}. Layout is optional and must cover every '
               'actual column exactly once. Roles are open strings seeded with joint_state, actuator_command, '
