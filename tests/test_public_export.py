@@ -130,6 +130,7 @@ def test_flattened_source_note_owners_are_private_but_native_fields_and_prose_su
     source = tmp_path / 'native.h5'
     with h5py.File(source, 'w') as f:
         f.attrs['source_directory'] = workstation
+        f.attrs['source_location'] = 'SSH:user:unusable-uri-credential@private-host'
         f.attrs['api_key'] = 'unusable-attribute-value'
         f.attrs['source'] = native
         f.attrs['source_url'] = 'file:///srv/private-env/source.h5'
@@ -177,6 +178,7 @@ def test_flattened_source_note_owners_are_private_but_native_fields_and_prose_su
         assert 'native token identity' in json.dumps(shown)
         assert '/observations/left/force' in json.dumps(shown)
         assert workstation not in json.dumps(shown)
+        assert 'unusable-uri-credential' not in json.dumps(shown)
         assert 'unusable-attribute-value' not in json.dumps(shown)
         assert 'unusable-attribute-access' not in json.dumps(shown)
         assert signed not in json.dumps(shown) and citation in json.dumps(shown)
@@ -187,6 +189,7 @@ def test_flattened_source_note_owners_are_private_but_native_fields_and_prose_su
         assert project({'uploader_notes': shown}) == {'uploader_notes': shown}
     raw = project({'recorded_metadata': {'native.h5': attributes}})['recorded_metadata']['native.h5']
     assert workstation not in json.dumps(raw)
+    assert 'unusable-uri-credential' not in json.dumps(raw)
     assert '/srv/private-env' not in json.dumps(raw)
     assert raw['file attribute env_args']['native_key'] == native
     assert raw['file attribute env_args']['description'] == prose
@@ -224,6 +227,88 @@ def test_flattened_source_note_owners_are_private_but_native_fields_and_prose_su
     assert groups == before and notes['recorded episode metadata'][private]['fields'][native] == 12
     plain = project({'uploader_notes': uploader_groups(prose, None, 10)})
     assert plain['uploader_notes'][0]['items'] == [{'name': 'note', 'value': prose}]
+    upper_signed = signed.replace('https://', 'HTTPS://')
+    uri_notes = {'native': {'fields': {'references': [upper_signed, citation],
+                                     'links': [upper_signed, citation],
+                                     'asset_urls': [upper_signed, native, citation],
+                                     'primitive_values': [upper_signed, 0, True, native, citation],
+                                     'protocol_relative': [upper_signed.removeprefix('HTTPS:'), native, citation]}},
+                 'asset_urls': [upper_signed, native, citation],
+                 'publisher_note': 'Read ' + upper_signed + ' for the task.'}
+    original_uri_notes = copy.deepcopy(uri_notes)
+    uri_groups = uploader_groups(uri_notes, None, 1)
+    original_uri_groups = copy.deepcopy(uri_groups)
+    uri_public = project({'uploader_notes': uri_groups})
+    for group in uri_public['uploader_notes']:
+        for item in group['items']:
+            if item['name'] == 'publisher_note':
+                assert item['value'] == uri_notes['publisher_note']
+            else:
+                assert upper_signed not in item['value'] and citation in item['value']
+                if item['name'].endswith(('asset_urls', 'primitive_values', 'protocol_relative')):
+                    assert native in item['value']
+                if item['name'].endswith('primitive_values'):
+                    assert '0, True' in item['value']
+                assert 'X-Amz-Signature' not in item['value']
+    assert uri_notes == original_uri_notes and uri_groups == original_uri_groups
+    legacy_uri = uploader_groups({'native': {'fields': {'references': [upper_signed, citation],
+                              'mixed': [upper_signed, native, citation]}}}, None, 1)
+    for group in legacy_uri:
+        for item in group['items']:
+            item.pop('_uploader_location_values', None)
+            item.pop('_uploader_field_path', None)
+    legacy_public = project({'uploader_notes': legacy_uri})
+    legacy_items = {item['name']: item['value'] for group in legacy_public['uploader_notes'] for item in group['items']}
+    assert upper_signed not in legacy_items['native / fields / references']
+    assert upper_signed not in legacy_items['native / fields / mixed']
+    assert native in legacy_items['native / fields / mixed']
+    uri_large = uploader_groups({'native': {'fields': {'references': [upper_signed, native, citation] * 20}}}, None, 1)
+    uri_receipt = uri_large[0]['items'][0]['_uploader_location_values']
+    assert uri_receipt['count'] == 60 and len(uri_receipt['values']) == 4
+    assert upper_signed not in json.dumps(project({'uploader_notes': uri_large}))
+    assert native in json.dumps(project({'uploader_notes': uri_large}))
+    for group in uri_large:
+        for item in group['items']:
+            item.pop('_uploader_location_values', None)
+            item.pop('_uploader_field_path', None)
+    legacy_large = project({'uploader_notes': uri_large})
+    assert upper_signed not in json.dumps(legacy_large) and native in json.dumps(legacy_large)
+    assert '60 values' in json.dumps(legacy_large)
+    access_uris = ['  ' + upper_signed + '  ', '//example.org/asset?X-Amz-Signature=unusable-url-test',
+                   'FILE:/srv/private/source.h5', 'S3://private-bucket/source.h5',
+                   'GS://private-bucket/source.h5', 'AZ://private-container/source.h5',
+                   'ABFS://private-container/source.h5', 'SSH://private-host/source.h5',
+                   'SFTP://private-host/source.h5', 'FTP://private-host/source.h5']
+    assert project({'extension': access_uris}) == {'extension': [None] * len(access_uris)}
+    native_identifiers = [native, 'urn:publisher:source', 'publisher:source_identity', citation,
+                          'Open FILE:/srv/private/source.h5 for the task.']
+    assert project({'extension': native_identifiers}) == {'extension': native_identifiers}
+    opaque_uris = ['SSH:user:unusable-uri-credential@private-host',
+                   'FTP:user:unusable-uri-credential@private-host',
+                   'FILE:unusable-uri-credential', 'S3:unusable-uri-credential',
+                   'GS:unusable-uri-credential', 'AZ:unusable-uri-credential',
+                   'ABFS:unusable-uri-credential', 'SFTP:unusable-uri-credential',
+                   'SSH%3Auser%3Aunusable-uri-credential%40private-host',
+                   'SSH%3Auser%3Aunusable-uri-credential%20encoded%40private-host',
+                   'HTTPS%3A%2F%2Fexample.org%2Fasset%3FX-Amz-Signature%3Dunusable-uri-credential']
+    opaque_groups = uploader_groups({'native': {'fields': {'references': [*opaque_uris, native, citation]}}}, None, 1)
+    for historical in (False, True):
+        value = copy.deepcopy(opaque_groups)
+        if historical:
+            for group in value:
+                for item in group['items']:
+                    item.pop('_uploader_location_values', None)
+                    item.pop('_uploader_field_path', None)
+        public = project({'uploader_notes': value})
+        assert 'unusable-uri-credential' not in json.dumps(public)
+        assert native in json.dumps(public) and citation in json.dumps(public)
+    for uri in [*opaque_uris, 'HTTP://[', 'SSH://[']:
+        raw_owner = {'recorded_metadata': {uri: {'source': uri, 'fields': {'path': native}}},
+                     'file attribute source_directory': uri}
+        public = project(raw_owner)
+        assert 'unusable-uri-credential' not in json.dumps(public)
+        assert native in json.dumps(public)
+        assert project(public) == public
 
 
 def test_reader_metadata_limit_paths_use_typed_source_identity_without_rewriting_publisher_text(tmp_path, monkeypatch):

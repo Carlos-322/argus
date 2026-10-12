@@ -37,6 +37,7 @@ _LOCATIONS = frozenset({
     'publicbase', 'publiccitation', 'citation',
 })
 _URL_QUERY_SECRETS = _SECRETS | {'signature', 'sig', 'keypairid', 'policy', 'googleaccessid'}
+_ACCESS_URI_PREFIXES = ('file:', 's3:', 'gs:', 'az:', 'abfs:', 'ssh:', 'sftp:', 'ftp:')
 _DROP = object()
 
 # These reader-owned note maps use source files as their keys. Keys inside the
@@ -83,9 +84,13 @@ def _private_url(value: str) -> bool:
     return False
 
 
+def _location_value(value: str) -> str:
+    return unquote(value.strip())
+
+
 def _private_location(value: str) -> bool:
-    value = unquote(value.strip())
-    if value.lower().startswith(('file:', 's3:', 'gs:', 'az:', 'abfs:', 'ssh:', 'sftp:', 'ftp:')):
+    value = _location_value(value)
+    if value.lower().startswith(_ACCESS_URI_PREFIXES):
         return True
     if '://' in value or value.startswith('//'):
         return _private_url(value if not value.startswith('//') else 'https:' + value)
@@ -97,9 +102,15 @@ def _private_location(value: str) -> bool:
 
 def _source_name(value: str) -> str:
     """A source file's basename is useful identity; its access directory is private."""
-    value = unquote(value.strip())
-    if '://' in value or value.lower().startswith(('file:', 's3:', 'gs:', 'az:')):
-        value = urlsplit(value).path
+    value = _location_value(value)
+    if '://' in value or value.startswith('//') or value.lower().startswith(_ACCESS_URI_PREFIXES):
+        try:
+            path = urlsplit(value).path
+        except ValueError:
+            return ''
+        if not path.startswith('/'):
+            return ''
+        value = path
     return PureWindowsPath(value).name if '\\' in value else PurePosixPath(value).name
 
 
@@ -115,18 +126,33 @@ def _location_field(field: str) -> bool:
     return field in _LOCATIONS or field.endswith(('url', 'uri', 'path', 'paths', 'urls', 'uris'))
 
 
+def _whole_uri(value) -> bool:
+    if not isinstance(value, str):
+        return False
+    token = value.strip()
+    if not token or any(char.isspace() for char in token):
+        return False
+    token = _location_value(token)
+    return (bool(re.match(r'^[a-z][a-z0-9+.-]*://', token, re.I)) or token.startswith('//')
+            or token.lower().startswith(_ACCESS_URI_PREFIXES))
+
+
+def _filesystem_list(parts) -> bool:
+    if not parts or any(_name(part) == 'fields' for part in parts):
+        return False
+    field = _name(_reader_attribute(parts[-1]) or parts[-1])
+    return (field in ('sources', 'paths', 'files') or field.endswith('paths')
+            or any(_name(_reader_attribute(part) or '') in _ATTRIBUTE_LOCATIONS for part in parts))
+
+
 def location_list_receipt(path, values, limit):
     """Retain only the existing preview of a typed location list, never arbitrary arrays."""
-    if not path or not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+    if not isinstance(values, list):
         return None
-    field = _name(_reader_attribute(path[-1]) or path[-1])
-    owned = field in ('sources', 'paths', 'files', 'urls', 'uris', 'links') or field.endswith(('urls', 'uris', 'paths'))
-    owned = owned or any(_name(_reader_attribute(part) or '') in _ATTRIBUTE_LOCATIONS for part in path)
     preview = values if len(values) <= limit else values[:4]
-    whole_urls = bool(preview) and all(v.startswith(('http://', 'https://', 'file://', 's3://', 'gs://'))
-                                      and not any(c.isspace() for c in v) for v in preview)
-    owned = whole_urls if any(_name(part) == 'fields' for part in path) else owned or whole_urls
-    return {'values': list(preview), 'count': len(values)} if owned and any(_private_location(v) for v in preview) else None
+    filesystem = _filesystem_list(path)
+    private = any(isinstance(v, str) and (_whole_uri(v) or filesystem) and _private_location(v) for v in preview)
+    return {'values': list(preview), 'count': len(values)} if private else None
 
 
 def _table_error(value):
@@ -188,21 +214,21 @@ def _uploader_item(item: dict) -> dict:
     value = item.get('value')
     terminal = _name(parts[-1]) if parts else ''
     locations = item.get('_uploader_location_values')
-    list_field = _name(_reader_attribute(parts[-1]) or parts[-1]) if parts else ''
-    owned_list = list_field in ('sources', 'paths', 'files', 'urls', 'uris', 'links') or list_field.endswith(('urls', 'uris', 'paths'))
-    owned_list = owned_list or any(a in _ATTRIBUTE_LOCATIONS for a in attributes)
-    if not isinstance(locations, dict) and owned_list and isinstance(value, str):
+    if not isinstance(locations, dict) and isinstance(value, str):
         summary = re.fullmatch(r'([0-9]+) values, (.+), \.\.\.', value)
-        tokens = (summary[2] if summary else value).split(', ')
+        tokens = (summary[2] if summary else value).split(', ', 24)
         count = int(summary[1]) if summary else len(tokens)
-        if all(token.startswith(('http://', 'https://', 'file://', 's3://', 'gs://'))
-               and not any(char.isspace() for char in token) for token in tokens) and count >= len(tokens):
+        # The reader's exact display delimiter lets whole URI members retain
+        # their type. Other members stay display strings, never guessed values.
+        if (len(tokens) <= (4 if summary else 24) and any(_whole_uri(token) for token in tokens)
+                and count >= len(tokens)):
             locations = {'values': tokens, 'count': count}
     if isinstance(locations, dict) and isinstance(locations.get('values'), list):
-        projected = [_project(v, 'urls') for v in locations['values']]
+        filesystem = _filesystem_list(parts)
+        projected = [_project(v, 'urls' if _whole_uri(v) or filesystem else '') for v in locations['values']]
         for i, original in enumerate(locations['values']):
             if (projected[i] is _DROP and isinstance(original, str)
-                    and not original.lower().startswith(('http://', 'https://'))):
+                    and not _whole_uri(original)):
                 projected[i] = _source_name(original) or 'source file'
         display = ', '.join('withheld' if v is _DROP else str(v) for v in projected)
         count = locations.get('count', len(projected))
@@ -420,9 +446,7 @@ def _project(value, field: str = '', attribute_owner: str = '', native_fields: b
         # An entire URL is a typed value even in an extension field. Do not scan
         # or rewrite URL fragments embedded in publisher prose.
         stripped = value.strip()
-        if (stripped.lower().startswith(('http://', 'https://'))
-                and not any(char.isspace() for char in stripped)
-                and _private_url(stripped)):
+        if _whole_uri(stripped) and _private_location(stripped):
             return _DROP
         # Direct source/path attributes can name HDF members; nested access fields retain protection.
         direct_attribute = attribute_owner in ('source', 'path') and field in (
