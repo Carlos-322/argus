@@ -148,19 +148,23 @@ def sample_frames(T: int, spans: list[tuple[int, int]], fps: float = FPS,
     a still span is the first frame of the next moving stretch, so the instant motion resumes is
     always sent; frame 0 and frame T-1 are always sent. A variable presentation clock
     selects the nearest source frame at each elapsed-time target, with ties going to
-    the earlier frame. Regular clocks keep the original frame-stride selection."""
+    the earlier frame. Regular clocks and legacy tied label clocks keep the original
+    frame-stride selection."""
     if T <= 0:
         return []
     clock = None
     if times_s is not None:
         clock = np.asarray(times_s, dtype=float)
+        intervals = np.diff(clock)
         if (clock.shape != (T,) or not np.isfinite(clock).all()
-                or not np.isfinite(np.diff(clock)).all() or np.any(np.diff(clock) < 0)):
+                or not np.isfinite(intervals).all() or np.any(intervals < 0)):
             raise ValueError('sampling requires one finite ordered presentation time per frame')
         if any(not np.isfinite(period) or period <= 0 for period in (moving_every_s, still_every_s)):
             raise ValueError('sampling cadence must be finite and positive')
         tolerance = max(1e-9, float(np.spacing(np.abs(clock).max())) * 4)
-        if np.allclose(np.diff(clock), 1 / fps, rtol=1e-6, atol=tolerance):
+        # Unmarked saved episodes may retain tied capture stamps as their label clock.
+        # They cannot order distinct frames; only an explicit producer repair changes that clock.
+        if np.any(intervals == 0) or np.allclose(intervals, 1 / fps, rtol=1e-6, atol=tolerance):
             clock = None
     mv, st = max(1, int(round(moving_every_s * fps))), max(1, int(round(still_every_s * fps)))
 

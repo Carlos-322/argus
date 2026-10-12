@@ -66,6 +66,11 @@ def test_vfr_request_samples_elapsed_time_and_keeps_the_intermediate_scene(tmp_p
             assert "Which instants you get: one every 1.5 s for the whole episode, plus its first and last frame." in request["prompt"]
             assert selected == [0, 45, 89]
             assert request["timesteps"] == [0, 1.5, 2.967]
+            legacy = copy.deepcopy(loaded)
+            legacy['times']['exo'] = np.repeat(np.arange(45) / 30, 2)
+            legacy_plan = me.plan(legacy)
+            assert legacy_plan['ks'] == [0, 45, 89]
+            assert "nearest available source frames" not in me._instants_line(legacy, legacy_plan)
         assert not request["decode_failed"]
     assert requests["vfr"]["sampling"] == requests["cfr"]["sampling"] == "teleop_arms-every-1.5s"
 

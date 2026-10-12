@@ -2283,7 +2283,8 @@ def _instants_line(ep: dict, pl: dict | None = None) -> str:
         times = np.asarray(times)[:pl['n']] if pl else np.asarray(times)
         intervals = np.diff(times)
         tolerance = max(1e-9, float(np.spacing(np.abs(times).max())) * 4) if len(times) else 1e-9
-        if len(intervals) > 1 and not np.allclose(intervals, intervals[0], rtol=1e-6, atol=tolerance):
+        if (len(intervals) > 1 and np.all(intervals > 0)
+                and not np.allclose(intervals, intervals[0], rtol=1e-6, atol=tolerance)):
             extra += (" Cadence targets select the nearest available source frames on this presentation clock. "
                       "Gaps in that clock remain gaps; frames are not invented between recorded instants.")
     # when every camera's file ends before the episode does, the last instant is the last frame they have (frames)
