@@ -14,8 +14,8 @@ text { font-family: 'EB Garamond', Georgia, serif; font-weight: 400; fill:#29282
 .edge { fill:none; stroke:#716d64; stroke-width:1.5; marker-end:url(#arrow); stroke-linejoin:round; }
 .both { marker-start:url(#arrow); }
 .optional { stroke-dasharray:5 5; }
-.flow { fill:none; stroke:#68806d; stroke-width:2; stroke-dasharray:3 26; animation:move 3s linear infinite; }
-@keyframes move { to { stroke-dashoffset:-29; } }
+.flow { fill:none; stroke:#526f8c; stroke-width:3.5; stroke-linecap:round; stroke-linejoin:round; stroke-dasharray:8 18; animation:move 2.6s linear infinite; }
+@keyframes move { to { stroke-dashoffset:-26; } }
 @media (prefers-reduced-motion:reduce) { .flow { display:none; } }
 </style><rect width="1480" height="1204" rx="10" fill="#fff"/>
 
@@ -148,5 +148,10 @@ text { font-family: 'EB Garamond', Georgia, serif; font-weight: 400; fill:#29282
 <text x="1206" y="1137" class="small" data-width="224">Reuse only matching</text>
 <text x="1206" y="1165" class="small" data-width="224">inputs and settings</text>
 <path d="M696 462 H783" class="flow"/>
+<path d="M1064 447 H1084 V348 H1119" class="flow"/>
+<path d="M1140 415 H1102 V634 H1065" class="flow"/>
+<path d="M1064 706 H1139" class="flow"/>
 <path d="M1273 772 V832" class="flow"/>
+<path d="M1106 911 V931 H924 V953" class="flow"/>
+<path d="M1106 931 H1273 V953" class="flow"/>
 </svg>

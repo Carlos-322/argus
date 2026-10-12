@@ -1,26 +1,23 @@
 # Argus
 
-[![Offline checks](https://github.com/Pantheon-Industries-Inc/argus/actions/workflows/ci.yml/badge.svg)](https://github.com/Pantheon-Industries-Inc/argus/actions/workflows/ci.yml)
 [![Python 3.11](https://img.shields.io/badge/python-3.11-455468)](pyproject.toml)
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-455468)](LICENSE)
 
-[Project](https://pantheon.inc/research/argus) | [Example annotations](https://pantheon.inc/data-board) | [Hosted Data Review](https://data.pantheon.inc/review)
-
 ### Update v2: Midcentury on WGO-Bench
 
-[Midcentury AI](https://www.midcentury.xyz/blog/optimizing-argus) reported a state-of-the-art result with its adaptation of Argus: **50.2% semantic F1 on WGO-Bench**, using **Sol 6.1 High** in an internal evaluation of 100 videos. Its Argus baseline uses the same model. Other published systems were not rerun through its evaluator, so the published scores are comparison context and do not isolate harness quality.
+Recently, [Midcentury AI](https://www.midcentury.xyz/blog/optimizing-argus) pushed an adaptation of Argus to SOTA (**50.2% semantic F1**) on WGO-Bench. This uses **Sol 6.1 High**; comparisons with published results from older models do not isolate the harness's contribution.
 
 ### Update v1: Format and sensor support
 
-Main now combines source-aware ingestion, depth and tactile reasoning, and consistent failure/recovery rules across teleoperated robots, handheld grippers and human first-person recordings. Long recordings retain one episode and their original clock through bounded model requests; findings, supporting evidence and qualified source claims carry through to the viewer and JSON exports.
+Argus now supports depth, tactile and other sensor data alongside RGB and robot state, with shared mistake/recovery annotation across teleop, UMI and human ego recordings. Format readers preserve source fields and timestamps; long recordings are annotated in chunks and rejoined into one episode, with findings and evidence available in the viewer and JSON.
 
 ## Overview
 
-Argus turns robot-learning recordings into dense annotations of **actions, task progress, failures, recoveries and recording quality**. We believe the combination of broad format support, behavioral annotation and source-verified multimodal reasoning distinguishes Argus among open-source robotics annotation tools. Provide recordings, their recording setup and a short description: the shared pipeline resolves settings and field meanings, checks the data, and lets the model inspect useful evidence without requiring a new annotation prompt for each dataset.
+Argus annotates **actions, subgoals, outcomes, mistakes and recoveries** from robot-learning data. It combines RGB with state, depth, tactile and other recorded signals, preserving their units, timestamps and source context for model reasoning. We believe this combination of format support and detailed behavioral and sensor annotation distinguishes Argus among open-source robotics annotation tools. Supply your recordings, recording setup and a dataset description; Argus handles ingestion, checks, sampling and evidence inspection through a shared harness.
 
 ![Shared annotation architecture: source-owned episode evidence, shared request policy, conditional request construction, optional evidence selection and source access, final annotation, verified joining and viewer/JSON outputs.](media/architecture.svg)
 
-**Recording setups:** teleoperated arms, handheld grippers using the Universal Manipulation Interface (UMI), and human first-person video. **Formats:** LeRobot v2.0/v2.1/v3.0, MCAP, HDF5, video files and folders, and ZIP/TAR archives, with supported JSON/CSV/Parquet sidecars. Nine public dataset adapters also provide download and sample-selection entrypoints.
+**Data:** teleop, UMI and human ego. **Formats:** LeRobot v2.0/v2.1/v3.0, MCAP, HDF5, video files and folders, and ZIP/TAR archives, with JSON/CSV/Parquet sidecars. Nine public dataset adapters provide download and sample-selection entrypoints.
 
 | Available evidence | How it contributes |
 |---|---|
@@ -58,7 +55,7 @@ uv run python -m review --data path/to/dataset --rig teleop_arms \
 uv run python -m board serve --board data/review/mine --clips data/review/mine/clips
 ```
 
-`--data` accepts a folder, file, archive or HTTP(S) URL. `--rig` identifies the recording setup: `teleop_arms` (robot arms), `handheld_gripper` (UMI) or `ego_head` (human first-person video). Formats and evidence are discovered from the source. Hosted Data Review resolves defaults automatically through the shared policy; its deployed version and upload limits can differ.
+`--data` accepts a folder, file, archive or HTTP(S) URL. `--rig` identifies the recording setup: `teleop_arms` (teleop), `handheld_gripper` (UMI) or `ego_head` (human ego). Argus detects formats and available evidence from the source. [Data Review](https://data.pantheon.inc/review) uses the same default policy; its deployed version and upload limits can differ.
 
 | Default or optional setting | Behavior |
 |---|---|
@@ -79,7 +76,7 @@ The viewer uses the canonical [board/index.html](board/index.html) for live and 
 
 ![Two-camera UMI annotation walkthrough, with action phases, subgoals and goal reasoning over the footage.](media/board_demo.webp)
 
-Animated WebP from the standalone demonstration; the canonical viewer is linked above.
+Animated WebP from the standalone demonstration. [Browse example annotations](https://pantheon.inc/data-board).
 
 <details>
 <summary>Individual stages, dataset adapters and custom boards</summary>
