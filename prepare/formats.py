@@ -2839,7 +2839,8 @@ def write_depth(ep: Path, ctx: dict, depth: dict | None, times: dict | None = No
     ctx["depth"] = {v: {"units": ("metres" if d.get("scale_m") else "relative"), "scale_m": d.get("scale_m"),
                         "kind": d.get("kind", "depth"), "source": d.get("source"),
                         **{k: d[k] for k in ('storage', 'paired_camera', 'source_key', 'source_dtype', 'source_shape',
-                                             'source_units', 'source_descriptor', 'source_row_count', 'encoding_clock', 'calibration_note') if k in d}} for v, d in depth.items()}
+                                             'source_units', 'source_descriptor', 'source_row_count', 'encoding_clock',
+                                             'calibration', 'calibration_note') if k in d}} for v, d in depth.items()}
 
 
 def probe_depth(path: Path) -> dict:
@@ -3168,6 +3169,8 @@ def video_views_episode(ep: Path, files: dict, rig: str, dataset: str, extra: di
                               'what': ' '.join(x for x in ((depth_notes.get(v) or {}).get('what'), d['alignment_note']) if x)}
         entry.update(width=pd_["width"], height=pd_["height"], pix_fmt=pd_["pix_fmt"])
         entry['paired_camera'] = d.get('paired_camera', v if v in files else None)
+        if d.get('calibration'):
+            entry['calibration'] = d['calibration']
         if d.get('source_key'):
             entry['source_key'] = d['source_key']
         if d.get('storage'):
@@ -8874,6 +8877,7 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
     they are assigned as assign_views does (a head camera gets one). A text or annotation channel becomes the task text or the
     uploader's notes. Channels of arm joints become the recorded state on a teleoperated rig (joint_state)."""
     from mcap.reader import make_reader
+    from prepare.mcap_registration import CAMERA_INFO, Registration
     with open(item["file"], "rb") as fh:
         try:
             summ = make_reader(fh, validate_crcs=True).get_summary()
@@ -8935,7 +8939,8 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
     unshown_of = {t: f"unshown{i + 1}.mp4" for i, t in enumerate([x for x in unused if x in cam_topics] + lone)}
     pictured = {t for t in set(vmap.values()) | set(unshown_of) if DEPTH_TOPIC.search(t)}
     depth_rng: dict = {}
-    want = set(vmap.values()) | set(text_topics) | set(depth_of) | set(unshown_of)
+    info_topics = {topic for topic, schema in chan_topics if CAMERA_INFO.search(schema)}
+    want = set(vmap.values()) | set(text_topics) | set(depth_of) | set(unshown_of) | info_topics
     view_of_topic = {t: v for v, t in vmap.items()}
     dwriters: dict[str, DepthWriter] = {}
     writers: dict[str, FrameWriter] = {}
@@ -8944,6 +8949,7 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
     facs, decs, undecodable, t0 = _decoders(), {}, set(), None
     camera_damage: list = []
     capture_ns: dict[str, list[int]] = {}
+    registration, depth_shapes = Registration(), {}
     clock_kinds, clock_errors = {}, []
     ep.mkdir(parents=True, exist_ok=True)
     with open(item["file"], "rb") as fh:
@@ -8953,6 +8959,21 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
                 if ch.topic in texts and len(texts[ch.topic]) > TEXT_MSGS_MAX and not _is_step(ch.topic):
                     n_text[ch.topic] += 1
                     continue
+                if ch.topic in info_topics:
+                    # Optional calibration must never truncate otherwise decodable image streams.
+                    try:
+                        if ch.id not in decs:
+                            decs[ch.id] = _decoder_for(ch.message_encoding, schema, facs)
+                        if decs[ch.id] is None:
+                            raise ValueError('CameraInfo encoding could not be decoded')
+                        info = decs[ch.id](msg.data)
+                        capture, _ = mcap_capture_stamp(info)
+                        stamp = capture if capture is not None else int(msg.log_time)
+                        registration.observe(ch.topic, info, stamp, camera_info=True)
+                        capture_ns.setdefault(ch.topic, []).append(stamp)
+                    except Exception:
+                        registration.invalid_info(ch.topic)
+                    continue
                 if ch.id not in decs:
                     decs[ch.id] = _decoder_for(ch.message_encoding, schema, facs)
                 if decs[ch.id] is None:
@@ -8961,6 +8982,8 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
                 dec = decs[ch.id](msg.data)
                 capture_stamp, stamp_error = mcap_capture_stamp(dec)
                 stamp = capture_stamp if capture_stamp is not None else int(msg.log_time)
+                if ch.topic in view_of_topic or ch.topic in depth_of:
+                    registration.observe(ch.topic, dec, stamp)
                 if ch.topic in view_of_topic or ch.topic in unshown_of or ch.topic in depth_of:
                     clock_kinds.setdefault(ch.topic, set()).add("capture" if capture_stamp is not None else "arrival")
                     if stamp_error:
@@ -8972,7 +8995,13 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
                         dw = dwriters.get(ch.topic)
                         if dw is None:
                             dw = dwriters[ch.topic] = DepthWriter(ep / f"depth_{depth_of[ch.topic]}.mkv")
+                        sizes = depth_shapes.setdefault(ch.topic, set())
+                        if len(sizes) < 2:
+                            sizes.add((got[0].shape[1], got[0].shape[0]))
+                        before = len(dw.pts)
                         dw.add((stamp - t0) / 1e9, got[0], got[1])
+                        if len(dw.pts) > before:
+                            capture_ns.setdefault(ch.topic, []).append(stamp)
                     if ch.topic not in unshown_of and ch.topic not in view_of_topic:
                         continue
                 if ch.topic in view_of_topic or ch.topic in unshown_of:
@@ -8993,7 +9022,7 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
                         w.add_image((stamp - t0) / 1e9, raw_image(dec))
                     else:
                         w.add((stamp - t0) / 1e9, bytes(_field(dec, "data", binary=True)))
-                    if len(w.pts) > before:
+                    if len(w.pts) > before and ch.topic not in depth_of:
                         capture_ns.setdefault(ch.topic, []).append(stamp)
                 else:
                     d = _field(dec, "data")
@@ -9022,8 +9051,32 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
         unused.append(f"{t} (no readable frames)")
         del vmap[v]
     files = {v: (t, ep / f"{v}.mp4") for v, t in vmap.items()}
+    shapes = {topic: next(iter(writer.source_sizes)) if len(writer.source_sizes) == 1 else None
+              for topic, writer in writers.items()}
+    shapes.update({topic: next(iter(sizes)) if len(sizes) == 1 else None for topic, sizes in depth_shapes.items()})
+    resolved = [(view, descriptor, *registration.resolve(descriptor['source'], vmap, shapes, capture_ns))
+                for view, descriptor in depth.items()]
+    associated = {}
+    # Proven associations own their camera slots before unproved topic-family placements.
+    for view, descriptor, paired, proof in sorted(resolved, key=lambda row: (row[2] is None,
+                                                                           row[1]['source'].endswith('/compressed'))):
+        topic = descriptor['source']
+        if paired is not None:
+            view = available_depth_view(paired, associated)
+            unused = [name for name in unused if name != f'{topic} (depth with no camera of its own)']
+        elif not registration.has_geometry(topic):
+            # Old topic-family associations remain camera families, not pixel registration proof.
+            paired = view if view in files else None
+        view = available_depth_view(view, associated)
+        descriptor.update(paired_camera=paired, calibration={'pixel_registration': proof})
+        associated[view] = descriptor
+    depth = associated
     extra = {"task_label": [item["name"]], "source": {"format": "mcap (cameras and text channels)", "file": item["name"],
                                                       "unused_cameras": unused}}
+    for topic in sorted(registration.unreadable):
+        add_issue(extra, 'camera_calibration_unreadable',
+                  'Recorded CameraInfo could not be decoded; image frames were retained and its pixel registration '
+                  'is unverified.', camera=topic)
     if rig == "handheld_gripper":
         extra["source"]["camera_selection"] = camera_role_proof or {
             "limitation": "No recorded actor map establishes camera sides; selected slots are presentation roles."}
@@ -9048,7 +9101,10 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
         w = writers.get(t)
         if counts.get(t) and w is not None:
             fps_u = measured_fps(np.asarray(w.pts, dtype=np.float64) / TIME_BASE_DEN)
-            why = ("depth with no colour camera of its own, drawn as a picture of near and far" if t in pictured else
+            registered = next((d for d in depth.values() if d['source'] == t and
+                               d['calibration']['pixel_registration']['status'] == 'matching_recorded_geometry'), None)
+            why = ("registered depth, also drawn as a picture of near and far" if registered else
+                   "depth with no colour camera of its own, drawn as a picture of near and far" if t in pictured else
                    unshown_why(t, rig, list(vmap.values())))
             entry = unshown_entry(t, ep / name, why, n_frames=counts[t], start_s=w.pts[0] / TIME_BASE_DEN,
                                   fps=fps_u)
@@ -9311,6 +9367,7 @@ class FrameWriter:
         self.held = []                    # encoded packets waiting for the next frame's time (_mux)
         self.blank, self.bad, self.waiting = blank, [], []    # waiting: blank frames before the first decoded one
         self.fine_clock = fine_clock
+        self.source_sizes = set()
 
     def _at(self, t_s: float) -> int:
         p = int(round(t_s * TIME_BASE_DEN))
@@ -9376,6 +9433,8 @@ class FrameWriter:
     def _encode(self, p: int, im) -> None:
         """One picture (None: a black frame) encoded at time p, the encoder opened at the first picture's size."""
         import av
+        if im is not None and len(self.source_sizes) < 2:
+            self.source_sizes.add(im.size)
         from PIL import Image
         if self.enc is None:
             self.dst = av.open(str(self.out), "w", options={"movie_timescale": str(TIME_BASE_DEN)}

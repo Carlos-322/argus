@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from prepare import formats as f
 from test_formats import _issues, _jpeg, _lerobot, _png
@@ -476,7 +477,8 @@ def _json_mcap(path: Path, chans: dict, n: int = 30, t0: float = 1_790_000_000.0
                 ids[t] = w.register_channel(topic=t, message_encoding="json", schema_id=sid)
         for s, t, m in msgs:
             ns = int((t0 + s) * 1e9)
-            w.add_message(ids[t], log_time=ns, publish_time=ns, data=json.dumps(m).encode())
+            w.add_message(ids[t], log_time=ns, publish_time=ns,
+                          data=m if isinstance(m, bytes) else json.dumps(m).encode())
         w.finish()
 
 
@@ -587,6 +589,123 @@ def test_depth_that_misses_only_an_edge_within_the_slack_reads_no_issue(tmp_path
 
 
 # ---------------------------------------------------------------- MCAP depth topics
+
+@pytest.mark.parametrize('variant', [
+    'registered', 'one_rgb', 'no_distortion', 'distortion', 'projection', 'rectification', 'crop', 'binning',
+    'missing_calibration', 'changing_calibration', 'different_frame', 'different_clock',
+    'malformed_camera_info', 'processed_candidate', 'nonidentity_mapping', 'bad_distortion_count',
+])
+def test_mcap_registration_uses_recorded_geometry_and_capture_clock(tmp_path, variant):
+    """One recorded camera has raw/compressed aliases, infrared and a separate depth frame."""
+    from label import depth as dp, episode as me, evidence_access as ea
+    root = tmp_path / 'upload'
+    root.mkdir()
+    def header(row, frame='color_optical', offset=0):
+        return {'frame_id': frame, 'stamp': {'sec': 1_790_000_000 + offset,
+                                            'nanosec': int(row * 1e9 / 30)}}
+    def info(row, frame='color_optical', color=False):
+        value = {'header': header(row, frame), 'width': 64, 'height': 48,
+                 'distortion_model': 'plumb_bob', 'd': [0., 0., 0., 0., 0.],
+                 'k': [52., 0., 32., 0., 52., 24., 0., 0., 1.],
+                 'r': [1., 0., 0., 0., 1., 0., 0., 0., 1.],
+                 'p': [52., 0., 32., 0., 0., 52., 24., 0., 0., 0., 1., 0.],
+                 'binning_x': 0, 'binning_y': 0,
+                 'roi': {'x_offset': 0, 'y_offset': 0, 'height': 0, 'width': 0, 'do_rectify': False}}
+        if frame == 'depth_optical':
+            value['k'][0] = value['p'][0] = 40.
+        if variant == 'no_distortion':
+            value['distortion_model'], value['d'] = 'none', []
+        if variant == 'nonidentity_mapping':
+            value['d'][0] = .1
+        if variant == 'bad_distortion_count':
+            value['d'] = [0.]
+        if color:
+            if variant == 'distortion': value['d'][0] = .1
+            if variant == 'projection': value['p'][3] = .1
+            if variant == 'rectification': value['r'] = [0., -1., 0., 1., 0., 0., 0., 0., 1.]
+            if variant == 'crop': value['roi']['x_offset'] = 1
+            if variant == 'binning': value['binning_x'] = 2
+            if variant == 'missing_calibration': value.pop('d')
+        if variant == 'changing_calibration' and row >= 15:
+            value['k'][0] += 1
+        return value
+    def color(row):
+        value = {**_jpg_msg(row), 'header': header(row)}
+        if variant == 'different_clock':
+            value['header']['stamp']['nanosec'] += 1_000_000
+        return value
+    def infrared(row):
+        value = color(row)
+        value['header']['frame_id'] = 'infra_optical'
+        return value
+    def raw_color(row):
+        value = color(row)
+        value.pop('format')
+        value.update(width=64, height=48, step=192, encoding='rgb8', is_bigendian=0,
+                     data=base64.b64encode(np.full((48, 64, 3), 8 * row % 256, np.uint8).tobytes()).decode())
+        return value
+    def aligned(row):
+        return {**_depth_msg(row), 'header': header(row, 'depth_optical' if variant == 'different_frame'
+                                                   else 'color_optical')}
+    aligned_topic = '/sensor/z_aligned_depth/image_raw' if variant == 'one_rgb' else '/sensor/aligned_depth/image_raw'
+    channels = {
+        '/sensor/color/image_raw': ('sensor_msgs/msg/Image', raw_color),
+        '/sensor/color/image_raw/compressed': ('sensor_msgs/msg/CompressedImage', color),
+        '/sensor/infra/image': ('sensor_msgs/msg/CompressedImage', infrared),
+        aligned_topic: ('sensor_msgs/msg/Image', aligned),
+        '/sensor/depth/image_raw': ('sensor_msgs/msg/Image',
+                                  lambda row: {**_depth_msg(row), 'header': header(row, 'depth_optical')}),
+        '/sensor/color/camera_info': ('sensor_msgs/msg/CameraInfo', lambda row:
+                                     b'{' if variant == 'malformed_camera_info' and row == 15
+                                     else info(row, color=True)),
+        aligned_topic.rsplit('/', 1)[0] + '/camera_info': ('sensor_msgs/msg/CameraInfo', info),
+        '/sensor/depth/camera_info': ('sensor_msgs/msg/CameraInfo', lambda row: info(row, 'depth_optical')),
+    }
+    if variant == 'processed_candidate':
+        channels['/sensor/color/image_rect'] = ('sensor_msgs/msg/CompressedImage', color)
+    if variant == 'one_rgb':
+        channels.pop('/sensor/color/image_raw/compressed')
+        channels.pop('/sensor/infra/image')
+    _json_mcap(root / 'capture.mcap', channels)
+    report = f.convert(root, 'handheld_gripper', tmp_path / 'episodes', 'recorded geometry', 900)
+    assert not report['failed']
+    ep = me.load(tmp_path / 'episodes' / report['episodes'][0]['episode_id'])
+    assert all(source['n_frames'] == 30 for source in ep['sources'].values())
+    all_depth = {**ep['depth'], **ep['additional_depth']}
+    by_source = {entry['source']: (view, entry) for view, entry in all_depth.items()}
+    assert len(all_depth) == 2
+    view, entry = by_source[aligned_topic]
+    raw_view = next(v for v, camera in ep['context']['cameras'].items()
+                    if camera['key'] == '/sensor/color/image_raw')
+    if variant in ('registered', 'one_rgb', 'no_distortion'):
+        assert entry['paired_camera'] == raw_view
+        proof = entry['calibration']['pixel_registration']
+        assert proof['rgb_topics'] == (['/sensor/color/image_raw'] if variant == 'one_rgb' else
+                                      ['/sensor/color/image_raw', '/sensor/color/image_raw/compressed'])
+        assert proof['frame_id'] == 'color_optical' and proof['matched_capture_count'] == 30
+        assert proof['camera_info']['roi']['do_rectify'] is False
+        assert ep['context']['depth'][view]['calibration'] == entry['calibration']
+        access = ea.Access(ep)
+        field = next(field for field in access.inventory()
+                     if field['kind'] == 'depth' and field['descriptor']['source'] == entry['source'])
+        assert field['descriptor']['calibration'] == entry['calibration']
+    else:
+        assert entry['paired_camera'] is None
+        assert entry['calibration']['pixel_registration']['status'] == 'unverified'
+        if variant == 'malformed_camera_info':
+            assert _issues(ep['context'], 'camera_calibration_unreadable')
+    native_view, native = by_source['/sensor/depth/image_raw']
+    assert native['paired_camera'] is None
+    assert all_depth[view]['scale_m'] == native['scale_m'] == .001
+    for source_view in (view, native_view):
+        pixels = dp.at_anchor(ep, all_depth, source_view, [0, 29])
+        assert int(pixels[0][0, 0]) == 900 and int(pixels[29][0, 0]) == 1190
+    # Source headers, clocks and calibration remain independently inspectable.
+    retained = ep['context']['mcap_field_inventory']
+    assert any(ch['topic'] == '/sensor/color/camera_info' for ch in retained)
+    camera_info = next(ch for ch in retained if ch['topic'] == '/sensor/color/camera_info')
+    assert any(field['field'] == 'header.frame_id' for field in camera_info['exact_numeric_fields'])
+
 
 def test_an_mcap_whose_only_camera_is_depth_is_labelled_from_its_depth_picture(tmp_path):
     root = tmp_path / "m"
