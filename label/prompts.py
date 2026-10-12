@@ -570,25 +570,30 @@ _MAP = {
 
 _MISTAKES = {
     "teleop_arms": (
-        "performance are operator mistakes, and they go in operator_mistakes: failed or repeated grasps, drops,\n"
-        "  knock-overs, collisions, fumbling, detours that serve the task in no way, long hesitations mid-task, the\n"
-        "  goal reached and then undone by the demonstration itself (a scene reset after the task is a data issue,\n"
-        "  above), the task given up while the recording continues."),
+        "performance are operator mistakes, and they go in operator_mistakes under the shared contribution\n"
+        "  rule's evidence of failure or wasted motion: failed grasps, repeated failed attempts at the same evident\n"
+        "  aim, unintended drops, knock-overs or collisions, fumbling, detours or hesitation demonstrably serving\n"
+        "  no aim, unintended loss of an achieved goal within the current activity, or an evident task given up\n"
+        "  while the recording continues. Intentional later reset is not itself a mistake (a scene reset after\n"
+        "  the task is a data issue, above)."),
     "handheld_gripper": (
-        "performance are operator mistakes, and they go in operator_mistakes: missed or slipped grasps, drops,\n"
-        "  knock-overs, fumbling, detours that serve the task in no way, long hesitations mid-task, the goal\n"
-        "  reached and then undone by the demonstration itself (a scene reset after the task is a data issue,\n"
-        "  above), the task given up while the recording continues. A person with handheld grippers often waves\n"
+        "performance are operator mistakes, and they go in operator_mistakes under the shared contribution\n"
+        "  rule's evidence of failure or wasted motion: missed or slipped grasps, repeated failed attempts at the\n"
+        "  same evident aim, unintended drops, knock-overs or collisions, fumbling, detours or hesitation\n"
+        "  demonstrably serving no aim, unintended loss of an achieved goal within the current activity, or an\n"
+        "  evident task given up while the recording continues. Intentional later reset is not itself a mistake\n"
+        "  (a scene reset after the task is a data issue, above). A person with handheld grippers often waves\n"
         "  a gripper at the start so its tracking can initialise, tests the jaws, shifts their grip on a\n"
         "  handle, sets one gripper down while working with the other, and lowers the grippers or points them\n"
-        "  away at the end; these are how the rig is used, not mistakes, and a static view from a gripper that\n"
-        "  has been set down is not a frozen camera."),
+        "  away at the end; these uses alone are not mistakes, and observed failures or wasted motion still\n"
+        "  follow the shared rule. A static view from a gripper that has been set down is not a frozen camera."),
     "ego_head": (
         "work are operator mistakes, and they go in operator_mistakes. Moving a part from one hand to the other,\n"
         "  re-gripping, putting a tool down and picking it up again, and taking something apart so it can be worked\n"
-        "  on are how people work, not mistakes, and switching to another job when the work calls for it is not\n"
-        "  giving up."),
+        "  on are normal uses. These uses alone are not mistakes; observed failures or wasted motion still follow\n"
+        "  the shared rule. Switching to another job when the work calls for it is not giving up."),
 }
+
 
 _SLACK_EGO = """- OPERATOR MISTAKES ARE THE FAILURES AND WASTEFUL STRETCHES, GROUPED AND GRADED. Every failure and every
   wasteful stretch in the timeline belongs to exactly one operator mistake, recovered or not, and every
@@ -596,7 +601,8 @@ _SLACK_EGO = """- OPERATOR MISTAKES ARE THE FAILURES AND WASTEFUL STRETCHES, GRO
   between them, a drop and fetching the object back, or one stretch of motion that serves no aim. t_s and
   end_s span the whole incident. deliberate says whether the incident looks staged; it never removes an
   incident or lowers its severity. Setup or settling in the first and last few seconds, brief pauses to look
-  with nothing in hand, and idle stretches are not mistakes."""
+  with nothing in hand, and idle stretches alone are not mistakes; observed failures or demonstrably wasted
+  motion within them still follow the shared contribution rule."""
 
 
 # The shared contract in the head camera's words: a video and its annotation, where the robot rigs have cameras,
@@ -671,7 +677,8 @@ _DATA_CONTRACT_BASE = """- WHY YOU ARE LABELLING THIS. These labels decide what 
   between them, a drop and fetching the object back, or one stretch of motion that serves no aim. t_s and
   end_s span the whole incident. deliberate says whether the incident looks staged; it never removes an
   incident or lowers its severity. Setup or settling in the first and last few seconds, brief pauses to look
-  with nothing in hand, and idle stretches are not mistakes.
+  with nothing in hand, and idle stretches alone are not mistakes; observed failures or demonstrably wasted
+  motion within them still follow the shared contribution rule.
 - SEVERITY IS TRAINING IMPACT, not how visible or dramatic something looks, in both lists. It comes from
   two things together: how much of the episode the problem touches, and how directly it corrupts what a
   model takes from the episode (what the cameras show, what the recorded motion says, what the instruction

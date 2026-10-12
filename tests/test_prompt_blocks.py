@@ -204,6 +204,8 @@ def test_one_contribution_policy_reaches_runtime_requests(rig, evidence, given, 
         assert "operator could have left the step out" not in fixed
         assert "step's result does not last or is never used" not in fixed
         assert "a step whose result lasts and is\n  used is advancing" not in fixed
+        assert "failed or repeated grasps" not in fixed
+        assert "goal reached and then undone by the demonstration itself" not in fixed.replace("\n  ", " ")
         shared = prompts.contribution_rules(rig)
         assert fixed.count(shared) == 1
         assert shared not in episode
