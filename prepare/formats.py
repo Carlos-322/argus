@@ -1739,10 +1739,10 @@ STATE_NOT_POSITION_WORDS = {"vel", "velocity", "velocities", "speed", "effort", 
                             "current", "currents", "force", "forces", "acc", "accel", "acceleration"}
 STATE_FRAME_WORDS = {"cartesian", "eef", "ee", "tcp", "pose", "effector", "flange", "tool", "rot", "rotation",
                      "orientation"}
-STATE_PART_POSE_NOTE = ("Labelled from the video: the recorded state's value names give a position for some values "
+STATE_PART_POSE_NOTE = ("Kinematic checks unavailable: the recorded state's value names give a position for some values "
                         "({}) but not a pose our checks read, and our checks read six joints and a gripper per arm or "
                         "a 6D pose and an opening per gripper.")
-STATE_UNAXED_NOTE = ("Labelled from the video: the recorded state's value names give a position or a pose without the "
+STATE_UNAXED_NOTE = ("Kinematic checks unavailable: the recorded state's value names give a position or a pose without the "
                      "axes our checks read ({}), not six joints and a gripper per arm.")
 
 
@@ -1788,18 +1788,18 @@ def state_layout(dims: int, rig: str, names: list[str] | None = None, *, value_r
         return "none", None
     per = "arm (six joints and a gripper)." if rig == "teleop_arms" else "gripper (a 6D pose and an opening)."
     if dims not in (7, 14):
-        return "none", (f"Labelled from the video: the recorded state has {dims} values per frame, and our checks "
+        return "none", (f"Kinematic checks unavailable: the recorded state has {dims} values per frame, and our checks "
                         "expect 7 per " + per)
-    unknown = ("Labelled from the video: the recorded values do not establish six named joints and a gripper "
+    unknown = ("Kinematic checks unavailable: the recorded values do not establish six named joints and a gripper "
                "or ordered x y z roll pitch yaw and an opening. Original values remain signals.")
     if not names or len(names) != dims:
         return "none", unknown
     names = [str(x) for x in names]
     if any(re.search(r"[\u3400-\u9fff]", name) for name in names):
-        return "none", ("Labelled from the video because the recorded Chinese value names are outside the joint "
+        return "none", ("Kinematic checks unavailable because the recorded Chinese value names are outside the joint "
                         "and Cartesian vocabulary our checks read. Original names and values remain signals.")
     if all(re.fullmatch(r"position[_./-]\d+", name, re.I) for name in names):
-        return "none", ("Labelled from the video because indexed position names declare neither joint meanings nor "
+        return "none", ("Kinematic checks unavailable because indexed position names declare neither joint meanings nor "
                         "Cartesian axes. Every original value is retained as a signal.")
     words = {x: state_words(x) for x in names}
     # a name with no words ("" or "_") has no last word, so it says neither an axis, a joint nor a gripper
@@ -1812,16 +1812,16 @@ def state_layout(dims: int, rig: str, names: list[str] | None = None, *, value_r
     joints = {name for name, role in zip(names, roles) if role == "joint"}
     grip = lambda name: bool(STATE_GRIPPER_NAME.search(name)) or name in grippers
     if any(last[x] in STATE_POSITION_AXES and (x in joints or "base" in words[x]) for x in names):
-        return "none", ("Labelled from the video because recorded joint positions or base axes do not establish "
+        return "none", ("Kinematic checks unavailable because recorded joint positions or base axes do not establish "
                         "an end effector Cartesian pose. Original names and values remain signals.")
     if any(STATE_QUAT_NAME.search(x) for x in names):
-        return "none", ("Labelled from the video: the recorded state's value names give a quaternion, and our checks "
+        return "none", ("Kinematic checks unavailable: the recorded state's value names give a quaternion, and our checks "
                         "read a position, a roll, pitch and yaw and an opening per gripper.")
     # a word for a present position (current_pos) is not a current
     other = next((x for x in names if set(words[x]) & STATE_NOT_POSITION_WORDS
                   and not set(words[x]) & STATE_POSITION_WORDS), None)
     if other:
-        return "none", (f"Labelled from the video: the recorded state's value names ({other}) give a velocity, an "
+        return "none", (f"Kinematic checks unavailable: the recorded state's value names ({other}) give a velocity, an "
                         "effort or another quantity that is not a position, and our checks read the positions of each "
                         + per)
     # Numbered pose fields do not establish the Cartesian axes on any rig.
@@ -1846,12 +1846,12 @@ def state_layout(dims: int, rig: str, names: list[str] | None = None, *, value_r
             return "none", STATE_PART_POSE_NOTE.format(placed)
         return "none", unknown
     if any(grip(x) for x in names):
-        return "none", ("Labelled from the video: the recorded state's value names put a gripper elsewhere than "
+        return "none", ("Kinematic checks unavailable: the recorded state's value names put a gripper elsewhere than "
                         "seventh in each group of seven, and our checks read six values and then the gripper.")
     if unaxed:
         return "none", STATE_UNAXED_NOTE.format(framed)
     if all(STATE_JOINT_NAME.search(x) for x in names):
-        return "none", (f"Labelled from the video: the recorded state's value names give {dims} joints and no gripper, "
+        return "none", (f"Kinematic checks unavailable: the recorded state's value names give {dims} joints and no gripper, "
                         "and our checks read six joints and a gripper per arm.")
     placed = next((x for g in groups for x in g[:6] if last[x] in STATE_POSITION_AXES), None)
     if placed:
@@ -1897,7 +1897,7 @@ def physical_state_layout(dims: int, rig: str, names=None, *, metadata=None, val
     units = state_units(metadata or {}, names, dims)
     expected = ["rad"] * 6 if kind == "joints" else ["m"] * 3 + ["rad"] * 3
     if any(units[offset + i] != unit for offset in range(0, dims, 7) for i, unit in enumerate(expected)):
-        return "none", ("Labelled from the video: physical state units are undeclared, conflicting, or outside "
+        return "none", ("Kinematic checks unavailable: physical state units are undeclared, conflicting, or outside "
                         "the supported metre and radian contract. Original readings remain signals without rescaling.")
     return kind, None
 

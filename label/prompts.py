@@ -419,11 +419,15 @@ Rules:
 - each task's outcome is judged on BALANCE OF EVIDENCE, the way a fair human reviewer
   would, per task independently: success = that mini-task's end-state is clearly
   reached; partial = a real observable part of it is left undone; failure = it is
-  demonstrably not accomplished (dropped, abandoned, undone). A missing confirming
+  demonstrably not accomplished (dropped, abandoned, undone); unclear = the available footage does not
+  establish the activity's core outcome. A missing confirming
   view of an incidental detail is NOT failure. An abandoned attempt the operator gives
   up on is a failure (or partial) for that task, and does not taint the others. An activity already
   under way at the first frame, or still under way at the last, is judged only on what the clip shows:
-  when the clip ends before it could finish, say in its note that the clip cuts it; that is not a failure.
+  when the clip ends before its outcome can be established, use unclear and explain the boundary in its note.
+  An unseen continuation or an unresolved core result is not evidence of partial completion or failure.
+  Preserve any observed failed attempts within that activity as failures; uncertainty about its eventual
+  outcome does not erase a demonstrated fumble, missed attempt or unintended result.
 - each task's completed_at_s (its goal frame) is the FIRST frame that task's
   success_predicate is satisfied AND stays satisfied for the rest of that task's span:
   the last action that puts THAT task's objects into their final state (the release,
