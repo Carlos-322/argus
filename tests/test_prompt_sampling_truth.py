@@ -16,6 +16,60 @@ def episode(n=600, profile="teleop_arms"):
             "state": np.zeros((n, 0)), "sources": {"exo": {"n_frames": n}}, "kmap": {}}
 
 
+def test_vfr_request_samples_elapsed_time_and_keeps_the_intermediate_scene(tmp_path):
+    """A row stride skipped a five-second scene after the source slowed from 30 to 3 FPS."""
+    from fractions import Fraction
+    import av
+    import json
+    from prepare import formats
+
+    clocks = {"vfr": np.r_[np.arange(60) / 30, 2 + np.arange(30) / 3],
+              "cfr": np.arange(90) / 30}
+    requests = {}
+    for name, times in clocks.items():
+        video = tmp_path / f"{name}.mp4"
+        with av.open(str(video), "w") as container:
+            stream = container.add_stream("mpeg4", rate=30)
+            stream.width, stream.height, stream.pix_fmt = 48, 32, "yuv420p"
+            for row, time in enumerate(times):
+                shade = 100 if row < 60 else 230 if row < 75 else 160
+                frame = av.VideoFrame.from_ndarray(np.full((32, 48, 3), shade, np.uint8), format="rgb24")
+                frame.pts, frame.time_base = round(time * 30), Fraction(1, 30)
+                for packet in stream.encode(frame):
+                    container.mux(packet)
+            for packet in stream.encode():
+                container.mux(packet)
+        directory = tmp_path / name
+        formats.video_views_episode(directory, {"exo": ("scene", video)}, "teleop_arms", "fixture", {})
+        loaded = me.load(directory)
+        request = me.build_request(directory)
+        selected = request["plan"]["ks"]
+        assert json.loads(json.dumps(selected)) == selected
+        images = me._decode_view(loaded, "exo", selected)
+        requests[name] = request
+        if name == "vfr":
+            assert "nearest available source frames" in request["prompt"]
+            assert "Gaps in that clock remain gaps" in request["prompt"]
+            assert selected == [0, 45, 63, 67, 72, 76, 81, 85, 89]
+            np.testing.assert_allclose(request["timesteps"],
+                                       [0, 1.5, 3, 4.333, 6, 7.333, 9, 10.333, 11.667], atol=.001)
+            np.testing.assert_allclose([np.asarray(images[row]).mean() for row in selected],
+                                       [100, 100, 230, 230, 230, 160, 160, 160, 160], atol=5)
+            # Offsetting the clock cannot change cadence or its explicit still/resume boundaries.
+            assert ms.sample_frames(90, [(62, 74)], fps=30, moving_every_s=1.5,
+                                    still_every_s=1.5, times_s=times + 500) == [0, 45, 62, 66, 71, 75, 79, 84, 88, 89]
+            # A long gap has no frames to invent; duration does not allocate cadence-sized arrays.
+            assert ms.sample_frames(4, [], moving_every_s=1.5, still_every_s=1.5,
+                                    times_s=np.array([500., 501.5, 1e12, 1e12 + 1.5])) == [0, 1, 2, 3]
+        else:
+            assert "nearest available source frames" not in request["prompt"]
+            assert "Which instants you get: one every 1.5 s for the whole episode, plus its first and last frame." in request["prompt"]
+            assert selected == [0, 45, 89]
+            assert request["timesteps"] == [0, 1.5, 2.967]
+        assert not request["decode_failed"]
+    assert requests["vfr"]["sampling"] == requests["cfr"]["sampling"] == "teleop_arms-every-1.5s"
+
+
 @pytest.mark.parametrize("signal_only", [False, True])
 def test_stop_and_restart_instants_are_named_without_changing_selection(signal_only):
     ep = episode()
