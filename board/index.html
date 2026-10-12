@@ -2475,7 +2475,8 @@ async function exportBlob(files) {
       const k = next++;
       const r = await fetch(episodeUrl(files[k]));
       if (!r.ok) throw new Error('export failed: ' + files[k] + ' ' + r.status);
-      lines[k] = JSON.stringify(await r.json());
+      // Static episodes are serialized on one line; preserve their exact numeric tokens.
+      lines[k] = (await r.text()).trim();
     }
   };
   await Promise.all(Array.from({length: Math.min(12, files.length)}, worker));

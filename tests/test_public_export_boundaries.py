@@ -1,6 +1,9 @@
 """Exercise real public serializers using synthetic private access descriptors."""
 import io
 import json
+import shutil
+import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -53,6 +56,52 @@ def public_sources(tmp_path, monkeypatch):
              'sensor_evidence': {'sensors': [descriptor]},
              '_withheld_checks': {'sensor_check': {'reason': 'unavailable', 'result': {'error': 'unavailable',
                                                                                       'source_path': PRIVATE_PATH}}}}
+    owners = [PRIVATE_PATH + '/owner_a/meta/info.json', PRIVATE_PATH + '/owner_b/meta/info.json']
+    pointer = lambda owner: '/' + owner.replace('~', '~0').replace('/', '~1') + '/fields/~1native~1channel'
+    field = {'id': 'metadata:owned', 'kind': 'metadata', 'name': 'recorded_metadata',
+             'descriptor': {'children': [owners[1]]}}
+    whole = {'id': 'inspection:whole', 'mode': 'metadata', 'descriptor': field, 'pointer': '',
+             'value': {owner: {'fields': {'/native/channel': 2**60 + 1, 'path': '/native/member'}}
+                       for owner in owners},
+             'exact_metadata_values': [{'pointer': pointer(owner), 'decimal': str(2**60 + 1)} for owner in owners]}
+    selected = {'id': 'inspection:selected', 'mode': 'metadata', 'descriptor': field,
+                'pointer': pointer(owners[1]), 'value': 2**60 + 1,
+                'exact_metadata_values': [{'pointer': '', 'decimal': str(2**60 + 1)}]}
+    orphan = {'id': 'inspection:orphan', 'mode': 'metadata',
+              'descriptor': {**field, 'id': 'metadata:orphan'},
+              'pointer': pointer(PRIVATE_PATH + '/unknown/meta/info.json').rsplit('/', 1)[0],
+              'value': {'/native/channel': 7, 'path': '/native/member',
+                        'recorded_metadata': {'/native/channel': 2**60 + 1}},
+              'exact_metadata_values': [{'pointer': '/recorded_metadata/~1native~1channel',
+                                         'decimal': str(2**60 + 1)}]}
+    native = {'id': 'inspection:native', 'mode': 'metadata',
+              'descriptor': {'kind': 'metadata', 'name': 'custom_metadata'},
+              'pointer': '/~1native~1channel', 'value': {'/native/channel': '/native/member'}}
+    label['evidence_inspection'].update(
+        source_current=True, source_proof=[{'name': 'prepared:context.json', 'sha256': 'a' * 64}],
+        inspections=[whole, selected, orphan, native],
+        untimed_findings=[{'evidence': [{'evidence_id': selected['id'], 'pointer': selected['pointer']},
+                                      {'evidence_id': orphan['id'], 'pointer': orphan['pointer']}]}])
+    notes = {**whole, 'id': 'inspection:notes',
+             'descriptor': {**field, 'id': 'metadata:notes', 'name': 'uploader_notes',
+                            'descriptor': {'children': ['recorded episode metadata']}},
+             'value': {'recorded episode metadata': whole['value']},
+             'exact_metadata_values': [{'pointer': '/recorded episode metadata' + pointer(owner),
+                                        'decimal': str(2**60 + 1)} for owner in owners]}
+    selected_notes = {**selected, 'id': 'inspection:selected_notes', 'descriptor': notes['descriptor'],
+                      'pointer': '/recorded episode metadata', 'value': whole['value'],
+                      'exact_metadata_values': whole['exact_metadata_values']}
+    label['evidence_inspection']['inspections'].extend([notes, selected_notes])
+    label['evidence_inspection']['parts'][0]['record'] = {
+        **label['evidence_inspection']['parts'][0]['record'], 'inspections': [
+        {'id': 'inspection:bounded', 'mode': 'metadata',
+         'descriptor': {**field, 'descriptor': {'preview': json.dumps(field['descriptor'])[:180],
+                                               'truncated': True, 'characters': 2000}}, 'pointer': '',
+         'value': {'preview': json.dumps(whole['value'])[:180], 'truncated': True, 'characters': 20000}},
+        notes,
+        {'id': 'inspection:serialized', 'mode': 'metadata', 'pointer': '',
+         'descriptor': {'kind': 'metadata', 'name': 'uploader_annotation'},
+         'value': json.dumps(notes['value'], ensure_ascii=False)}]}
     (paths['qa'] / 'ep.json').write_text(json.dumps(label))
     for kind in ('sensors', 'hands', 'keypoints'):
         (paths[kind] / 'ep.json').write_text(json.dumps({'series': [], **descriptor}))
@@ -130,4 +179,114 @@ def test_static_json_boundaries(public_sources, tmp_path, monkeypatch):
             assert str(tmp_path) not in text
     assert CITATION in exported['synthetic/data/ep/ep.json']
     assert 'public label' in exported['synthetic/data/ep/ep.json']
+    live = Request('/api/episode?file=ep.json&download=1')
+    live.do_GET()
+    for document in (json.loads(live.wfile.getvalue()), json.loads(exported['synthetic/data/ep/ep.json'])):
+        evidence = document['evidence_inspection']
+        whole, selected, orphan, native, notes, selected_notes = evidence['inspections']
+        assert [r['id'] for r in evidence['inspections']] == [
+            'inspection:whole', 'inspection:selected', 'inspection:orphan', 'inspection:native',
+            'inspection:notes', 'inspection:selected_notes']
+        assert evidence['source_current'] and evidence['source_proof'][0]['sha256'] == 'a' * 64
+        owners = list(whole['value'])
+        assert len(set(owners)) == 2 and all(owner.startswith('info.json') for owner in owners)
+        assert whole['descriptor']['descriptor']['children'] == [owners[1]]
+        assert selected['pointer'] == '/' + owners[1] + '/fields/~1native~1channel'
+        assert selected['value'] == whole['value'][owners[1]]['fields']['/native/channel'] == 2**60 + 1
+        assert whole['value'][owners[0]]['fields']['path'] == '/native/member'
+        assert whole['exact_metadata_values'][1]['pointer'] == selected['pointer']
+        refs = evidence['untimed_findings'][0]['evidence']
+        assert refs[0]['pointer'] == selected['pointer']
+        assert 'pointer' not in orphan and orphan['pointer_executable'] is False and orphan['limitations']
+        assert orphan['value'] == {'/native/channel': 7, 'path': '/native/member',
+                                   'recorded_metadata': {'/native/channel': 2**60 + 1}}
+        assert orphan['exact_metadata_values'] == [{'pointer': '/recorded_metadata/~1native~1channel',
+                                                   'decimal': str(2**60 + 1)}]
+        assert 'pointer' not in refs[1] and refs[1]['pointer_executable'] is False
+        assert native['pointer'] == '/~1native~1channel' and native['value'] == {'/native/channel': '/native/member'}
+        assert notes['value']['recorded episode metadata'] == whole['value']
+        assert selected_notes['pointer'] == '/recorded episode metadata'
+        assert selected_notes['value'] == whole['value']
+        assert selected_notes['exact_metadata_values'] == whole['exact_metadata_values']
+        assert notes['exact_metadata_values'][1]['pointer'] == '/recorded episode metadata' + selected['pointer']
+        bounded = evidence['parts'][0]['record']['inspections'][0]
+        assert bounded['id'] == 'inspection:bounded' and bounded['value']['truncated']
+        assert bounded['value']['characters'] == 20000 and bounded['limitations']
+        serialized = evidence['parts'][0]['record']['inspections'][2]
+        assert serialized['id'] == 'inspection:serialized'
+        assert json.loads(serialized['value']) == notes['value']
     assert all(p.read_bytes() == content for p, content in before.items())
+
+
+@pytest.mark.skipif(not shutil.which('node'), reason='node is required for the browser export path')
+def test_native_integer_evidence_is_exact_in_static_json_lines(public_sources, tmp_path, monkeypatch):
+    import numpy as np
+    import pandas as pd
+    from label.evidence_access import Access
+    from prepare import formats
+
+    prepared = tmp_path / 'prepared'
+    prepared.mkdir()
+    originals = np.array([2**60 + 1, 2**64 - 1], dtype=np.uint64)
+    signals = formats.recorded_signals(pd.DataFrame({'flags': originals}), set(), 2)
+    context = {'episode_id': 'ep', 'profile': 'ego_head', 'state_kind': 'none',
+               'n_state_frames': 2, 'fps': 30, 'source': {}, 'cameras': {}}
+    formats.write_signals(prepared, context, signals)
+    (prepared / 'context.json').write_text(json.dumps(context))
+    access = Access({'context': context, 'dir': prepared, 'signals': dict(signals),
+                     'state': None, 'action': None})
+    field = next(row for row in access.inventory() if row['kind'] == 'array' and row['name'] == 'flags')
+    receipt = access.inspect({'field_id': field['id'], 'mode': 'samples',
+                              'start_row': 0, 'end_row': 2, 'columns': [0]})
+    label_path = public_sources['qa'] / 'ep.json'
+    label = json.loads(label_path.read_text())
+    label['ordinary_readings'] = [None, 0, -1, 1.25]
+    label['evidence_inspection'] = {
+        'version': 1, 'inspections': [receipt], 'untimed_findings': [
+            {'headline': 'Recorded flags differ', 'adds_beyond_video': True,
+             'evidence': [{'evidence_id': receipt['id'], 'rows': [0, 1], 'columns': [0]}]}]}
+    label_path.write_text(json.dumps(label))
+
+    download = Request('/api/episode?file=ep.json&download=1')
+    download.do_GET()
+    assert download.status == 200
+    live = json.loads(download.wfile.getvalue())
+    assert live['evidence_inspection']['inspections'][0]['values'] == [[int(value)] for value in originals]
+    monkeypatch.setattr(static, 'plan', lambda *a, **k: [
+        {'rec': {'file': 'ep.json', 'episode_id': 'ep', 'duration_s': 1},
+         'ds': 'synthetic', 'media': {}, 'frames': {}}])
+    args = SimpleNamespace(board=tmp_path, **public_sources, out=tmp_path / 'site',
+                           build_id='precision', force=False, public_base=None, title='Synthetic', header=None)
+    assert static.cmd_site(args) == 0
+    episode = (args.out / 'precision/data/ep/ep.json').read_text()
+    script = r"""
+const input = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const {src, piece} = require('./tests/page_functions')();
+const render = new Function('esc', 'genericSensorHeadlineHtml',
+  piece('recordingFindings') + piece('recordingFindingsHtml')
+  + 'return recordingFindingsHtml(recordingFindings(JSON.parse(arguments[2])));');
+const html = render(String, s => s, input.episode);
+const start = src.indexOf('async function exportBlob(');
+const code = src.slice(start, src.indexOf('function saveBlob(', start));
+const exportBlob = new Function('STATIC', 'fetch', 'episodeUrl', code + 'return exportBlob;')(
+  true, async () => new Response(input.episode), file => file);
+exportBlob(['ep.json']).then(async blob => {
+  process.stdout.write(JSON.stringify({html, exported: await blob.text()}));
+}).catch(error => { console.error(error); process.exitCode = 1; });
+"""
+    result = subprocess.run([shutil.which('node'), '-e', script], cwd=Path(__file__).resolve().parents[1],
+                            input=json.dumps({'episode': episode}), text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    browser = json.loads(result.stdout)
+    for value in originals:
+        assert f'<td>{int(value)}</td>' in browser['html']
+    lines = browser['exported'].splitlines()
+    assert len(lines) == 1
+    exported = json.loads(lines[0])
+    inspected = exported['evidence_inspection']['inspections'][0]
+    assert inspected['values'] == [[int(value)] for value in originals]
+    assert inspected['native_dtype'] == 'uint64'
+    assert inspected['exact_integer_values'] == receipt['exact_integer_values']
+    assert exported['ordinary_readings'] == label['ordinary_readings']
+    assert PRIVATE_PATH not in browser['exported'] and PRIVATE_URL not in browser['exported']
+    assert json.loads(label_path.read_text()) == label

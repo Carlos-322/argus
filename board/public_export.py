@@ -28,7 +28,7 @@ _SECRETS = frozenset({
 # Source locations resolve private preparation trees before this projection runs.
 _PRIVATE_LOCATIONS = frozenset({
     'sourcelocation', 'rawpath', 'localpath', 'retainedroot', 'retainedevidenceroot',
-    'episodedir', 'exampledir', 'jobdir', 'cachedir',
+    'episodedir', 'exampledir', 'jobdir', 'cachedir', 'sourcerowmapfile',
 })
 _LOCATIONS = frozenset({
     'source', 'sources', 'path', 'paths', 'file', 'files', 'filename', 'directory', 'dir',
@@ -48,6 +48,7 @@ _NOTE_SOURCE_MAPS = frozenset({
 })
 _NOTE_SOURCE_VALUES = frozenset({'recordedannotationdatasource'})
 _NOTE_CLAIMS = frozenset({'unassigneddatasetmetadataclaims'})
+_READER_CONTEXT_MAPS = _NOTE_SOURCE_MAPS | {'uploadernotes', 'recordedsensorfields'}
 _ATTRIBUTE_LOCATIONS = frozenset({'sourcedirectory', 'sourcelocation'})
 _METADATA_LIMIT_SUFFIX = (' and its recorded metadata exceed the prompt note limit; complete original rows '
                           'and source claims remain in the episode context and uploader notes.')
@@ -174,7 +175,7 @@ def _partial_coverage(value: str) -> str:
 def _source_keys(value: dict) -> dict:
     reserved = {key for key in value if not _private_location(key)}
     used, keys = set(), {}
-    for key in value:
+    for key in sorted(value):
         public = key
         if _private_location(key):
             base = _source_name(key) or 'source file'
@@ -189,6 +190,184 @@ def _source_keys(value: dict) -> dict:
         keys[key] = public
         used.add(public)
     return keys
+
+
+def reader_context_field(name: str, value):
+    """Keep reader-owned source-map typing when an inspection unwraps its value."""
+    if _name(name) in _READER_CONTEXT_MAPS:
+        return project({name: value}).get(name)
+    return value
+
+
+def reader_annotation_projection(text, notes):
+    """Project canonical serialized notes; unrelated publisher prose has no typed proof."""
+    if not isinstance(text, str) or not isinstance(notes, (dict, list)):
+        return None
+    from prepare.formats import annotation_text
+    try:
+        for files in (False, True):
+            if text == annotation_text(notes, files=files):
+                return annotation_text(reader_context_field('uploader_notes', notes), files=files) or ''
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _inspection_source_name(value):
+    descriptor = value.get('descriptor') if isinstance(value, dict) else None
+    name = descriptor.get('name') if isinstance(descriptor, dict) else None
+    return name if (isinstance(name, str) and descriptor.get('kind') in ('metadata', 'context')
+                    and _name(name) in _READER_CONTEXT_MAPS and value.get('mode') == 'metadata') else None
+
+
+def _source_pointer_keys(name, value, prefix=()):
+    """Alias only source-owner positions; native recorded fields are separate keys."""
+    if _name(name) == 'fields':
+        return {}
+    keys = {}
+    if isinstance(value, dict):
+        if _name(name) in _NOTE_SOURCE_MAPS:
+            keys[prefix] = _source_keys(value)
+        for key, child in value.items():
+            if _name(key) != 'fields':
+                keys.update(_source_pointer_keys(key, child, prefix + (key,)))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            keys.update(_source_pointer_keys('', child, prefix + (str(index),)))
+    return keys
+
+
+def _inspection_record(value: dict) -> dict:
+    """Restore source-map ownership in saved inspection values and citations."""
+    receipts = value.get('inspections')
+    result = dict(value)
+    if isinstance(value.get('parts'), list):
+        result['parts'] = [{**part, 'record': _inspection_record(part['record'])}
+                           if isinstance(part, dict) and isinstance(part.get('record'), dict) else part
+                           for part in value['parts']]
+    if not isinstance(receipts, list):
+        return result
+
+    def truncated_map(receipt):
+        selected = receipt.get('value')
+        return (isinstance(selected, dict) and selected.get('truncated') is True
+                and isinstance(selected.get('preview'), str))
+
+    aliases = {}
+    for receipt in receipts:
+        if (_inspection_source_name(receipt) and receipt.get('pointer') == ''
+                and isinstance(receipt.get('value'), dict) and not truncated_map(receipt)):
+            field = receipt['descriptor'].get('id') or receipt.get('field_id')
+            if isinstance(field, str):
+                aliases[field] = _source_pointer_keys(receipt['descriptor']['name'], receipt['value'])
+
+    def pointer_alias(pointer, keys, name):
+        if not isinstance(pointer, str) or not pointer.startswith('/'):
+            return pointer
+        prefix, public, native = (), [], _name(name) == 'fields'
+        for encoded in pointer[1:].split('/'):
+            token = encoded.replace('~1', '/').replace('~0', '~')
+            owners = keys.get(prefix, {})
+            source_owner = not native and _name(prefix[-1] if prefix else name) in _NOTE_SOURCE_MAPS
+            if token in owners:
+                public.append(owners[token].replace('~', '~0').replace('/', '~1'))
+            elif source_owner and _private_location(token):
+                return None
+            else:
+                public.append(encoded)
+            native = native or _name(token) == 'fields'
+            prefix += (token,)
+        return '/' + '/'.join(public)
+
+    references, shown = {}, []
+    for receipt in receipts:
+        if not _inspection_source_name(receipt):
+            descriptor = receipt.get('descriptor') if isinstance(receipt, dict) else None
+            if (isinstance(descriptor, dict) and descriptor.get('name') == 'uploader_annotation'
+                    and descriptor.get('kind') in ('metadata', 'context') and receipt.get('mode') == 'metadata'):
+                for original in receipts:
+                    if (_inspection_source_name(original) == 'uploader_notes' and original.get('pointer') == ''):
+                        projected = reader_annotation_projection(receipt.get('value'), original.get('value'))
+                        if projected is not None:
+                            receipt = {**receipt, 'value': projected}
+                            break
+            shown.append(receipt)
+            continue
+        receipt = dict(receipt)
+        descriptor = dict(receipt['descriptor'])
+        field = descriptor.get('id') or receipt.get('field_id')
+        keys = aliases.get(field, {}) if isinstance(field, str) else {}
+        details = descriptor.get('descriptor')
+        if isinstance(details, dict) and isinstance(details.get('children'), list):
+            children = details['children']
+            if all(isinstance(child, str) for child in children):
+                owners = keys.get((), {})
+                descriptor['descriptor'] = {**details, 'children': [owners.get(child, child) for child in children]}
+                if not owners and _name(descriptor['name']) in _NOTE_SOURCE_MAPS:
+                    descriptor['descriptor'].update(children=list(_source_keys(dict.fromkeys(children)).values()),
+                                                    children_executable=False)
+        elif (isinstance(details, dict) and details.get('truncated') is True
+              and isinstance(details.get('preview'), str)):
+            descriptor['descriptor'] = {**details, 'preview': 'Original source-map descriptor preview is retained privately.'}
+        receipt['descriptor'] = descriptor
+        old = receipt.get('pointer')
+        public = pointer_alias(old, keys, descriptor['name'])
+        if isinstance(receipt.get('value'), (dict, list)):
+            if truncated_map(receipt):
+                receipt['value'] = {**receipt['value'], 'preview': 'Original source-map preview is retained privately.'}
+                receipt['limitations'] = list(receipt.get('limitations') or [])
+                note = 'The saved metadata preview lacks complete source-map structure for public owner aliases.'
+                if note not in receipt['limitations']:
+                    receipt['limitations'].append(note)
+            else:
+                tokens = [token.replace('~1', '/').replace('~0', '~') for token in old.split('/')[1:]] if isinstance(old, str) else []
+                scope = tokens[-1] if tokens else descriptor['name']
+                native_scope = receipt.get('value_scope') == 'native_fields' or any(_name(token) == 'fields' for token in tokens)
+                if native_scope:
+                    scope = 'fields'
+                relative_keys = _source_pointer_keys(scope, receipt['value'])
+                if not native_scope and _name(scope) in _READER_CONTEXT_MAPS:
+                    receipt['value'] = reader_context_field(scope, receipt['value'])
+                else:
+                    # A source-owner selection retains note typing around its native members.
+                    selected = {'fields': receipt['value']} if native_scope else receipt['value']
+                    selected = project({'recorded_metadata': {'selection': selected}})['recorded_metadata']['selection']
+                    receipt['value'] = selected['fields'] if native_scope else selected
+                if 'exact_metadata_values' in receipt:
+                    receipt['exact_metadata_values'] = [{**item, 'pointer': pointer_alias(item.get('pointer'), relative_keys, scope)}
+                        for item in receipt.get('exact_metadata_values') or [] if isinstance(item, dict)]
+        if public is None:
+            receipt.pop('pointer', None)
+            receipt['pointer_executable'] = False
+            if isinstance(old, str) and 'fields' in [
+                    _name(token.replace('~1', '/').replace('~0', '~')) for token in old.split('/')[1:]]:
+                receipt['value_scope'] = 'native_fields'
+            note = 'Original source-owner pointer is retained privately; this saved selection has no verified public alias.'
+            receipt['limitations'] = list(receipt.get('limitations') or [])
+            if note not in receipt['limitations']:
+                receipt['limitations'].append(note)
+        elif isinstance(old, str):
+            receipt['pointer'] = public
+        if isinstance(receipt.get('id'), str) and isinstance(old, str):
+            references[(receipt['id'], old)] = public
+        shown.append(receipt)
+    result['inspections'] = shown
+
+    def citations(item):
+        if isinstance(item, list):
+            return [citations(child) for child in item]
+        if not isinstance(item, dict):
+            return item
+        item = {key: child if key in ('parts', 'inspections') else citations(child) for key, child in item.items()}
+        key = (item.get('evidence_id'), item.get('pointer'))
+        if all(isinstance(part, str) for part in key) and key in references:
+            if references[key] is None:
+                item.pop('pointer', None)
+                item['pointer_executable'] = False
+            else:
+                item['pointer'] = references[key]
+        return item
+    return citations(result)
 
 
 def _uploader_item(item: dict) -> dict:
@@ -392,6 +571,8 @@ def _project(value, field: str = '', attribute_owner: str = '', native_fields: b
     if isinstance(value, dict):
         if not native_fields:
             value = _dictionary_values(value)
+            if field == 'evidenceinspection':
+                value = _inspection_record(value)
         if field == 'uploadernotes' and not native_fields:
             value = _uploader_group(value)
         elif field == 'readerissues' and not native_fields:
@@ -426,7 +607,16 @@ def _project(value, field: str = '', attribute_owner: str = '', native_fields: b
                     or name.endswith(('apikey', 'accesstoken', 'secretaccesskey'))
                     or (field == 'compare' and name in ('runid', 'code'))):
                 continue
-            shown = _project(item, name, owner, native_fields, note_owner, machine_checks)
+            item_native, item_notes = native_fields, note_owner
+            if key == 'value' and (source_name := _inspection_source_name(value)):
+                item_notes = _name(source_name)
+                # A selected metadata subtree retains its original native-field scope.
+                pointer = value.get('pointer')
+                if isinstance(pointer, str):
+                    item_native = item_native or 'fields' in [
+                        _name(token.replace('~1', '/').replace('~0', '~')) for token in pointer.split('/')[1:]]
+                item_native = item_native or value.get('value_scope') == 'native_fields'
+            shown = _project(item, name, owner, item_native, item_notes, machine_checks)
             if shown is not _DROP:
                 result[source_keys.get(key, key)] = shown
         return result

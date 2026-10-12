@@ -11,6 +11,59 @@ from label import signals as sg
 RISE = np.r_[np.zeros(30), np.linspace(0, .3, 10), np.full(20, .3)][:, None]
 
 
+@pytest.mark.parametrize('human_role', ['event_flag', ''])
+def test_job_loader_retains_native_human_meaning_without_public_bindings(tmp_path, human_role):
+    import pandas as pd
+    from label import dictionary as dd, dictionary_editor as editor
+    from label.evidence_access import Access
+    from prepare import formats
+
+    job = tmp_path / 'job'
+    episodes = []
+    originals = {}
+    for name, offset in [('episode_one', 1), ('episode_two', 5)]:
+        folder = job / 'episodes' / name
+        folder.mkdir(parents=True)
+        context = {'episode_id': name, 'profile': 'ego_head', 'state_kind': 'none',
+                   'n_state_frames': 2, 'fps': 30, 'source': {}, 'cameras': {}}
+        readings = np.array([2**60 + offset, 2**60 + offset + 2], dtype=np.uint64)
+        source = pd.DataFrame({'flags': readings})
+        formats.write_signals(folder, context, formats.recorded_signals(source, set(), 2))
+        (folder / 'context.json').write_text(json.dumps(context))
+        (folder / 'sources.json').write_text(json.dumps({'exo': {'n_frames': 2}}))
+        originals[name] = (folder / context['recorded_table_fields']).read_bytes()
+        episodes.append(folder)
+    inventory = dd.inventory(episodes)
+    field = next(f for f in inventory['fields'] if f['kind'] == 'native')
+    record = dd._base(inventory, 'complete')
+    record['raw_text'] = json.dumps({'entries': [{'id': field['id'], 'meaning': 'Machine event flags',
+                                                'role': 'event_flag'}]})
+    dd._parse(record)
+    (job / 'dictionary.json').write_text(json.dumps(record))
+    editor.save_override(job, {'revision': 0, 'field_id': field['id'], 'meaning': 'Human reviewed flags',
+                               'role': human_role}, actor='private-reviewer')
+
+    def interpreted(folder):
+        access = Access(me.load(folder))
+        selected = next(f for f in access.inventory() if f['kind'] == 'array' and f['name'] == 'flags')
+        return selected['descriptor']['interpretation']
+
+    for folder in episodes:
+        assert interpreted(folder) == {'meaning': 'Human reviewed flags', 'role': human_role, 'provenance': 'human'}
+        assert (folder / 'recorded_table_fields.npz').read_bytes() == originals[folder.name]
+        public = editor.for_episode(folder)
+        assert public['entries'][field['id']]['role'] == human_role
+        assert 'source_identity' not in json.dumps(public) and 'source_descriptor_sha256' not in json.dumps(public)
+        assert 'private-reviewer' not in json.dumps(public)
+
+    context_path = episodes[0] / 'context.json'
+    context = json.loads(context_path.read_text())
+    context['table_field_inventory'][0]['descriptor']['units'] = 'changed after interpretation'
+    context_path.write_text(json.dumps(context))
+    assert interpreted(episodes[0]) == {}
+    assert interpreted(episodes[1])['meaning'] == 'Human reviewed flags'
+
+
 def fixture(name="left_pressure", array=RISE, role="touch", *, shape=None, stored=None):
     context = {"episode_id": "episode_one", "fps": 30, "profile": "teleop_arms", "state_kind": "none",
                "signals": [{"name": name, "key": "s0", "shape": shape or [array.shape[1]], "source": "sensor.h5/pad"}]}

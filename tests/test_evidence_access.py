@@ -243,6 +243,54 @@ def test_metadata_is_discoverable_and_nested_inspection_is_bounded(tmp_path):
     with pytest.raises(ValueError):
         a.inspect({'field_id': '../../etc/passwd'})
 
+    # Reader-owned source maps need distinct executable public owners, not private file keys.
+    from prepare.formats import lerobot_metadata
+    owned = {'episode_index': 0, 'profile': 'ego_head', 'state_kind': 'none'}
+    sources = ['/Users/synthetic/owner_a/meta/info.json', '/Users/synthetic/owner_b/meta/info.json']
+    native = {'fields': {'/native/channel': 2**60 + 1, 'path': '/native/member'}, 'calibration': 'A'}
+    lerobot_metadata(owned, {'dir': '/Users/synthetic/owner_b', 'info': {**native, 'calibration': 'B'},
+                            'episode_metadata': {0: {sources[0]: native}}})
+    before = copy.deepcopy(owned)
+    (tmp_path / 'context.json').write_text(json.dumps(owned))
+    source_before = (tmp_path / 'context.json').read_bytes()
+    a = access(tmp_path, **owned)
+    proof = ea.source_proof(a.ep['context'], tmp_path)
+    field = next(f for f in a.inventory() if f['name'] == 'recorded_metadata')
+    whole = a.inspect({'field_id': field['id'], 'mode': 'metadata'})
+    assert '/Users/synthetic/' not in ea.packed(whole)
+    assert 'uploader_annotation' not in {f['name'] for f in a.inventory()}
+    notes_field = next(f for f in a.inventory() if f['name'] == 'uploader_notes')
+    notes = a.inspect({'field_id': notes_field['id'], 'mode': 'metadata'})
+    assert '/Users/synthetic/' not in ea.packed(notes)
+    independent = access(tmp_path, uploader_notes={'annotation': 'structured claim'},
+                         uploader_annotation='Independent publisher prose.')
+    assert 'uploader_annotation' in {f['name'] for f in independent.inventory()}
+    from board.public_export import reader_annotation_projection
+    assert reader_annotation_projection('Publisher prose.', 'Publisher prose.') is None
+    withheld = access(tmp_path, uploader_notes='https://example.org/object?token=synthetic')
+    withheld_field = next(f for f in withheld.inventory() if f['name'] == 'uploader_notes')
+    assert withheld.inspect({'field_id': withheld_field['id'], 'mode': 'metadata'})['value'] is None
+    owners = field['descriptor']['children']
+    assert len(set(owners)) == 2 and all(owner.startswith('info.json') for owner in owners)
+    assert set(whole['value']) == set(owners)
+    assert {value['calibration'] for value in whole['value'].values()} == {'A', 'B'}
+    reversed_context = {**owned, 'recorded_metadata': dict(reversed(list(owned['recorded_metadata'].items())))}
+    reordered = access(tmp_path, **reversed_context)
+    reordered_field = next(f for f in reordered.inventory() if f['name'] == 'recorded_metadata')
+    reordered_value = reordered.inspect({'field_id': reordered_field['id'], 'mode': 'metadata'})['value']
+    assert {value['calibration']: owner for owner, value in reordered_value.items()} == {
+        value['calibration']: owner for owner, value in whole['value'].items()}
+    for owner in owners:
+        pointer = '/' + owner.replace('~', '~0').replace('/', '~1') + '/fields/~1native~1channel'
+        selected = a.inspect({'field_id': field['id'], 'mode': 'metadata', 'pointer': pointer})
+        assert selected['value'] == 2**60 + 1 and selected['pointer'] == pointer
+        assert selected['exact_metadata_values'] == [{'pointer': '', 'decimal': str(2**60 + 1)}]
+        assert whole['value'][owner]['fields']['path'] == '/native/member'
+    assert {item['pointer'] for item in whole['exact_metadata_values']} == {
+        '/' + owner + '/fields/~1native~1channel' for owner in owners}
+    assert ea.source_proof(a.ep['context'], tmp_path) == proof
+    assert owned == before and (tmp_path / 'context.json').read_bytes() == source_before
+
 
 def test_native_mcap_roundtrip_keeps_frequency_types_and_shape_variants(tmp_path):
     from mcap.writer import Writer

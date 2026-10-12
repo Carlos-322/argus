@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import math
+import re
 import zipfile
 from collections import Counter
 from pathlib import Path
@@ -34,6 +35,7 @@ IMPLEMENTATION_SHA256 = hashlib.sha256(b''.join(path.read_bytes() for path in (
     Path(__file__).parent.parent / 'prepare' / 'hdf_metadata.py',
     Path(__file__).parent.parent / 'prepare' / 'mcap_fields.py',
     Path(__file__).parent.parent / 'prepare' / 'state_contract.py',
+    Path(__file__).parent.parent / 'board' / 'public_export.py',
     Path(__file__).with_name('source_eligibility.py')))).hexdigest()
 # These describe the prepared episode or checks already in the annotation request.
 # Original metadata and unfamiliar context keys retain their separate inspection path.
@@ -42,7 +44,8 @@ state_unaligned fps duration_s n_state_frames real_times clocks clock_start_s cl
 cameras depth signals source instruction instruction_note task_label capture_qc sensor_checks stream_checks
 stream_pairing reader_issues contacts unshown_cameras recorded_jumps gripper_channels gripper_value piece
 packaging collection_note data_dictionary retained_evidence_root recorded_camera_ns recorded_mcap_fields recorded_hdf5_metadata'''.split())
-PREPARED_CONTEXT = PREPARED_CONTEXT | {'represented_source_members', 'annotation_policy', 'task_mode', 'state_contract', 'trimmed'}
+PREPARED_CONTEXT = PREPARED_CONTEXT | {'represented_source_members', 'annotation_policy', 'task_mode', 'state_contract', 'trimmed',
+                                     'recorded_table_fields', 'table_field_inventory'}
 
 
 def needs_inspection(ep, sensor_evidence):
@@ -52,6 +55,8 @@ def needs_inspection(ep, sensor_evidence):
     native = any(not detail.get('already_supplied') for archive in archives
                  for channel in archive.get('mcap_field_inventory') or []
                  for detail in channel.get('field_details') or [])
+    native = native or any(not field.get('bookkeeping') for archive in archives
+                           for field in archive.get('table_field_inventory') or [])
     from label.source_eligibility import needs_extra_evidence
     metadata = needs_extra_evidence(ctx)
     from prepare.state_contract import redundant_observation_target
@@ -100,7 +105,7 @@ def untimed_identity(ctx, metadata_fields):
     descriptors = [{k: m[k] for k in se.SEMANTIC_KEYS if k in m} for m in ctx.get('signals') or []]
     spatial = {kind: {view: {k: m[k] for k in (*se.SEMANTIC_KEYS, 'scale_m', 'kind', 'mounting') if k in m}
                       for view, m in (ctx.get(kind) or {}).items()} for kind in ('depth', 'cameras')}
-    retained = [{k: archive[k] for k in ('recorded_hdf5_metadata', 'mcap_field_inventory') if k in archive}
+    retained = [{k: archive[k] for k in ('recorded_hdf5_metadata', 'mcap_field_inventory', 'table_field_inventory') if k in archive}
                 for archive in [ctx, *(ctx.get('recorded_sensor_fields') or [])]]
     values = {name: ctx.get(name) for name in metadata_fields}
     return hashlib.sha256(se._json([meanings, descriptors, spatial, retained, values]).encode()).hexdigest()
@@ -160,7 +165,7 @@ def source_proof(ctx, ep_dir):
         for view, entry in entries.items():
             if not isinstance(entry, dict):
                 continue
-            for key in ('packed', 'kmap'):
+            for key in ('packed', 'kmap', 'source_row_map_file'):
                 if entry.get(key):
                     add(f'{group}:{view}:{key}', entry[key])
     for index, entry in enumerate(ctx.get('unshown_cameras') or []):
@@ -173,6 +178,8 @@ def source_proof(ctx, ep_dir):
     for i, archive in enumerate([ctx, *(ctx.get('recorded_sensor_fields') or [])]):
         if archive.get('recorded_mcap_fields'):
             add(f'retained:{i}:mcap', retained / archive['recorded_mcap_fields'])
+        if archive.get('recorded_table_fields'):
+            add(f'retained:{i}:table', retained / archive['recorded_table_fields'])
         hdf = archive.get('recorded_hdf5_metadata') or {}
         if hdf.get('source_path'):
             add(f'retained:{i}:hdf', hdf['source_path'])
@@ -184,6 +191,14 @@ def same_source_proof(saved, ctx, ep_dir):
         return False
     current = source_proof(ctx, ep_dir)
     return not any(item.get('missing') for item in current) and equivalent_source_proof(saved, current)
+
+
+def table_source_identity(ctx, ep_dir):
+    """The immutable owned archive identity used by native field interpretations."""
+    proof = next((item for item in source_proof(ctx, ep_dir) if item['name'] == 'retained:0:table'), None)
+    if proof is None:
+        return {'missing': True}
+    return {key: value for key, value in proof.items() if key != 'mtime_ns' or 'sha256' not in proof}
 
 
 def equivalent_source_proof(left, right):
@@ -310,7 +325,12 @@ def current_descriptor(ctx, sensor):
     if sensor.get('access_kind') == 'depth':
         return (ctx.get('depth') or {}).get(sensor.get('view'))
     if sensor.get('access_kind') == 'image':
-        return (ctx.get('cameras') or {}).get(sensor.get('view'))
+        view = sensor.get('view')
+        if isinstance(view, str) and re.fullmatch(r'unshown[1-9]\d*', view):
+            index = int(view.removeprefix('unshown')) - 1
+            entries = ctx.get('unshown_cameras') or []
+            return entries[index] if index < len(entries) else None
+        return (ctx.get('cameras') or {}).get(view)
     if sensor['name'] in ('state', 'action'):
         return {}
     return next((m for m in ctx.get('signals') or [] if m.get('name') == sensor['name']), None)
@@ -531,14 +551,28 @@ class Access:
         for view, entry in self.ep.get('sources', {}).items():
             self.add('image', view, None, {**ctx.get('cameras', {}).get(view, {}),
                 'interpretation': prepared_interpretation(ctx, view, 'camera')}, view=view)
+        for index, entry in enumerate(ctx.get('unshown_cameras') or []):
+            view = f'unshown{index + 1}'
+            descriptor = {key: value for key, value in entry.items()
+                          if key not in ('packed', 'kmap', 'camera_times')}
+            self.add('image', view, None, {**descriptor, 'key': entry['name'],
+                'clock': 'own source rows; episode synchronization is unverified',
+                'interpretation': field_interpretation(ctx, entry['name'], 'camera',
+                                                       context_path=f'unshown_cameras/{index}')},
+                view=view, unshown_entry=entry)
         for view, entry in {**self.ep.get('depth', {}), **self.ep.get('additional_depth', {})}.items():
             meta = (ctx.get('depth') or {}).get(view) or {k: entry[k] for k in
                     (*se.SEMANTIC_KEYS, 'scale_m', 'range', 'kind', 'source') if k in entry}
             ident = self.add('depth', view, None, meta, view=view)
             self.fields[ident]['public']['available_modes'] = ['images', 'regions']
+        from board.public_export import reader_context_field, reader_annotation_projection
+        duplicate_annotation = reader_annotation_projection(ctx.get('uploader_annotation'), ctx.get('uploader_notes')) is not None
         for name, value in ctx.items():
-            if name in ('data_dictionary', 'mcap_field_inventory', 'represented_source_members'):
+            if name in ('data_dictionary', 'mcap_field_inventory', 'table_field_inventory', 'represented_source_members'):
                 continue
+            if name == 'uploader_annotation' and duplicate_annotation:
+                continue
+            value = reader_context_field(name, value)
             self.add('context' if name in PREPARED_CONTEXT else 'metadata', name, value, {'type': type(value).__name__,
                      'children': list(value)[:20] if isinstance(value, dict) else None,
                      'items': len(value) if isinstance(value, (dict, list)) else None})
@@ -567,6 +601,35 @@ class Access:
                              hdf5_source=source, hdf5_field=detail, archive_name=str(path))
 
     def retained(self, archive):
+        filename = archive.get('recorded_table_fields')
+        if filename:
+            path = self.local(filename)
+            source_identity = table_source_identity(self.ep['context'], self.ep['dir'])
+            for index, detail in enumerate(archive.get('table_field_inventory') or []):
+                if detail.get('reason'):
+                    self.add('unreadable', detail['name'], None,
+                             {**(detail.get('descriptor') or {}), 'reason': detail['reason'],
+                              'source_shape': detail.get('source_shape'), 'dtype': detail.get('dtype')})
+                    continue
+                try:
+                    shape, _, dtype, _ = header(path, detail['array'])
+                    descriptor = {**(detail.get('descriptor') or {}),
+                                  'source_shape': detail.get('source_shape'), 'shape': list(shape),
+                                  'source_row_count': detail['source_row_count'],
+                                  'bookkeeping': bool(detail.get('bookkeeping')),
+                                  'dtype': str(dtype), 'source_column': detail['name'],
+                                  'episode_index': self.ep['context'].get('episode_index'),
+                                  'interpretation': field_interpretation(self.ep['context'], detail['name'], 'native',
+                                      context_path=f'table_field_inventory/{index}', source_identity=source_identity),
+                                  'source': 'original owned table rows, with explicit source presence'}
+                    ident = self.add('array', detail['name'], None, descriptor, path=path, key=detail['array'],
+                                     source_rows_key=detail['source_rows'], source_row_count=detail['source_row_count'],
+                                     frame_index_key=detail.get('source_frame_index'),
+                                     archive_name=filename)
+                    self.fields[ident]['public'].update(shape=[detail['source_row_count'], *shape[1:]],
+                                                       dtype=str(dtype), available_modes=['samples'])
+                except (OSError, KeyError, ValueError, zipfile.BadZipFile) as error:
+                    self.add('unreadable', detail['name'], None, {'reason': str(error)[:200]})
         filename = archive.get('recorded_mcap_fields')
         if filename:
             path = self.local(filename)
@@ -817,9 +880,11 @@ class Access:
         packet = field['public']['kind'] == 'native'
         native = packet or field['public']['kind'] == 'array'
         shape = header(field['path'], field['key'])[0] if native else field['value'].shape
-        n, width = shape[0], math.prod(shape[1:]) or 1
+        n, width = field.get('source_row_count', shape[0]), math.prod(shape[1:]) or 1
         spectrum = result['mode'] == 'spectrum'
         extrema = result['mode'] == 'extrema'
+        if field.get('source_rows_key') and (spectrum or extrema):
+            raise ValueError('typed table fields expose original samples; select source rows and components')
         if extrema and packet:
             raise ValueError('native packet extrema is unavailable; inspect original typed samples')
         limit = MAX_ROWS
@@ -842,7 +907,17 @@ class Access:
             result.update(extrema=stats, sampling='component minima and maxima with neighboring rows, plus uniform context',
                           scanned_rows=total)
             result['limitations'].append('Extrema retain peaks, not every change. A peak alone does not establish a task event.')
-        if native:
+        present = None
+        if field.get('source_rows_key'):
+            with np.load(field['path']) as archive:
+                source_rows = archive[field['source_rows_key']]
+            positions = np.searchsorted(source_rows, rows)
+            present = positions < len(source_rows)
+            present[present] &= source_rows[positions[present]] == rows[present]
+            exact = array_rows(field['path'], field['key'], positions[present], cols)
+            selected = np.zeros((len(rows), len(cols)), dtype=exact.dtype)
+            selected[present] = exact
+        elif native:
             values = array_rows(field['path'], field['key'], rows, None if spectrum else cols)
             selected = values[:, cols] if spectrum else values
         else:
@@ -850,6 +925,15 @@ class Access:
         result.update(rows=rows.tolist(), total_rows_in_window=total, sampled=len(rows) < total,
                       columns=cols, omitted_columns=width - len(cols), values=clean(selected),
                       operation='stored components, without averaging')
+        if present is not None:
+            result['values'] = [clean(value) if valid else [None] * len(cols)
+                                for value, valid in zip(selected, present)]
+            result['source_present'] = clean(present)
+            result['native_dtype'] = str(header(field['path'], field['key'])[2])
+            if field.get('frame_index_key'):
+                result['source_frame_indices'] = clean(array_rows(field['path'], field['frame_index_key'], rows, [0])[:, 0])
+            result['limitations'].append('Source frame indices are recorded table facts, not verified camera synchronization. '
+                                         'A missing reading or a row with another recorded shape or dtype is absent in this variant.')
         if field.get('raw_path'):
             keep = [i for i, row in enumerate(rows) if row < field['raw_rows']]
             exact = array_rows(field['raw_path'], field['raw_key'], rows[keep], cols)
@@ -981,10 +1065,36 @@ class Access:
         view, kind = field['view'], field['public']['kind']
         times = self.times()
         ctx = self.ep['context']
+        image_ep = self.ep
+        own_entry = field.get('unshown_entry')
+        own_pts, source_start = None, 0
+        if own_entry is not None:
+            from prepare.camera_clock import unshown_times
+            clock = unshown_times(self.ep['dir'], own_entry, float(ctx.get('clock_zero_s') or 0.0))
+            if clock is None:
+                from prepare.formats import probe
+                facts = probe(Path(own_entry['packed']))
+                native = facts['pts'].astype(np.float64) * float(facts['time_base'])
+                source_start = int(np.searchsorted(native, float(own_entry.get('base_s') or 0.0) - 1e-7))
+                own_pts = facts['pts'][source_start:source_start + int(own_entry['n_frames'])]
+                if not len(own_pts):
+                    raise ValueError('no image packet covers the owned source window')
+                times = own_pts.astype(np.float64) * float(facts['time_base'])
+                times = times - times[0]
+            else:
+                times, own_pts = clock
+                source_start = int((own_entry.get('frame_span') or [0])[0])
+            placeholders = [int(row) - source_start for row in own_entry.get('placeholder_rows') or []
+                            if source_start <= int(row) < source_start + len(times)]
+            image_ep = {'dir': self.ep['dir'], 'context': {'fps': own_entry.get('fps') or 30.0,
+                'cameras': {view: {'key': own_entry['name']}},
+                'placeholder_frames': {view: me.frame_runs(placeholders)}},
+                'sources': {view: {**own_entry, 'n_frames': len(times)}}, 'kmap': {},
+                'times': {view: times, view + '_pts': own_pts}}
         notes = [(ctx.get('camera_clock') or {}).get(v) for v in (view, me.anchor(self.ep))]
         if kind == 'depth':
             notes.append((ctx.get('depth_camera_clock') or {}).get(view))
-        unverified = any(notes) or any(field['descriptor'].get(k) for k in
+        unverified = own_entry is not None or any(notes) or any(field['descriptor'].get(k) for k in
                                       ('aligned_by', 'camera_aligned_by', 'clock_problem'))
         measurements = result['mode'] == 'regions'
         limit = 32 if measurements else MAX_IMAGES
@@ -1017,8 +1127,9 @@ class Access:
             depth = {**self.ep.get('depth', {}), **self.ep.get('additional_depth', {})}
             got = dp.at_anchor(self.ep, depth, view, rows.tolist())
         else:
-            got = me._decode_view(self.ep, view, rows.tolist(), widths=[512])
-            got = {k: im for k, im in got.items() if me.recording_at(self.ep, view, k)}
+            got = me._decode_view(image_ep, view, rows.tolist(), widths=[512])
+            placeholders = me.placeholder_instants(image_ep, rows).get(view, set())
+            got = {k: im for k, im in got.items() if k not in placeholders and me.recording_at(image_ep, view, k)}
         media, frames = [], []
         source_frames = []
         preview_rows = {list(got)[i] for i in indices(len(got), MAX_IMAGES)}
@@ -1041,6 +1152,9 @@ class Access:
                 source = {'row': int(k), 'source_frame': source_row, 'pts': int(entry['pts'][source_row])}
                 if entry.get('t') is not None:
                     source['source_time_s'] = float(entry['t'][source_row])
+                if entry.get('source_row_map_file'):
+                    owned_rows = np.load(entry['source_row_map_file'], mmap_mode='r', allow_pickle=False)
+                    source['source_table_row'] = int(owned_rows[source_row])
                 source_frames.append(source)
                 if entry.get('paired_camera', view) is None:
                     result['limitations'].append('No recorded RGB camera pairing; measurements remain in this depth image frame.')
@@ -1052,6 +1166,9 @@ class Access:
                 picture = dp.picture(picture, entry)
             else:
                 frames.append({'row': int(k)})
+                if own_entry is not None:
+                    source_frames.append({'row': int(k), 'source_row': source_start + int(k),
+                                          'source_pts': int(own_pts[k]), 'source_time_s': time_s})
                 if isinstance(picture, mf.Shrunk):
                     picture = picture.at(512)
             picture = picture.copy()

@@ -22,8 +22,10 @@ PIECE_MAX_S, so none of them is cut.
 from __future__ import annotations
 
 import copy
+import errno
 import json
 import math
+import os
 import re
 import shutil
 from pathlib import Path
@@ -51,8 +53,22 @@ def duration(ctx: dict) -> float:
 
 
 def needs_pieces(ep_dir: Path) -> bool:
-    ctx = json.loads((Path(ep_dir) / "context.json").read_text())
-    return duration(ctx) > piece_max(ctx)
+    """Use the same surviving anchor span as request validation, without loading sensor arrays."""
+    from label import episode as me
+    from prepare.formats import clock_context
+    from prepare.camera_clock import load_times
+    ep_dir = Path(ep_dir)
+    ctx = clock_context(json.loads((ep_dir / "context.json").read_text()))
+    source_path = ep_dir / 'sources.json'
+    if not source_path.is_file():
+        return duration(ctx) > piece_max(ctx)
+    sources = json.loads(source_path.read_text())
+    times = load_times(ep_dir, ctx) if ctx.get('real_times') else None
+    if times is not None:
+        zero = float(ctx.get('clock_zero_s') or 0.0)
+        times = {key: value if key.endswith('_pts') else value - zero for key, value in times.items()}
+    ep = {'dir': ep_dir, 'context': ctx, 'sources': sources, 'times': times}
+    return me.request_duration(ep) > piece_max(ctx)
 
 
 def motion(ep: dict) -> tuple[np.ndarray, np.ndarray]:
@@ -61,7 +77,7 @@ def motion(ep: dict) -> tuple[np.ndarray, np.ndarray]:
     from label import episode as me
     n = int(ep["sources"][me.anchor(ep)]["n_frames"])
     t = np.array([me.frame_time(ep, k) for k in range(n)], dtype=np.float64)
-    if me.state_kind(ep) != "none" and len(ep["state"]) == n:
+    if not ep['context'].get('state_unaligned') and me.state_kind(ep) != "none" and len(ep["state"]) == n:
         s = np.asarray(ep["state"], dtype=np.float64)
         d = np.abs(np.diff(s, axis=0)).sum(axis=1)
         return t, np.concatenate([[0.0], d])
@@ -164,6 +180,16 @@ def fmt_clock(s: float) -> str:
     return f"{s // 60}:{s % 60:02d}"
 
 
+def _reuse_array(source: Path, target: Path) -> None:
+    """Share immutable prepared arrays locally, copying only across filesystem boundaries."""
+    try:
+        os.link(source.resolve(), target)
+    except OSError as error:
+        if error.errno != errno.EXDEV:
+            raise
+        shutil.copy2(source, target)
+
+
 def write_pieces(ep_dir: Path, pieces_root: Path) -> list[Path]:
     """Write one sidecar folder per part under pieces_root (named <episode>__pNN) and record the cuts in the
     episode's context (context["pieces"]). Returns the part folders."""
@@ -175,10 +201,9 @@ def write_pieces(ep_dir: Path, pieces_root: Path) -> list[Path]:
     ctx = ep["context"]
     t, m = motion(ep)
     n = len(t)
-    # The parent's first capture need not be zero. Keep the final frame's actual display interval when planning,
-    # rather than appending an unbudgeted tail after choosing cuts.
-    step = float(np.median(np.diff(t))) if len(t) > 1 else 1.0 / me.ep_fps(ep)
-    total = max(duration(ctx), float(t[-1]) + step)
+    # Cut the same actual source span that request admission validates, including the last frame interval.
+    total = me.request_duration(ep)
+    unaligned = bool(ctx.get('state_unaligned'))
     max_s = piece_max(ctx)
     cuts = choose_cuts(t, m, max_s, total)
     bounds = [0] + [c["frame"] for c in cuts] + [n]
@@ -190,7 +215,7 @@ def write_pieces(ep_dir: Path, pieces_root: Path) -> list[Path]:
     tz = dict(np.load(ep_dir / ctx["real_times"])) if ctx.get("real_times") else None
     presentation = dict(np.load(ep_dir / ctx["presentation_times"])) if ctx.get("presentation_times") else None
     touch = {}
-    if zs is not None:
+    if zs is not None and not unaligned:
         # touch is judged once, on the whole recording, and each part's signal entries carry the verdict
         # (label/episode.py touch_verdicts): a part that falls inside a long press has no rest of its own, so its slice
         # alone would not read as touch and the part would lose the contact the recording shows
@@ -203,7 +228,7 @@ def write_pieces(ep_dir: Path, pieces_root: Path) -> list[Path]:
     # were measured, or measuring them failed), so no part's labelling finds contacts on its own slice; the recording's
     # context.json is not given them. They are found with the verdicts just made, so no signal is judged twice
     contacts = None
-    if "contacts" in ctx or ctx.get("signals"):
+    if not unaligned and ("contacts" in ctx or ctx.get("signals")):
         from label import contacts as lc
         contacts = lc.of_episode(ep, frozenset(nm for nm, v in touch.items() if v))
     out = []
@@ -232,6 +257,8 @@ def write_pieces(ep_dir: Path, pieces_root: Path) -> list[Path]:
                 np.save(d / f"kmap_{v}.npy", (np.asarray(km[k0:k1]) - j0).astype(np.int32))
                 s2["kmap"] = f"kmap_{v}.npy"
             s2["n_frames"] = int(j1 - j0)
+            if s.get('last_frame_interval_s') is not None and tz is not None and v in tz and j1 < len(tz[v]) and j1 > j0:
+                s2['last_frame_interval_s'] = float(tz[v][j1] - tz[v][j1 - 1])
             if tz is not None and f"{v}_pts" in tz:
                 new_times[f"{v}_pts"] = tz[f"{v}_pts"][j0:j1]
             else:
@@ -253,7 +280,7 @@ def write_pieces(ep_dir: Path, pieces_root: Path) -> list[Path]:
             c2["placeholder_frames"] = held       # on the part's own frames
         c2.update(episode_id=name, n_state_frames=int(k1 - k0), duration_s=round(t1 - t0, 3),
                   piece={"of": ep_dir.name, "index": i + 1, "count": count, "t0_s": round(t0, 3), "t1_s": round(t1, 3), "max_s": max_s})
-        if ctx.get('recorded_mcap_fields') or ctx.get('recorded_sensor_fields'):
+        if ctx.get('recorded_mcap_fields') or ctx.get('recorded_table_fields') or ctx.get('recorded_sensor_fields'):
             c2['retained_evidence_root'] = str(Path(ctx.get('retained_evidence_root') or ep_dir).resolve())
         if ctx.get("recorded_camera_ns"):
             c2["recorded_camera_ns"] = str((ep_dir / ctx["recorded_camera_ns"]).resolve())
@@ -264,6 +291,9 @@ def write_pieces(ep_dir: Path, pieces_root: Path) -> list[Path]:
             from prepare.camera_clock import unshown_span
             c2["unshown_cameras"] = unshown_span(ep_dir, ctx["unshown_cameras"], t0, t1,
                                                 float(ctx.get("clock_zero_s") or 0.0), shift=True)
+        if unaligned:
+            # Contacts on the lost anchor's clock cannot be rebased onto this part's camera clock.
+            c2.pop('contacts', None)
         c2 = shift_context_times(c2, -t0)
         parent_notes = []
         if t0:
@@ -320,10 +350,16 @@ def write_pieces(ep_dir: Path, pieces_root: Path) -> list[Path]:
                 with np.load(ep_dir / ctx["depth_presentation_times"]) as dt:
                     np.savez(d / ctx["depth_presentation_times"], **{key: dt[key] - origin for key in dt.files})
         if z is not None:
-            arrs = {kk: z[kk][k0:k1] for kk in z.files}
-            np.savez(d / "state.npz", **arrs)
-        if zs is not None:          # the context lists the recording's other signals, so the part carries its rows
-            np.savez(d / "signals.npz", **{kk: zs[kk][k0:k1] for kk in zs.files})
+            if unaligned:
+                # Original source rows remain untimed evidence; camera indices cannot select their rows.
+                _reuse_array(ep_dir / 'state.npz', d / 'state.npz')
+            else:
+                np.savez(d / "state.npz", **{kk: z[kk][k0:k1] for kk in z.files})
+        if zs is not None:
+            if unaligned:
+                _reuse_array(ep_dir / 'signals.npz', d / 'signals.npz')
+            else:
+                np.savez(d / "signals.npz", **{kk: zs[kk][k0:k1] for kk in zs.files})
             # copies, so the recording's own context.json keeps its entries as prepare wrote them
             c2["signals"] = [{**s, "touch": touch[s["name"]],
                               **({"touch_role": "touch"} if sg.touch_permission(
@@ -397,8 +433,7 @@ def _write_or_reuse(d: Path, proot: Path) -> list[Path]:
         if not all((proot / n / "context.json").exists() for n in names):
             raise RuntimeError(f"{d.name}: a saved piece is missing; use an explicit fresh job")
         for name in names:
-            part = json.loads((proot / name / "context.json").read_text())
-            if duration(part) > piece_max(ctx) + 1e-8:
+            if needs_pieces(proot / name):
                 raise RuntimeError(f"{name}: saved part exceeds the request duration limit; use an explicit fresh job")
         return [proot / n for n in names]
     parts = write_pieces(d, proot)

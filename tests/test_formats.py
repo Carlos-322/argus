@@ -2029,6 +2029,227 @@ def test_a_lerobot_episode_keeps_every_usable_value():
         _a_lerobot_episode_keeps_every_usable_value(Path(t))
 
 
+def test_lerobot_native_measurements_reach_inspection_with_source_presence_and_units():
+    import io
+    import json
+    import numpy as np
+    from PIL import Image
+    from label import episode as me
+    from label.evidence_access import Access
+    from checks.sensors import clock_findings
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        encoded = []
+        large = []
+        for i in range(30):
+            buffer = io.BytesIO()
+            Image.fromarray(np.full((16, 16), 700 + 100 * (i % 2), np.uint16)).save(buffer, format="PNG")
+            encoded.append({"bytes": buffer.getvalue(), "path": None})
+            buffer = io.BytesIO()
+            Image.fromarray(np.full((80, 80), 700 + 100 * (i % 2), np.uint16)).save(buffer, format="PNG")
+            large.append({"bytes": buffer.getvalue(), "path": None})
+        flags = np.array([2**60 + i % 2 for i in range(30)], dtype=np.uint64)
+        gapped = [np.array([value, value + np.uint64(2)], np.uint64) for value in flags]
+        gapped[7], gapped[10] = None, np.array([2**60], np.uint64)
+        clock = 1_700_000_000_000_000_000 + np.arange(30, dtype=np.int64) * 30_000_000
+        columns = {"observation.images.taxel": encoded, "tactile.pad": encoded, "observation.images.large_pad": large,
+                   "contact_flags": flags, "gapped_flags": gapped,
+                   "pressure_kpa": np.arange(100, 130, dtype=np.int16),
+                   "camera_time_ns": clock, "sensor_time_us": clock // 1000, "conflicting_time": clock}
+        features = {"observation.images.taxel": {"dtype": "image", "shape": [16, 16, 1],
+                                                 "sensor_type": "pressure", "unit": "raw_count"},
+                    "tactile.pad": {"dtype": "image", "shape": [16, 16, 1], "unit": "raw_count"},
+                    "observation.images.large_pad": {"dtype": "image", "shape": [80, 80, 1],
+                                                       "sensor_type": "pressure", "unit": "raw_count"},
+                    "contact_flags": {"dtype": "uint64", "shape": [1]},
+                    "gapped_flags": {"dtype": "uint64", "shape": [2]},
+                    "pressure_kpa": {"dtype": "int16", "shape": [1], "unit": "kPa"},
+                    "camera_time_ns": {"dtype": "int64", "shape": [1], "unit": "ns"},
+                    "sensor_time_us": {"dtype": "int64", "shape": [1], "unit": "us"},
+                    "conflicting_time": {"dtype": "int64", "shape": [1], "unit": "ns", "units": "us"}}
+        _lerobot(root / "input", {0: columns}, feats=features)
+        from unittest.mock import patch
+        decoded = {}
+        original_decode = f._image_values
+        def decode_once(column):
+            decoded[column.name] = decoded.get(column.name, 0) + 1
+            return original_decode(column)
+        with patch.object(f, '_image_values', decode_once):
+            report = f.convert(root / "input", "ego_head", root / "out", "native", 900)
+        assert decoded == {name: 1 for name in ('observation.images.taxel', 'tactile.pad', 'observation.images.large_pad')}
+        assert not report["failed"] and len(report["episodes"]) == 1
+        ep = root / "out" / report["episodes"][0]["episode_id"]
+        context = json.loads((ep / "context.json").read_text())
+        loaded = me.load(ep)
+        access = Access(loaded)
+        inventory = access.inventory()
+        errors = []
+        expected = {"observation.images.taxel": [700, 800], "tactile.pad": [700, 800],
+                    "observation.images.large_pad": [700, 800],
+                    "contact_flags": [2**60, 2**60 + 1], "gapped_flags": [2**60, 2**60 + 1],
+                    "camera_time_ns": clock[:2].tolist(),
+                    "sensor_time_us": (clock[:2] // 1000).tolist(), "conflicting_time": clock[:2].tolist()}
+        for name, values in expected.items():
+            native = [row for row in inventory if row["name"] == name and row["kind"] == "array"]
+            if not native:
+                errors.append(f"{name}: no typed source field")
+                continue
+            inspected = access.inspect({"field_id": native[0]["id"], "mode": "samples",
+                                        "start_row": 0, "end_row": 2, "columns": [0]})
+            if inspected["values"] != [[value] for value in values]:
+                errors.append(f"{name}: source readings changed: {inspected['values']}")
+            assert inspected["source_frame_indices"] == [0, 1]
+            assert inspected["limitations"] and "times_s" not in inspected
+            if name == "gapped_flags":
+                missing = access.inspect({"field_id": native[0]["id"], "mode": "samples",
+                                          "start_row": 7, "end_row": 11, "columns": [0, 1]})
+                assert missing["values"][0] == [None, None] and missing["values"][-1] == [None, None]
+                assert missing["values"][1] == [2**60, 2**60 + 2]
+                variant = next(row for row in native if row['descriptor']['source_shape'] == [1])
+                odd = access.inspect({"field_id": variant['id'], "mode": "samples",
+                                      "start_row": 10, "end_row": 11, "columns": [0]})
+                assert odd['values'] == [[2**60]] and odd['source_present'] == [True]
+            if name in ("observation.images.taxel", "tactile.pad", "observation.images.large_pad"):
+                assert native[0]["dtype"] == "uint16"
+                assert inspected["component_units"] == ["raw_count"]
+        for name in ("observation.images.taxel", "tactile.pad", "observation.images.large_pad"):
+            if name not in loaded["signals"] or loaded["signals"][name][0, 0] != 700:
+                errors.append(f"{name}: aligned image readings missing or quantized")
+        if "pressure_kpa" not in loaded["signals"]:
+            errors.append("declared pressure ramp erased as a counter")
+        if clock_findings(loaded):
+            errors.append(f"synchronized declared clocks reported apart: {context.get('clocks')}")
+        assert not {"contact_flags", "gapped_flags"} & set(loaded["signals"]), "lossy integer projection exposed"
+        assert "conflicting_time" not in {row['name'] for row in context['clocks']}
+        assert any(issue['kind'] == 'clock_units_unresolved' and issue['signal'] == 'conflicting_time'
+                   for issue in context['reader_issues'])
+        assert not errors, "\n".join(errors)
+
+        # A source with only exact integer evidence must enter the default discovery path on its own.
+        from label import dictionary
+        from label.evidence_access import needs_inspection, source_proof, equivalent_source_proof
+        from label.source_eligibility import needs_extra_evidence
+        _lerobot(root / "native_only", {0: {"contact_flags": flags}},
+                 feats={"contact_flags": features["contact_flags"]})
+        native_report = f.convert(root / "native_only", "ego_head", root / "native_out", "native", 900)
+        assert not native_report['failed']
+        native_ep = root / "native_out" / native_report['episodes'][0]['episode_id']
+        native_ctx = json.loads((native_ep / 'context.json').read_text())
+        native_ctx['represented_source_members'] = {'json': {name: [''] for name in native_ctx['recorded_metadata']}}
+        (native_ep / 'context.json').write_text(json.dumps(native_ctx))
+        native_loaded = me.load(native_ep)
+        assert not native_loaded['signals'] and not needs_extra_evidence(native_loaded['context'])
+        assert needs_inspection(native_loaded, {})
+        assert dictionary.needs_interpretation([native_ep])
+        native_inventory = dictionary.inventory([native_ep])
+        field = next(row for row in native_inventory['fields'] if row['name'] == 'contact_flags' and row['kind'] == 'native')
+        assert field['dtype'] == 'uint64' and field['shape'] == [] and not field.get('summary')
+        from label.dictionary_context import apply_context
+        import copy
+        receipt = dictionary._base(native_inventory, 'complete')
+        receipt['raw_text'] = json.dumps({'entries': [{'id': field['id'], 'meaning': 'recorded status flags',
+                                                      'role': 'event_flag'}]})
+        dictionary._parse(receipt)
+        overrides = {'schema': 1, 'revision': 1, 'entries': {field['id']: {'meaning': 'reviewed status flags'}}}
+        native_loaded['context'] = apply_context(native_ctx, receipt, overrides)
+        bound = next(row for row in Access(native_loaded).inventory() if row['kind'] == 'array')
+        assert bound['descriptor']['interpretation']['meaning'] == 'reviewed status flags'
+        assert bound['descriptor']['interpretation']['role'] == 'event_flag'
+        for property, value in [('array', 'wrong_key'), ('descriptor', {'unit': 'other_units'})]:
+            changed = copy.deepcopy(native_ctx)
+            changed['table_field_inventory'][0][property] = value
+            changed = apply_context(changed, receipt, overrides)
+            assert not any(row['kind'] == 'native' for row in changed['data_dictionary']['fields'])
+        assert str(root) not in json.dumps(Access(native_loaded).inventory())
+        assert str(root) not in json.dumps(dictionary._request(native_inventory))
+        before = source_proof(native_ctx, native_ep)
+        with np.load(native_ep / native_ctx['recorded_table_fields']) as archive:
+            arrays = {key: archive[key] for key in archive.files}
+        arrays[native_ctx['table_field_inventory'][0]['array']][1] += np.uint64(1)
+        np.savez(native_ep / native_ctx['recorded_table_fields'], **arrays)
+        assert not equivalent_source_proof(before, source_proof(native_ctx, native_ep))
+        assert dictionary.inventory([native_ep])['digest'] != native_inventory['digest']
+        rebound = next(row for row in Access(native_loaded).inventory() if row['kind'] == 'array')
+        assert not rebound['descriptor']['interpretation'], 'source mutation must withhold machine and human meanings'
+
+
+def test_lerobot_packed_table_native_arrays_keep_their_recorded_episode_owner():
+    import numpy as np
+    from label import episode as me
+    from label.evidence_access import Access
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        flags = np.array([2**60 + i % 2 for i in range(15)] + [2**60 + 9 + i % 2 for i in range(15)], np.uint64)
+        _lerobot_v3(root / 'input', {'observation.images.front': 30}, {
+            'episode_index': np.repeat([0, 1], 15), 'frame_index': np.tile(np.arange(15), 2),
+            'timestamp': np.tile(np.arange(15) / 30, 2), 'contact_flags': flags})
+        report = f.convert(root / 'input', 'ego_head', root / 'out', 'native', 900)
+        assert not report['failed'] and len(report['episodes']) == 2
+        for episode in report['episodes']:
+            loaded = me.load(root / 'out' / episode['episode_id'])
+            owner = loaded['context']['episode_index']
+            access = Access(loaded)
+            native = next(row for row in access.inventory() if row['kind'] == 'array' and row['name'] == 'contact_flags')
+            result = access.inspect({'field_id': native['id'], 'mode': 'samples', 'columns': [0]})
+            assert result['values'] == [[int(value)] for value in flags[owner * 15:(owner + 1) * 15]]
+            assert result['source_frame_indices'] == list(range(15))
+            assert native['descriptor']['episode_index'] == owner
+
+
+def test_lerobot_bookkeeping_alone_keeps_rgb_default_but_unknown_ramps_remain_measurements():
+    import json
+    import numpy as np
+    from label import episode as me, dictionary
+    from label.evidence_access import needs_inspection
+    from label.source_eligibility import needs_extra_evidence
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        cases = [('seq', np.arange(30, dtype=np.int64), {}),
+                 ('counter', np.uint64(2**60) + np.arange(30, dtype=np.uint64), {}),
+                 ('camera_time_ns', 1_700_000_000_000_000_000 + np.arange(30, dtype=np.int64) * 30_000_000, {'unit': 'ns'}),
+                 ('diagnostics', np.linspace(0, 1, 30), {'role': 'bookkeeping'}),
+                 ('untyped_reading', np.arange(30, dtype=np.int64), {})]
+        for name, values, metadata in cases:
+            _lerobot(root / name, {0: {name: values}}, feats={name: {'dtype': str(values.dtype), 'shape': [1], **metadata}})
+            report = f.convert(root / name, 'ego_head', root / (name + '_out'), 'native', 900)
+            assert not report['failed']
+            ep = root / (name + '_out') / report['episodes'][0]['episode_id']
+            ctx = json.loads((ep / 'context.json').read_text())
+            ctx['represented_source_members'] = {'json': {source: [''] for source in ctx['recorded_metadata']}}
+            (ep / 'context.json').write_text(json.dumps(ctx))
+            loaded = me.load(ep)
+            assert not needs_extra_evidence(loaded['context'])
+            assert needs_inspection(loaded, {}) == (name == 'untyped_reading'), name
+            assert dictionary.needs_interpretation([ep]) == (name == 'untyped_reading'), name
+            assert (name in loaded['signals']) == (name == 'untyped_reading'), name
+
+
+def test_lerobot_typed_retention_checks_budget_before_stacking_and_names_withheld_fields():
+    import numpy as np
+    from label import episode as me
+    from label.evidence_access import Access
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        values = [np.full(128, 2**60 + i % 2, np.uint64) for i in range(30)]
+        _lerobot(root / 'input', {0: {'wide_flags': values, 'ordinary': np.linspace(0, 1, 30)}})
+        from unittest.mock import patch
+        original_stack = np.stack
+        def bounded_stack(rows, *args, **kwargs):
+            assert sum(row.nbytes for row in rows) <= 4096, 'native allocation occurred before its retention limit'
+            return original_stack(rows, *args, **kwargs)
+        with patch.object(f, 'SIGNAL_EPISODE_BYTES', 4096), patch.object(np, 'stack', bounded_stack):
+            report = f.convert(root / 'input', 'ego_head', root / 'out', 'native', 900)
+        assert not report['failed'], report['failed']
+        loaded = me.load(root / 'out' / report['episodes'][0]['episode_id'])
+        assert 'ordinary' in loaded['signals'] and 'wide_flags' not in loaded['signals']
+        inventory = Access(loaded).inventory()
+        assert not any(row['kind'] == 'array' and row['name'] == 'ordinary' for row in inventory)
+        withheld = next(row for row in inventory if row['name'] == 'wide_flags' and row['kind'] == 'unreadable')
+        assert 'limit' in withheld['descriptor']['reason']
+        assert any(issue['kind'] == 'native_retention_limit' for issue in loaded['context']['reader_issues'])
+
+
 def _jpeg(shade: int, w: int = 64, h: int = 48) -> bytes:
     import io
     import numpy as np
@@ -2522,6 +2743,255 @@ def _lerobot_image_cameras_the_model_is_not_shown_reach_the_board(tmp_path):
     un = ctx.get("unshown_cameras") or []
     assert [u["name"] for u in un] == ["observation.images.top_mask"] and un[0]["n_frames"] == 10, un
     assert Path(un[0]["packed"]).exists()
+
+    # Mixed storage still uses camera roles, with each table image on its original source row.
+    from label import episode as me
+    from label.evidence_access import Access, current_descriptor
+    from board import clips
+    import pandas as pd
+    import pytest
+    import json
+    for image_main in (False, True):
+        mixed = tmp_path / ('image_scene' if image_main else 'video_scene')
+        image_key = 'observation.images.head' if image_main else 'observation.images.aux_camera'
+        cells = [{'bytes': _jpeg(40 + k * 5, 96, 72)} for k in range(12)]
+        cells[3], cells[7] = {'bytes': b'broken jpeg'}, None
+        source_descriptor = {**feat, 'vendor_metadata': {'optics': 'unclassified', 'calibration': None}}
+        broken_key = 'observation.images.broken_camera'
+        _lerobot(mixed, {0: {image_key: cells, broken_key: [{'bytes': b'broken'}] * 12,
+                  'language_instruction': ['observe initial'] * 6 + ['observe later'] * 6}},
+                 feats={image_key: source_descriptor, broken_key: feat,
+                 'timestamp': {'dtype': 'int64', 'shape': [1], 'units': 'ns'}}, n_video=12)
+        video_key = 'observation.images.tactile_camera' if image_main else 'observation.images.cam_high'
+        if image_main:
+            old = mixed / 'videos' / 'chunk-000' / 'observation.images.cam_high'
+            old.rename(old.with_name(video_key))
+            info_path = mixed / 'meta' / 'info.json'
+            info = json.loads(info_path.read_text())
+            info['features'][video_key] = info['features'].pop('observation.images.cam_high')
+            info_path.write_text(json.dumps(info))
+        table_path = mixed / 'data' / 'chunk-000' / 'episode_000000.parquet'
+        table = pd.read_parquet(table_path)
+        native_clock = np.arange(12, dtype=np.int64) * 40_000_000 + 8_000_000_000
+        table['timestamp'] = native_clock
+        table.to_parquet(table_path)
+        output = tmp_path / ('eps_image_scene' if image_main else 'eps_video_scene')
+        report = f.convert(mixed, 'ego_head', output, 'test', 900)
+        assert not report['failed'], report
+        context = _episode_ctx(output, report, '000000')
+        directory = output / context['episode_id']
+        episode = me.load(directory)
+        assert context['cameras']['exo']['key'] == (image_key if image_main else video_key)
+        (retained,) = context.get('unshown_cameras') or []
+        assert retained['name'] == (video_key if image_main else image_key)
+        assert current_descriptor(context, {'access_kind': 'image', 'view': 'unshown1'}) == retained
+        assert current_descriptor(context, {'access_kind': 'image', 'view': 'exo'}) == context['cameras']['exo']
+        assert retained['n_frames'] == 12
+        assert {issue['camera'] for issue in _issues(context, 'camera_not_decodable')} == {broken_key}
+        assert {issue['camera'] for issue in _issues(context, 'frames_not_decodable')} == {image_key}
+        with np.load(directory / context['recorded_container_times']['file']) as clocks:
+            np.testing.assert_array_equal(clocks['timestamp'], native_clock)
+        assert context['recorded_container_times']['clocks']['timestamp']['units'] == 'ns'
+        assert context['annotation_subtasks'][0]['t1'] == pytest.approx(.24 if image_main else .2)
+        assert context['annotation_subtasks'][0]['raw_t0'] == 8_000_000_000
+        access = Access(episode)
+        images = [field for field in access.inventory() if field['kind'] == 'image']
+        assert len(images) == 2
+        image_field = next(field for field in images if field['descriptor'].get('key') == image_key)
+        assert image_field['descriptor']['source_descriptor'] == source_descriptor
+        receipt = access.inspect({'field_id': image_field['id'], 'mode': 'images', 'rows': [0, 3, 7, 11]})
+        assert receipt['rows'] == [0, 11] and receipt['unavailable_rows'] == [3, 7]
+        if image_main:
+            np.testing.assert_allclose(episode['times']['exo'], np.arange(12) * .04)
+        else:
+            assert receipt['source_frames'][0]['source_row'] == 0
+            assert receipt['source_frames'][-1]['source_row'] == 11
+            assert receipt['source_frames'][-1]['source_time_s'] == pytest.approx(.44)
+            assert 'times_s' not in receipt
+        request = me.build_request(directory, inspect_evidence=True)
+        assert request['plan']['ks'][0] == 0 and request['plan']['ks'][-1] == 11
+        assert not any(name.startswith(image_key) for name in episode['signals'])
+        jobs = clips.episode_jobs(directory, tmp_path / 'mixed_clips' / str(image_main), True)
+        assert len(jobs) == 2
+        for job in jobs:
+            assert clips.extract_one(*job[:4], clips.find_ffmpeg(), 1, *job[4:13]) is None
+            assert clips.clip_frames(job[3]) == 12
+
+
+    # Packed video windows and embedded images retain the same proven episode owner.
+    packed = tmp_path / 'packed_mixed'
+    image_key, video_key = 'observation.images.head', 'observation.images.tactile_camera'
+    packed_images = [{'bytes': _jpeg(20 + owner * 80 + row * 4, 96, 72)}
+                     for owner in range(2) for row in range(12)]
+    native_clock = np.tile(np.arange(12, dtype=np.int64) * 40_000_000, 2)
+    _lerobot_v3(packed, {video_key: 24}, {'episode_index': np.repeat([0, 1], 12),
+        'frame_index': np.tile(np.arange(12), 2), 'timestamp': native_clock, image_key: packed_images,
+        'observation.images.depth': [{'bytes': _png(np.full((128, 128), 700 + owner * 100, np.uint16))}
+                                     for owner in range(2) for _ in range(12)]})
+    info_path = packed / 'meta' / 'info.json'
+    info = json.loads(info_path.read_text())
+    info['features'].update({image_key: feat, 'timestamp': {'dtype': 'int64', 'shape': [1], 'unit': 'ns'},
+        'observation.images.depth': {'dtype': 'image', 'shape': [128, 128, 1], 'sensor_type': 'depth', 'units': 'mm'}})
+    info_path.write_text(json.dumps(info))
+    output = tmp_path / 'eps_packed_mixed'
+    report = f.convert(packed, 'ego_head', output, 'test', 900)
+    assert not report['failed'] and len(report['episodes']) == 2, report
+    full_packets = f.probe(packed / 'videos' / video_key / 'chunk-000' / 'file-000.mp4')['pts']
+    for record in report['episodes']:
+        directory = output / record['episode_id']
+        episode = me.load(directory)
+        owner = episode['context']['episode_index']
+        assert episode['context']['cameras']['exo']['key'] == image_key
+        access = Access(episode)
+        side = next(field for field in access.inventory() if field['kind'] == 'image' and
+                    field['descriptor'].get('key') == video_key)
+        receipt = access.inspect({'field_id': side['id'], 'mode': 'images', 'rows': [0, 11]})
+        depth_field = next(field for field in access.inventory() if field['kind'] == 'depth')
+        depth_receipt = access.inspect({'field_id': depth_field['id'], 'mode': 'regions', 'rows': [0, 11]})
+        np.testing.assert_allclose(depth_receipt['values'], [[.7 + owner * .1], [.7 + owner * .1]], rtol=0, atol=1e-12)
+        assert [frame['source_table_row'] for frame in depth_receipt['source_frames']] == [0, 11]
+        assert [frame['source_pts'] for frame in receipt['source_frames']] == [
+            int(full_packets[owner * 12]), int(full_packets[owner * 12 + 11])]
+        with np.load(directory / episode['context']['recorded_container_times']['file']) as clocks:
+            np.testing.assert_array_equal(clocks['timestamp'], native_clock[owner * 12:(owner + 1) * 12])
+        images = me._decode_view(episode, 'exo', [0, 11])
+        for row in (0, 11):
+            assert abs(np.asarray(images[row]).mean() - (20 + owner * 80 + row * 4)) <= 3
+        request = me.build_request(directory, inspect_evidence=True)
+        assert request['timesteps'][-1] == pytest.approx(.44, abs=.001)
+        from label import pieces, policy
+        ctx = json.loads((directory / 'context.json').read_text())
+        ctx['annotation_policy'] = {**policy.resolve(ctx), 'part_max_s': .25}
+        (directory / 'context.json').write_text(json.dumps(ctx))
+        parts = pieces.write_pieces(directory, tmp_path / 'packed_depth_parts' / str(owner))
+        assert len(parts) == 2
+        for part in parts:
+            loaded_part = me.load(part)
+            offset = int(np.searchsorted(np.arange(12) * .04, loaded_part['context']['piece']['t0_s'] - .0005))
+            access_part = Access(loaded_part)
+            native_depth = next(field for field in access_part.inventory() if field['kind'] == 'depth')
+            result = access_part.inspect({'field_id': native_depth['id'], 'mode': 'regions', 'rows': [0]})
+            assert result['source_frames'][0]['source_table_row'] == offset
+            np.testing.assert_allclose(result['values'], [[.7 + owner * .1]], rtol=0, atol=1e-12)
+            with np.load(loaded_part['context']['recorded_container_times']['file']) as original_clock:
+                np.testing.assert_array_equal(original_clock['timestamp'], native_clock[owner * 12:(owner + 1) * 12])
+            assert str(tmp_path) not in json.dumps(access_part.inventory())
+        for job in clips.episode_jobs(directory, tmp_path / 'packed_clips' / str(owner), True):
+            assert clips.extract_one(*job[:4], clips.find_ffmpeg(), 1, *job[4:13]) is None
+            assert clips.clip_frames(job[3]) == 12
+
+
+    # Declared scalar image measurements bypass the colour encoder, independent of pixel size.
+    from label import depth as dp
+    from label.evidence_access import same_source_proof
+    cases = [('depth', {'units': 'mm', 'scale_m': .001}, np.uint16, 700, 800),
+             ('depth', {}, np.uint16, 700, 800),
+             ('disparity', {'units': 'px', 'scale_m': .001}, np.uint16, 700, 800),
+             ('depth', {'units': 'mm'}, np.uint8, 70, 80),
+             ('depth', {'units': 'mm', 'scale_m': 1.}, np.uint16, 700, 800),
+             ('depth', {'units': 'mm'}, np.uint16, 700, 80, 'mixed_dtype'),
+             ('depth', {'units': 'mm'}, np.uint8, 70, 80, 'rgb'),
+             ('depth pressure', {'units': 'mm'}, np.uint16, 700, 800),
+             ('camera', {}, np.uint8, 70, 80)]
+    for index, case in enumerate(cases):
+        representation, calibration, dtype, first, second = case[:5]
+        variant = case[5] if len(case) > 5 else None
+        source = tmp_path / f'declared_depth_{index}'
+        key = 'observation.images.depth'
+        shape = (128, 128, 3) if representation == 'camera' or variant == 'rgb' else (128, 128)
+        values = [np.full(shape, first, dtype), np.full(shape, second, dtype), None, None,
+                  np.zeros(shape, dtype)]
+        if variant == 'mixed_dtype':
+            values[1] = values[1].astype(np.uint8)
+        cells = [{'bytes': _png(value)} if value is not None else None for value in values]
+        cells[3] = {'bytes': b'not a PNG'}
+        feature = {'dtype': 'image', 'shape': list(shape), 'sensor_type': representation, **calibration}
+        _lerobot(source, {0: {key: cells}}, feats={key: feature,
+                 'timestamp': {'dtype': 'int64', 'shape': [1], 'units': 'ns'}}, n_video=5)
+        table_path = source / 'data/chunk-000/episode_000000.parquet'
+        table = pd.read_parquet(table_path)
+        clock = 1_700_000_000_000_000_000 + np.arange(5, dtype=np.int64) * 20_000_000
+        table['timestamp'] = clock
+        table.to_parquet(table_path)
+        original = table_path.read_bytes()
+        output = tmp_path / f'depth_output_{index}'
+        from unittest.mock import patch
+        from PIL import Image
+        attempts, original_open = [], Image.open
+        def open_once(payload, *args, **kwargs):
+            if hasattr(payload, 'getvalue'):
+                attempts.append(payload.getvalue())
+            return original_open(payload, *args, **kwargs)
+        with patch.object(Image, 'open', open_once):
+            report = f.convert(source, 'ego_head', output, 'test', 900)
+        assert len(attempts) == 4
+        assert not report['failed'], report
+        directory = output / report['episodes'][0]['episode_id']
+        episode = me.load(directory)
+        access = Access(episode)
+        fields = access.inventory()
+        measured = [field for field in fields if field['kind'] == 'depth']
+        if representation == 'camera':
+            assert not measured and any(field['kind'] == 'image' and field.get('descriptor', {}).get('key') == key
+                                        for field in fields)
+            continue
+        if representation == 'depth pressure' or variant == 'rgb':
+            assert not measured
+            native = next(field for field in fields if field['kind'] == 'array' and field['name'] == key)
+            receipt = access.inspect({'field_id': native['id'], 'mode': 'samples', 'start_row': 0,
+                                      'end_row': 2, 'columns': [0]})
+            assert receipt['values'] == [[first], [second]]
+            continue
+        assert len(measured) == (2 if variant == 'mixed_dtype' else 1), fields
+        streams = {**episode['depth'], **episode['additional_depth']}
+        for field in measured:
+            descriptor = field['descriptor']
+            assert descriptor['source_key'] == key
+            assert descriptor['source_dtype'] in ({'uint8', 'uint16'} if variant == 'mixed_dtype' else {np.dtype(dtype).name})
+            assert descriptor['source_units'] == calibration.get('units') and descriptor['paired_camera'] is None
+            expected_rows = ([1] if descriptor['source_dtype'] == 'uint8' else [0, 4]) if variant == 'mixed_dtype' else [0, 1, 4]
+            view, entry = field['name'], streams[field['name']]
+            decoded = dp.at_anchor(episode, streams, view, [0, 1, 2, 3, 4])
+            assert sorted(decoded) == expected_rows
+            for row in decoded:
+                np.testing.assert_array_equal(decoded[row], values[row])
+                assert decoded[row].dtype == values[row].dtype
+            receipt = access.inspect({'field_id': field['id'], 'mode': 'regions', 'rows': [0, 1, 2, 3, 4],
+                                      'roi': [0, 0, 1, 1]})
+            assert receipt['rows'] == expected_rows
+            assert receipt['unavailable_rows'] == [row for row in range(5) if row not in expected_rows]
+            metric = representation == 'depth' and calibration.get('units') == 'mm' and calibration.get('scale_m', .001) == .001
+            factor = .001 if metric else 1
+            expected = [[(first if row == 0 else second) * factor] if row != 4 else [None] for row in expected_rows]
+            assert receipt['values'] == expected
+            if 4 in expected_rows:
+                assert receipt['frames'][-1]['valid_fraction'] == 0
+            assert [frame['source_table_row'] for frame in receipt['source_frames']] == expected_rows
+            assert 'times_s' not in receipt and receipt['limitations']
+            from board.public_export import project
+            projected = project({'context': episode['context'], 'depth': streams,
+                                 'receipt': receipt, 'source_rows': 5})
+            assert entry['source_row_map_file'] not in json.dumps(projected, default=lambda value: value.tolist())
+            assert all('source_row_map_file' not in value for value in projected['depth'].values())
+            assert projected['source_rows'] == 5
+            assert [frame['source_table_row'] for frame in projected['receipt']['source_frames']] == expected_rows
+        with np.load(directory / episode['context']['recorded_container_times']['file']) as clocks:
+            np.testing.assert_array_equal(clocks['timestamp'], clock)
+        assert table_path.read_bytes() == original
+        from label.evidence_access import withhold_stale_untimed
+        claim = {'headline': 'Stored region readings', 'adds_beyond_video': True,
+                 'evidence': [{'evidence_id': receipt['id'], 'rows': [expected_rows[0]], 'columns': [0]}]}
+        record = {**access.record(), **access.bind([claim])}
+        assert record['untimed_findings'] and same_source_proof(record['source_proof'], episode['context'], directory)
+        row_map = Path(entry['source_row_map_file'])
+        rows = np.load(row_map)
+        rows[0] += 1
+        np.save(row_map, rows)
+        assert not same_source_proof(record['source_proof'], episode['context'], directory)
+        withhold_stale_untimed(record, episode['context'], directory)
+        assert not record['untimed_findings'] and record['withheld_untimed_findings']
+        assert str(tmp_path) not in json.dumps(fields)
+
 
 
 def test_lerobot_image_cameras_the_model_is_not_shown_reach_the_board():

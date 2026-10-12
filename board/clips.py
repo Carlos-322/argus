@@ -165,9 +165,10 @@ def start_offsets(ep_dir: Path, sources: dict, fps: float = 30.0) -> dict:
     first frame offset s after it (RealOmni's right gripper camera starts up to 2 s after the left one); one that
     started earlier drops its skip frames from before the clock's start (more than half a frame before it), so it
     never plays early, and its next frame is at most half a frame from 0."""
-    tp = ep_dir / "times.npz"
+    ctx = _context(ep_dir)
+    tp = ep_dir / (ctx.get("real_times") or "times.npz")
     cams = cams_of(sources)
-    zero = _context(ep_dir).get("clock_zero_s")
+    zero = ctx.get("clock_zero_s")
     if not tp.exists() or not cams or (len(cams) < 2 and zero is None):
         return {}
     import numpy as np
@@ -196,7 +197,8 @@ def clip_times(ep_dir: Path, sources: dict, fps: float = 30.0) -> dict:
     (sources.json n_frames): the times label/episode.py chooses the model's frames by (frame_time, and each paired
     camera's kmap, nearest in time). The clock starts where start_offsets puts it."""
     import numpy as np
-    tp = ep_dir / "times.npz"
+    ctx = _context(ep_dir)
+    tp = ep_dir / (ctx.get("real_times") or "times.npz")
     cams = cams_of(sources)
     if not tp.exists() or not cams:
         return {}
@@ -214,7 +216,8 @@ def clip_times(ep_dir: Path, sources: dict, fps: float = 30.0) -> dict:
 
 def extract_one(packed: str, base_s: float, n_frames: int, out_mp4: Path,
                 ffmpeg: str, threads: int, fps: float = 30.0, main: bool = True, offset_s: float = 0.0,
-                skip: int = 0, times=None, query_s=None, query_map=None, source_pts=None) -> dict | None:
+                skip: int = 0, times=None, query_s=None, query_map=None, source_pts=None,
+                last_frame_interval_s: float | None = None) -> dict | None:
     """Exactly the episode's n_frames, starting at its first frame. Packed files are on an exact frame grid,
     so seeking half a frame before the episode's offset lands on its first frame whichever way the decimal
     rounds, and -frames:v stops after the last one (never a frame of the next episode). Per-episode files
@@ -274,7 +277,10 @@ def extract_one(packed: str, base_s: float, n_frames: int, out_mp4: Path,
             raise RuntimeError(f"{out_mp4.name}: no frame of {packed} decodes")
         if times is not None and len(times) >= skip + got:
             mapping = None if query_map is None else query_map - skip
-            retime(tmp, times[skip:skip + got], fps, main, query_s, mapping)
+            interval = last_frame_interval_s
+            if interval is not None and skip + got < len(times):
+                interval = float(times[skip + got] - times[skip + got - 1])
+            retime(tmp, times[skip:skip + got], fps, main, query_s, mapping, interval)
         os.replace(tmp, out_mp4)
     finally:
         tmp.unlink(missing_ok=True)       # a cut that failed part way leaves no half written clip behind
@@ -289,27 +295,33 @@ HALFWAY_TAG = "each frame shown from halfway after the capture before it"
 DISPLAY_TICKS_PER_S = 1_000_000
 
 
-def shown_from(capture_s, fps: float = 30.0, lead_s: float = 0.0):
+def shown_from(capture_s, fps: float = 30.0, lead_s: float = 0.0, last_frame_interval_s: float | None = None):
     """When each frame of a camera with capture times (capture_s, on the episode's clock) comes on screen, and when the
     last one goes off: from halfway after the capture before it, so at every time the board shows the frame captured
     nearest it, which is how label/episode.py picks a camera's frame for an instant (kmap, nearest in time). The
     first frame comes on lead_s before its capture, as early as the request shows it, and never before the clip's
     start at 0; the last stays on half its step after its capture (half a frame at fps for a camera with one frame).
+    A declared last_frame_interval_s retains the owned presentation end instead of inferring a half-step.
     Returns (starts, end) in seconds."""
     import numpy as np
     t = np.asarray(capture_s, dtype=np.float64)
     starts = np.concatenate([[max(0.0, float(t[0]) - lead_s)], (t[1:] + t[:-1]) / 2])
     step = float(t[-1] - t[-2]) if len(t) > 1 else 1.0 / fps
+    if last_frame_interval_s is not None:
+        if not np.isfinite(last_frame_interval_s) or last_frame_interval_s <= 0:
+            raise ValueError("the final owned frame has no usable presentation interval")
+        return starts, float(t[-1]) + last_frame_interval_s
     return starts, float(t[-1]) + step / 2
 
 
-def display_ticks(capture_s, fps: float = 30.0, main: bool = True, query_s=None, query_map=None):
+def display_ticks(capture_s, fps: float = 30.0, main: bool = True, query_s=None, query_map=None,
+                  last_frame_interval_s: float | None = None):
     """Display starts in fine ticks, constrained by the request's actual frame choices. A midpoint tie can resolve
     either way under float arithmetic, so its encoded boundary must keep that choice rather than recompute it.
     Other instants differ from the halfway boundary by at most one tick."""
     import numpy as np
     from label.episode import PAIRED_SPAN_SLACK_S
-    starts, end = shown_from(capture_s, fps, 0.0 if main else PAIRED_SPAN_SLACK_S)
+    starts, end = shown_from(capture_s, fps, 0.0 if main else PAIRED_SPAN_SLACK_S, last_frame_interval_s)
     ticks = np.floor(starts * DISPLAY_TICKS_PER_S).astype(np.int64) + 1
     ticks[0] = int(np.floor(starts[0] * DISPLAY_TICKS_PER_S))
     if query_s is not None and query_map is not None:
@@ -332,7 +344,8 @@ def display_ticks(capture_s, fps: float = 30.0, main: bool = True, query_s=None,
     return ticks, max(int(np.ceil(end * DISPLAY_TICKS_PER_S)), int(ticks[-1]) + 1)
 
 
-def retime(mp4: Path, capture_s, fps: float = 30.0, main: bool = True, query_s=None, query_map=None) -> None:
+def retime(mp4: Path, capture_s, fps: float = 30.0, main: bool = True, query_s=None, query_map=None,
+           last_frame_interval_s: float | None = None) -> None:
     """Put the frames of an encoded clip, in display order, on screen when shown_from says (capture_s, their capture
     times on the episode's clock, seconds), each lasting until the next one comes on: the times label/episode.py
     chooses the model's frames by, where the file's own timestamps can be an even rate its recorder never kept (a
@@ -340,12 +353,13 @@ def retime(mp4: Path, capture_s, fps: float = 30.0, main: bool = True, query_s=N
     (PAIRED_SPAN_SLACK_S), where label/episode.py _in_span first shows it; the request's instants are the main
     camera's own captures, so it comes on at its first. Encoded packets keep their decode order. Their decode clock
     spans the full presentation duration and starts early enough that every packet decodes before it is displayed.
-    The clip's comment is HALFWAY_TAG."""
+    The clip's comment is HALFWAY_TAG. A declared final owned presentation interval supplies the stop;
+    capture clocks without it retain their existing half-step stop."""
     import av
     import numpy as np
     from fractions import Fraction
 
-    new, stop = display_ticks(capture_s, fps, main, query_s, query_map)
+    new, stop = display_ticks(capture_s, fps, main, query_s, query_map, last_frame_interval_s)
     tmp = mp4.with_name(mp4.stem + ".time.mp4")
     try:
         with av.open(str(mp4)) as src:
@@ -717,7 +731,7 @@ def episode_jobs(ep_dir: Path, mp4_dir: Path, force: bool, prefix: str = ""):
     times = clip_times(ep_dir, sources, fps)
     import numpy as np
     packets = {}
-    if ctx.get("piece") and ctx.get("real_times"):
+    if ctx.get("real_times"):
         with np.load(ep_dir / ctx["real_times"]) as z:
             packets = {cam: z[f"{cam}_pts"] for cam in cams if f"{cam}_pts" in z.files}
     query = times.get(clock_cam)
@@ -730,7 +744,7 @@ def episode_jobs(ep_dir: Path, mp4_dir: Path, force: bool, prefix: str = ""):
             km = (np.load(ep_dir / s["kmap"]) if s.get("kmap") else
                   np.arange(len(query)) if query is not None else None)
             jobs.append((s["packed"], float(s["base_s"]), int(s["n_frames"]), o, fps, cam == big, off, skip,
-                         times.get(cam), query, km, packets.get(cam), ep_dir.name, cam))
+                         times.get(cam), query, km, packets.get(cam), s.get("last_frame_interval_s"), ep_dir.name, cam))
     # Retained cameras keep their own start on the episode clock. A verified scene may use the main size. One that started
     # before the clock drops its frames from before it, as start_offsets does
     for view, e in unshown_views(ctx):
@@ -748,12 +762,12 @@ def episode_jobs(ep_dir: Path, mp4_dir: Path, force: bool, prefix: str = ""):
                 from prepare.formats import nearest
                 km = nearest(ts, query) if query is not None else None
                 jobs.append((str(e["packed"]), float(e.get("base_s") or 0.0), len(ts), o, f, view == big,
-                             off, skip, ts, query, km, pts, ep_dir.name, view))
+                             off, skip, ts, query, km, pts, e.get("last_frame_interval_s"), ep_dir.name, view))
                 continue
             start = float(e.get("start_s") or 0.0) - float(ctx.get("clock_zero_s") or 0.0)
             skip = int(round(-start * f)) if start < 0 else 0
             jobs.append((str(e["packed"]), float(e.get("base_s") or 0.0), int(e["n_frames"]), o, f, view == big,
-                         max(0.0, start + skip / f), skip, None, None, None, None, ep_dir.name, view))
+                         max(0.0, start + skip / f), skip, None, None, None, None, None, ep_dir.name, view))
     return jobs
 
 
@@ -835,6 +849,67 @@ def failed_reason(cams: dict, ep_dir: Path) -> str:
     return f"the {camera_label(view, _context(ep_dir))} video could not be decoded, so this episode was left out"
 
 
+def surviving_video_clock(ep_dir: Path, ctx: dict, src: dict, main: str) -> float:
+    """Recover owned media PTS without declaring capture synchronization or moving sensor rows."""
+    import numpy as np
+    from prepare.formats import nearest, probe
+    clocks = {}
+    end_intervals = {}
+    notes = ctx.setdefault('camera_clock', {})
+    for view, source in src.items():
+        facts = probe(Path(source['packed']))
+        pts = facts['pts']
+        seconds = np.asarray(pts, dtype=np.float64) * float(facts['time_base'])
+        start = int(np.searchsorted(seconds, float(source.get('base_s') or 0.0) - 1e-7))
+        owned = pts[start:start + int(source['n_frames'])]
+        if not len(owned):
+            raise ValueError(f'{view}: no video presentation timestamps cover its owned source window')
+        if len(owned) < int(source['n_frames']):
+            ctx.setdefault('reader_issues', []).append({'kind': 'camera_short', 'camera': view,
+                'what': f'{view} has {len(owned)} available video timestamps for {source["n_frames"]} declared frames; '
+                        'the available source frames are retained.'})
+            source['n_frames'] = len(owned)
+        own_times = np.asarray(owned, dtype=np.float64) * float(facts['time_base'])
+        clocks[view], clocks[view + '_pts'] = own_times - own_times[0], owned
+        end = start + len(owned)
+        following = seconds[end:][seconds[end:] > own_times[-1]]
+        if len(following):
+            end_intervals[view] = float(following[0] - own_times[-1])
+        else:
+            import av
+            with av.open(str(source['packed'])) as container:
+                stream = container.streams.video[0]
+                end_intervals[view] = next((float(packet.duration * stream.time_base)
+                    for packet in container.demux(stream) if packet.pts == int(owned[-1])
+                    and packet.duration and packet.duration > 0), None)
+        if end_intervals[view] is None:
+            raise ValueError(f'{view}: its final owned packet declares no usable presentation duration')
+        source['last_frame_interval_s'] = end_intervals[view]
+        notes[view] = {'method': 'owned video presentation timestamps',
+                       'what': 'Frame spacing and source packets come from this video. Capture timing is unavailable; '
+                               'each video starts at its own first packet, so shared start and synchronization '
+                               'with other cameras, state and sensors are unverified.'}
+    differences = np.diff(clocks[main])
+    positive = differences[differences > 0]
+    interval = float(np.median(positive)) if len(positive) else end_intervals[main]
+    for view, source in src.items():
+        if view != main:
+            name = f'kmap_{view}.npy'
+            np.save(ep_dir / name, nearest(clocks[view], clocks[main]))
+            source['kmap'] = name
+    previous = {key: ctx[key] for key in ('real_times', 'presentation_times', 'clock_zero_s', 'clock_start_s') if key in ctx}
+    if previous:
+        ctx.setdefault('source', {})['previous_camera_clock'] = previous
+    for key in ('presentation_times', 'clock_zero_s', 'clock_start_s'):
+        ctx.pop(key, None)
+    name = 'surviving_video_times.npz'
+    np.savez(ep_dir / name, **clocks)
+    ctx['real_times'] = name
+    ctx['fps'] = 1.0 / interval
+    ctx['n_state_frames'] = int(src[main]['n_frames'])
+    return float(clocks[main][-1]) + end_intervals[main]
+
+
 def drop_cameras(ep_dir: Path, views, keep_clock: bool = False) -> tuple[str | None, list[dict]]:
     """Take cameras out of a prepared episode, out of sources.json, context.json's cameras and depth.json, so labelling
     and the board never decode them. Returns (the new main camera when the main camera went, else None; the reader
@@ -866,6 +941,14 @@ def drop_cameras(ep_dir: Path, views, keep_clock: bool = False) -> tuple[str | N
     old_name = camera_label(old_main, ctx) if old_main else ""
     rest = {v: s for v, s in src.items() if v not in views}
     paired = bool(rest) and bool(rest[cams_of(rest)[0]].get("kmap"))      # the new main camera, paired by time
+    if keep_clock and paired and old_main in views:
+        from prepare.camera_clock import load_times
+        tp = ep_dir / (ctx.get("real_times") or "times.npz")
+        recorded = load_times(ep_dir, ctx) if tp.exists() else {}
+        replacement = cams_of(rest)[0]
+        if not all(view in recorded and len(recorded[view]) for view in (old_main, replacement)):
+            raise ValueError("cannot preserve the existing label clock after camera loss: "
+                             "the surviving video has no proven placement on that clock")
     for v in views:
         src.pop(v, None)
         (ctx.get("cameras") or {}).pop(v, None)
@@ -892,6 +975,10 @@ def drop_cameras(ep_dir: Path, views, keep_clock: bool = False) -> tuple[str | N
         else:
             for s in src.values():
                 s.pop("kmap", None)
+            # The surviving camera defines footage geometry even when it cannot place the old arrays.
+            seconds = surviving_video_clock(ep_dir, ctx, src, main)
+            ctx["duration_s"] = (max(seconds, float(ctx.get("duration_s") or 0.0))
+                                 if keep_clock else seconds)
             if ctx.get("state_kind") not in (None, "none") or ctx.get("signals"):
                 ctx["state_unaligned"] = (f"It was recorded on the frames of the {old_name}, which could not be "
                                           "decoded, and the episode has no capture times to place it on the other "
@@ -899,7 +986,7 @@ def drop_cameras(ep_dir: Path, views, keep_clock: bool = False) -> tuple[str | N
                 issues.append({"kind": "state_unaligned", "what": f"The recorded state and signals are on the frames "
                                f"of the {old_name}, which could not be decoded, and the episode has no capture times "
                                f"to place them on the {camera_label(main, ctx)}'s frames, so they are not used."})
-    if main in (ctx.get("camera_clock") or {}):
+    if main in (ctx.get("camera_clock") or {}) and not ctx.get('state_unaligned'):
         from prepare.formats import Signals, qualify_camera_signals, write_signals
         sig = Signals()
         if ctx.get("signals"):
@@ -1298,8 +1385,8 @@ def main() -> int:
     unshown_cut: dict[str, set] = {}            # the same for the cameras the model is not shown (unshown_views)
     unshown_broken: dict[str, dict[str, str]] = {}
     with ThreadPoolExecutor(max_workers=args.jobs) as ex:
-        futs = {ex.submit(extract_one, pk, b, du, o, ffmpeg, args.clip_threads, fps, is_main, off, skip, t, q, km, pts):
-                (o, ep, cam) for (pk, b, du, o, fps, is_main, off, skip, t, q, km, pts, ep, cam) in jobs}
+        futs = {ex.submit(extract_one, pk, b, du, o, ffmpeg, args.clip_threads, fps, is_main, off, skip, t, q, km, pts, end):
+                (o, ep, cam) for (pk, b, du, o, fps, is_main, off, skip, t, q, km, pts, end, ep, cam) in jobs}
         for f in as_completed(futs):
             o, ep, cam = futs[f]
             if cam.startswith(UNSHOWN):
@@ -1347,10 +1434,10 @@ def main() -> int:
             # every clip is timed on it (start_offsets); each camera's frames are recorded as they come out
             # the cameras the model is not shown too, at their start on the moved clock (CLOCK_TIME_KEYS)
             redo, again, u_cut, u_broken = {}, set(), set(), {}
-            for (pk, b, du, o, fps, is_main, off, skip, t, q, km, pts, ep, cam) in episode_jobs(d, args.out, True,
+            for (pk, b, du, o, fps, is_main, off, skip, t, q, km, pts, end, ep, cam) in episode_jobs(d, args.out, True,
                                                                                     args.name_prefix):
                 try:
-                    counts = extract_one(pk, b, du, o, ffmpeg, args.clip_threads, fps, is_main, off, skip, t, q, km, pts)
+                    counts = extract_one(pk, b, du, o, ffmpeg, args.clip_threads, fps, is_main, off, skip, t, q, km, pts, end)
                     if cam.startswith(UNSHOWN):
                         u_cut.add(cam)
                         continue

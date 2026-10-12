@@ -23,6 +23,167 @@ def test_only_a_recording_longer_than_the_limit_is_cut(tmp_path):
         assert pieces.needs_pieces(d) is cut, secs
 
 
+@pytest.mark.parametrize('variable', [False, True])
+def test_fallback_camera_parts_keep_full_footage_and_unaligned_source_rows(tmp_path, variable):
+    """Losing the short anchor must not omit the longer camera's tail or invent sensor alignment."""
+    import base64
+    import io
+    from PIL import Image
+    from board import clips
+    from board.build import episode_seconds
+    from label import policy
+    from test_formats import _clip
+    from test_prepare import joint_names
+
+    upload = tmp_path / 'upload'
+    upload.mkdir()
+    old_video, surviving_video = upload / 'top.mp4', upload / 'wrist_left.mp4'
+    _clip(old_video, 30)
+    import av
+    from fractions import Fraction
+    ticks = np.arange(90) if not variable else np.r_[np.arange(45) * 2, 90 + np.arange(45) * 3]
+    rate = 30 if variable else 15
+    source_times = ticks / rate
+    source_end = float((ticks[-1] + 1) / rate)
+    with av.open(str(surviving_video), 'w') as container:
+        stream = container.add_stream('mpeg4', rate=rate)
+        stream.width, stream.height, stream.pix_fmt = 64, 36, 'yuv420p'
+        for row in range(90):
+            frame = av.VideoFrame.from_ndarray(np.full((36, 64, 3), row * 9 % 256, np.uint8), format='rgb24')
+            frame.pts, frame.time_base = int(ticks[row]), Fraction(1, rate)
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+    episodes = tmp_path / 'episodes'
+    source = episodes / 'episode_fallback'
+    state = np.tile(np.arange(30, dtype=np.float32)[:, None], (1, 14))
+    action = state + 100
+    signal = np.arange(30, dtype=np.int64)[:, None]
+    f.video_views_episode(source, {'exo': ('top', old_video), 'left': ('wrist_left', surviving_video)},
+                         'teleop_arms', 'fixture', {},
+                         real={'exo': np.arange(30) / 30, 'left': source_times},
+                         state=state, action=action, state_names=joint_names(), signals={'force': signal})
+    context = json.loads((source / 'context.json').read_text())
+    native_values = np.stack([np.arange(30, dtype=np.uint64) + np.uint64(2**60),
+                              np.arange(30, dtype=np.uint64) + np.uint64(2**60 + 1)], axis=1)
+    present = np.ones(30, dtype=bool)
+    present[7] = False
+    native_frames = np.arange(30, dtype=np.int64) * 2 + 7
+    signals = f.Signals({'force': signal})
+    signals.native_table_fields = [{'name': 'opaque_counters', 'values': native_values[present],
+                                   'source_rows': np.flatnonzero(present), 'source_row_count': 30,
+                                   'source_shape': [2], 'metadata': {}, 'bookkeeping': False}]
+    signals.native_table_frames = native_frames
+    f.write_signals(source, context, signals)
+    assert context['duration_s'] == 1.0
+    context['annotation_policy'] = {**policy.resolve(context), 'part_max_s': 1.0}
+    context.pop('real_times', None)
+    (source / 'context.json').write_text(json.dumps(context))
+    (source / 'times.npz').unlink()
+    old_video.write_bytes(b'fixture camera cannot decode')
+    # A timestampless survivor cannot establish its origin on an existing label clock.
+    labelled_context = {**context, 'clock_zero_s': 1.25, 'clock_start_s': 12.0}
+    (source / 'context.json').write_text(json.dumps(labelled_context))
+    saved_context = (source / 'context.json').read_bytes()
+    saved_sources = (source / 'sources.json').read_bytes()
+    with pytest.raises(ValueError, match='cannot preserve the existing label clock'):
+        clips.drop_cameras(source, ['exo'], keep_clock=True)
+    assert (source / 'context.json').read_bytes() == saved_context
+    assert (source / 'sources.json').read_bytes() == saved_sources
+    assert not (source / 'surviving_video_times.npz').exists()
+    (source / 'context.json').write_text(json.dumps(context))
+    main, issues = clips.drop_cameras(source, ['exo'])
+    assert main == 'left' and any(issue['kind'] == 'state_unaligned' for issue in issues)
+    whole = me.load(source)
+    assert me.request_duration(whole) == pytest.approx(source_end) and whole['context']['state_unaligned']
+    assert episode_seconds(whole['context'], source) == pytest.approx(source_end)
+    assert np.allclose(whole['times']['left'], source_times)
+    assert whole['context']['n_state_frames'] == 90
+
+    def check_board_clip(directory, expected_frames, expected_end):
+        (clip_job,) = clips.episode_jobs(directory, tmp_path / 'board_clips' / directory.name, True)
+        assert clips.extract_one(*clip_job[:4], clips.find_ffmpeg(), 1, *clip_job[4:13]) is None
+        with av.open(str(clip_job[3])) as encoded:
+            video = encoded.streams.video[0]
+            packets = [packet for packet in encoded.demux(video) if packet.size and packet.pts is not None]
+            actual_end = max(float((packet.pts + packet.duration) * video.time_base) for packet in packets)
+        assert len(packets) == expected_frames
+        assert actual_end == pytest.approx(expected_end, abs=2e-6)
+        with av.open(str(clip_job[3])) as encoded:
+            images = [frame.to_ndarray(format='rgb24') for frame in encoded.decode(video=0)]
+        original = me._decode_view(me.load(directory), 'left', [0, expected_frames - 1])
+        for image, index in zip((images[0], images[-1]), (0, expected_frames - 1)):
+            assert abs(image.mean() - np.asarray(original[index]).mean()) <= 3
+
+    check_board_clip(source, 90, source_end)
+    # Previously prepared fallback sidecars can still carry the old anchor's length.
+    legacy = tmp_path / 'legacy_fallback'
+    legacy.mkdir()
+    legacy_context = {**whole['context'], 'duration_s': 1.0, 'n_state_frames': 30}
+    legacy_context.pop('real_times', None)
+    (legacy / 'context.json').write_text(json.dumps(legacy_context))
+    (legacy / 'sources.json').write_text((source / 'sources.json').read_text())
+    assert pieces.needs_pieces(legacy)
+
+    job = tmp_path / 'job'
+    job.mkdir()
+    units = pieces.write_units(job, episodes)
+    assert len(units[source.name]) == int(np.ceil(source_end))
+    parts = [job / 'units' / name for name in units[source.name]]
+    assert sum(me.load(part)['sources']['left']['n_frames'] for part in parts) == 90
+    covered = []
+    for part in parts:
+        episode = me.load(part)
+        count = episode['sources']['left']['n_frames']
+        base = int(np.searchsorted(source_times, episode['context']['piece']['t0_s'] - .0005))
+        covered.extend(range(base, base + count))
+        assert episode['context']['state_unaligned']
+        assert np.array_equal(episode['state'], state) and np.array_equal(episode['action'], action)
+        assert np.array_equal(np.load(part / 'signals.npz')['s0'], signal)
+        assert (part / 'state.npz').samefile(source / 'state.npz')
+        assert (part / 'signals.npz').samefile(source / 'signals.npz')
+        request = me.build_request(part, cell_w=64, inspect_evidence=True)
+        assert me.request_duration(episode) <= 1.0 + 1e-9
+        expected_end = (source_times[base + count] if base + count < 90 else source_end) - source_times[base]
+        check_board_clip(part, count, float(expected_end))
+        assert not request['plan']['state_usable'] and not request.get('contacts')
+        assert request['timesteps'][0] == 0.0
+        assert request['timesteps'][-1] == pytest.approx(source_times[base + count - 1] - source_times[base], abs=.001)
+        assert 'state' not in request['blocks'] and 'signals' not in request['blocks']
+        got = me._decode_view(episode, 'left', list(range(count)))
+        want = me._decode_view(whole, 'left', list(range(base, base + count)))
+        assert len(got) == count
+        for row in range(count):
+            assert np.array_equal(np.asarray(got[row]), np.asarray(want[base + row]))
+        sent_images = [item for item in request['content'] if item['type'] == 'image_url']
+        for item, row in zip(sent_images[-2:], (base, base + count - 1)):
+            sent = Image.open(io.BytesIO(base64.b64decode(item['image_url']['url'].split(',', 1)[1])))
+            # Compare assembled request image pixels below the caption, allowing JPEG rounding.
+            assert abs(np.asarray(sent)[-16:, 16:48].mean() - np.asarray(want[row]).mean()) <= 3
+        access = request['evidence_access']
+        inspected = set()
+        for field in access.inventory():
+            if field['name'] not in ('state', 'force', 'opaque_counters'):
+                continue
+            receipt = access.inspect({'field_id': field['id'], 'mode': 'samples',
+                                      'start_row': 0, 'end_row': 30, 'columns': [0]})
+            inspected.add(field['name'])
+            assert receipt['rows'] == list(range(30))
+            assert 'times_s' not in receipt
+            if field['name'] == 'opaque_counters':
+                assert receipt['native_dtype'] == 'uint64'
+                assert receipt['source_present'] == present.tolist()
+                assert receipt['source_frame_indices'] == native_frames.tolist()
+                assert receipt['values'] == [[int(value)] if valid else [None]
+                                             for value, valid in zip(native_values[:, 0], present)]
+            else:
+                assert np.array_equal(np.asarray(receipt['values']).ravel(), np.arange(30))
+            assert any('no verified episode alignment' in note for note in receipt['limitations'])
+        assert inspected == {'state', 'force', 'opaque_counters'}
+    assert covered == list(range(90))
+
+
 def test_cuts_land_at_the_stillest_moment_near_each_target():
     t = np.arange(0, 1000, 0.1)
     m = np.ones_like(t)

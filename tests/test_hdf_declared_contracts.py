@@ -104,10 +104,14 @@ def test_unnamed_numeric_map_does_not_acquire_depth_semantics(tmp_path):
         assert formats.h5_kind('depth', depth) == 'depth'
 
 
-@pytest.mark.parametrize('name,representation', [('readings', 'depth'),
-                                                ('force_sensor/depth', 'depth'),
-                                                ('readings', 'disparity')])
-def test_declared_depth_representation_survives_classification_and_conversion(tmp_path, name, representation):
+@pytest.mark.parametrize('name,representation,units,scale,expected_scale', [
+    ('readings', 'depth', 'm', None, 1.),
+    ('force_sensor/depth', 'depth', 'm', None, 1.),
+    ('readings', 'disparity', 'pixels', None, None),
+    ('readings', 'depth', 'mm', np.float32(.001), float(np.float32(.001))),
+    ('readings', 'depth', 'mm', 1., None)])
+def test_declared_depth_representation_survives_classification_and_conversion(
+        tmp_path, name, representation, units, scale, expected_scale):
     from label import depth
     source = tmp_path / 'depth.h5'
     values = np.full((6, 64, 80), 25, dtype=np.uint16)
@@ -116,14 +120,16 @@ def test_declared_depth_representation_survives_classification_and_conversion(tm
         h['timestamp'] = np.arange(6) / 10
         field = h.create_dataset(name, data=values)
         field.attrs['sensor_type'] = representation
-        field.attrs['units'] = 'm' if representation == 'depth' else 'pixels'
+        field.attrs['units'] = units
+        if scale is not None:
+            field.attrs['depth_scale'] = scale
         streams = formats.h5_streams(h, '')
         assert [s['path'] for s in streams['depth']] == [name]
         assert not streams['signal']
     ep, ctx = convert(source, tmp_path)
     entry = depth.load(ep)['exo']
     assert entry['kind'] == representation
-    assert depth.metric_scale(entry) == (1. if representation == 'depth' else None)
+    assert depth.metric_scale(entry) == expected_scale
     decoded = depth.decode(entry, entry['pts'], [0])[0]
     np.testing.assert_array_equal(decoded, values[0])
     assert decoded.dtype == np.uint16

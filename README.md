@@ -28,7 +28,7 @@ Argus turns robot-learning recordings into dense annotations of **actions, task 
 | Robot state and actions | Declared joints, poses, grippers and control meanings support motion checks and comparison with the footage. Training targets are not automatically treated as commands. |
 | Depth | Images and measured regions can establish camera-relative distance or separation where units, calibration and clocks support it. Relative depth stays relative. |
 | Tactile | Pressure, normal/shear force, contact arrays and optical tactile images can reveal changes in grip, contact distribution or surface motion. Raw response is not automatically physical force or slip. |
-| Other recorded fields | Numeric channels, event flags, native waveform packets and structured metadata can be inspected through the same bounded evidence interface. A recorded sample rate enables spectral analysis; this is not general audio transcription. |
+| Other recorded fields | Numeric channels, event flags, native waveform packets and structured metadata can be inspected through the same bounded evidence interface. Eligible waveform samples support spectral analysis when a recorded sample rate is available; this is not general audio transcription. |
 | Publisher context | Instructions, task spans, annotations and calibration retain their source ownership. The model checks claims against observations; missing or conflicting information remains qualified. |
 
 Labels include action phases (advancing, wasteful or idle), subgoals, key events, outcomes, operator mistakes and recoveries, scene changes and recording issues. Sensor conclusions carry evidence, confidence and limitations; ambiguous clocks and unsupported physical claims remain qualified. Inspection may yield no additional finding.

@@ -147,16 +147,31 @@ def test_review_reuses_real_preparation_and_refuses_unverified_paid_resume(tmp_p
         doc = json.loads(context.read_text())
         doc['data_dictionary'] = {'status': 'skipped', 'entries': {}}
         context.write_text(json.dumps(doc))
-    class ReachedChecks(Exception):
+    class ReachedLabel(Exception):
         pass
+    commands = []
+    def reach_label(job, step, command, *args, **kwargs):
+        if step in ('dry_run', 'label'):
+            commands.append((step, command))
+        if step == 'label':
+            raise ReachedLabel()
+        return 0
     monkeypatch.setattr(formats, 'convert', convert)
     monkeypatch.setattr(dictionary_stage, 'prepare', dictionary)
     monkeypatch.setattr(harness, 'call_model', lambda *a, **k: pytest.fail('unexpected provider call'))
-    monkeypatch.setattr(rv, 'run_step', lambda *a, **k: (_ for _ in ()).throw(ReachedChecks()))
-    argv = ['review', '--data', str(upload), '--rig', 'ego_head', '--out', str(job)]
+    monkeypatch.setattr(rv, 'run_step', reach_label)
+    timeout = [] if change == 'source_in_job' else ['--timeout', '900']
+    argv = ['review', '--data', str(upload), '--rig', 'ego_head', '--out', str(job), *timeout]
     monkeypatch.setattr(sys, 'argv', argv)
-    with pytest.raises(ReachedChecks):
+    with pytest.raises(ReachedLabel):
         rv.main()
+    assert [step for step, _ in commands] == ['dry_run', 'label']
+    for _, command in commands:
+        assert command[:3] == [rv.PY, '-m', 'label.harness']
+        if timeout:
+            assert command[command.index('--timeout') + 1] == '900'
+        else:
+            assert '--timeout' not in command
     assert json.loads((job / 'preparation_receipt.json').read_text())['source']
     ep = next((job / 'episodes').glob('episode_*'))
     generated = next(ep.glob('*.mp4'))
@@ -189,7 +204,7 @@ def test_review_reuses_real_preparation_and_refuses_unverified_paid_resume(tmp_p
     elif change == 'legacy':
         (job / 'preparation_receipt.json').unlink()
     if change in (None, 'source_in_job'):
-        with pytest.raises(ReachedChecks):
+        with pytest.raises(ReachedLabel):
             rv.main()
         assert dictionaries == [1, 1]
     else:
