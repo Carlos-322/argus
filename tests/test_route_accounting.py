@@ -30,6 +30,140 @@ def args(**changes):
                 timeout=1, **changes)
 
 
+@pytest.mark.parametrize('received_first', [False, True])
+def test_http_rejected_selection_fails_over_without_replaying_received_rounds(tmp_path, monkeypatch, received_first):
+    import io
+    import urllib.error
+    from label import evidence_access as ea
+    from test_label import _packed_episode
+    ep, _ = _packed_episode(tmp_path)
+    job = tmp_path / 'job'
+    out = job / 'run' / 'out'
+    calls = []
+    class Response(io.BytesIO):
+        pass
+    def provider(req, timeout):
+        content = json.loads(req.data)['messages'][0]['content']
+        key = req.get_header('Authorization').split()[-1]
+        selection = next((p['text'] for p in content if p.get('text', '').startswith(ea.SELECTION)), None)
+        inspected = any(p.get('text', '').startswith('INSPECTED EVIDENCE') for p in content)
+        calls.append((key, selection is not None, inspected))
+        if key == 'sk-or-empty' and (not received_first or inspected):
+            raise urllib.error.HTTPError(req.full_url, 402, 'Payment Required', {}, io.BytesIO(b'{"error":{"code":402}}'))
+        if selection is not None and not inspected:
+            page = json.loads(selection.split('FIELD INVENTORY\n', 1)[1])
+            field = next(f for f in page['fields'] if 'samples' in f.get('available_modes', []))
+            reply = {'requests': [{'field_id': field['id'], 'mode': 'samples'}]}
+        else:
+            reply = {'requests': []} if selection is not None else {'timeline': []}
+        return Response(json.dumps({'usage': {'cost': .004 if selection is not None else .01},
+            'choices': [{'finish_reason': 'stop', 'message': {'content': json.dumps(reply)}}]}).encode())
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', provider)
+    assert harness.run_batch([ep], out, keys=['sk-or-empty', 'sk-or-funded'], concurrency=1,
+        force=False, max_spend=2, **args(cell_w=128)) == 0
+    result = json.loads((out / f'{ep.name}.json').read_text())
+    inspection = result['evidence_inspection']
+    assert result['parse_ok'] and inspection['status'] == 'complete' and inspection['inspections']
+    assert len(inspection['rounds']) == 2 and all(r['state'] == 'received' for r in inspection['rounds'])
+    rejected = inspection['rounds'][1 if received_first else 0]['rejected_attempts']
+    assert len(rejected) == 1 and rejected[0]['http_status'] == 402
+    assert rejected[0]['state'] == 'rejected unpaid' and rejected[0]['cost_usd'] == 0
+    assert len(calls) == 4
+    assert calls.count(('sk-or-empty', True, False)) == 1
+    assert calls.count(('sk-or-funded', True, False)) == (0 if received_first else 1)
+    assert label_spend(job) == pytest.approx(.018) and label_spend_complete(job)
+
+
+@pytest.mark.parametrize('response_kind', ['body_error', 'timeout', 'unproven_key_error'])
+def test_unverified_final_key_error_never_releases_hold_or_fails_over(tmp_path, monkeypatch, response_kind):
+    import io
+    ep = observed_packed_episode(tmp_path)
+    out = tmp_path / 'job' / 'run' / 'out'
+    calls = []
+    def provider(req, timeout):
+        calls.append(req.get_header('Authorization'))
+        if response_kind == 'unproven_key_error':
+            raise harness.KeyExhausted('HTTP 402: no typed response proof')
+        if response_kind == 'timeout':
+            raise TimeoutError('response acceptance unknown')
+        return io.BytesIO(b'{"error":{"code":402,"message":"insufficient credits"}}')
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', provider)
+    assert harness.run_batch([ep], out, keys=['sk-or-empty', 'sk-or-funded'], concurrency=1,
+        force=False, max_spend=2, **args(cell_w=128)) == 1
+    assert calls == ['Bearer sk-or-empty']
+    failure = json.loads((out / f'noreply_{ep.name}.json').read_text())
+    assert failure['final_dispatch_outcome'] == 'unverified' and failure['final_reserved_usd'] > 0
+    assert label_spend(tmp_path / 'job') >= failure['final_reserved_usd']
+    assert not label_spend_complete(tmp_path / 'job')
+
+
+@pytest.mark.parametrize('status', [401, 402])
+@pytest.mark.parametrize('prior_unknown', [False, True])
+def test_http_rejection_proof_applies_only_before_any_unknown_attempt(monkeypatch, status, prior_unknown):
+    import io
+    import urllib.error
+    calls = []
+    def provider(req, timeout):
+        calls.append(1)
+        if prior_unknown and len(calls) == 1:
+            raise TimeoutError('first acceptance unknown')
+        raise urllib.error.HTTPError(req.full_url, status, 'Rejected', {}, io.BytesIO(b'{}'))
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', provider)
+    monkeypatch.setattr(harness.time, 'sleep', lambda _: None)
+    with pytest.raises(RuntimeError) as caught:
+        harness._post(harness.OPENROUTER_URL, {}, 'sk-or-fixture', 1, attempts=2)
+    if prior_unknown:
+        assert not isinstance(caught.value, harness.KeyExhausted) and len(calls) == 2
+    else:
+        assert caught.value.verified_unpaid and caught.value.http_status == status and calls == [1]
+
+
+def test_native_rgb_final_http_rejection_reuses_exact_payload_on_next_key(tmp_path, monkeypatch):
+    import io
+    import urllib.error
+    ep = observed_packed_episode(tmp_path)
+    job = tmp_path / 'job'
+    out = job / 'run' / 'out'
+    requests = []
+    def provider(req, timeout):
+        requests.append((req.get_header('Authorization'), req.data))
+        if len(requests) == 1:
+            raise urllib.error.HTTPError(req.full_url, 402, 'Payment Required', {}, io.BytesIO(b'{}'))
+        return io.BytesIO(json.dumps({'usage': {'cost': .01}, 'choices': [{'finish_reason': 'stop',
+            'message': {'content': '{"timeline":[]}'}}]}).encode())
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', provider)
+    assert harness.run_batch([ep], out, keys=['sk-or-empty', 'sk-or-funded'], concurrency=1,
+        force=False, max_spend=2, **args(cell_w=128)) == 0
+    assert [row[0] for row in requests] == ['Bearer sk-or-empty', 'Bearer sk-or-funded']
+    assert requests[0][1] == requests[1][1]
+    result = json.loads((out / f'{ep.name}.json').read_text())
+    assert result['parse_ok'] and result['final_attempt_index'] == 2
+    assert label_spend(job) == pytest.approx(.01) and label_spend_complete(job)
+
+
+def test_unproven_routing_key_error_preserves_unknown_route_charge(tmp_path, monkeypatch):
+    ep = observed_packed_episode(tmp_path)
+    job = tmp_path / 'job'
+    out = job / 'run' / 'out'
+    calls = []
+    def provider(content, model, reasoning, api_key, *a, **kw):
+        calls.append((model, api_key))
+        if model == route.ROUTE_MODEL:
+            raise harness.KeyExhausted('legacy callable error, no server rejection proof')
+        return {'usage': {'cost': .01}, 'choices': [{'finish_reason': 'stop',
+                'message': {'content': '{"timeline":[]}'}}]}
+    monkeypatch.setattr(harness, 'call_model', provider)
+    monkeypatch.setattr(route, '_CACHE', {})
+    assert harness.run_batch([ep], out, keys=['sk-or-empty', 'sk-or-funded'], concurrency=1,
+        force=False, max_spend=2, **args()) == 0
+    result = json.loads((out / f'{ep.name}.json').read_text())
+    routing = result['config']['resolution_route']
+    assert routing['dispatch_outcome'] == 'unverified' and routing['cost_usd'] > 0
+    assert [key for _, key in calls] == ['sk-or-empty', 'sk-or-empty']
+    assert label_spend(job) == pytest.approx(.01 + routing['cost_usd'])
+    assert not label_spend_complete(job)
+
+
 def observed_packed_episode(root):
     """A recording with observed joints only, for isolated route/final invoice contracts."""
     import numpy as np
@@ -438,7 +572,7 @@ def test_final_retry_reuses_paid_route_receipt(tmp_path, monkeypatch, final_repl
         finals.append(1)
         if len(finals) == 1:
             if final_reply == 'key_exhausted':
-                raise harness.KeyExhausted('fixture key empty')
+                raise harness.KeyExhausted('fixture key empty', http_status=402, first_attempt=True)
             return {'usage': {'cost': .01}, 'choices': [{
                 'finish_reason': 'length' if final_reply == 'truncated' else 'stop',
                 'message': {'content': 'unparseable'}}]}
@@ -568,7 +702,7 @@ def test_inspection_cache_is_carried_through_new_route_claim(tmp_path, monkeypat
             claimed = json.loads((out / f'noreply_{ep.name}.json').read_text())
             at_dispatch.append((label_spend(job), claimed['config']['resolution_route']['cost_usd']))
             return {'usage': {'cost': .004}, 'choices': [{'message': {'content': '{}'}}]}
-        raise harness.KeyExhausted('fixture key empty')
+        raise harness.KeyExhausted('fixture key empty', http_status=402, first_attempt=True)
     monkeypatch.setattr(route, '_CACHE', {})
     monkeypatch.setattr(harness, 'call_model', provider)
     build_request = harness.me.build_request

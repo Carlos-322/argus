@@ -138,12 +138,14 @@ def _paid_route(ep, api_key, call_model, timeout, receipt_path, identity, reserv
     try:
         resp = call_model(content, ROUTE_MODEL, ROUTE_REASONING, api_key,
                           max_tokens=ROUTE_MAX_TOKENS, timeout=timeout)
-    except KeyExhausted:
-        persist({'fine_detail': None, 'why': 'routing key has no credit', 'cost_usd': 0.0,
-                 'dispatch_outcome': 'not dispatched'})
-        if settle_dispatch is not None:
-            settle_dispatch(bound, 0.0)
-        raise
+    except KeyExhausted as error:
+        if error.verified_unpaid:
+            persist({'fine_detail': None, 'why': 'routing request rejected before processing', 'cost_usd': 0.0,
+                     'dispatch_outcome': 'not dispatched'})
+            if settle_dispatch is not None:
+                settle_dispatch(bound, 0.0)
+            raise
+        hit.update(why=f'routing failed: {str(error)[:120]}', dispatch_outcome='unverified')
     except Exception as error:
         hit.update(why=f'routing failed: {str(error)[:120]}', dispatch_outcome='unverified')
     else:

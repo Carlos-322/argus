@@ -1422,6 +1422,19 @@ def merge(parts, ep_dir=None):
             'parts': rows, 'timing': 'Inspection times are local to each part; add time_origin_s for the parent episode.'}
 
 
+def rejected_selection_proof(record):
+    """A durable unpaid rejection has explicit HTTP and numeric receipt types, never diagnostic prose."""
+    def attempt(row):
+        return (isinstance(row, dict) and row.get('state') == 'rejected unpaid'
+                and type(row.get('http_status')) is int and row['http_status'] in (401, 402)
+                and type(row.get('http_attempt')) is int and row['http_attempt'] == 1
+                and type(row.get('cost_usd')) in (int, float) and row['cost_usd'] == 0
+                and math.isfinite(row['cost_usd']) and row.get('verified_unpaid') is True)
+    history = record.get('rejected_attempts', []) if isinstance(record, dict) else None
+    return (attempt(record) and isinstance(history, list)
+            and all(attempt(prior) and 'rejected_attempts' not in prior for prior in history))
+
+
 def recover_selection_reservations(doc):
     """Account for dispatched rounds whose response was lost before the cost receipt was saved."""
     if not isinstance(doc, dict) or not isinstance(doc.get('rounds'), list):
@@ -1435,6 +1448,9 @@ def recover_selection_reservations(doc):
     for round_record in doc['rounds']:
         if not isinstance(round_record, dict):
             raise ValueError('saved inspection round is invalid')
+        if round_record.get('state') == 'rejected unpaid' and not rejected_selection_proof(round_record):
+            round_record['state'] = 'dispatched'
+            changed = True
         if round_record.get('state') != 'dispatched':
             continue
         doc['status'] = 'incomplete'
@@ -1485,25 +1501,30 @@ def discover(access, base_content, call, cache_path, *, rounds=2, reserve_cost=0
             doc.update(status='incomplete')
             doc['limitations'].append('Inspection selection exceeds image count or byte budget; no dispatch.')
             break
-        if index < len(doc['rounds']):
-            saved = doc['rounds'][index]
-            if saved.get('state') != 'received':
-                doc.update(status='incomplete')
-                break
+        saved = doc['rounds'][index] if index < len(doc['rounds']) else None
+        rejected_attempts = []
+        if saved is not None and saved.get('state') == 'received':
             saved['response'] = selection_receipt(saved['response'])
         else:
+            if saved is not None:
+                if not rejected_selection_proof(saved):
+                    doc.update(status='incomplete')
+                    break
+                rejected_attempts = list(saved.get('rejected_attempts') or []) + [
+                    {k: v for k, v in saved.items() if k != 'rejected_attempts'}]
             reserve = reserve_cost(content) if callable(reserve_cost) else reserve_cost
             if type(reserve) not in (int, float) or not math.isfinite(reserve) or reserve <= 0:
                 reserve = MAX_SELECTION_COST
             if doc.get('status') == 'incomplete' or doc['cost_usd'] + reserve > MAX_SELECTION_COST:
-                doc['status'] = 'incomplete'
+                doc.update(status='incomplete')
                 doc['limitations'].append('Inspection selection stopped at the cost or dispatch boundary.')
                 break
             if reserve_dispatch is not None and not reserve_dispatch(reserve):
                 doc['status'] = 'incomplete'
                 doc['limitations'].append('Inspection selection exceeds the remaining batch spend cap.')
                 break
-            claim = path.with_name(path.name + f'.round{index}.claim')
+            attempt = f'.retry{len(rejected_attempts)}' if rejected_attempts else ''
+            claim = path.with_name(path.name + f'.round{index}{attempt}.claim')
             claim.parent.mkdir(parents=True, exist_ok=True)
             try:
                 with claim.open('x') as stream:
@@ -1514,8 +1535,13 @@ def discover(access, base_content, call, cache_path, *, rounds=2, reserve_cost=0
                 doc.update(status='incomplete')
                 doc['limitations'].append('Selection dispatch was already claimed; no automatic retry.')
                 break
-            saved = {'state': 'dispatched', 'reserved_cost_usd': reserve}
-            doc['rounds'].append(saved)
+            fresh = {'state': 'dispatched', 'reserved_cost_usd': reserve,
+                     **({'rejected_attempts': rejected_attempts} if rejected_attempts else {})}
+            if saved is None:
+                doc['rounds'].append(fresh)
+            else:
+                doc['rounds'][index] = fresh
+            saved = fresh
             write_atomic(path, doc)
             try:
                 response = call(content)
@@ -1533,6 +1559,14 @@ def discover(access, base_content, call, cache_path, *, rounds=2, reserve_cost=0
                 if type(cost) in (int, float) and math.isfinite(cost) and cost >= 0 and settle_dispatch is not None:
                     settle_dispatch(reserve, cost)
             except Exception as error:
+                from label.harness import KeyExhausted
+                if isinstance(error, KeyExhausted) and error.verified_unpaid:
+                    saved.update(state='rejected unpaid', http_status=error.http_status,
+                                 http_attempt=1, verified_unpaid=True, cost_usd=0.0)
+                    write_atomic(path, doc)
+                    if settle_dispatch is not None:
+                        settle_dispatch(reserve, 0.0)
+                    raise
                 doc.update(status='incomplete')
                 doc['cost_usd'] += reserve
                 doc['cost_is_conservative_estimate'] = True
