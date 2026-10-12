@@ -31,7 +31,8 @@ MAX_SCAN_BYTES = 256 * 1024 * 1024
 SOURCE_HASH_LIMIT = 16 * 1024 * 1024
 IMPLEMENTATION_SHA256 = hashlib.sha256(b''.join(path.read_bytes() for path in (
     Path(__file__), Path(__file__).with_name('depth.py'),
-    Path(__file__).with_name('dictionary_context.py'),
+    Path(__file__).with_name('dictionary_context.py'), Path(__file__).with_name('sensor_evidence.py'),
+    Path(__file__).with_name('optical_motion.py'),
     Path(__file__).parent.parent / 'prepare' / 'hdf_metadata.py',
     Path(__file__).parent.parent / 'prepare' / 'mcap_fields.py',
     Path(__file__).parent.parent / 'prepare' / 'state_contract.py',

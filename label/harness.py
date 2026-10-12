@@ -341,7 +341,8 @@ def input_identity(ep_dir: Path, *, model: str, reasoning: str, max_tokens: int,
                     separators=(',', ':'), ensure_ascii=True).encode()).hexdigest(),
                 "request_semantics_sha256": hashlib.sha256(b''.join(path.read_bytes() for path in (
                     Path(__file__), Path(me.__file__), Path(policy.__file__),
-                    Path(me.__file__).with_name('prompts.py')))).hexdigest()}
+                    Path(me.__file__).with_name('prompts.py'), Path(me.__file__).with_name('sensor_evidence.py'),
+                    Path(me.__file__).with_name('optical_motion.py')))).hexdigest()}
     return {"version": 2, "source_proof": source_proof(ctx, ep_dir), "settings": settings}
 
 

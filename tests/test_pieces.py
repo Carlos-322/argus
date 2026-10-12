@@ -503,6 +503,127 @@ def _part_result(p: Path, action: str) -> dict:
                        "completion": {"task_completed": "success"}}}
 
 
+@pytest.mark.parametrize('first', ['refused', 'claimed', 'unknown', 'newer_claimed', 'newer_unknown',
+                                  'contradicted_refusal', 'paid_failed', 'paid_unknown_cost', 'paid_reply',
+                                  'ambiguous_corrupt', 'ambiguous_index'])
+def test_split_refusals_keep_each_dispatch_receipt_in_native_board_download(tmp_path, monkeypatch, first):
+    import shutil
+    import subprocess
+    from board import build as board_build, rules, serve
+    from label.dictionary_stage import label_spend, label_spend_complete
+    from label.evidence_access import source_proof
+
+    job, source, parts = _three_parts(tmp_path, monkeypatch)
+    context = json.loads((source / 'context.json').read_text())
+    (job / 'pieces' / ('.' + source.name + '.source_proof.json')).write_text(
+        json.dumps(source_proof(context, source)))
+    monkeypatch.setattr(harness, 'call_model_once', lambda *a, **k: pytest.fail('unexpected dispatch'))
+    requests = []
+    out = job / 'run' / 'out'
+    for part in parts:
+        request = harness.label_episode(part, job / 'dry' / (part.name + '.json'),
+            model=None, reasoning=None, max_tokens=100, timeout=10, cell_w=128,
+            api_key='dry-run', dry_run=True)
+        requests.append(request)
+        assert harness.record_budget_refusal(out / (part.name + '.json'), request)
+    refused = out / ('noreply_' + parts[0].name + '.json')
+    ambiguous = first.startswith('ambiguous_')
+    unknown = ambiguous or first in ('claimed', 'unknown', 'newer_claimed', 'newer_unknown', 'paid_unknown_cost')
+    if ambiguous or first in ('claimed', 'unknown', 'newer_claimed', 'newer_unknown', 'contradicted_refusal'):
+        record = json.loads(refused.read_text())
+        record.update(final_dispatch_outcome='not dispatched' if first == 'contradicted_refusal' else
+                      'claimed' if first.endswith('claimed') else 'unverified', final_reserved_usd=6.4,
+                      no_reply='TimeoutError /srv/private?token=secret')
+        if first != 'contradicted_refusal':
+            record.pop('no_reply_kind')
+        if first.startswith('newer_') or ambiguous:
+            import copy
+            old = _part_result(parts[0], 'An older paid label must not leak.')
+            old['usage'] = {'est_cost_usd': .02}
+            old['input_identity'] = copy.deepcopy(requests[0]['input_identity'])
+            old['input_identity']['source_proof'][0]['sha256'] = '0' * 64
+            (out / (parts[0].name + '.json')).write_text(json.dumps(old))
+            record.update(final_attempt_index=2, final_cost_history=[{'usage': {'est_cost_usd': .02}}])
+        if first == 'ambiguous_index':
+            record['final_attempt_index'] = True
+        refused.write_text('{broken private receipt' if first == 'ambiguous_corrupt' else json.dumps(record))
+    elif first in ('paid_failed', 'paid_unknown_cost', 'paid_reply'):
+        record = {key: requests[0][key] for key in ('episode_dir', 'model', 'input_identity', 'annotation_policy')}
+        record['usage'] = {'est_cost_usd': .02}
+        if first in ('paid_failed', 'paid_unknown_cost'):
+            record.update(finish_reason='length', content_tail='An incomplete recorded response')
+            if first == 'paid_unknown_cost':
+                record.update(usage={'est_cost_usd': None}, final_dispatch_outcome='unverified', final_reserved_usd=6.4)
+            target = out / ('failed_' + parts[0].name + '.json')
+        else:
+            record.update(parse_ok=True, labels={'timeline': [], 'task_summary': 'Reach for the object.'})
+            target = out / (parts[0].name + '.json')
+        refused.unlink()
+        target.write_text(json.dumps(record))
+    before = {path: path.read_bytes() for path in out.glob('*.json')}
+    expected_cost = 1e300 if ambiguous else 6.42 if first.startswith('newer_') else 6.4 if unknown or first == 'contradicted_refusal' else .02 if first.startswith('paid_') else 0
+    assert label_spend(job) == expected_cost
+    assert label_spend_complete(job) is (not unknown)
+    final = job / 'run_final'
+    pieces.stitch_run(job, source.parent, {source.name: [part.name for part in parts]}, final / 'out')
+    assert before == {path: path.read_bytes() for path in out.glob('*.json')}
+    joined = json.loads((final / 'out' / (source.name + '.json')).read_text())
+    assert joined['parse_ok'] is (first == 'paid_reply')
+    assert 'An older paid label must not leak.' not in json.dumps(joined)
+    assert 'final_dispatch_outcome' not in joined and 'no_reply_kind' not in joined
+    missing = joined['stitched']['missing']
+    skipped = [row for row in missing if row.get('no_reply_kind') == 'spend_cap']
+    assert len(skipped) == (3 if first == 'refused' else 2)
+    assert all(row['final_dispatch_outcome'] == 'not dispatched' for row in skipped)
+    assert all(row['no_reply_kind'] == 'spend_cap' for row in joined['config']['pieces'][1:])
+    if first in ('claimed', 'unknown', 'newer_claimed', 'newer_unknown'):
+        assert missing[0]['final_dispatch_outcome'] == ('claimed' if first.endswith('claimed') else 'unverified')
+        assert 'no_reply_kind' not in missing[0]
+    elif ambiguous or first in ('paid_failed', 'contradicted_refusal'):
+        assert 'final_dispatch_outcome' not in missing[0] and 'no_reply_kind' not in missing[0]
+    if first in ('paid_failed', 'paid_unknown_cost'):
+        assert missing[0]['raw_head'] == 'An incomplete recorded response'
+        assert missing[0]['finish_reason'] == 'length'
+    info = {'run_id': 'fixture', 'code': 'fixture', 'kind': 'review'}
+    entry = rules.own_data_entry('fixture', str(final), str(source.parent), 'teleop_arms')
+    native = board_build.episode_file(entry, {}, source.name + '.json', source.name, joined,
+                                    info, source.parent, context)
+    public = serve.public_label(native)
+    public_skipped = [row for row in public['_stitched']['missing'] if row.get('no_reply_kind') == 'spend_cap']
+    assert public_skipped == [row for row in public['_stitched']['missing'] if row.get('final_dispatch_outcome') == 'not dispatched']
+    assert len(public_skipped) == len(skipped)
+    if first != 'paid_reply':
+        assert public['_label_failed']['status'] == 'no_part'
+        assert len([row for row in public['_label_failed']['parts'] if row.get('no_reply_kind') == 'spend_cap']) == len(skipped)
+    assert 'token=secret' not in json.dumps(public)
+    assert label_spend(job) == expected_cost
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('no node')
+    program = """
+const {piece} = require('./tests/page_functions')('./board/serve.py');
+const render = new Function('famName','famList',piece('esc')+piece('fmtDur')+piece('fmtT')
+  +piece('partFailureReason')+piece('cmpFailHtml')+piece('readerIssueRows')
+  +'return {cmpFailHtml,readerIssueRows};')(x=>x,()=> 'labelling');
+const d = JSON.parse(require('fs').readFileSync(0,'utf8'));
+console.log(JSON.stringify({card:d._label_failed ? render.cmpFailHtml(d._label_failed,'Astra',d._usage,true) : '',
+                           gaps:render.readerIssueRows(d)}));
+"""
+    completed = subprocess.run([node, '-e', program], cwd=Path(__file__).resolve().parent.parent,
+        input=json.dumps(public), capture_output=True, text=True, check=True)
+    rendered = json.loads(completed.stdout)
+    block = rendered['card'] if first != 'paid_reply' else ''.join(rendered['gaps'])
+    assert block.count('Annotation not sent') == len(skipped)
+    assert 'remaining spend cap' in block
+    if first in ('claimed', 'unknown', 'newer_claimed', 'newer_unknown'):
+        assert 'Response outcome unknown' in block
+    if first in ('paid_failed', 'paid_unknown_cost'):
+        assert 'Response cut off' in block and 'Response outcome unknown' not in block
+    if first != 'paid_reply':
+        assert 'The call cost' not in block
+    assert 'token=secret' not in completed.stdout and 'not called' not in completed.stdout
+
+
 def test_stitch_keeps_distinct_untimed_issues_and_failed_rgb_receipts(tmp_path, monkeypatch):
     job, src, parts = _three_parts(tmp_path, monkeypatch)
     out = job / 'run' / 'out'

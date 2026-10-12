@@ -89,29 +89,89 @@ def test_piece_merge_shifts_motion_pairs_and_keeps_quality_gaps_unusable():
     assert not se.bind(missing, [finding])['findings']
 
 
-def test_normal_request_derives_motion_from_decoded_tactile_images(tmp_path):
+@pytest.mark.parametrize("cell_w", [192, 320])
+def test_normal_request_derives_motion_from_decoded_tactile_images(tmp_path, cell_w, monkeypatch):
     import av
     import json
     from label import episode as me
+    from label import optical_motion as om
+    from label.frames import Shrunk
 
     folder = tmp_path / 'episode_dots'
     folder.mkdir()
     movie = folder / 'pad.mp4'
     with av.open(str(movie), 'w') as container:
         stream = container.add_stream('libx264', rate=30)
-        stream.width, stream.height, stream.pix_fmt = 240, 160, 'yuv420p'
-        for k in range(15):
-            frame = av.VideoFrame.from_image(pad(2 if k >= 7 else 0))
+        stream.width, stream.height, stream.pix_fmt = 720, 480, 'yuv420p'
+        for k in range(120):
+            frame = av.VideoFrame.from_image(pad(2 if 30 <= k < 90 else 0).resize((720, 480)))
             for packet in stream.encode(frame):
                 container.mux(packet)
         for packet in stream.encode():
             container.mux(packet)
     ctx = {'dataset': 'unfamiliar_pad', 'profile': 'ego_head', 'state_kind': 'none', 'fps': 30,
-           'cameras': {'exo': {'name': 'tactile_camera', 'width': 240, 'height': 160}}}
+           'cameras': {'exo': {'name': 'tactile_camera', 'width': 720, 'height': 480}}}
     (folder / 'context.json').write_text(json.dumps(ctx))
-    (folder / 'sources.json').write_text(json.dumps({'exo': {'packed': str(movie), 'base_s': 0, 'n_frames': 15}}))
-    request = me.build_request(folder, cell_w=192)
-    pairs = request['sensor_evidence']['sensors'][0]['marker_motion']['pairs']
+    (folder / 'sources.json').write_text(json.dumps({'exo': {'packed': str(movie), 'base_s': 0, 'n_frames': 120}}))
+    observed = {}
+    measure = om.measure
+    def capture(frames, times):
+        observed.update(frames=frames, times=times)
+        return measure(frames, times)
+    monkeypatch.setattr(om, 'measure', capture)
+    request = me.build_request(folder, cell_w=cell_w, sample_fps=1)
+    motion = request['sensor_evidence']['sensors'][0]['marker_motion']
+    assert motion['analysis_size'] == [cell_w, int(cell_w * 2 / 3 / 2 + .5) * 2]
+    pairs = motion['pairs']
     assert any(p.get('p95_px', 0) > 1 for p in pairs if p.get('p95_px') is not None)
     sent = request['sensor_evidence']['sensors'][0]['times']
     assert all(p['from_s'] in sent and p['to_s'] in sent for p in pairs)
+    assert 'common analysis_size' in motion['coordinates']
+    ks = sorted(observed['frames'])
+    assert isinstance(observed['frames'][ks[0]], Image.Image)
+    assert isinstance(observed['frames'][ks[1]], Shrunk)
+    assert isinstance(observed['frames'][ks[-1]], Image.Image)
+    # A common analysis size must not conceal actual capture-geometry changes.
+    first = observed['frames'][ks[0]]
+    for changed_size in ((720, 400), (360, 240)):
+        changed = Shrunk(first.resize(changed_size), [cell_w])
+        assert measure({0: first, 1: changed, 2: first}, {0: 0., 1: 1., 2: 2.}) is None
+
+
+@pytest.mark.parametrize("module_name", ["optical_motion", "sensor_evidence"])
+def test_optical_algorithm_changes_invalidate_receipts_without_changing_rgb_payload(tmp_path, monkeypatch, module_name):
+    import importlib
+    import json
+    from pathlib import Path
+    from label import episode as me, evidence_access as ea, harness, optical_motion as om
+    from tests.test_label import _packed_episode
+
+    folder, _ = _packed_episode(tmp_path)
+    (folder / 'state.npz').unlink()
+    path = folder / 'context.json'
+    ctx = json.loads(path.read_text())
+    ctx['state_kind'] = 'none'
+    ctx.pop('n_state_frames')
+    path.write_text(json.dumps(ctx))
+    kwargs = dict(model='openai/gpt-6.1-sol', reasoning='high', max_tokens=2000,
+                  cell_w=128, example_dir=None)
+    before = harness.input_identity(folder, **kwargs)
+    request = me.build_request(folder, cell_w=128)
+    assert not request['sensor_evidence']['sensors']
+    access = ea.Access(me.load(folder)).signature()
+    implementation = ea.IMPLEMENTATION_SHA256
+    read_bytes = Path.read_bytes
+    algorithm = Path(om.__file__).with_name(module_name + ".py").resolve()
+    def changed_bytes(path):
+        data = read_bytes(path)
+        return data + b'\n# changed optical algorithm\n' if path.resolve() == algorithm else data
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, 'read_bytes', changed_bytes)
+            importlib.reload(ea)
+            assert not harness.same_input_identity(before, harness.input_identity(folder, **kwargs))
+            assert ea.IMPLEMENTATION_SHA256 != implementation
+            assert ea.Access(me.load(folder)).signature() != access
+            assert me.build_request(folder, cell_w=128)['content'] == request['content']
+    finally:
+        importlib.reload(ea)
