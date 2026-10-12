@@ -284,6 +284,8 @@ def label_episode(ep_dir: Path, out_path: Path, *, model: str, reasoning: str, a
         # the recording's contacts (label/contacts.py) and the strips each one shown was drawn with (checks/contacts.py)
         **({"contacts": req["contacts"], "contact_views": req["contact_views"]} if req.get("contact_views") else {}),
         "config": {"views": req["views"], "cam_labels": req["cam_labels"], "layout": "grid",
+                   **({'camera_observation_views': req['camera_observation_views']}
+                      if 'camera_observations' in req['schema_fields'] else {}),
                    "grid_cols": req["grid_cols"], "cell": req["cell"],
                    "n_timesteps": len(pl["ks"]), "n_frames_sent": len(pl["ks"]) * len(req["cam_labels"]),
                    "n_image_parts": req["n_images"], "fullres_frames": ["first", "last"],
@@ -342,7 +344,10 @@ def input_identity(ep_dir: Path, *, model: str, reasoning: str, max_tokens: int,
                 "request_semantics_sha256": hashlib.sha256(b''.join(path.read_bytes() for path in (
                     Path(__file__), Path(me.__file__), Path(policy.__file__),
                     Path(me.__file__).with_name('prompts.py'), Path(me.__file__).with_name('sensor_evidence.py'),
-                    Path(me.__file__).with_name('optical_motion.py')))).hexdigest()}
+                    Path(me.__file__).with_name('optical_motion.py'),
+                    Path(me.__file__).with_name('lens.py'),
+                    Path(me.__file__).parent.parent / 'prepare' / 'formats.py',
+                    Path(me.__file__).with_name('dictionary_context.py')))).hexdigest()}
     return {"version": 2, "source_proof": source_proof(ctx, ep_dir), "settings": settings}
 
 
@@ -633,7 +638,7 @@ def normalize_timeline(labels: dict) -> dict:
 
 # the reply's fields by the type the output format gives them (label/prompts.py)
 LIST_FIELDS = ("timeline", "key_events", "state_changes", "scene_graph", "recovery", "data_issues", "operator_mistakes",
-               "tasks", "contacts", "contacts_missing", "sensor_findings", "evidence_findings")
+               "tasks", "contacts", "contacts_missing", "sensor_findings", "evidence_findings", "camera_observations")
 DICT_FIELDS = ("scene", "completion", "goal_alignment")
 TEXT_FIELDS = ("task_summary", "performance_review", "viewpoint")
 TIME_FIELDS = ("t_s", "start_s", "end_s", "completed_at_s", "goal_reached_at_s", "undone_at_s", "failure_t_s",
@@ -694,6 +699,62 @@ def typed_labels(labels: dict) -> dict:
         else:
             sc["objects"] = _rows(labels, "scene.objects", sc["objects"])
     return labels
+
+
+def camera_observation_source(proof, views) -> bool:
+    """Require native packed-camera identities before a model view can drive presentation."""
+    if (not isinstance(proof, list) or not proof or not views
+            or any(not isinstance(item, dict) or item.get('missing') for item in proof)):
+        return False
+    for view in views:
+        matches = [item for item in proof if item.get('name') == f'rgb:{view}:packed']
+        if (len(matches) != 1 or not matches[0].get('location_sha256')
+                or not matches[0].get('size') or not (matches[0].get('sha256') or matches[0].get('mtime_ns'))):
+            return False
+    return True
+
+
+def bind_camera_observations(rows, fields: dict) -> dict:
+    """Bind optional final-label observations to requested IDs and immutable native inputs."""
+    from collections import Counter
+    config = fields.get('config') or {}
+    views = config.get('camera_observation_views') or []
+    proof = (fields.get('input_identity') or {}).get('source_proof')
+    supplied = (isinstance(views, list) and len(views) > 1 and all(isinstance(v, str) for v in views)
+                and len(views) == len(set(views)) and all(v in (config.get('views') or []) for v in views)
+                and 'camera_observations' in (config.get('schema_fields') or []))
+    native_verified = supplied and camera_observation_source(proof, views)
+    result = {'version': 1, 'views': list(views) if isinstance(views, list) else [],
+              'source_proof': copy.deepcopy(proof), 'observations': [], 'withheld_observations': []}
+    counts = Counter(row.get('view') for row in rows if isinstance(row, dict) and isinstance(row.get('view'), str)) \
+        if isinstance(rows, list) else {}
+    for row in rows if isinstance(rows, list) else [rows]:
+        why = None
+        if not supplied:
+            why = 'Camera observations were not requested with exact supplied view IDs.'
+        elif not native_verified:
+            why = 'Native camera source identities are missing or cannot be verified.'
+        elif not isinstance(row, dict) or row.get('view') not in views:
+            why = 'The observation does not name an exact supplied view ID.'
+        elif counts[row['view']] != 1:
+            why = 'More than one observation names this view; no observation is selected.'
+        elif row.get('content') not in ('scene', 'sensor', 'unclear') or not isinstance(row.get('evidence'), str) or not row['evidence'].strip():
+            why = 'The observation needs a known content class and visible evidence.'
+        if why:
+            result['withheld_observations'].append({'observation': copy.deepcopy(row), 'why': why})
+        else:
+            result['observations'].append({key: row[key] for key in ('view', 'content', 'evidence')})
+    return result
+
+
+def camera_observation_sources_match(parent, child, views) -> bool:
+    """A request part's view IDs must still name the parent's native camera files."""
+    from label.evidence_access import equivalent_source_proof
+    if not camera_observation_source(parent, views) or not camera_observation_source(child, views):
+        return False
+    names = {f'rgb:{view}:packed' for view in views}
+    return equivalent_source_proof([p for p in parent if p['name'] in names],
+                                   [p for p in child if p['name'] in names])
 
 
 def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int, fields: dict, *, model: str,
@@ -907,6 +968,10 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
     if cost is None:
         result.update(final_dispatch_outcome="unverified", final_reserved_usd=bound,
                       usage_reported=raw_usage)
+    if 'camera_observations' in labels:
+        result['camera_observations'] = bind_camera_observations(labels['camera_observations'], fields)
+        result['camera_observations']['provenance'] = {'model': result.get('model_served') or model,
+            'generation_id': result.get('generation_id'), 'method': 'same episode annotation request'}
     if isinstance(fields.get("sensor_evidence"), dict):
         from label.sensor_evidence import bind
         result["sensor_evidence"] = bind(fields["sensor_evidence"], labels.get("sensor_findings"))

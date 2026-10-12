@@ -7,16 +7,16 @@ video-only rigs) and, where the dataset keeps real capture times, times.npz and 
 anchor camera by time. Nothing about the data is changed: the model sees the episode as the dataset ships it.
 
 What the model is told about the episode, and where each fact comes from:
-- dataset, robot type, fps, camera names and resolution: the dataset's own metadata (context.json).
-- what each camera is: checked by eye on the dataset's frames at prepare time, stated as the dataset's
-  camera identity, and the model is told to verify it against the pixels.
+- dataset, robot type, fps and camera resolution: recorded metadata and preparation facts (context.json).
+- camera labels: presentation aliases, separately from recorded mount identifiers, explicit mounting facts
+  and reader-verified descriptions. Profiles and slots do not establish physical camera placement.
 - the instruction or annotation: the dataset's per-episode text, as a claim to check.
 - still spans: from the recorded state, true by construction (state.still_spans), as the recording's claim.
 - recorded motion between consecutive instants: from the recorded state, as a claim to check.
 - sampling: exactly what state.sample_frames did.
 - which of these are said at all: each part that depends on data the episode may not hold is a block (BLOCKS) with a
   test of the episode folder, so an episode without that data gets no word of it and is asked for no field of it.
-- a fisheye lens: only where the camera's own frames show a circular image with black corners (label/lens.py).
+- a circular image area: only where its pixels have persistent dark corners (label/lens.py), without asserting optics.
 Nothing else is said about field of view or the lens, nor about lighting, object identities, or what a gripper
 reading implies.
 
@@ -60,10 +60,10 @@ from prepare.signal_alignment import ALIGNED_CAMERA, ALIGNED_ASSUMED, placement_
 from prepare.state_notes import ASSUMED_CLOCK, LAYOUT, NOT_RECORDED, SHORT, STATE_WHY, UNREADABLE
 
 FPS = 30
-VIEW_ORDER = ("exo", "left", "right")          # harness view keys with a role: the scene camera, the two mounted ones
-MOUNTED = ("left", "right")                     # the cameras mounted on the left and right arm or gripper
+VIEW_ORDER = ("exo", "left", "right")          # stable presentation slots; their order does not establish content
+MOUNTED = ("left", "right")                     # actor-side slots; physical mounting needs separate evidence
 EXTRA_VIEW = re.compile(r"extra(\d+)")          # any other camera the recording has (extra1, extra2, ...)
-CAM_NAME = {"exo": "top", "left": "left", "right": "right"}   # dataset camera names
+CAM_NAME = {"exo": "top", "left": "left", "right": "right"}   # fallback presentation labels
 GRID_CELL_W_BY_RIG = {"teleop_arms": 448, "handheld_gripper": 320, "ego_head": 256}
 CELL_W_STEPS = (448, 384, 320, 288, 256, 224, 192)   # widths tried, largest first, when a request is too big
 DETAIL_VIEW_BYTES_MAX = 2_000_000   # room kept under the cap for the two full-resolution first and last frames
@@ -267,7 +267,7 @@ def order_views(keys) -> list[str]:
 
 
 def views(ep: dict) -> list[str]:
-    """The episode's cameras in row order (top, then left, then right gripper, then any other cameras)."""
+    """The shown camera slots in stable presentation order, without inferring physical placement."""
     have = ep.get("sources") or ep["context"].get("cameras") or dict.fromkeys(VIEW_ORDER)
     return order_views(have)
 
@@ -1079,20 +1079,24 @@ def _camera_line(ep: dict, v: str) -> str:
 
 
 def _camera_facts(ep: dict, v: str) -> str:
-    """A description written at prep time (verified for that dataset) wins; the fallback says only what the
-    camera's slot implies: on the left/right gripper, or not on one."""
+    """A recorded or verified role can guide geometry; a presentation slot cannot establish it."""
+    from prepare.formats import camera_role_provenance, camera_mounting
     cam = (ep["context"].get("cameras") or {}).get(v) or {}
-    if cam.get("desc"):
+    provenance = camera_role_provenance(cam, v, rig(ep))
+    mounting = camera_mounting(cam, v, rig(ep))
+    if cam.get("desc") and provenance not in ('presentation', 'recorded_name'):
         return f"- {cam_name(ep, v)}: {cam['desc'].rstrip('.')}."
+    if mounting == 'unspecified':
+        return (f"- {cam_name(ep, v)}: recorded view"
+                + (f" {cam['key']}" if cam.get('key') else '')
+                + "; its presentation slot and profile do not establish camera mounting or viewpoint. "
+                  "Read the scene or sensor content and placement from the pixels and explicit source claims.")
+    if mounting in ('fixed', 'scene'):
+        return f"- {cam_name(ep, v)}: explicitly described as a {mounting} camera; read its direction from the pixels."
     n = _rig_nouns(rig(ep))
-    if v == "exo" and rig(ep) == "ego_head":
-        return f"- {cam_name(ep, v)}: the camera worn on the person's head."
-    if v == "exo":
-        return (f"- {cam_name(ep, v)}: a camera that is not mounted on any {n['actor']}. Use it for the "
-                "scene layout, object locations and where things end up.")
-    if v not in MOUNTED:
-        return (f"- {cam_name(ep, v)}: another camera the recording has; the dataset does not say where it is "
-                "mounted, so read that from its frames.")
+    if mounting == 'head':
+        return (f"- {cam_name(ep, v)}: explicitly described as head-mounted; read its wearer or platform "
+                "and direction from the pixels.")
     side = "" if len(views(ep)) == 1 or v not in ("left", "right") else f"{v.upper()} "
     return (f"- {cam_name(ep, v)}: the camera mounted on the {side}{n['gripper_of']}. When its own gripper's fingers "
             "are in view, they sit in the same place in every frame, usually along the bottom edge, and change only by "
@@ -1101,35 +1105,44 @@ def _camera_facts(ep: dict, v: str) -> str:
 
 
 def camera_desc(ep: dict, recorded: bool = True) -> str:
+    from prepare.formats import camera_role_provenance, camera_mounting
     vs, r = views(ep), rig(ep)
     n = _rig_nouns(r)
     cams = ep["context"].get("cameras") or {}
-    unknown_mount = {v for v in vs if cams.get(v, {}).get("mounting") == "unspecified"}
-    mounted = [v for v in vs if v in MOUNTED and v not in unknown_mount]
+    provenance = {v: camera_role_provenance(cams.get(v, {}), v, r) for v in vs}
+    mounting = {v: camera_mounting(cams.get(v, {}), v, r) for v in vs}
+    unknown_mount = {v for v in vs if mounting[v] == 'unspecified'}
+    mounted = [v for v in vs if mounting[v] in ('actor', 'gripper', 'wrist')]
     res = sorted({f"{c.get('width')}x{c.get('height')}" for c in cams.values() if c.get("width")})
     rec = f" (recording {', '.join(res)} at {ep_fps(ep):g} fps)" if res else ""
     count = "There is exactly 1 camera; every grid row and every image strip is labelled with its name" \
         if len(vs) == 1 else (f"There are exactly {len(vs)}; every grid row and every image strip is labelled "
                               "with one of these names")
-    s = (f"Cameras in this episode, as named in the dataset{rec}. {count}:\n"
+    s = (f"Cameras in this episode{rec}. {count}:\n"
          + "\n".join(_camera_line(ep, v) for v in vs) + "\n")
-    if not unknown_mount and not any(v not in MOUNTED for v in vs):
+    s += ("The camera labels are presentation aliases identifying the supplied views, not publisher assertions "
+          "about mounting or actor identity. A contradiction of a presentation alias is not a recording fault. "
+          "Report observable corruption or missing evidence independently of those aliases. ")
+    if mounted and len(mounted) == len(vs):
         s += (f"No camera in this episode is off the {n['actor'] if len(mounted) == 1 else n['actors']}: the "
               f"whole scene is seen only through {'that camera' if len(mounted) == 1 else 'those cameras'}, so "
               "reconstruct the layout and where things end up from what it shows.\n")
-    if r == "ego_head":
-        s += ("This camera description is dataset metadata, not guaranteed truth: check it against the pixels. "
+    claims = [cam_name(ep, v) for v in vs if mounting[v] != 'unspecified'
+              or (provenance[v] != 'presentation' and cams.get(v, {}).get('desc'))]
+    if claims:
+        s += ("Check explicit recorded or verified camera-role claims in the descriptions or structured facts for "
+              + ', '.join(claims) + ". A description alone does not establish mounting: check only the mounting "
+              "or image-type assertions it actually makes, not its presentation alias. If an explicit assertion "
+              "contradicts the pixels, describe what the view actually is and record it as a data issue.")
+    if r == "ego_head" and any(mounting[v] == 'head' for v in vs):
+        s += ("The recorded head-camera mount claims for " + ', '.join(claims)
+              + " are not guaranteed truth: check them against the pixels. "
               "If the stream contradicts it (a view that stays fixed instead of moving with the person's head, "
               "a black, frozen or corrupted stream), describe what the view actually is and record it as a data "
               "issue. Where the camera is worn and where it points are read from the frames: a head camera turns "
               "and tilts with the head, so it shows wherever the person looks, and a camera that is really on the "
               "chest or held in the hand, or a mount that slips and tilts the view partway through, is worth "
               "recording.")
-    else:
-        s += ("These camera identities are dataset metadata, not guaranteed truth: check them against the "
-              "pixels. If a stream's content contradicts its name (a mounted camera that shows a fixed view "
-              f"or the reverse, two {n['actor']} streams swapped or identical, a black or frozen stream), "
-              "describe what the view actually is and record it as a data issue.")
     if r != "ego_head" and mounted:
         s += (f" A mounted camera turns with its {n['actor']}, so where it looks changes through the episode: "
               "sometimes down onto the work, sometimes along or across it. Work out its direction at each instant "
@@ -1146,7 +1159,12 @@ def camera_desc(ep: dict, recorded: bool = True) -> str:
               "Determine camera placement and arm identity from the pixels and explicit recorded identities. "
               "Do not report a camera metadata mismatch merely because a side-named camera is fixed: "
               "its mounting was not declared.")
-    elif "left" in vs and "right" in vs:
+    identity_known = all(mounting[v] in ('actor', 'gripper', 'wrist') for v in vs if v in MOUNTED)
+    if r == "ego_head":
+        s += (" In the output, \"left\", \"right\" and \"both\" name the person's own left and right hands. "
+              "Which hand is which follows the person's body (the forearm it belongs to, the thumb side), "
+              "not which half of the image it is in, because hands cross the midline and reach across.")
+    elif identity_known and "left" in vs and "right" in vs:
         s += (f" In the output, \"left\", \"right\" and \"both\" name the streams: an action is \"left\" when "
               "the left stream's own gripper makes the contact, \"right\" likewise, "
               f"\"both\" when the two act together. The other {n['actor']} often appears inside a view, and an "
@@ -1155,12 +1173,7 @@ def camera_desc(ep: dict, recorded: bool = True) -> str:
               "stream really sits on the side its name says is a separate question for the pixels: where the "
               f"other {n['actor']} and the scene appear in it once you have worked out from the frame how that camera "
               "is turned at that instant" + (", and which recorded motion its view follows." if recorded else "."))
-    elif r == "ego_head":
-        s += (" In the output, \"left\", \"right\" and \"both\" name the person's own left and right hands, "
-              "as seen from their head. Which hand is which follows the person's body (the forearm it belongs to, "
-              "the thumb side), not which half of the image it is in, because hands cross the midline and reach "
-              "across.")
-    elif (state_kind(ep) != "none" and len(actors(ep)) == 1
+    elif (identity_known and state_kind(ep) != "none" and len(actors(ep)) == 1
           and len([v for v in vs if v in MOUNTED]) == 1 and actor_views(ep)[0] is not None):
         s += f" In the output, the \"arm\" field always names the one {n['actor']}: \"{actors(ep)[0]}\"."
     return s
@@ -2077,6 +2090,20 @@ def _has_sensor_evidence(ep: dict, pl: dict) -> bool:
     return bool((pl.get("sensor_evidence") or {}).get("sensors"))
 
 
+def _camera_observation_views(ep: dict, pl: dict) -> list[str]:
+    return pl.get('camera_observation_views', views(ep))
+
+
+def _needs_camera_observations(ep: dict, pl: dict) -> bool:
+    from label.dictionary_context import camera_content_role
+    shown = _camera_observation_views(ep, pl)
+    return len(shown) > 1 and any(camera_content_role(ep['context'], view) is None for view in shown)
+
+
+def _camera_observations_text(ep: dict, pl: dict) -> str:
+    return prompts.camera_observation_block([(view, cam_name(ep, view)) for view in _camera_observation_views(ep, pl)])
+
+
 def _action_semantics_text(ep: dict, pl: dict) -> str:
     from prepare.state_contract import action_semantics
     semantics = action_semantics(ep['context'])
@@ -2105,6 +2132,8 @@ def _action_semantics_text(ep: dict, pl: dict) -> str:
 
 BLOCKS = (
     Block("collection_note", "intro", _has_collection_note, _collection_text),
+    Block('camera_observations', 'frames_detail', _needs_camera_observations, _camera_observations_text,
+          schema_fields=('camera_observations',)),
     Block("action_semantics", "state", lambda ep, pl: ep.get('action') is not None and ep['action'].size > 0,
           _action_semantics_text),
     Block("contact_views", "frames_detail", _has_contact_views, _contact_views_text),
@@ -2400,8 +2429,10 @@ def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int 
         pl["contact"] = []   # wide cells already show contact in detail
     # full size is kept only where a detail view shows it: the first and last instant and the contact instants
     imgs = frames(ep, pl, gate, widths=widths, detail_ks={pl["ks"][0], pl["ks"][-1], *(pl.get("contact") or [])})
+    pl['camera_observation_views'] = [v for v in order_views(imgs)
+                                    if any(k in imgs[v] and recording_at(ep, v, k) for k in pl['ks'])]
     any_img = next(im[pl["ks"][0]] for im in imgs.values() if pl["ks"][0] in im)
-    # a circular image with black corners names a fisheye lens in that camera's line (label/lens.py)
+    # A circular area with dark corners is an image observation, not a lens-type or calibration fact.
     ep["lens"] = {v: lens.circular_image(imgs[v]) for v in order_views(imgs)}
     pl["sensor_evidence"] = se.build(ep, pl, shown={v: [k for k in pl["ks"] if k in im and recording_at(ep, v, k)]
                                                   for v, im in imgs.items()}, images=imgs)
@@ -2485,6 +2516,7 @@ def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int 
             "cell": [cell_w, cell_h], "timesteps": [round(frame_time(ep, k), 3) for k in pl["ks"]], "lens": ep["lens"],
             "grid_cols": grid_cols, "decode_failed": decode_failures(ep),
             "still_spans": describe_spans(ep, pl["spans"]), "views": views(ep),
+            'camera_observation_views': pl['camera_observation_views'],
             "sampling": f"{rig(ep)}-every-{every_s(ep):g}s",
             "annotation_policy": ep['context']['annotation_policy'],
             "blocks": [b.name for b in blocks],

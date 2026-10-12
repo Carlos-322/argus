@@ -32,7 +32,9 @@ def case_teleop_joints():
     n = 900
     ep = {"context": {"dataset": "allenai/MolmoAct2-BimanualYAM-Dataset", "robot_type": "bi_yam_follower", "fps": 30,
                       "task_label": ["Spell out Ai2"], "instruction": "Spell AI2.", "profile": "teleop_arms",
-                      "state_kind": "joints", "cameras": {"exo": {"width": 640, "height": 360}}},
+                      "state_kind": "joints", "cameras": {"exo": {"width": 640, "height": 360},
+                                                           "left": {"key": "left_wrist_camera"},
+                                                           "right": {"key": "right_wrist_camera"}}},
           "state": _joints(n), "sources": {"exo": {}, "left": {}, "right": {}}}
     return ep, _pl(n, [(300, 449)])
 
@@ -51,7 +53,8 @@ def case_handheld_pose():
 def case_teleop_video_only():
     n = 450
     ep = {"context": {"dataset": "you/rig", "fps": 30, "profile": "teleop_arms", "state_kind": "none",
-                      "cameras": {"exo": {"width": 640, "height": 480}, "left": {"width": 640, "height": 480}}},
+                      "cameras": {"exo": {"width": 640, "height": 480},
+                                  "left": {"key": "left_wrist_camera", "width": 640, "height": 480}}},
           "state": np.zeros((n, 0)), "sources": {"exo": {}, "left": {}}}
     return ep, _pl(n)
 
@@ -73,7 +76,7 @@ def case_teleop_video_only_two_wrists():
     """Video only with both mounted cameras: its camera paragraph loses one clause in Task 3 (controller decision 3)."""
     ep, pl = case_teleop_video_only()
     ep["sources"]["right"] = {}
-    ep["context"]["cameras"]["right"] = {"width": 640, "height": 480}
+    ep["context"]["cameras"]["right"] = {"key": "right_wrist_camera", "width": 640, "height": 480}
     return ep, pl
 
 
@@ -130,15 +133,15 @@ CASES = {"teleop_joints": case_teleop_joints, "handheld_pose": case_handheld_pos
          "teleop_video_only_two_wrists": case_teleop_video_only_two_wrists}
 # Expectations describe evidence, independently of the block registry and prompt wording.
 CASE_CAPABILITIES = {
-    "teleop_joints": ({"state"}, ()),
+    "teleop_joints": ({"camera_observations", "state"}, ("camera_observations",)),
     "handheld_pose": ({"state"}, ()),
-    "teleop_video_only": ({"no_state"}, ()),
+    "teleop_video_only": ({"camera_observations", "no_state"}, ("camera_observations",)),
     "ego_plain": ({"no_state"}, ()),
-    "teleop_unaligned": ({"state_unaligned"}, ()),
-    "teleop_everything": ({"collection_note", "contact_views", "depth", "state", "signals", "contacts",
-                            "uploader_notes"}, ("contacts", "contacts_missing")),
+    "teleop_unaligned": ({"camera_observations", "state_unaligned"}, ("camera_observations",)),
+    "teleop_everything": ({"camera_observations", "collection_note", "contact_views", "depth", "state", "signals", "contacts",
+                            "uploader_notes"}, ("camera_observations", "contacts", "contacts_missing")),
     "ego_annotated_tracks": ({"no_state", "signals"}, ()),
-    "teleop_video_only_two_wrists": ({"no_state"}, ()),
+    "teleop_video_only_two_wrists": ({"camera_observations", "no_state"}, ("camera_observations",)),
 }
 
 
@@ -432,9 +435,9 @@ def test_block_presence_depends_on_evidence_across_dataset_and_rig_names(block, 
 
 def test_contacts_ask_for_their_fields_and_imply_the_contact_check():
     ep, pl = CASES["teleop_joints"]()
-    assert me.requested_schema(ep, pl) == () and "contact_checks" not in me.implied_checks(ep, pl)
+    assert me.requested_schema(ep, pl) == ("camera_observations",) and "contact_checks" not in me.implied_checks(ep, pl)
     _add_contact(ep, pl)
-    assert me.requested_schema(ep, pl) == ("contacts", "contacts_missing")
+    assert me.requested_schema(ep, pl) == ("camera_observations", "contacts", "contacts_missing")
     assert "contact_checks" in me.implied_checks(ep, pl)
 
 
@@ -470,7 +473,7 @@ def test_a_contact_timed_only_by_a_signal_that_does_not_measure_touch_is_not_sho
     ep["signal_meta"] = {"teleop.intervention": {}}
     ep["contacts"] = ep["contacts_shown"] = [dict(CONTACT, signals=["teleop.intervention"])]
     episode = me.build_prompt(ep, pl, cell_w=448, cell_h=252)[1]
-    assert "contacts" not in [b.name for b in me.present_blocks(ep, pl)] and me.requested_schema(ep, pl) == ()
+    assert "contacts" not in [b.name for b in me.present_blocks(ep, pl)] and me.requested_schema(ep, pl) == ("camera_observations",)
     assert "CONTACTS:" not in episode and '"contacts"' not in episode
     assert me.touch_contacts(ep, pl, ep["contacts"]) == []
     _add_contact(ep, pl)                             # a contact the glove's pressure times is shown
@@ -520,6 +523,39 @@ def test_a_video_only_mounted_view_does_not_prove_only_its_arm_acts():
     _, prompt = me.build_prompt(ep, pl, cell_w=448, cell_h=252)
     assert '"arm" field always' not in prompt
     assert "mounted on the LEFT arm" in prompt
+
+
+def test_camera_content_observation_block_is_gated_by_exact_authoritative_roles():
+    ep, pl = CASES['teleop_video_only_two_wrists']()
+    # Structural wrist names establish mounts, not whether images show a scene or a sensing surface.
+    assert 'camera_observations' in me.requested_schema(ep, pl)
+    text = me.build_prompt(ep, pl, cell_w=224, cell_h=126)[1]
+    assert 'exo: top' in text and 'left: left' in text and 'right: right' in text
+    assert '"content": "scene|sensor|unclear"' in text
+    for view in ep['context']['cameras']:
+        ep['context']['cameras'][view]['content_role'] = 'scene_camera'
+    assert 'camera_observations' not in me.requested_schema(ep, pl)
+    assert 'OBSERVED CAMERA CONTENT' not in me.build_prompt(ep, pl, cell_w=224, cell_h=126)[1]
+    ep['context']['cameras']['right']['content_role'] = 'tactile_image'
+    assert 'camera_observations' not in me.requested_schema(ep, pl)
+    ep['context']['cameras']['right'].pop('content_role')
+    ep['context']['cameras']['right']['mounting'] = 'gripper'
+    assert 'camera_observations' in me.requested_schema(ep, pl)
+    # A stale human dictionary field must not classify a view just because its alias agrees.
+    ctx = ep['context']
+    ctx['episode_id'] = 'recording'
+    ctx['data_dictionary'] = {'episode_id': 'recording', 'fields': [
+        {'id': 'camera-right', 'name': 'right', 'kind': 'camera', 'bindings': [
+            {'episode': 'another-recording', 'context_path': 'cameras/right'}]}],
+        'entries': {'camera-right': {'role': 'scene_camera', 'provenance': 'human'}}}
+    assert 'camera_observations' in me.requested_schema(ep, pl)
+    ctx['cameras']['right']['name'] = 'right'
+    ctx['data_dictionary']['fields'][0]['bindings'][0]['episode'] = 'recording'
+    assert 'camera_observations' not in me.requested_schema(ep, pl)
+    ctx['data_dictionary']['entries']['camera-right']['provenance'] = 'machine'
+    assert 'camera_observations' in me.requested_schema(ep, pl)
+    single, one_pl = CASES['ego_plain']()
+    assert 'camera_observations' not in me.requested_schema(single, one_pl)
 
 
 def test_a_video_only_rig_with_two_wrist_cameras_is_not_told_its_views_follow_a_recorded_motion():

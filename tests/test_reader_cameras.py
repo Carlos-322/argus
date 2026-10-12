@@ -491,6 +491,124 @@ def _depth_msg(k: int) -> dict:
             "data": base64.b64encode(np.full((48, 64), 900 + 10 * k, np.uint16).tobytes()).decode()}
 
 
+@pytest.mark.parametrize('rig,primary', [
+    ('handheld_gripper', '/alpha/image_raw/compressed'),
+    ('handheld_gripper', '/zeta/image_raw/compressed'),
+    ('teleop_arms', '/alpha/image_raw/compressed'),
+])
+def test_mcap_presentation_camera_slots_do_not_invent_publisher_mount_claims(tmp_path, rig, primary):
+    from label import episode as me
+    root = tmp_path / 'upload'
+    root.mkdir()
+    other = '/other/image_raw/compressed'
+    _json_mcap(root / 'capture.mcap', {primary: ('foxglove.CompressedImage', _jpg_msg),
+                                     other: ('foxglove.CompressedImage', _jpg_msg)})
+    report = f.convert(root, rig, tmp_path / 'episodes', 'native camera', 900)
+    assert not report['failed']
+    folder = tmp_path / 'episodes' / report['episodes'][0]['episode_id']
+    ep = me.load(folder)
+    camera = next(c for c in ep['context']['cameras'].values() if c['key'] == primary)
+    assert camera['key'] == primary
+    assert {c['key'] for c in ep['context']['cameras'].values()} == {primary, other}
+    assert all(source['n_frames'] == 30 for source in ep['sources'].values())
+    request = me.build_request(folder, inspect_evidence=False)
+    prompt = '\n'.join(c.get('text', '') for c in request['content'])
+    assert 'looking along its fingers' not in prompt
+    assert 'a camera that is not mounted on any' not in prompt
+    assert 'camera labels are presentation aliases' in prompt
+    assert 'do not establish camera mounting' in prompt
+    assert 'contradiction of a presentation alias is not a recording fault' in prompt
+    assert 'camera_observations' in request['schema_fields']
+    assert all(f'{view}: {me.cam_name(ep, view)}' in prompt for view in request['views'])
+    # Legacy contexts must not turn the same generated description into a source claim.
+    if rig == 'handheld_gripper':
+        camera.pop('role_provenance', None)
+        camera['name'] = 'gripper'
+        camera['desc'] = 'the camera carried on the handheld gripper, looking along its fingers'
+        camera.pop('mounting', None)
+        legacy = me.camera_desc(ep)
+        assert 'looking along its fingers' not in legacy
+        assert 'do not establish camera mounting' in legacy
+
+
+def test_recorded_mount_names_and_verified_adapter_descriptions_keep_viewpoint_guidance(tmp_path):
+    from label import episode as me
+    from prepare import fastumi
+    root = tmp_path / 'upload'
+    root.mkdir()
+    _json_mcap(root / 'capture.mcap', {'/left_wrist/image_raw/compressed':
+                                      ('foxglove.CompressedImage', _jpg_msg)})
+    report = f.convert(root, 'teleop_arms', tmp_path / 'episodes', 'named wrist', 900)
+    ep = me.load(tmp_path / 'episodes' / report['episodes'][0]['episode_id'])
+    prompt = me.camera_desc(ep)
+    assert 'camera mounted on the' in prompt
+    assert 'recorded or verified camera-role claims' in prompt
+    assert 'record it as a data issue' in prompt
+    # Specialized adapters supply descriptions checked on native frames, beyond a generic slot.
+    clip = _mp4(tmp_path / 'cam.mp4', 12)
+    folder = tmp_path / 'verified'
+    f.video_views_episode(folder, {'right': ('camera_rgb_image', clip)}, 'handheld_gripper', 'verified', {},
+                          descs={'right': fastumi.CAMERA_DESC['gripper']})
+    verified = me.load(folder)
+    assert verified['context']['cameras']['right']['role_provenance'] == 'adapter'
+    prompt = me.camera_desc(verified)
+    assert fastumi.CAMERA_DESC['gripper'] in prompt
+    assert 'recorded or verified camera-role claims' in prompt
+    assert 'record it as a data issue' in prompt
+    camera = verified['context']['cameras']['right']
+    camera.update(role_provenance='human', mounting='fixed', desc='a fixed camera viewing the work bench')
+    prompt = me.camera_desc(verified)
+    assert 'a fixed camera viewing the work bench' in prompt
+    assert 'No camera in this episode is off the gripper' not in prompt
+    assert 'A mounted camera turns with its gripper' not in prompt
+    for provenance, desc in [('adapter', 'Recorded camera channel /sensor/image; selected slots are presentation roles'),
+                             ('adapter', 'the depth picture stored by the recorder as an ordinary image'),
+                             ('recorded', None), ('human', None)]:
+        camera.update(role_provenance=provenance)
+        camera.pop('mounting', None)
+        if desc:
+            camera['desc'] = desc
+        else:
+            camera.pop('desc', None)
+        prompt = me.camera_desc(verified)
+        if desc:
+            assert desc in prompt
+        assert 'No camera in this episode is off the gripper' not in prompt
+        assert 'A mounted camera turns with its gripper' not in prompt
+        assert 'camera mounted on the handheld gripper' not in prompt
+    camera.update(role_provenance='human', mounting='gripper')
+    assert 'A mounted camera turns with its gripper' in me.camera_desc(verified)
+    verified['context']['profile'] = 'ego_head'
+    camera.pop('mounting')
+    prompt = me.camera_desc(verified)
+    assert "name the person's own left and right hands" in prompt
+    verified['context']['profile'] = 'teleop_arms'
+    camera.update(role_provenance='human', mounting='fixed', desc='a fixed camera viewing the work bench')
+    verified['context']['cameras']['left'] = {**camera, 'name': 'left'}
+    verified['sources']['left'] = dict(verified['sources']['right'])
+    prompt = me.camera_desc(verified)
+    assert "the left stream's own gripper makes the contact" not in prompt
+    assert 'stream really sits on the side its name says' not in prompt
+
+
+def test_camera_observations_use_only_views_with_actual_supplied_native_frames(tmp_path):
+    from label import episode as me
+    root = tmp_path / 'upload'
+    root.mkdir()
+    _json_mcap(root / 'capture.mcap', {'/alpha/image': ('foxglove.CompressedImage', _jpg_msg),
+                                     '/other/image': ('foxglove.CompressedImage', _jpg_msg)})
+    report = f.convert(root, 'handheld_gripper', tmp_path / 'episodes', 'native camera', 900)
+    folder = tmp_path / 'episodes' / report['episodes'][0]['episode_id']
+    sources = json.loads((folder / 'sources.json').read_text())
+    assert set(sources) == {'right', 'extra1'}
+    Path(sources['extra1']['packed']).write_bytes(b'corrupted after conversion')
+    request = me.build_request(folder, inspect_evidence=False)
+    assert request['views'] == ['right', 'extra1']
+    assert request['camera_observation_views'] == ['right']
+    assert 'camera_observations' not in request['schema_fields']
+    assert any(issue['camera'] == 'extra1' for issue in request['decode_failed'])
+
+
 def test_undecodable_frames_inside_an_mcap_camera_are_flagged(tmp_path):
     root = tmp_path / "m"
     root.mkdir()

@@ -982,6 +982,50 @@ def merge_jaws(ep_dir, parts, missing=()):
     return merged
 
 
+def merge_camera_observations(ep_dir: Path, parts: list[tuple[dict, dict]], missing, ep: dict) -> dict | None:
+    """Only source-current, agreeing part observations describe a whole recording's view."""
+    if not any(isinstance(r.get('camera_observations'), dict) for _, r in parts):
+        return None
+    from label.evidence_access import source_proof, piece_reference
+    from label.harness import camera_observation_sources_match
+    from label import episode as me
+    from board.dictionary_projection import current_camera_observations
+    ep_dir = Path(ep_dir)
+    ctx = ep['context']
+    views = me.views(ep)
+    result = {'version': 1, 'views': views, 'source_proof': source_proof(ctx, ep_dir),
+              'observations': [], 'withheld_observations': [], 'parts': [],
+              'provenance': {'method': 'agreement of source-bound final annotation parts'}}
+    by_view = {view: [] for view in views}
+    for pc, record in parts:
+        owner = copy.deepcopy(pc.get('piece') or {})
+        child = copy.deepcopy(record.get('camera_observations') or {})
+        directory = Path(record['episode_dir']) if record.get('episode_dir') else None
+        location = piece_reference(ep_dir, directory, owner)
+        valid = False
+        if location:
+            actual_ctx = json.loads((directory / 'context.json').read_text())
+            current_camera_observations(child, actual_ctx, directory)
+            valid = (child.get('source_current') is True and camera_observation_sources_match(
+                result['source_proof'], child.get('source_proof'), child.get('views')))
+        result['parts'].append({'source_piece': {key: owner.get(key) for key in ('index', 't0_s', 't1_s')},
+                                'source_location': location, 'record': child})
+        if valid:
+            for row in child.get('observations') or []:
+                if row['view'] in by_view:
+                    by_view[row['view']].append(row)
+    expected = len(parts) + len(missing)
+    for view in views:
+        rows = by_view[view]
+        if len(rows) == expected and len({r['content'] for r in rows}) == 1:
+            result['observations'].append({'view': view, 'content': rows[0]['content'],
+                'evidence': ' | '.join(dict.fromkeys(r['evidence'] for r in rows))})
+        else:
+            result['withheld_observations'].append({'view': view,
+                'why': 'Request parts disagree or do not all supply a verified observation for this view.'})
+    return result
+
+
 def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = ()) -> dict:
     """One labelling result for the whole recording from its parts' results [(part context, part result), ...]
     in order. Times are shifted onto the recording's clock; observations and actual tasks are joined.
@@ -1152,9 +1196,11 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
     from label.evidence_access import merge as merge_inspection
     evidence_inspection = merge_inspection(parts, ep_dir)
     jaw_evidence = merge_jaws(ep_dir, parts, missing)
+    camera_observations = merge_camera_observations(ep_dir, parts, missing, ep)
     selected = policy.effective(ctx)
     return {"episode_dir": str(ep_dir), "model": first.get("model"), "reasoning_effort": first.get("reasoning_effort"),
             'annotation_policy': selected,
+            **({'camera_observations': camera_observations} if camera_observations is not None else {}),
             **({'jaw_evidence': jaw_evidence} if jaw_evidence else {}),
             **({"sensor_evidence": sensor_evidence} if sensor_evidence["sensors"] else {}),
             **({"evidence_inspection": evidence_inspection} if evidence_inspection['parts'] else {}),

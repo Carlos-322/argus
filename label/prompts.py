@@ -264,6 +264,21 @@ OPERATOR_MISTAKE_TAGS = ("failed_grasp, dropped_object, knocked_object, collisio
                          "hesitation, unnecessary_motion, goal_undone, incomplete_task")
 
 
+def camera_observation_block(views: list[tuple[str, str]]) -> str:
+    """Optional pixel-grounded content descriptions using exact supplied view identities."""
+    names = '; '.join(f'{view}: {alias}' for view, alias in views)
+    return ('\nOBSERVED CAMERA CONTENT. The supplied view IDs and image-row labels are: ' + names + '. '
+            'Add "camera_observations" to the final JSON, as a list of '
+            '{"view": "<exact supplied view ID>", "content": "scene|sensor|unclear", '
+            '"evidence": "<brief description of the visible content>"}. '
+            'Use scene for a view showing the device, person, objects or workspace; sensor for a view of '
+            'a sensing surface or sensor image rather than the surrounding work; unclear when the pixels '
+            'do not establish either, or its content changes between these classes. Judge the visible content '
+            'across the supplied footage, not its name, topic, slot or profile. '
+            'These observations do not establish camera mounting, actor ownership, physical calibration '
+            'or a recording fault. Preserve explicit human and source descriptions separately.\n')
+
+
 def schema(r: str, recorded: bool = True) -> str:
     """The output schema for a robot rig (the head camera has its own, EGO_SCHEMA). A video only episode is offered no
     tag for a state it does not have."""

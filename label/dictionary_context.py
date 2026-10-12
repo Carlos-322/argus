@@ -141,3 +141,46 @@ def field_interpretation(context: dict, name: str, kind="signal", *, context_pat
     if len(matched) != 1:
         return {}
     return copy.deepcopy((overlay.get("entries") or {}).get(matched[0]["id"]) or {})
+
+
+SCENE_CONTENT_ROLES = frozenset(('scene', 'scene_camera', 'scene_image'))
+SENSOR_CONTENT_ROLES = frozenset(('sensor', 'sensor_view', 'tactile_image', 'optical_tactile', 'touch', 'tactile'))
+TACTILE_CONTENT_ROLES = SENSOR_CONTENT_ROLES - {'sensor', 'sensor_view'}
+
+
+def camera_content_role(ctx: dict, view: str, entry: dict | None = None) -> dict | None:
+    """Resolve explicit content roles independently of mounting and initial machine interpretations."""
+    from label.signals import _role
+    if entry is None:
+        entry = (ctx.get('cameras') or {}).get(view) or {}
+    path = 'cameras/' + view.replace('~', '~0').replace('/', '~1')
+    if view in (ctx.get('cameras') or {}):
+        interpretation = prepared_interpretation(ctx, view, 'camera')
+    else:
+        index = next((i for i, item in enumerate(ctx.get('unshown_cameras') or []) if item is entry), None)
+        path = 'unshown_cameras/' + str(index)
+        interpretation = field_interpretation(ctx, entry.get('name'), 'camera', context_path=path)
+    overlay = ctx.get('data_dictionary') or {}
+    fields = [f for f in overlay.get('fields') or [] if f.get('kind') == 'camera'
+              and f.get('name') == entry.get('name') and any(b.get('episode') == _owner(ctx)
+              and b.get('context_path') == path and _bound(ctx, f, b) for b in f.get('bindings') or [])]
+    if interpretation.get('provenance') == 'human' and 'role' in interpretation and len(fields) == 1:
+        ident = fields[0]['id']
+        machine = (overlay.get('machine_entries') or {}).get(ident)
+        explicit = (not isinstance(machine, dict) or interpretation['role'] != machine.get('role')
+                    or any(row.get('field_id') == ident and 'role' in (row.get('after') or {})
+                           for row in (overlay.get('override_history') or overlay.get('history') or [])))
+        if explicit:
+            role = _role(interpretation['role'])
+            return {'role': 'scene' if role in SCENE_CONTENT_ROLES else
+                    'tactile' if role in TACTILE_CONTENT_ROLES else
+                    'sensor' if role in SENSOR_CONTENT_ROLES else 'other', 'provenance': 'human'}
+    # These structured facts declare content. Generic RGB and mount declarations do not.
+    for key in ('content_role', 'recorded_role', 'role'):
+        role = _role(entry.get(key))
+        if role in SCENE_CONTENT_ROLES | SENSOR_CONTENT_ROLES:
+            return {'role': 'scene' if role in SCENE_CONTENT_ROLES else
+                    'tactile' if role in TACTILE_CONTENT_ROLES else 'sensor', 'provenance': 'recorded'}
+        if key in entry and role in ('', 'other', 'unknown', 'unclear'):
+            return {'role': 'other', 'provenance': 'recorded'}
+    return None
