@@ -9,28 +9,24 @@ Recently, [Midcentury AI](https://www.midcentury.xyz/blog/optimizing-argus) push
 
 ### Update v1: Format and sensor support
 
-Argus now supports depth, tactile and other sensor data alongside RGB and robot state, with shared mistake/recovery annotation across teleop, UMI and human ego recordings. Format readers preserve source fields and timestamps; long recordings are annotated in chunks and rejoined into one episode, with findings and evidence available in the viewer and JSON.
+This release extends annotation to depth, tactile and other sensor data, and consolidates teleop, UMI and human ego under one harness. Format readers preserve source fields and timestamps; long recordings are annotated in chunks and rejoined on the original timeline. Behavioral and sensor annotations are available in both the viewer and JSON exports.
 
 ## Overview
 
-Argus annotates **actions, subgoals, outcomes, mistakes and recoveries** from robot-learning data. It combines RGB with state, depth, tactile and other recorded signals, preserving their units, timestamps and source context for model reasoning. We believe this combination of format support and detailed behavioral and sensor annotation distinguishes Argus among open-source robotics annotation tools. Supply your recordings, recording setup and a dataset description; Argus handles ingestion, checks, sampling and evidence inspection through a shared harness.
+Argus is a multimodal annotation harness for robot learning data. The VLM jointly interprets multi-view RGB, proprioception, actions, depth, tactile and other episode data to produce dense annotations of **actions, subgoals, outcomes, operator mistakes and recoveries**. A shared pipeline handles ingestion, frame sampling and sensor inspection across teleop, UMI and human ego datasets, preserving source timing and measurement semantics without dataset-specific prompts. We believe this combination of broad format support and joint visual/sensor reasoning distinguishes Argus among open-source robotics annotation tools.
 
-![Shared annotation architecture: source-owned episode evidence, shared request policy, conditional request construction, optional evidence selection and source access, final annotation, verified joining and viewer/JSON outputs.](media/architecture.svg)
+![Annotation pipeline: format ingestion, field interpretation, visual and sensor evidence selection, VLM annotation, temporal stitching, viewer and JSON exports.](media/architecture.svg)
 
 **Data:** teleop, UMI and human ego. **Formats:** LeRobot v2.0/v2.1/v3.0, MCAP, HDF5, video files and folders, and ZIP/TAR archives, with JSON/CSV/Parquet sidecars. Nine public dataset adapters provide download and sample-selection entrypoints.
 
 | Available evidence | How it contributes |
 |---|---|
-| RGB cameras | Timestamped multi-view grids, first/last frames and relevant boundaries establish actions, progress, outcomes and visible mistakes. |
-| Robot state and actions | Declared joints, poses, grippers and control meanings support motion checks and comparison with the footage. Training targets are not automatically treated as commands. |
-| Depth | Images and measured regions can establish camera-relative distance or separation where units, calibration and clocks support it. Relative depth stays relative. |
-| Tactile | Pressure, normal/shear force, contact arrays and optical tactile images can reveal changes in grip, contact distribution or surface motion. Raw response is not automatically physical force or slip. |
-| Other recorded fields | Numeric channels, event flags, native waveform packets and structured metadata can be inspected through the same bounded evidence interface. Eligible waveform samples support spectral analysis when a recorded sample rate is available; this is not general audio transcription. |
-| Publisher context | Instructions, task spans, annotations and calibration retain their source ownership. The model checks claims against observations; missing or conflicting information remains qualified. |
-
-Labels include action phases (advancing, wasteful or idle), subgoals, key events, outcomes, operator mistakes and recoveries, scene changes and recording issues. Sensor conclusions carry evidence, confidence and limitations; ambiguous clocks and unsupported physical claims remain qualified. Inspection may yield no additional finding.
-
-[Format readers](prepare/formats.py) retain source evidence; [field interpretation](label/dictionary.py) resolves meanings and units; [checks](checks) assess recording integrity. Shared [policy](label/policy.py) and [frame planning](label/episode.py) construct requests. When useful, the model [inspects additional evidence](label/evidence_access.py) before [annotation](label/harness.py); [joining](label/pieces.py) restores the original timeline. RGB-only recordings use this same path without requiring extra sensor inputs.
+| RGB | Timestamped multi-view frames provide visual context for task execution, object interactions, progress, failures and recoveries. |
+| Proprioception and actions | Joint states, end-effector poses, gripper states and action trajectories provide motion context. Training targets retain their declared semantics rather than being assumed to be executed commands. |
+| Depth | Metric depth supports camera-relative distance and separation when units, calibration and temporal alignment are known. Relative depth remains relative. |
+| Tactile | Pressure, normal/shear force, contact arrays and optical tactile images support analysis of grip, contact distribution and surface motion. Raw sensor response alone does not establish physical force or slip. |
+| Other episode fields | Numeric channels, event flags, waveform packets and structured metadata are accessible through the same inspection interface. Spectral analysis of eligible waveforms requires a recorded sample rate. |
+| Task context | Instructions, annotations and calibration metadata provide context. The VLM checks publisher claims against the recording rather than assuming their correctness. |
 
 ## Install and review
 
@@ -55,24 +51,26 @@ uv run python -m review --data path/to/dataset --rig teleop_arms \
 uv run python -m board serve --board data/review/mine --clips data/review/mine/clips
 ```
 
-`--data` accepts a folder, file, archive or HTTP(S) URL. `--rig` identifies the recording setup: `teleop_arms` (teleop), `handheld_gripper` (UMI) or `ego_head` (human ego). Argus detects formats and available evidence from the source. [Data Review](https://data.pantheon.inc/review) uses the same default policy; its deployed version and upload limits can differ.
+`--data` accepts a folder, file, archive or HTTP(S) URL. Set `--rig` to `teleop_arms`, `handheld_gripper` or `ego_head` for teleop, UMI or human ego, respectively. Argus detects the format and available evidence; RGB-only data follows the same pipeline without requiring sensor inputs. [Data Review](https://data.pantheon.inc/review) uses the same default policy, though its deployed version and upload limits can differ.
 
 | Default or optional setting | Behavior |
 |---|---|
 | Astra, the default | `openai/gpt-6-astra`, medium reasoning; a regular sample every 1.5s for teleop, 1s for UMI and 0.5s for human ego, plus eligible boundaries and first/last frames. |
 | Sol 6.1 High | `--model openai/gpt-6.1-sol --reasoning high`; defaults to 1 FPS on all recording setups and requires at least 1 FPS. |
 | Faster actions | `--sample-fps 2` is recommended for subsecond fumbles and rapid recoveries. More images shorten the available request window and can increase cost. |
-| Task scope | Source declarations establish episode or session scope. `--task-mode episode` or `session` overrides it; missing instructions alone do not imply a session. Human ego annotations retain their activities schema. |
+| Task scope | Episode/session scope follows source metadata; `--task-mode episode` or `session` overrides it. A missing instruction does not automatically imply a session. Human ego uses the activities schema. |
 
-One recording remains one public episode. Internal request parts rejoin on its original clock; session tasks annotate activities within it. Explicit preparation limits report trimming; missing parts and processing failures remain visible alongside usable footage and evidence.
+Each recording produces one public episode. Long recordings are split to fit API request limits and rejoined on the original timeline; internal chunk boundaries are not treated as recording truncation. Session mode annotates activities within the recording. Preparation limits, missing chunks and processing failures are reported alongside any usable results.
 
-Resume reuses recorded settings, source proofs, selected frames and evidence omissions. Changing paid request semantics requires a new run. `--free` skips paid field interpretation, routing and evidence selection; its base requests do not predict later evidence choices. Caps include applicable calls and outstanding reservations; unknown charges remain reserved.
+Resume preserves the original settings, input verification and evidence selection. Changes to paid request semantics require a new run. `--free` skips paid field interpretation, image-detail routing and evidence selection, so it previews base requests rather than the full paid evidence path. Spending caps account for all applicable calls and outstanding reservations; unresolved charges stay reserved.
 
 ## Results and further use
 
-A review job keeps prepared `episodes/`, base requests in `dry/`, receipts in `run/`, rejoined labels in `run_final/`, and the board. Episode JSON, filtered JSON Lines and static exports preserve annotations and substantive evidence. Public exports withhold private access descriptors and infrastructure paths. Human field interpretations take precedence, including an explicitly blank role; stale findings are withheld when their source or interpretation changes.
+The output schema includes action phases (advancing, wasteful or idle), subgoals, key events, outcomes, operator mistakes, recoveries, scene changes and recording quality. Sensor findings include evidence, confidence and limitations; inspection can yield no additional finding when the signal is inconclusive.
 
-The viewer uses the canonical [board/index.html](board/index.html) for live and static pages. It shows behavioral and sensor findings over the footage, with supporting readings and detail available alongside it. Keep uploaded footage under its own access policy and license when sharing.
+A review job contains prepared `episodes/`, base requests in `dry/`, receipts in `run/`, rejoined labels in `run_final/`, and the board. Episode JSON, filtered JSON Lines and static exports retain annotations and supporting evidence while omitting internal access metadata. Human field overrides take precedence, including a blank role; source or interpretation changes invalidate stale findings.
+
+Live and static boards use the same [viewer](board/index.html), with behavioral and sensor annotations overlaid on the footage and supporting measurements available alongside it. Shared footage remains subject to its source license and access policy.
 
 ![Two-camera UMI annotation walkthrough, with action phases, subgoals and goal reasoning over the footage.](media/board_demo.webp)
 
