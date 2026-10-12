@@ -1197,20 +1197,57 @@ def camera_entry(view: str, name: str, pr: dict, rig: str) -> dict:
                      "codec": pr["codec"]}, view, name, rig)
 
 
+def camera_role_provenance(cam: dict, view: str, rig: str) -> str:
+    """Separate camera-role claims from presentation slots, including older generated descriptions."""
+    provenance = cam.get('role_provenance')
+    if provenance in ('presentation', 'recorded_name', 'recorded', 'human', 'adapter'):
+        return provenance
+    desc = cam.get('desc')
+    defaults = {EGO_DESC, 'the camera carried on the handheld gripper, looking along its fingers',
+                'the camera carried on the LEFT-hand gripper, looking along its fingers',
+                'the camera carried on the RIGHT-hand gripper, looking along its fingers'}
+    unknown = str(desc or '').startswith('recorded camera ') and cam.get('mounting') == 'unspecified'
+    if desc and desc not in defaults and not unknown:
+        # Older specialized readers supplied descriptions checked on their native recordings.
+        return 'adapter'
+    identifier = cam.get('key') or cam.get('name') or ''
+    if identifier in ('left', 'right', 'head', 'gripper', 'exo'):
+        identifier = ''
+    if view in ('left', 'right') and is_mount_named(identifier):
+        return 'recorded_name'
+    return 'presentation'
+
+
+def camera_mounting(cam: dict, view: str, rig: str) -> str:
+    """Descriptions are not structural mount proofs; keep affirmative source identities separately."""
+    mounting = cam.get('mounting')
+    if mounting in ('actor', 'gripper', 'wrist', 'head', 'fixed', 'scene'):
+        return mounting
+    if mounting == 'unspecified':
+        return mounting
+    identifier = cam.get('key') or cam.get('name') or ''
+    if identifier in ('left', 'right', 'head', 'gripper', 'exo'):
+        identifier = ''
+    if view in ('left', 'right') and is_mount_named(identifier):
+        return 'actor'
+    return 'unspecified'
+
+
 def describe(cam: dict, view: str, name: str, rig: str) -> dict:
-    """Name and describe the cameras whose role follows from the rig alone: the head camera on a person,
-    and the cameras carried on handheld grippers. Side names alone do not establish wrist mounting."""
+    """Keep profile aliases separate from mount identities explicitly named by the source."""
     if view in ("left", "right") and rig != "ego_head":
         cam["name"] = view          # the side, as our boards name mounted cameras; the dataset's key stays in "key"
     if rig == "ego_head" and view == "exo":
-        cam.update(name="head", desc=EGO_DESC)
+        cam['name'] = 'head'
     elif rig == "handheld_gripper" and view in ("left", "right"):
         if view == "right" and not re.search("right", name, re.I):
-            cam.update(name="gripper", desc="the camera carried on the handheld gripper, looking along its fingers")
-        else:
-            cam.update(desc=f"the camera carried on the {view.upper()}-hand gripper, looking along its fingers")
-    elif rig == "teleop_arms" and view in ("left", "right") and not is_mount_named(name):
-        cam.update(mounting="unspecified", desc=f"recorded camera {name}; its name does not establish a wrist mount or arm identity")
+            cam['name'] = 'gripper'
+    provenance = 'recorded_name' if view in ('left', 'right') and is_mount_named(name) else 'presentation'
+    cam['role_provenance'] = provenance
+    if provenance == 'presentation':
+        cam.update(mounting='unspecified', desc=f'recorded camera {name}; its presentation slot does not establish camera mounting or viewpoint')
+    else:
+        cam['mounting'] = 'actor'
     return cam
 
 
@@ -3132,6 +3169,8 @@ def video_views_episode(ep: Path, files: dict, rig: str, dataset: str, extra: di
         cams[v] = camera_entry(v, name, pr, rig)
         if (descs or {}).get(v):
             cams[v]["desc"] = descs[v]
+            cams[v]['role_provenance'] = 'adapter'
+            cams[v].pop('mounting', None)
     placed = {v: presentation_clock(times[v], nominal_fps)[0] for v in order}
     camera_span_issues(extra, placed, anchor, {v: files[v][0] for v in order},
                        {"profile": rig, "cameras": cams})
@@ -5530,6 +5569,8 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
             cameras[v] = describe({"key": key, "name": _short(key, v), "width": w, "height": h, "codec": codec}, v, key, rig)
             if key in descs:
                 cameras[v]["desc"] = descs[key]
+                cameras[v]['role_provenance'] = 'adapter'
+                cameras[v].pop('mounting', None)
         note_broken_cameras(extra, broken, bool(sources))
         vmap = {v: k for v, k in vmap.items() if v in sources}
         # the episode is as long as its main camera's window, as in one file per camera below
@@ -5577,6 +5618,8 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
         cameras[v] = camera_entry(v, key, pr, rig)
         if key in descs:
             cameras[v]["desc"] = descs[key]
+            cameras[v]['role_provenance'] = 'adapter'
+            cameras[v].pop('mounting', None)
     times = None
     if not all(grid.values()):
         times = {}

@@ -6,6 +6,100 @@ from pathlib import Path
 import pytest
 
 
+def test_observed_camera_content_uses_native_ids_and_current_roles_for_exports(tmp_path, monkeypatch):
+    import copy
+    import hashlib
+    import json
+    from test_label import _packed_episode
+    from label import evidence_access, harness
+    from board import dictionary_projection, public_export, static, to_board
+
+    folder, _ = _packed_episode(tmp_path)
+    path = folder / 'context.json'
+    ctx = json.loads(path.read_text())
+    ctx['cameras'] = {v: {'name': 'opaque camera', 'width': 64, 'height': 36} for v in ('exo', 'left', 'right')}
+    ctx['data_dictionary'] = {'schema': 1, 'episode_id': folder.name, 'status': 'success',
+        'fields': [{'id': v, 'kind': 'camera', 'name': 'opaque camera',
+                    'bindings': [{'episode': folder.name, 'context_path': 'cameras/' + v}]} for v in ctx['cameras']],
+        'entries': {v: {'role': 'rgb_image', 'provenance': 'machine'} for v in ctx['cameras']}}
+    path.write_text(json.dumps(ctx))
+    media = [Path(s['packed']) for s in json.loads((folder / 'sources.json').read_text()).values()]
+    before = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in media}
+    fields = {'config': {'views': ['exo', 'left', 'right'], 'cam_labels': ['opaque camera'] * 3,
+                         'camera_observation_views': ['exo', 'left', 'right'],
+                         'schema_fields': ['camera_observations']},
+              'input_identity': {'source_proof': evidence_access.source_proof(ctx, folder)}}
+    rows = [{'view': 'exo', 'content': 'sensor', 'evidence': 'A deforming marked surface fills this view.'},
+            {'view': 'left', 'content': 'sensor', 'evidence': 'Only another marked contact surface is visible.'},
+            {'view': 'right', 'content': 'scene', 'evidence': 'The device and work surface are visible.'}]
+    # Exercise the real annotation writer with an offline reply, without invoking a provider.
+    monkeypatch.setattr(harness, 'call_model_once', lambda *a, **k: {
+        'choices': [{'finish_reason': 'stop', 'message': {'content': json.dumps({
+            'timeline': [], 'camera_observations': rows})}}], 'usage': {'cost': 0.0}})
+    recorded = harness.label_episode(folder, tmp_path / 'reply.json', model='openai/gpt-6.1-sol',
+        reasoning='high', api_key='offline', max_tokens=2000, timeout=1, cell_w=128)
+    assert recorded['labels']['camera_observations'] == rows
+    assert recorded['camera_observations']['observations'] == rows
+    assert recorded['camera_observations']['source_proof'] == recorded['input_identity']['source_proof']
+    bound = harness.bind_camera_observations(rows, fields)
+    result = {**fields, 'episode_dir': str(folder), 'parse_ok': True, 'labels': {'timeline': []},
+              'camera_observations': bound}
+    saved = to_board.convert(result, 'native')
+    shown = dictionary_projection.apply(copy.deepcopy(saved), ctx, folder)
+    assert shown['camera_presentation']['right'] == {'role': 'scene', 'provenance': 'observed'}
+    assert shown['camera_presentation']['exo'] == {'role': 'sensor', 'provenance': 'observed'}
+    assert static.shown_cams(shown) == ['right', 'exo', 'left']
+    assert static.shown_cams({'camera_views': ['right', 'extra1', 'extra2', 'extra3', 'extra4'],
+        'camera_presentation': {'right': {'role': 'tactile'}, 'extra1': {'role': 'sensor'},
+                               'extra2': {'role': 'scene'}, 'extra3': {'role': 'tactile'},
+                               'extra4': {'role': 'sensor'}}}) == ['extra2', 'extra1', 'extra4', 'right', 'extra3']
+    assert public_export.project(shown)['camera_observations']['observations'] == rows
+    assert saved['camera_observations'] == bound and 'camera_presentation' not in saved
+    assert 'camera_observations' not in to_board.convert({**result, 'parse_ok': False}, 'native')
+    inherited = copy.deepcopy(ctx)
+    inherited['data_dictionary']['machine_entries'] = copy.deepcopy(ctx['data_dictionary']['entries'])
+    inherited['data_dictionary']['entries']['right'].update(meaning='A reviewed description', provenance='human')
+    assert dictionary_projection.apply(copy.deepcopy(saved), inherited, folder)['camera_presentation']['right']['role'] == 'scene'
+    inherited['data_dictionary']['override_history'] = [{'field_id': 'right', 'after': {'role': 'rgb_image'}}]
+    assert dictionary_projection.apply(copy.deepcopy(saved), inherited, folder)['camera_presentation']['right']['role'] == 'other'
+
+    # The current exact human interpretation wins without rewriting the saved model receipt.
+    revised = copy.deepcopy(ctx)
+    revised['data_dictionary']['entries']['right'] = {'role': 'tactile_image', 'provenance': 'human'}
+    revised['data_dictionary']['entries']['left'] = {'role': 'scene', 'provenance': 'human'}
+    shown = dictionary_projection.apply(copy.deepcopy(saved), revised, folder)
+    assert shown['camera_presentation']['right']['role'] == 'tactile'
+    assert static.shown_cams(shown)[0] == 'left'
+    revised['data_dictionary']['entries']['right'] = {'role': 'unknown', 'provenance': 'human'}
+    assert dictionary_projection.apply(copy.deepcopy(saved), revised, folder)['camera_presentation']['right']['role'] == 'other'
+    # Explicit recorded content also takes precedence over a model observation.
+    revised = copy.deepcopy(ctx)
+    revised['cameras']['right']['role'] = 'tactile_image'
+    assert dictionary_projection.apply(copy.deepcopy(saved), revised, folder)['camera_presentation']['right']['role'] == 'tactile'
+
+    malformed = rows + [{'view': 'missing', 'content': 'scene', 'evidence': 'An invented camera.'}, rows[-1]]
+    checked = harness.bind_camera_observations(malformed, fields)
+    assert [r['view'] for r in checked['observations']] == ['exo', 'left']
+    assert len(checked['withheld_observations']) == 3
+    unsolicited = copy.deepcopy(fields)
+    unsolicited['config']['schema_fields'] = []
+    assert not harness.bind_camera_observations(rows, unsolicited)['observations']
+    unseen = copy.deepcopy(fields)
+    unseen['config']['camera_observation_views'] = ['exo', 'left']
+    assert [r['view'] for r in harness.bind_camera_observations(rows, unseen)['observations']] == ['exo', 'left']
+    unsupported = copy.deepcopy(fields)
+    unsupported['input_identity']['source_proof'] = []
+    assert not harness.bind_camera_observations(rows, unsupported)['observations']
+
+    # A saved observation never promotes a view after its native source changes.
+    media[-1].write_bytes(media[-1].read_bytes() + b'changed source')
+    stale = dictionary_projection.apply(copy.deepcopy(saved), ctx, folder)
+    assert stale['camera_observations']['source_current'] is False
+    assert not stale['camera_observations']['observations']
+    assert all(r['role'] != 'scene' for r in stale['camera_presentation'].values())
+    assert {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in media[:-1]} == {p: before[p] for p in media[:-1]}
+
+
 def test_duplicate_camera_names_keep_exact_sensor_owner_across_request_and_stitch(tmp_path):
     import json
     import hashlib
@@ -84,9 +178,9 @@ const {src,piece}=require(process.argv[1])();
 const rows=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));
 const begin=src.indexOf('// ================= sensor evidence:');
 const end=src.indexOf('// ================= touch:',begin);
-const api=new Function('esc','fmtT',piece('episodeCams')+piece('cameraPresentation')
-  +piece('supportingCameras')+piece('unshownCams')+src.slice(begin,end)
-  +'return {episodeCams,supportingCameras,sensorEvidence,gripFindingStripHtml};')(String,String);
+  const api=new Function('esc','fmtT',piece('episodeCams')+piece('cameraPresentation')
+  +piece('supportingCameras')+piece('cameraSectionLabel')+piece('sceneFirstLayout')+piece('cameraCaption')+piece('unshownCams')+src.slice(begin,end)
+  +'return {episodeCams,supportingCameras,cameraSectionLabel,sceneFirstLayout,cameraCaption,sensorEvidence,gripFindingStripHtml};')(String,String);
 const optical=rows['audit_optical_handoff.json'];
 const original=JSON.stringify(optical);
 const support=api.supportingCameras(optical);
@@ -115,6 +209,21 @@ const roleData={camera_views:['exo','extra1','extra2'],camera_labels:['head','to
   camera_presentation:{extra1:{role:'scene'},extra2:{role:'tactile'}}};
 assert.deepEqual(api.supportingCameras(roleData).map(c=>[c.view,c.role]),[['exo','other'],['extra2','tactile']]);
 assert.equal(api.episodeCams(roleData).main,'extra1');
+const generic={camera_views:['exo','left','right'],camera_presentation:{exo:{role:'sensor'},left:{role:'scene'},right:{role:'tactile'}}};
+assert.equal(api.episodeCams(generic).main,'left');
+assert.deepEqual(api.supportingCameras(generic).map(c=>c.role),['sensor','tactile']);
+assert.equal(api.cameraSectionLabel('sensor'),'Sensor views');
+assert.equal(api.cameraSectionLabel('tactile'),'Tactile cameras');
+const mixed={camera_views:['right','extra1','extra2'],camera_presentation:{right:{role:'sensor'},extra1:{role:'tactile'},extra2:{role:'scene'}}};
+assert.equal(api.sceneFirstLayout(mixed),true,'a verified scene leads sensor views without an exo slot');
+const interleaved={camera_views:['right','extra1','extra2','extra3','extra4'],camera_presentation:{right:{role:'tactile'},extra1:{role:'sensor'},extra2:{role:'scene'},extra3:{role:'tactile'},extra4:{role:'sensor'}}};
+assert.deepEqual(api.supportingCameras(interleaved).map(c=>c.view),['extra1','extra4','right','extra3'],
+  'sensor and tactile sections remain contiguous with stable order within each');
+const grippers={camera_views:['left','right'],camera_presentation:{left:{role:'scene'},right:{role:'scene'}}};
+assert.equal(api.sceneFirstLayout(grippers),false,'ordinary RGB-only gripper layout is preserved');
+assert.equal(api.cameraCaption({...mixed,camera_labels:['opaque sensor','pad','workbench']},'right'),'opaque sensor');
+assert.equal(api.cameraCaption({...grippers,camera_mounting:{right:'fixed'}},'right'),'right camera');
+assert.equal(api.cameraCaption({...grippers,camera_mounting:{right:'wrist'}},'right'),'right wrist');
 const opaque=rows['episode_waveform_sound_probe.json'];
 opaque.camera_presentation={right:{role:'tactile'},extra1:{role:'tactile'},extra2:{role:'scene'},extra3:{role:'scene'}};
 assert.equal(api.episodeCams(opaque).main,'extra2','a known scene camera leads over a misassigned sensor view');

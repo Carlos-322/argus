@@ -243,6 +243,9 @@ def convert(result: dict, dataset: str | None = None) -> dict:
         "dataset": dataset,
         "episode_prompt": labels.get("task_summary") or "",
         "viewpoint": labels.get("viewpoint"),  # ego: first_person | third_person
+        **({'camera_observations': finite(copy.deepcopy(result['camera_observations']))}
+           if not failed and isinstance(result.get('camera_observations'), dict)
+           and result['camera_observations'].get('version') == 1 else {}),
         "objects": objects,
         "event_labels": event_labels,
         "key_events": key_events,

@@ -1,20 +1,21 @@
-"""Whether a camera's image is a circle with black corners, the mark of a fisheye lens whose image circle is smaller
-than the sensor (FastUMI's gripper cameras). A fisheye whose image circle is wider than the sensor (RealOmni's
-gripper cameras, Gen-HumanEgo's and Egocentric-100K's head cameras) fills the frame and is not named by this check.
+"""Detect an observed circular image area with persistent dark corners.
+
+Circular masks and sensor interiors can have the same shape as a lens image circle. This check does not establish
+lens type, distortion or calibration; verified adapter descriptions remain separate source claims.
 
 The check reads the frames the request already decoded, so it costs no extra decode and gives the same answer for
 the same episode every time. Each of up to MAX_FRAMES sampled frames, spread evenly over the episode, is shrunk to a
-THUMB_W px wide grey image, and every pixel keeps its brightest value over those frames. Outside a lens's image
-circle the sensor gets no light, so those pixels stay black in every frame however the camera moves, while a dark
-part of a real scene is lit in at least one frame of a moving camera. The pixels that never pass DARK_MAX are then
+THUMB_W px wide grey image, and every pixel keeps its brightest value over those frames. Persistent dark areas
+may be image borders or masks, while a dark part of a moving scene can be lit in another frame.
+The pixels that never pass DARK_MAX are then
 matched to the outside of an ellipse centred on the image (a circle, once a video's stored shape stretches it),
 with the radii that misplace the fewest pixels. The image is circular when
 
 - all four corners never pass DARK_MAX,
 - at least MIN_OUTSIDE of the image lies outside the ellipse, and at least MIN_PURITY of that never passes DARK_MAX,
 - at most MAX_DARK_INSIDE of the inside never passes DARK_MAX,
-- and the band just inside the edge is lit (its median brightest value is at least EDGE_LIT): a lens's image
-  circle ends sharply, while a dark scene fades out towards a vignetted edge.
+- and the band just inside the edge is lit (its median brightest value is at least EDGE_LIT), separating
+  a sharp circular area from a gradual dark edge.
 
 A normal frame fails the first rule (its corners are lit in some frame), a dark scene the last two, and a gripper's
 dark fingers along the bottom edge the first (the top corners are lit).
@@ -23,7 +24,8 @@ from __future__ import annotations
 
 import numpy as np
 
-DESC = "a fisheye lens; straight lines curve near the edge"
+DESC = ("a circular image area with dark corners. Judge visible distortion from the pixels; "
+        "this shape alone does not establish lens type or calibration")
 THUMB_W = 64
 SOURCE_W = 192          # the narrowest grid cell (label/episode.py CELL_W_STEPS)
 MAX_FRAMES = 24

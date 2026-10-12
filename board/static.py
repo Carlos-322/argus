@@ -113,7 +113,7 @@ def shown_cams(d: dict) -> list:
     roles = d.get("camera_presentation") or {}
     main = next((v for v in candidates if (roles.get(v) or {}).get("role") == "scene"),
                 "exo" if "exo" in views else views[0])
-    rank = {"scene": 0, "other": 1, "tactile": 2}
+    rank = {"scene": 0, "other": 1, "sensor": 2, "tactile": 3}
     return [main, *sorted((v for v in candidates if v != main),
                          key=lambda v: rank.get((roles.get(v) or {}).get("role"), 1))]
 

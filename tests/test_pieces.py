@@ -503,6 +503,63 @@ def _part_result(p: Path, action: str) -> dict:
                        "completion": {"task_completed": "success"}}}
 
 
+def test_camera_content_consensus_keeps_part_source_proof_and_abstains_at_gaps(tmp_path, monkeypatch):
+    import copy
+    from label.evidence_access import source_proof
+    from board import dictionary_projection, public_export, static, to_board
+    _job, source, folders = _three_parts(tmp_path, monkeypatch)
+    contexts = [json.loads((p / 'context.json').read_text()) for p in folders]
+    records = []
+    for folder, ctx in zip(folders, contexts):
+        record = _part_result(folder, 'observe the supplied views')
+        record['config'].update(views=['exo', 'left', 'right'], camera_observation_views=['exo', 'left', 'right'],
+                                schema_fields=['camera_observations'])
+        record['input_identity'] = {'source_proof': source_proof(ctx, folder)}
+        record['camera_observations'] = harness.bind_camera_observations([
+            {'view': v, 'content': 'scene' if v == 'right' else 'sensor',
+             'evidence': 'Visible workspace.' if v == 'right' else 'Visible sensor surface.'}
+            for v in ('exo', 'left', 'right')], record)
+        records.append(record)
+    joined = pieces.stitch(source, list(zip(contexts, records)))
+    assert len(joined['camera_observations']['parts']) == 3
+    assert joined['camera_observations']['observations'][-1]['view'] == 'right'
+    ctx = json.loads((source / 'context.json').read_text())
+    saved = to_board.convert(joined, 'native parts')
+    projected = dictionary_projection.apply(copy.deepcopy(saved), ctx, source)
+    assert static.shown_cams(projected)[0] == 'right'
+    assert public_export.project(projected)['camera_observations']['source_current'] is True
+
+    conflicting = copy.deepcopy(records)
+    conflicting[1]['camera_observations']['observations'][-1]['content'] = 'sensor'
+    mixed = pieces.stitch(source, list(zip(contexts, conflicting)))
+    assert 'right' not in {r['view'] for r in mixed['camera_observations']['observations']}
+    assert mixed['camera_observations']['withheld_observations']
+    missing = [{'part': 2, 't0_s': contexts[1]['piece']['t0_s'],
+                't1_s': contexts[1]['piece']['t1_s'], 'why': 'no parsed labels'}]
+    gapped = pieces.stitch(source, [(contexts[i], records[i]) for i in (0, 2)], missing)
+    assert not gapped['camera_observations']['observations']
+    # A later change to a child's ownership context cannot promote its old consensus.
+    child_path = folders[1] / 'context.json'
+    changed = json.loads(child_path.read_text())
+    changed['source']['view_note'] = 'Changed native ownership claim'
+    child_path.write_text(json.dumps(changed))
+    stale = dictionary_projection.apply(copy.deepcopy(saved), ctx, source)
+    assert stale['camera_observations']['source_current'] is False
+    assert not stale['camera_observations']['observations']
+    # Even a fresh child proof cannot assign a parent's view ID to a different native camera.
+    changed = copy.deepcopy(contexts[1])
+    child_path.write_text(json.dumps(changed))
+    source_path = folders[1] / 'sources.json'
+    sources = json.loads(source_path.read_text())
+    sources['right']['packed'], sources['left']['packed'] = sources['left']['packed'], sources['right']['packed']
+    source_path.write_text(json.dumps(sources))
+    reassigned = copy.deepcopy(records)
+    reassigned[1]['input_identity'] = {'source_proof': source_proof(changed, folders[1])}
+    reassigned[1]['camera_observations'] = harness.bind_camera_observations(
+        records[1]['camera_observations']['observations'], reassigned[1])
+    assert not pieces.stitch(source, list(zip(contexts, reassigned)))['camera_observations']['observations']
+
+
 @pytest.mark.parametrize('first', ['refused', 'claimed', 'unknown', 'newer_claimed', 'newer_unknown',
                                   'contradicted_refusal', 'paid_failed', 'paid_unknown_cost', 'paid_reply',
                                   'ambiguous_corrupt', 'ambiguous_index'])

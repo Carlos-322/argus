@@ -258,10 +258,25 @@ HANDHELD_WORDING = [
 
 # Tags offered for reuse in the robot rigs' schema.
 DATA_ISSUE_TAGS = ("instruction_mismatch, human_intervention, camera_fault, recording_fault, "
-                   "state_video_mismatch, unintended_out_of_view, setup_change, scene_reset, idle_stretch, "
+                   "state_video_mismatch, observability_loss, setup_change, scene_reset, idle_stretch, "
                    "truncated_episode")
 OPERATOR_MISTAKE_TAGS = ("failed_grasp, dropped_object, knocked_object, collision, prolonged_struggle, "
                          "hesitation, unnecessary_motion, goal_undone, incomplete_task")
+
+
+def camera_observation_block(views: list[tuple[str, str]]) -> str:
+    """Optional pixel-grounded content descriptions using exact supplied view identities."""
+    names = '; '.join(f'{view}: {alias}' for view, alias in views)
+    return ('\nOBSERVED CAMERA CONTENT. The supplied view IDs and image-row labels are: ' + names + '. '
+            'Add "camera_observations" to the final JSON, as a list of '
+            '{"view": "<exact supplied view ID>", "content": "scene|sensor|unclear", '
+            '"evidence": "<brief description of the visible content>"}. '
+            'Use scene for a view showing the device, person, objects or workspace; sensor for a view of '
+            'a sensing surface or sensor image rather than the surrounding work; unclear when the pixels '
+            'do not establish either, or its content changes between these classes. Judge the visible content '
+            'across the supplied footage, not its name, topic, slot or profile. '
+            'These observations do not establish camera mounting, actor ownership, physical calibration '
+            'or a recording fault. Preserve explicit human and source descriptions separately.\n')
 
 
 def schema(r: str, recorded: bool = True) -> str:
@@ -340,7 +355,7 @@ Return ONLY JSON with this shape. Each timeline segment is one array whose value
   "performance_review": "<1-2 sentences on how well the work was done: pace, rework, anything lost or dropped, time spent searching or waiting>",
   "data_issues": [
     {"issue": "<what is anomalous, in plain words>",
-     "category": "<short snake_case tag for the kind of data issue. Reuse one of these when it fits, so the same kind gets the same tag across episodes: instruction_mismatch, other_person_same_object, camera_fault, recording_fault, unintended_out_of_view, setup_change, idle_stretch. Coin your own when none fits.>",
+     "category": "<short snake_case tag for the kind of data issue. Reuse one of these when it fits, so the same kind gets the same tag across episodes: instruction_mismatch, other_person_same_object, camera_fault, recording_fault, observability_loss, setup_change, idle_stretch. Coin your own when none fits.>",
      "severity": "low" | "medium" | "high",
      "t_s": <float when it starts, or null if it spans the episode>,
      "end_s": <float when it is over (the last frame it affects), or null if it spans the episode>,
@@ -388,15 +403,15 @@ Rules:
   folding -> each fold completed, not each grasp. Pick the natural unit
   of progress for the task in front of you. A short task with one such
   unit still gets its start and finish marked.
-- THIS IS EGOCENTRIC (first-person) HUMAN video: a person wearing a head camera
-  going about activities with their own two hands. There is NO robot and usually NO
+- THIS USES THE HUMAN-HAND ANNOTATION PROFILE: describe the person's work with their own
+  hands. Determine viewpoint and camera mounting from the supplied evidence. There is NO robot and usually NO
   single overall goal, especially in a longer clip; the person does a SEQUENCE of
   distinct activities. "arm"/left/right means the person's LEFT or RIGHT HAND. Do NOT
   force one global success/failure or one goal frame. Segment the clip into the
   distinct activities in `tasks`. (A short atomic clip that is genuinely one task
   simply yields ONE task, with its own goal frame.)
 - hands_visible is a per-step ground-truth: set it FALSE whenever NEITHER of the
-  person's hands is actually in the head-camera frame during that step, and TRUE when
+  person's hands is actually in the supplied frame during that step, and TRUE when
   at least one hand (or a clearly hand-held object in the grip) is in shot. In
   first-person video the head/gaze often points away from the hands, so the hands drop
   below, behind, or out of the frame while the person leans in, looks over a shelf,
@@ -468,39 +483,40 @@ Rules:
 def what_this_is(r: str) -> str:
     """What the footage is, first, so the schema is read with the right rig in mind."""
     if r == "ego_head":
-        return ("- WHAT THIS EPISODE IS: a person wears a camera on their head and works with their own two hands;\n"
+        return ("- WHAT THIS EPISODE IS: human activity annotated with the person's hands as the acting parts;\n"
                 "  the recording is human demonstration footage collected to train robots and world models. The\n"
-                "  person's hands, arms and body appear, and that is expected. The head camera points wherever the\n"
-                "  person looks, so hands and objects leave the frame routinely as they look around, lean in or turn;\n"
+                "  person's hands, arms and body can appear, and that is expected. The profile does not establish camera\n"
+                "  mounting or viewpoint. Hands and objects can leave the frame during the work;\n"
                 "  hands_visible records when that happens, and it is not a data issue unless the work becomes\n"
                 "  unobservable for a substantial stretch. Other people nearby are part of the surroundings, and so\n"
                 "  is their own work: coworkers passing, working at the next station, restocking or taking from a\n"
                 "  shared supply, or clearing a shared area are how real workplaces look and teach a model nothing\n"
-                "  wrong. Another person matters only when they actively manipulate the same object the wearer is\n"
-                "  manipulating at that moment, because a model would credit their action to the wearer's hands; that\n"
+                "  wrong. Another person matters only when they actively manipulate the same object the person is\n"
+                "  manipulating at that moment, because a model would credit their action to the person's hands; that\n"
                 "  is a low-severity data issue unless it takes over the task. When the dataset cuts continuous\n"
                 "  footage into fixed-length files, a file that starts or ends in the middle of an activity is how\n"
                 "  the dataset is packaged, not a data issue.\n")
     if r == "teleop_arms":
-        return ("- WHAT THIS EPISODE IS: a person teleoperates the robot arms to perform the task; the recording\n"
-                "  is a demonstration collected to train robots. In the workspace the scene should change only\n"
+        return ("- WHAT THIS EPISODE IS: robot-arm activity; the profile alone does not establish the control method.\n"
+                "  The recording is a demonstration collected to train robots. In the workspace the scene should change only\n"
                 "  through the robot, unless the episode's own description (after these instructions) says a person\n"
                 "  takes part in the task, in which case their part is intended. The room\n"
                 "  around the workspace (walls, furniture, people further away) is sometimes visible, for\n"
                 "  example when a gripper camera points up; that is the surroundings, not a problem by itself.\n")
-    return ("- WHAT THIS EPISODE IS: a person holds the handheld gripper(s) and performs the task with them;\n"
-            "  the recording is a demonstration collected to train robots. The gripper's own body and fingers,\n"
-            "  and the demonstrator's own hands, arms and body (including the hand holding the other gripper),\n"
-            "  can appear in its camera; that is the demonstrator, not another person. A rig with two grippers\n"
-            "  often shows the other gripper in one gripper's camera, held in the demonstrator's other hand, even\n"
-            "  when only one gripper's footage was sent: a housing like this gripper's, with its own fingers and\n"
-            "  handle or strap, that moves through the frame while this camera's own gripper stays fixed in it,\n"
-            "  often holding an object of its own. It is the rig's other gripper, never a task object, and what it\n"
-            "  does is part of the demonstration. The robot trained on this\n"
-            "  has only the gripper's fingers, so a task object moved by the demonstrator's bare hand, arm or the\n"
-            "  gripper's housing teaches a change the robot cannot make and is worth reporting; anyone else\n"
-            "  touching the scene is reported as usual. The room around the task is sometimes visible; that is\n"
-            "  the surroundings, not a problem by itself.\n")
+    return ("- WHAT THIS EPISODE IS: gripper activity annotated with grippers as the acting parts; the profile\n"
+            "  alone does not establish human holding, the control method or camera mounting. The recording is\n"
+            "  a demonstration collected to train robots. Gripper bodies and fingers, and people's hands, arms\n"
+            "  and bodies, can appear. Establish participant and device ownership from the pixels and explicit\n"
+            "  source claims. When that evidence establishes a handheld demonstration with two grippers, the\n"
+            "  other gripper can appear even when only one gripper's footage was sent. A similar housing with\n"
+            "  its own fingers and handle or strap, independent motion and an object held in its fingers are\n"
+            "  useful cues, but resemblance alone does not establish ownership or exclude a task object. When\n"
+            "  established as the rig's other gripper, its actions are part of the demonstration. This profile's\n"
+            "  gripper-only execution contract treats the fingers as the acting part, subject to explicit source task or actor rules.\n"
+            "  A task object moved by a bare hand, arm or the gripper's housing outside that contract is worth\n"
+            "  reporting: its change was not made by the declared acting part. This is an annotation contract,\n"
+            "  not an inferred limit of a physical robot. Anyone else touching the scene is reported as usual.\n"
+            "  The room around the task is sometimes visible; that is the surroundings, not a problem by itself.\n")
 
 
 _WHY = {
@@ -545,8 +561,8 @@ _VISIBILITY = {
         "  end state) from the views at that moment or just before and after. Observability is lost only when\n"
         "  the task state at such a moment cannot be established from any view, and the task did not intend it."),
     "ego_head": (
-        "- WHAT KEEPS THE WORK OBSERVABLE. There is one camera and it turns with the head, so objects and hands leave\n"
-        "  the frame whenever the person looks elsewhere and return when they look back. The work is observable when\n"
+        "- WHAT KEEPS THE WORK OBSERVABLE. Objects and hands can leave the frame during the work and return later.\n"
+        "  The presentation profile alone does not establish camera mounting. The work is observable when\n"
         "  the frames show what the hands did to the objects, even if not at every instant. Observability is a data\n"
         "  issue only when the outcome of the work cannot be read from the footage for a substantial stretch."),
 }
@@ -618,8 +634,8 @@ EGO_CONTRACT_WORDING = [
      "and breaks the link\n  between what is seen and what is annotated"),
     ("a faithful, correctly labelled record of a demonstration", "a faithful, correctly labelled record of the work"),
     ("how well was the demonstration performed", "how well was the work done"),
-    ("the label (the\n  instruction describes a different task, object or order, or only part of what happens)",
-     "the label (the\n  annotation describes a different activity, object or order, or only part of what happens)"),
+    ("the label (the\n  instruction contradicts the observed task, object or required order)",
+     "the label (the\n  annotation contradicts the observed activity, object or required order)"),
     ("An operator who does a different task than the instruction has an instruction\n  mismatch (a data issue), not "
      "an unfinished task (an operator mistake), and the outcome is still judged\n  against the instruction.",
      "A person who does different work than the annotation describes has an instruction\n  mismatch, not "
@@ -667,9 +683,13 @@ _DATA_CONTRACT_BASE = """- WHY YOU ARE LABELLING THIS. These labels decide what 
   First, is this recording a faithful, correctly labelled record of a demonstration? Where it is not, that is
   a data issue, and it goes in data_issues. The map (not a checklist; report whatever you see, including kinds
   not listed): <<MAP>>; the label (the
-  instruction describes a different task, object or order, or only part of what happens); observability (the
-  task state becoming unobservable in a way nobody intended). A data issue is fixed in the dataset (trim,
+  instruction contradicts the observed task, object or required order); observability (the
+  loss of evidence needed to establish the task state). Describe the visibility loss without attributing
+  intent unless the footage or an explicit source claim establishes it. A data issue is fixed in the dataset (trim,
   mask, relabel or drop) and says nothing about how skilfully the task was done.
+  A free-form description need not list every action. An omitted action alone is not a contradiction
+  unless the source declares that description exhaustive. Keep the full observed activity in the timeline.
+  This does not excuse incorrect claims or missing and erroneous subtasks within declared timed coverage.
   Second, taking the recording as faithful, how well was the demonstration performed? Mistakes in the
   <<MISTAKES>> An operator who does a different task than the instruction has an instruction
   mismatch (a data issue), not an unfinished task (an operator mistake), and the outcome is still judged

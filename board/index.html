@@ -2448,7 +2448,7 @@ function episodeCams(d) {
 // Presentation roles do not change prepared camera IDs, model inputs or the labelled clock.
 function cameraPresentation(d, view, name) {
   const declared = (d.camera_presentation || {})[view];
-  if (declared && ['scene', 'tactile', 'other'].includes(declared.role)) return declared.role;
+  if (declared && ['scene', 'sensor', 'tactile', 'other'].includes(declared.role)) return declared.role;
   return 'other';
 }
 function supportingCameras(d) {
@@ -2456,9 +2456,25 @@ function supportingCameras(d) {
   const unshown = unshownCams(d).filter(u => u.view !== main);
   const shown = side.map(view => ({view, name: (d.camera_labels || [])[views.indexOf(view)] || view,
     unshown: unshown.find(u => u.view === view)}));
-  const rank = {scene: 0, other: 1, tactile: 2};
+  const rank = {scene: 0, other: 1, sensor: 2, tactile: 3};
   return [...shown, ...unshown.filter(u => !side.includes(u.view)).map(u => ({view: u.view, name: u.name || u.view, unshown: u}))]
     .map(c => ({...c, role: cameraPresentation(d, c.view, c.name)})).sort((a, b) => rank[a.role] - rank[b.role]);
+}
+function cameraSectionLabel(role) {
+  return role === 'sensor' ? 'Sensor views' : role === 'tactile' ? 'Tactile cameras' : '';
+}
+function sceneFirstLayout(d) {
+  const {views, main} = episodeCams(d);
+  return views.includes('exo') || (cameraPresentation(d, main) === 'scene'
+    && supportingCameras(d).some(c => ['sensor', 'tactile'].includes(c.role)));
+}
+function cameraCaption(d, view) {
+  const {views} = episodeCams(d), i = views.indexOf(view);
+  const name = (d.camera_labels && i >= 0 && d.camera_labels[i])
+    || unshownCams(d).find(u => u.view === view)?.name || view;
+  if (['sensor', 'tactile'].includes(cameraPresentation(d, view))) return name;
+  if ((d.camera_mounting || {})[view] === 'wrist') return `${name} wrist`;
+  return view === 'left' || view === 'right' ? `${name} camera` : name;
 }
 // the listed episodes as JSON Lines: the server joins them, a static build fetches and joins them here
 async function exportBlob(files) {
@@ -2527,12 +2543,7 @@ function buildVideoMenu() {
   const st = vdStepAt(d, v ? v.currentTime : 0);
   const {views, main} = episodeCams(d);
   const cams = [main, ...views.filter(c => c !== main)];
-  const hasTop = main === 'exo';
-  // an extra camera is named as its cell is (camera_labels), never as a wrist
-  const label = c => { const i = views.indexOf(c); return (d.camera_labels && i >= 0 && d.camera_labels[i]) || c; };
-  const name = c => (d.camera_mounting || {})[c] === 'unspecified' ? `${label(c)} camera`
-    : c === 'exo' ? 'exo' : (c !== 'left' && c !== 'right') ? label(c)
-    : (hasTop ? `${c} wrist` : `${c} camera`);
+  const name = c => cameraCaption(d, c);
   const eidEnc = encodeURIComponent(eid);
   vdMenu.innerHTML = `<button type="button" class="vd-opt" role="menuitem" data-whole="1">Whole episode<small>`
       + `${cams.length > 1 ? 'every camera in one frame' : 'the camera'}${dur ? `, 0.0s to ${fmtT(dur)}` : ''}</small>`
@@ -2728,7 +2739,7 @@ function unshownCams(d) {
 // kept: the footage playing now moves into the new cells (renderEp keepVideo), so they get no source of their own
 function unshownCellsHtml(d, eidEnc, kept) {
   return unshownCams(d).map(u => `
-        <div class="cam-cell cam-wrist cam-unshown${cameraPresentation(d, u.view, u.name) === 'tactile' ? ' cam-tactile' : ''}">
+        <div class="cam-cell cam-wrist cam-unshown${['sensor', 'tactile'].includes(cameraPresentation(d, u.view, u.name)) ? ' cam-tactile' : ''}">
           <span class="cam-label">${esc(u.name || u.view)}, not shown to the model</span>
           <video id="video-${esc(u.view)}" preload="auto" muted playsinline${kept ? ''
             : ` src="${esc(videoSrc(eidEnc, u.view))}"${posterAttr(eidEnc, u.view)}`} `
@@ -6041,13 +6052,11 @@ function renderEp(d, opts) {
     const i = camViews.indexOf(v);
     return (d.camera_labels && i >= 0 && d.camera_labels[i]) || unshownCams(d).find(u => u.view === v)?.name || v;
   };
-  const hasTop = camViews.includes('exo');
+  const hasTop = sceneFirstLayout(d);
   const sideCams = episodeCams(d).side;
   const supportCams = supportingCameras(d);
   const camLabel = v => unshownCams(d).some(u => u.view === v) ? `${camNameOf(v)}, not shown to the model`
-    : (d.camera_mounting || {})[v] === 'unspecified' ? `${camNameOf(v)} camera`
-    : v === 'exo' ? 'exo' : (v !== 'left' && v !== 'right') ? camNameOf(v)
-    : (hasTop ? `${v} wrist` : `${camNameOf(v)}${camNameOf(v) === 'gripper' ? '' : ' gripper'}`);
+    : cameraCaption(d, v);
   // the side cells' video ids: the two mounted cameras keep theirs, any other camera is video-<its view>
   const sideId = v => v === 'left' ? 'video-wl' : v === 'right' ? 'video-wr' : `video-${v}`;
   const videoUrl = videoSrc(eidEnc, mainCam);
@@ -6374,11 +6383,12 @@ function renderEp(d, opts) {
         </div>
         ${supportCams.map((c, i) => {
           const v = c.view;
-          const section = c.role === 'tactile' && (i === 0 || supportCams[i - 1].role !== 'tactile')
-            ? '<div class="cam-section">Tactile cameras</div>' : '';
+          const sectionLabel = cameraSectionLabel(c.role);
+          const section = sectionLabel && (i === 0 || supportCams[i - 1].role !== c.role)
+            ? `<div class="cam-section">${sectionLabel}</div>` : '';
           if (c.unshown) return section + unshownCellsHtml({...d, unshown_cameras: [c.unshown]}, eidEnc, !!keep);
           return section + `
-        <div class="cam-cell cam-wrist${c.role === 'tactile' ? ' cam-tactile' : ''}">
+        <div class="cam-cell cam-wrist${['sensor', 'tactile'].includes(c.role) ? ' cam-tactile' : ''}">
           <span class="cam-label">${esc(camLabel(v))}</span>
           <video id="${sideId(v)}" preload="auto" muted playsinline${gripOnly
             ? ' controls' : ''}${keep ? '' : ` src="${esc(v === 'left' ? videoUrlWL : v === 'right' ? videoUrlWR

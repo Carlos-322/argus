@@ -663,6 +663,26 @@ def test_request_grid_receipt_rebuilds_actual_dense_inputs(tmp_path, monkeypatch
         grids.rebuild(result, ep)
 
 
+@pytest.mark.parametrize('module_name', ['formats', 'dictionary_context', 'lens'])
+def test_prepare_helper_changes_invalidate_annotation_identity_without_changing_rgb(tmp_path, monkeypatch, module_name):
+    from prepare import formats
+    from label import dictionary_context, lens
+    folder, _ = _packed_episode(tmp_path)
+    kwargs = dict(model='openai/gpt-6.1-sol', reasoning='high', max_tokens=2000,
+                  cell_w=128, example_dir=None)
+    before = harness.input_identity(folder, **kwargs)
+    request = me.build_request(folder, cell_w=128)
+    original = Path.read_bytes
+    watched = Path({'formats': formats, 'dictionary_context': dictionary_context, 'lens': lens}[module_name].__file__).resolve()
+    def changed_bytes(path):
+        data = original(path)
+        return data + b'\n# changed camera provenance helper\n' if path.resolve() == watched else data
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, 'read_bytes', changed_bytes)
+        assert not harness.same_input_identity(before, harness.input_identity(folder, **kwargs))
+        assert me.build_request(folder, cell_w=128)['content'] == request['content']
+
+
 def test_grid_publication_rejects_replaced_or_escaping_images(tmp_path):
     assert hasattr(mf, 'grid_jpegs'), 'the grid extractor must distinguish supplemental images'
     from label import grids
@@ -1453,7 +1473,7 @@ def _fingers(rng, i):
     return a
 
 
-def test_a_circular_image_names_a_fisheye_lens_and_other_images_do_not():
+def test_a_circular_image_area_is_detected_and_other_images_are_not():
     from label import lens
     assert lens.circular_image(_frames(_circular))["circular"]
     for make in (_scene, _dark_room, _fingers):
@@ -1463,18 +1483,19 @@ def test_a_circular_image_names_a_fisheye_lens_and_other_images_do_not():
     assert np.array_equal(lens.thumb(im), lens.thumb(mf.Shrunk(im, [448, 320, 192])))
 
 
-def test_the_camera_line_names_the_fisheye_only_where_the_check_fired():
+def test_the_camera_line_describes_a_circular_area_without_asserting_lens_optics():
     ep = {"context": {"dataset": "x", "fps": 30, "profile": "handheld_gripper", "state_kind": "none",
                       "cameras": {"left": {"name": "left", "desc": "the camera carried on the LEFT-hand gripper"},
                                   "right": {"name": "right", "desc": "the camera carried on the RIGHT-hand gripper"}}},
           "sources": {"left": {}, "right": {}}, "lens": {"left": {"circular": True}, "right": {"circular": False}}}
     desc = me.camera_desc(ep)
-    assert "- left: the camera carried on the LEFT-hand gripper. It has a fisheye lens; straight lines curve near " \
-           "the edge.\n" in desc
+    assert '- left: the camera carried on the LEFT-hand gripper. It has a circular image area with dark corners' in desc
     assert "- right: the camera carried on the RIGHT-hand gripper.\n" in desc
-    assert desc.count("fisheye") == 1
+    assert 'fisheye' not in desc and 'straight lines curve' not in desc
+    ep['context']['cameras']['right']['desc'] = 'the verified fisheye camera carried on the RIGHT-hand gripper'
+    assert 'verified fisheye camera' in me.camera_desc(ep)
     del ep["lens"]
-    assert "fisheye" not in me.camera_desc(ep)
+    assert 'circular image area' not in me.camera_desc(ep)
 
 
 def test_circular_image_with_no_frames_is_not_circular():

@@ -6,7 +6,48 @@ import json
 from pathlib import Path
 
 
-def camera_presentation(ctx: dict) -> dict:
+from label.dictionary_context import camera_content_role, TACTILE_CONTENT_ROLES
+
+
+def current_camera_observations(record: dict, ctx: dict, episode_dir: Path) -> list:
+    """Revalidate saved observation receipts against current native inputs and owned request parts."""
+    if not isinstance(record, dict) or record.get('version') != 1:
+        return []
+    from label.harness import bind_camera_observations, camera_observation_sources_match
+    from label.evidence_access import same_source_proof, resolve_piece
+    try:
+        checked = bind_camera_observations(record.get('observations'), {
+            'config': {'views': record.get('views'), 'camera_observation_views': record.get('views'),
+                       'schema_fields': ['camera_observations']},
+            'input_identity': {'source_proof': record.get('source_proof')}})
+        valid = (not checked['withheld_observations'] and
+                 same_source_proof(record.get('source_proof'), ctx, episode_dir))
+        for part in record.get('parts') or []:
+            owner = part.get('source_piece') or {}
+            directory = resolve_piece(episode_dir, part.get('source_location'), owner, ctx)
+            piece_ctx = json.loads((directory / 'context.json').read_text()) if directory else None
+            child = part.get('record')
+            if not isinstance(piece_ctx, dict) or not isinstance(child, dict):
+                valid = False
+                continue
+            current_camera_observations(child, piece_ctx, directory)
+            valid = (valid and child.get('source_current') is True and
+                     camera_observation_sources_match(record.get('source_proof'), child.get('source_proof'),
+                                                      child.get('views')))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        valid = False
+    record['source_current'] = bool(valid)
+    if not valid:
+        withheld = record.setdefault('withheld_observations', [])
+        for row in record.get('observations') or []:
+            item = {'observation': copy.deepcopy(row), 'why': 'Saved camera observations use changed or unverified source inputs.'}
+            if item not in withheld:
+                withheld.append(item)
+        record['observations'] = []
+    return record.get('observations') or []
+
+
+def camera_presentation(ctx: dict, observations: list = ()) -> dict:
     """Display roles from exact bindings or explicit preparation facts, never camera names."""
     from board.clips import unshown_views
     from label.dictionary_context import prepared_interpretation, field_interpretation
@@ -14,7 +55,17 @@ def camera_presentation(ctx: dict) -> dict:
     entries = list((ctx.get('cameras') or {}).items()) + unshown_views(ctx)
     retained_index = {id(entry): index for index, entry in enumerate(ctx.get('unshown_cameras') or [])}
     presentation = {}
+    observed = {row['view']: row for row in observations if row.get('content') in ('scene', 'sensor', 'unclear')}
     for view, entry in entries:
+        authoritative = camera_content_role(ctx, view, entry)
+        if authoritative is not None:
+            presentation[view] = {'role': authoritative['role']}
+            continue
+        if view in observed:
+            presentation[view] = {'role': 'scene' if observed[view]['content'] == 'scene' else
+                                  'sensor' if observed[view]['content'] == 'sensor' else 'other',
+                                  'provenance': 'observed'}
+            continue
         if view in (ctx.get('cameras') or {}):
             interpretation = prepared_interpretation(ctx, view, 'camera')
         else:
@@ -23,7 +74,7 @@ def camera_presentation(ctx: dict) -> dict:
         role = sg._role(interpretation.get('role') if 'role' in interpretation else entry.get('role'))
         if role:
             presentation[view] = {'role': 'tactile' if role in
-                ('tactile_image', 'optical_tactile', 'touch', 'tactile') else 'scene' if role in
+                TACTILE_CONTENT_ROLES else 'sensor' if role in ('sensor', 'sensor_view') else 'scene' if role in
                 ('scene', 'scene_camera', 'rgb_camera', 'head_camera', 'ego_camera', 'wrist_camera', 'external_camera')
                 else 'other'}
     return presentation
@@ -54,7 +105,8 @@ def apply(shown: dict, ctx: dict, episode_dir: Path, owner: str | None = None) -
     effective_ctx = {**ctx, **({'data_dictionary': dictionary} if dictionary is not None else {})}
     # Camera presentation follows current exact bindings, including human overrides.
     # It does not reassign cameras or alter the clock on which labels were produced.
-    presentation = camera_presentation(effective_ctx)
+    observations = current_camera_observations(shown.get('camera_observations'), effective_ctx, episode_dir)
+    presentation = camera_presentation(effective_ctx, observations)
     shown.pop('camera_presentation', None)
     if presentation:
         shown['camera_presentation'] = presentation
