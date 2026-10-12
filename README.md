@@ -5,7 +5,7 @@
 
 ### Update v2: Midcentury on WGO-Bench
 
-Recently, [Midcentury AI](https://www.midcentury.xyz/blog/optimizing-argus) pushed an adaptation of Argus to SOTA (**50.2% semantic F1**) on WGO-Bench. This uses **Sol 6.1 High**; comparisons with published results from older models do not isolate the harness's contribution.
+Recently, [Midcentury AI](https://www.midcentury.xyz/blog/optimizing-argus) pushed an adaptation of Argus to SOTA (**50.2% semantic F1**) on WGO-Bench. However, this uses **Sol 6.1 High**, meaning comparisons with published results from older models do not isolate the harness's contribution.
 
 ### Update v1: Format and sensor support
 
