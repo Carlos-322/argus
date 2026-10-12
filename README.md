@@ -61,9 +61,9 @@ Labels include action phases marked advancing, wasteful or idle; key events, pro
 
 Prepared episodes retain native arrays, clocks, calibration and attributed publisher claims. Unresolved ownership or conflicting annotations remain qualified. Motion checks require declared physical roles, suitable units and usable clocks; a vector's width alone does not establish joints or poses. Pressure, optical motion, jaw movement and relative depth can support observations, but force, slip, physical distance and contact timing require suitable calibration and timing evidence.
 
-The board keeps the episode navigation and existing action, progress, recovery, depth and hand-pose controls. It distinguishes recording faults from model or processing failures. Useful sensor conclusions appear with their readings, reasoning, confidence, alternatives and limitations. An inspection can return no additional finding.
+The board keeps the episode navigation and existing action, progress, recovery, depth and hand-pose controls. It distinguishes recording faults from model or processing failures. Useful sensor conclusions appear with their readings, reasoning, confidence, alternatives and limitations. An inspection can return no additional finding. Source-declared action meanings stay attributed; training targets are not automatically treated as control commands.
 
-Episode JSON, filtered JSON Lines and static exports retain annotations and substantive evidence. Public projection withholds private access descriptors and infrastructure locations. Human field interpretations take precedence, including an explicitly blank role; stale conclusions are withheld when the source or interpretation no longer supports them. Keep uploaded footage under its own access policy and license when sharing a board.
+Episode JSON, filtered JSON Lines and static exports retain annotations and substantive evidence. Public projection withholds private access descriptors and infrastructure locations. Human field interpretations take precedence over model guesses, including an explicitly blank role; stale conclusions are withheld when the source or interpretation no longer supports them. Keep uploaded footage under its own access policy and license when sharing a board.
 
 ## Advanced stages
 

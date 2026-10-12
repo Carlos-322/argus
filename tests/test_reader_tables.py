@@ -1506,6 +1506,7 @@ def test_hdf5_commands_with_coarse_stamps_stay_signals_beside_precise_state(tmp_
             h["observations/timestamp"] = T0 + np.arange(66) / 30
             h["commands/action"] = np.tile(np.cos(np.arange(66))[:, None], (1, 14))
             h["commands/action"].attrs["names"] = joint_names()
+            h["commands/action"].attrs["action_semantics"] = json.dumps({"version": 1, "role": "command"})
             h["commands/timestamp"] = T0 + (np.arange(66) / 30 if step is None else
                                           np.floor(np.arange(66) / 30 / step + 1e-5) * step)
     ctx = _recorder(tmp_path, change)
