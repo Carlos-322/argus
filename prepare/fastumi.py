@@ -113,7 +113,13 @@ def prepare_one(item: str, raw_root: Path, out_root: Path, force: bool) -> str:
     _dl(f"{task}/meta/episodes.jsonl", raw_root)
     parq = _dl(f"{task}/" + info["data_path"].format(episode_chunk=chunk, episode_index=eidx), raw_root)
     df = pd.read_parquet(parq).sort_values("frame_index")
-    for entry in hub.ls(REPO, f"{task}/meta"):
+    tables, lookup_unavailable = [], False
+    if any(column in df.columns for column in TABLE_COLUMNS.values()):
+        try:
+            tables = hub.ls(REPO, f"{task}/meta")
+        except hub.HubReadError:
+            lookup_unavailable = True
+    for entry in tables:
         path = Path(entry["path"])
         if (entry["type"] == "file" and path.parent == Path(task) / "meta"
                 and path.suffix in (".jsonl", ".parquet") and TABLE_COLUMNS.get(path.stem) in df.columns):
@@ -165,6 +171,10 @@ def prepare_one(item: str, raw_root: Path, out_root: Path, force: bool) -> str:
         "stream_checks": {"frames_on_grid": grid, "episode_length_meta": meta["length"] if meta["length"] is not None else -1},
     }
     formats.lerobot_annotations(context, root, df, parq)
+    if lookup_unavailable:
+        formats.add_issue(context, 'metadata_limit', 'The native task table listing was unavailable; available local '
+                          'tables and all recorded annotation codes were retained. Additional upstream tables may '
+                          'not be present in this cache.')
     for issue in root["metadata_issues"]:
         formats.add_issue(context, issue["kind"], issue["text"])
     instruction = context.get("instruction", "")

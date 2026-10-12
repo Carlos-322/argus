@@ -4131,10 +4131,14 @@ def test_writing_bookkeeping_again_keeps_the_same_metadata():
 
 
 def test_lerobot_task_tables_are_read_while_foreign_notes_stay_listed(monkeypatch):
+    import io
     import json
     import numpy as np
     import pandas as pd
+    import pytest
+    import urllib.error
     from prepare import fastumi
+    native_listing = fastumi.hub.ls
     with tempfile.TemporaryDirectory() as t:
         root = Path(t) / 'upload'
         _lerobot(root, {0: {'observation.state': [np.zeros(14)] * 10, 'task_index': [0] * 10}})
@@ -4147,8 +4151,9 @@ def test_lerobot_task_tables_are_read_while_foreign_notes_stay_listed(monkeypatc
         assert root / 'broken_meta.json' in f.opened_notes(items)
         assert root / 'ep99_meta.json' not in f.opened_notes(items)
 
-        for case, (tasks, table, expected) in enumerate([(['owned task'], True, 'owned task'),
-                                                        ([0], True, 'recorded task'), ([], False, '')]):
+        for case, (tasks, table, unavailable, expected) in enumerate([
+                (['owned task'], True, False, 'owned task'), ([0], True, False, 'recorded task'),
+                ([], False, True, ''), ([], True, True, 'recorded task')]):
             raw = Path(t) / str(case) / 'raw'
             task = 'single_arm/example'
             source = raw / task
@@ -4172,14 +4177,28 @@ def test_lerobot_task_tables_are_read_while_foreign_notes_stay_listed(monkeypatc
                 requested.append(path)
                 return raw_root / path
             monkeypatch.setattr(fastumi, '_dl', download)
-            monkeypatch.setattr(fastumi.hub, 'ls', lambda repo, path: [
-                {'type': 'file', 'path': task + '/meta/tasks.parquet'}] if table else [])
+            if unavailable:
+                def listing_failure(req, timeout):
+                    if table:
+                        raise urllib.error.URLError('offline listing')
+                    raise urllib.error.HTTPError(req.full_url, 404, 'Not Found', {}, io.BytesIO(b'{}'))
+                monkeypatch.setattr(fastumi.hub.urllib.request, 'urlopen', listing_failure)
+                monkeypatch.setattr(fastumi.hub.time, 'sleep', lambda _: None)
+                monkeypatch.setattr(fastumi.hub, 'ls', native_listing)
+            else:
+                monkeypatch.setattr(fastumi.hub, 'ls', lambda repo, path: [
+                    {'type': 'file', 'path': task + '/meta/tasks.parquet'}] if table else [])
             out = raw.parent / 'out'
             assert fastumi.prepare_one(task + '/0', raw, out, False) == 'ok'
             prepared = out / fastumi.episode_dir_name(task + '/0')
             ctx = json.loads((prepared / 'context.json').read_text())
             assert ctx.get('instruction', '') == expected
-            assert (task + '/meta/tasks.parquet' in requested) == table
+            assert (task + '/meta/tasks.parquet' in requested) == (table and not unavailable)
+            if unavailable:
+                with pytest.raises(fastumi.hub.HubReadError) as caught:
+                    native_listing(fastumi.REPO, task + '/meta')
+                assert isinstance(caught.value, RuntimeError)
+                assert isinstance(caught.value.__cause__, urllib.error.URLError)
             if table:
                 span = ctx['annotation_subtasks'][0]
                 assert span['values'] == [0] * 10
@@ -4190,12 +4209,23 @@ def test_lerobot_task_tables_are_read_while_foreign_notes_stay_listed(monkeypatc
             assert ctx['recorded_metadata'][str(source / 'meta' / 'episodes.jsonl')][0]['fields']['tasks'] == tasks
             kinds = {issue['kind'] for issue in ctx.get('reader_issues', [])}
             assert ('metadata_unreadable' in kinds) == (tasks == [0])
-            assert ('metadata_limit' in kinds) == (not table)
+            assert ('metadata_limit' in kinds) == (not table or unavailable)
             if table:
                 assert '73' in json.dumps(ctx['annotation_tables'])
             with np.load(prepared / 'state.npz') as saved:
                 np.testing.assert_array_equal(saved['state'], values)
                 np.testing.assert_array_equal(saved['action'], values + 1)
+        def programmer_error(repo, path):
+            raise RuntimeError('broken listing implementation')
+        monkeypatch.setattr(fastumi.hub, 'ls', programmer_error)
+        with pytest.raises(RuntimeError, match='broken listing implementation'):
+            fastumi.prepare_one(task + '/0', raw, out, True)
+        class MalformedListing(io.BytesIO):
+            headers = {}
+        monkeypatch.setattr(fastumi.hub, 'ls', native_listing)
+        monkeypatch.setattr(fastumi.hub.urllib.request, 'urlopen', lambda *a, **k: MalformedListing(b'{broken'))
+        with pytest.raises(json.JSONDecodeError):
+            fastumi.prepare_one(task + '/0', raw, out, True)
 
 
 def _converted_notes(root, out):

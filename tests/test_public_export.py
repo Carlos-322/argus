@@ -437,11 +437,21 @@ def test_reader_metadata_limit_paths_use_typed_source_identity_without_rewriting
         formats.lerobot_annotations(context, index, frame, data)
     issues = [issue for issue in context['reader_issues']
               if issue['kind'] == 'metadata_limit' and issue.get('source') == str(data)]
-    assert len(issues) == 1 and str(tmp_path) not in issues[0]['what']
+    assert len(issues) == 2 and all(str(tmp_path) not in issue['what'] or
+                                   'has unresolved recorded annotation codes' in issue['what'] for issue in issues)
+    note_limits = [issue for issue in issues if 'exceed the prompt note limit' in issue['what']]
+    assert len(note_limits) == 1 and str(tmp_path) not in note_limits[0]['what']
     unresolved_issues = [issue for issue in context['reader_issues']
         if 'has unresolved recorded annotation codes' in issue['what']]
     assert len(unresolved_issues) == 1 and unresolved_issues[0].get('source') == str(data)
+    assert unresolved_issues[0]['kind'] == 'metadata_limit'
     assert str(data) in unresolved_issues[0]['what']
+    assert [claim['value'] for claim in context['annotation_unresolved']] == [91, 91, 92]
+    assert [claim['raw_time'] for claim in context['annotation_unresolved']] == [0., 1., 2.]
+    assert all(claim['data_source'] == str(data) for claim in context['annotation_unresolved'])
+    assert any(step['label'] == 'one' for step in context['annotation_subtasks'])
+    from board.families import Families
+    assert not Families().classify({'dataset_checks': {'reader_issues': issues}})['counted']
     assert str(data) not in json.dumps(project({'dataset_checks': {'reader_issues': context['reader_issues']}}))
 
 
