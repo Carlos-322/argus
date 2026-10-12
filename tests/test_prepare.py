@@ -289,7 +289,10 @@ def test_video_views_episode_times_frames_by_their_pts(tmp_path):
     assert json.loads((ep / "context.json").read_text()) == ctx
     assert ctx["real_times"] == "times.npz" and ctx["fps"] == 30.0 and ctx["n_state_frames"] == 6
     assert ctx["duration_s"] == round(3072 / 15360 + 1 / 30, 3)
-    assert ctx["cameras"]["exo"]["name"] == "head" and ctx["cameras"]["exo"]["desc"] == formats.EGO_DESC
+    camera = ctx["cameras"]["exo"]
+    assert camera["name"] == "head" and camera["key"] == "a"
+    assert formats.camera_role_provenance(camera, "exo", "ego_head") == "presentation"
+    assert formats.camera_mounting(camera, "exo", "ego_head") == "unspecified"
     assert not (ep / "state.npz").exists() and (ep / "instruction.txt").read_text() == "\n"
 
 
@@ -475,7 +478,10 @@ def test_a_fourth_camera_is_sent_to_the_model_under_its_own_name(tmp_path):
     assert rc == 0 and set(ctx["cameras"]) == {"exo", "left", "extra1"} and ctx["source"]["unused_cameras"] == []
     req = me.build_request(ep)
     assert req["views"] == ["exo", "left", "extra1"] and req["cam_labels"][-1] == ctx["cameras"]["extra1"]["name"]
-    assert f"- {ctx['cameras']['extra1']['name']}: another camera the recording has" in req["prompt"]
+    camera = ctx['cameras']['extra1']
+    assert camera['key'] == 'observation.images.cam_low'
+    assert f"- {camera['name']}: recorded view {camera['key']}" in req["prompt"]
+    assert formats.camera_mounting(camera, "extra1", "teleop_arms") == "unspecified"
     assert "There are exactly 3" in req["prompt"]
 
 

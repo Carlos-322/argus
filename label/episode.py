@@ -1062,12 +1062,12 @@ def _map_tile(ep: dict, name: str, k: int):
 def _rig_nouns(r: str) -> dict:
     if r == "ego_head":
         return {"actor": "hand", "an_actor": "a hand", "actors": "hands", "gripper_of": "hand",
-                "who": "a person wears a camera on their head and works with their own two hands"}
+                "who": "the person's hands are the acting parts in this annotation profile"}
     if r == "teleop_arms":
         return {"actor": "arm", "an_actor": "an arm", "actors": "arms", "gripper_of": "arm's gripper",
-                "who": "a person teleoperates the robot arms"}
+                "who": "robot arms are the acting parts; the profile alone does not establish the control method"}
     return {"actor": "gripper", "an_actor": "a gripper", "actors": "grippers", "gripper_of": "handheld gripper",
-            "who": "a person holds handheld grippers and does the task with them"}
+            "who": "grippers are the acting parts; the profile alone does not establish human holding or the control method"}
 
 
 def _camera_line(ep: dict, v: str) -> str:
@@ -2228,14 +2228,8 @@ def _intro_head(ep: dict) -> str:
     n = _rig_nouns(r)
     robot = ctx.get("robot_type")
     what = f" ({robot})" if robot else ""
-    k = len(actors(ep))
-    who = n["who"] if r in ("teleop_arms", "ego_head") else (
-        # one camera says nothing about how many grippers the rig has: a two-gripper rig's upload can carry one
-        # gripper's footage, and its other gripper then appears in that camera, held in the other hand
-        "a person does the task with one or two handheld grippers, and this recording has one gripper's camera"
-        if k == 1
-        else f"a person holds {k} handheld grippers, one per hand, and does the task with them")
-    kind_of = ("one clip of first-person human video from the {d} dataset, collected to train robots and world "
+    who = n["who"]
+    kind_of = ("one clip of human activity from the {d} dataset, collected to train robots and world "
                "models" if r == "ego_head" else "one episode of a robot-learning demonstration from the {d} dataset{w}")
     window = recording_window_note(ep)
     if window:

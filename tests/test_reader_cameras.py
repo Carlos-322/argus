@@ -591,6 +591,38 @@ def test_recorded_mount_names_and_verified_adapter_descriptions_keep_viewpoint_g
     assert 'stream really sits on the side its name says' not in prompt
 
 
+@pytest.mark.parametrize('rig', ['ego_head', 'handheld_gripper'])
+def test_native_video_profile_intro_does_not_assert_mount_or_control(tmp_path, rig):
+    from label import episode as me
+    from label import prompts
+    clip = _mp4(tmp_path / 'capture.mp4', 12)
+    folder = tmp_path / 'native'
+    view = 'exo' if rig == 'ego_head' else 'right'
+    f.video_views_episode(folder, {view: ('capture', clip)}, rig, 'native', {})
+    request = me.build_request(folder, inspect_evidence=True)
+    intro = me._intro_head(me.load(folder))
+    shared = prompts.what_this_is(rig)
+    for text in (intro, shared, request['prompt']):
+        assert 'a person wears a camera on their head' not in text
+        assert 'a person wearing a head camera' not in text
+        assert 'head camera points wherever' not in text
+        assert 'a person holds the handheld gripper' not in text
+        assert 'one per hand' not in text
+        assert 'never a task object' not in text
+    assert 'camera_observations' not in request['schema_fields']
+    assert 'sensor_findings' not in request['schema_fields']
+    assert request['evidence_access'] is None
+    if rig == 'handheld_gripper':
+        assert 'ownership' in shared
+        assert 'gripper-only execution contract' in shared
+        assert 'explicit source task or actor rules' in shared
+        assert 'has only the gripper' not in shared
+        assert 'other gripper' in shared and 'fingers' in shared and 'handle or strap' in shared
+    else:
+        assert 'wearer' not in shared
+        assert "person's own left and right hands" in request['prompt']
+
+
 def test_camera_observations_use_only_views_with_actual_supplied_native_frames(tmp_path):
     from label import episode as me
     root = tmp_path / 'upload'
