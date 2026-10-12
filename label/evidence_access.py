@@ -1559,7 +1559,7 @@ def discover(access, base_content, call, cache_path, *, rounds=2, reserve_cost=0
                 if type(cost) in (int, float) and math.isfinite(cost) and cost >= 0 and settle_dispatch is not None:
                     settle_dispatch(reserve, cost)
             except Exception as error:
-                from label.harness import KeyExhausted
+                from label.errors import KeyExhausted
                 if isinstance(error, KeyExhausted) and error.verified_unpaid:
                     saved.update(state='rejected unpaid', http_status=error.http_status,
                                  http_attempt=1, verified_unpaid=True, cost_usd=0.0)

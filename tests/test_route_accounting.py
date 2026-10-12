@@ -74,6 +74,66 @@ def test_http_rejected_selection_fails_over_without_replaying_received_rounds(tm
     assert label_spend(job) == pytest.approx(.018) and label_spend_complete(job)
 
 
+@pytest.mark.parametrize('stage,status', [('inspection', 402), ('routing', 401)])
+def test_module_cli_retires_rejected_key_without_losing_paid_inspection_or_route(tmp_path, monkeypatch, stage, status):
+    import io
+    import runpy
+    import sys
+    import urllib.error
+    from label import evidence_access as ea
+    from test_label import _packed_episode
+    ep = _packed_episode(tmp_path)[0] if stage == 'inspection' else observed_packed_episode(tmp_path)
+    job = tmp_path / 'job'
+    out = job / 'run' / 'out'
+    calls = []
+    def provider(req, timeout):
+        body = json.loads(req.data)
+        content = body['messages'][0]['content']
+        key = req.get_header('Authorization').split()[-1]
+        selection = next((p['text'] for p in content if p.get('text', '').startswith(ea.SELECTION)), None)
+        inspected = any(p.get('text', '').startswith('INSPECTED EVIDENCE') for p in content)
+        routed = body['model'] == route.ROUTE_MODEL
+        calls.append((key, routed, selection is not None, inspected))
+        if key == 'sk-or-empty' and (stage == 'routing' or inspected):
+            raise urllib.error.HTTPError(req.full_url, status, 'Rejected', {}, io.BytesIO(b'{}'))
+        if routed:
+            answer = {'fine_detail': False, 'why': 'whole-object view is sufficient'}
+        elif selection is not None and not inspected:
+            page = json.loads(selection.split('FIELD INVENTORY\n', 1)[1])
+            field = next(f for f in page['fields'] if 'samples' in f.get('available_modes', []))
+            answer = {'requests': [{'field_id': field['id'], 'mode': 'samples'}]}
+        else:
+            answer = {'requests': []} if selection is not None else {'timeline': []}
+        return io.BytesIO(json.dumps({'usage': {'cost': .004 if routed or selection is not None else .01},
+            'choices': [{'finish_reason': 'stop', 'message': {'content': json.dumps(answer)}}]}).encode())
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', provider)
+    monkeypatch.setattr(route, '_CACHE', {})
+    monkeypatch.setenv('OPENROUTER_API_KEYS', 'sk-or-empty,sk-or-funded')
+    monkeypatch.setattr(sys, 'argv', ['label.harness', '--episodes-root', str(tmp_path), '--out-dir', str(out),
+        '--model', harness.DEFAULT_MODEL, '--reasoning', 'medium', '--max-tokens', '100', '--timeout', '1',
+        '--concurrency', '1', '--max-spend', '2', '--cell-w', '128' if stage == 'inspection' else '0'])
+    with pytest.warns(RuntimeWarning, match='label.harness.*found in sys.modules'), pytest.raises(SystemExit) as finished:
+        runpy.run_module('label.harness', run_name='__main__', alter_sys=True)
+    assert finished.value.code == 0
+    result = json.loads((out / f'{ep.name}.json').read_text())
+    assert result['parse_ok'] and result['model'] == harness.DEFAULT_MODEL
+    assert calls[-1][0] == 'sk-or-funded' and len(calls) == (4 if stage == 'inspection' else 3)
+    if stage == 'inspection':
+        inspection = result['evidence_inspection']
+        assert inspection['status'] == 'complete' and inspection['inspections']
+        assert all(r['state'] == 'received' for r in inspection['rounds'])
+        rejected = inspection['rounds'][1]['rejected_attempts']
+        assert len(rejected) == 1 and rejected[0]['http_status'] == status and rejected[0]['cost_usd'] == 0
+        assert calls.count(('sk-or-empty', False, True, False)) == 1
+        assert not any(key == 'sk-or-funded' and selected and not inspected for key, _, selected, inspected in calls)
+    else:
+        routing = result['config']['resolution_route']
+        assert routing['dispatch_outcome'] == 'received' and routing['cost_usd'] == pytest.approx(.004)
+        assert calls[:2] == [('sk-or-empty', True, False, False), ('sk-or-funded', True, False, False)]
+    assert label_spend(job) == pytest.approx(.018 if stage == 'inspection' else .014)
+    assert label_spend_complete(job)
+
+
 @pytest.mark.parametrize('response_kind', ['body_error', 'timeout', 'unproven_key_error'])
 def test_unverified_final_key_error_never_releases_hold_or_fails_over(tmp_path, monkeypatch, response_kind):
     import io
