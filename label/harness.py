@@ -87,7 +87,13 @@ DECODE_GATE = threading.BoundedSemaphore(int(_dg) if (_dg or "").isdigit() and i
 
 
 class KeyExhausted(RuntimeError):
-    """The key has no credit left; the batch retires it and moves on."""
+    """Only an explicit first-attempt HTTP rejection proves an unpaid, replay-safe refusal."""
+
+    def __init__(self, message, *, http_status=None, first_attempt=False):
+        super().__init__(message)
+        self.http_status = http_status
+        self.verified_unpaid = (type(http_status) is int and http_status in (401, 402)
+                               and first_attempt is True)
 
 
 class Truncated(RuntimeError):
@@ -215,16 +221,15 @@ def _post(url: str, body: dict, api_key: str, timeout: int, *, attempts: int = 6
             if not resp.get("choices"):
                 # HTTP 200 carrying an error body and no completion: fail loudly, never record an empty parse
                 err = json.dumps(resp.get("error") or resp)[:300]
-                code = (resp.get("error") or {}).get("code") if isinstance(resp.get("error"), dict) else None
-                if is_key_exhausted(code if isinstance(code, int) else 0, err):
-                    raise KeyExhausted(f"200 with error body: {err}")
                 raise RuntimeError(f"200 response with no choices: {err}")
             return resp
         except urllib.error.HTTPError as e:
             text = e.read().decode(errors="replace")[:500]
             last = f"HTTP {e.code}: {text[:300]}"
             if is_key_exhausted(e.code, text):
-                raise KeyExhausted(last)
+                if e.code in (401, 402) and attempt == 0:
+                    raise KeyExhausted(last, http_status=e.code, first_attempt=True)
+                raise RuntimeError(last)
             if e.code in (429, 500, 502, 503, 504, 529):
                 if attempt + 1 == attempts:
                     break
@@ -910,10 +915,17 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
     t_start = time.time()
     try:
         resp = call_model_once(content, model, reasoning, api_key, max_tokens, timeout)
-    except KeyExhausted:
-        fields['config']['request_images']['dispatch_status'] = 'not_dispatched'
-        write_atomic(claim_path, {**claim, 'final_dispatch_outcome': 'not dispatched',
-                                  'final_reserved_usd': 0.0, 'no_reply': 'final key has no credit'})
+    except KeyExhausted as error:
+        if error.verified_unpaid:
+            fields['config']['request_images']['dispatch_status'] = 'not_dispatched'
+            write_atomic(claim_path, {**claim, 'final_dispatch_outcome': 'not dispatched',
+                'final_reserved_usd': 0.0, 'no_reply': 'final request rejected before processing',
+                'final_rejection': {'http_status': error.http_status, 'http_attempt': 1,
+                                    'state': 'rejected unpaid', 'cost_usd': 0.0}})
+        else:
+            fields['config']['request_images']['dispatch_status'] = 'outcome_unknown'
+            write_atomic(claim_path, {**claim, 'final_dispatch_outcome': 'unverified',
+                                      'no_reply': f'KeyExhausted: {error}'})
         raise
     except Exception as error:
         fields['config']['request_images']['dispatch_status'] = 'outcome_unknown'
@@ -1241,6 +1253,12 @@ def run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurren
                     spent["usd"] += c - reserved[0] - selection_accounted[0] - prior_cost
                 return ("ok", ep, c)
             except KeyExhausted as e:
+                if not e.verified_unpaid:
+                    failure = out_for(ep).with_name(f'noreply_{out_for(ep).name}')
+                    if failure.exists() and not reserved[0]:
+                        with spend_lock:
+                            spent['usd'] += episode_cost(json.loads(failure.read_text())) - selection_accounted[0] - prior_cost
+                    return ('fail', ep, f'KeyExhausted with unverified dispatch outcome: {e}')
                 with spend_lock:
                     spent['usd'] -= reserved[0]
                     pending[ep] = max(0.0, pending.get(ep, 0.0) - reserved[0])

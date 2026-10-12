@@ -501,7 +501,7 @@ def test_batch_finishes_when_a_key_runs_out(tmp_path, monkeypatch):
     def fake_label(ep, out, *, api_key, **kw):
         calls[api_key] += 1
         if api_key == "sk-or-a" and calls[api_key] > 2:
-            raise harness.KeyExhausted("HTTP 402: Insufficient credits")
+            raise harness.KeyExhausted("HTTP 402: Insufficient credits", http_status=402, first_attempt=True)
         out.write_text(json.dumps({"parse_ok": True, "usage": {"est_cost_usd": 0.5}}))
         return {"usage": {"est_cost_usd": 0.5}}
 

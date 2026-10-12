@@ -706,6 +706,67 @@ def test_crashed_selection_reservation_survives_resume_and_service_spend(tmp_pat
     assert label_spend(job) == pytest.approx(.2)
 
 
+def test_rejected_selection_proof_survives_settlement_crash_and_retains_claim_history(tmp_path, monkeypatch):
+    import io
+    import urllib.error
+    from label import harness
+    inspected = access(tmp_path)
+    cache = tmp_path / 'job' / 'run' / 'out' / '.evidence' / 'episode_a.json.inspection.json'
+    def rejected(req, timeout):
+        raise urllib.error.HTTPError(req.full_url, 401, 'Unauthorized', {}, io.BytesIO(b'{}'))
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', rejected)
+    def call(content):
+        return harness.call_model_once(content, 'openai/gpt-6-astra', 'medium', 'sk-or-fixture', 100, 1)
+    def settlement(reserved, cost):
+        assert reserved == .2 and cost == 0
+        saved = json.loads(cache.read_text())
+        assert saved['rounds'][0]['state'] == 'rejected unpaid' and saved['cost_usd'] == 0
+        raise SystemExit('stopped after durable refusal')
+    with pytest.raises(SystemExit):
+        ea.discover(inspected, [], call, cache, rounds=1, reserve_cost=.2, settle_dispatch=settlement)
+    assert cache.with_name(cache.name + '.round0.claim').exists()
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', lambda *a, **kw: io.BytesIO(json.dumps({
+        'usage': {'cost': .01}, 'choices': [{'message': {'content': '{"requests":[]}'}}]}).encode()))
+    doc, _ = ea.discover(inspected, [], call, cache, rounds=1, reserve_cost=.2)
+    assert doc['status'] == 'complete' and doc['cost_usd'] == pytest.approx(.01)
+    assert doc['rounds'][0]['state'] == 'received'
+    assert doc['rounds'][0]['rejected_attempts'][0]['http_status'] == 401
+    assert cache.with_name(cache.name + '.round0.retry1.claim').exists()
+
+
+def test_unproven_old_key_error_keeps_conservative_hold_without_replay(tmp_path):
+    from label import harness
+    inspected = access(tmp_path)
+    cache = tmp_path / 'inspection.json'
+    def unproven(_):
+        raise harness.KeyExhausted('HTTP 402: legacy text without a saved response')
+    doc, _ = ea.discover(inspected, [], unproven, cache, rounds=1, reserve_cost=.2)
+    before = json.loads(cache.read_text())
+    assert doc['status'] == 'incomplete' and doc['cost_usd'] == .2
+    resumed, _ = ea.discover(inspected, [], lambda _: pytest.fail('unknown dispatch replayed'), cache,
+                             rounds=1, reserve_cost=.2)
+    assert resumed['cost_usd'] == .2 and resumed['rounds'] == before['rounds']
+    assert resumed['cost_is_conservative_estimate'] is True
+
+
+def test_malformed_rejection_proof_becomes_unknown_without_retry(tmp_path):
+    from label import harness
+    inspected = access(tmp_path)
+    cache = tmp_path / 'inspection.json'
+    def rejected(_):
+        raise harness.KeyExhausted('explicit refusal', http_status=402, first_attempt=True)
+    with pytest.raises(harness.KeyExhausted):
+        ea.discover(inspected, [], rejected, cache, rounds=1, reserve_cost=.2)
+    saved = json.loads(cache.read_text())
+    saved['rounds'][0].update(http_attempt=True, cost_usd=False)
+    cache.write_text(json.dumps(saved))
+    doc, _ = ea.discover(inspected, [], lambda _: pytest.fail('malformed rejection replayed'), cache,
+                         rounds=1, reserve_cost=.2)
+    assert doc['status'] == 'incomplete' and doc['cost_usd'] == .2
+    assert doc['rounds'][0]['state'] == 'dispatched'
+    assert doc['rounds'][0]['reservation_accounted'] is True
+
+
 def test_legacy_resume_diagnostic_does_not_change_settled_spend(tmp_path):
     from label import harness
     from label.dictionary_stage import label_spend, label_spend_complete
