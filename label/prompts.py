@@ -120,26 +120,22 @@ Rules:
 - Name objects by what you actually see. There is no fixed vocabulary.
   If you cannot tell what something is, describe it by shape/colour.
 - Only claim what the frames show; when unsure, say so in notes rather than guessing.
-- contribution and progress are judged IN CONTEXT of the whole episode so far
-  and the overall goal, NEVER as an isolated snapshot. You see the entire video,
-  so reason over the full trajectory: what state had the task reached by this
-  step, and does this step move it toward the goal FROM THERE.
-- contribution says what a stretch did for what the operator was trying to do at that moment, judged by
-  its effect, not by how the motion looks. The aim is the operator's own, read from what they do: what the
-  motion is directed at, and above all what they do next. Retrying the same thing, fetching an object back
-  or putting something back supports a failed-attempt interpretation; building on the result and
-  moving on supports success. These are evidence of intent, not categorical proof. Where there is no outside goal, the operator's own aims are all there is; never
-  judge a stretch against a task you imagine for them.
-    "advancing": gets, or moves toward, what the operator was aiming at. This includes recovering after a
-      failure and indirect but effective means (bracing an object so the other arm can work).
-    "wasteful": motion that serves no aim that is met: every try at an aim except the one that works,
-      whether or not the tries differ; a fumble; a detour; motion the operator later undoes; hesitating
-      with an object in hand.
-    "idle": the arm is not engaged in the task.
-  A motion that gets what it was aimed at is never wasteful, however unusual or slow it looks (a regrasp to
-  change an object's orientation, setting one object down to free a gripper, a probe or tilt to look), and
-  imprecision the operator leaves may be intentional. Check the visible result and declared goal rather than
-  assuming either error or success from the absence of a correction.
+- contribution and progress are judged with the whole video in view, NEVER as an isolated snapshot: you see
+  what happens after every step, so use it. For progress, ask what state the task had reached by this step and
+  whether this step moves it toward the goal FROM THERE.
+- contribution says whether a step helped. To decide, look at what happens after the step, not at what the
+  step seems to be trying to do.
+    "advancing": the step's result lasts and the work that follows needs it, or the step is itself part of
+      the work the operator is doing. The object it grasped stays grasped, the piece it placed stays placed,
+      or the thing it set up is what the next steps build on, however roundabout the way there. A step that
+      only holds or steadies something for the other arm is advancing too, because the other arm's work depends on it.
+    "wasteful": the step's result does not last or is never used, or the operator could have left the step
+      out and still done the same work. That covers a grasp that slips, a fit that does not hold, a piece
+      that gets dropped, a try that has to be repeated, a move that changes nothing the rest of the work
+      relies on, and work the operator later takes apart or abandons. When the operator tries the same
+      thing several times, only the try that finally works is advancing; the ones before it are wasteful.
+    "idle": the arm is not doing anything to the objects.
+  Judge every step this way, whatever the task is and whether or not the task as a whole succeeds.
 - A failure is an attempt that does not get what it was aimed at, or an outcome nobody aimed at: an object
   that unintentionally slips, falls, rolls or is knocked is a failure, even if it is recovered afterwards.
   An intentionally released, dropped or rolled object is judged against its evident aim. Each failed
@@ -242,8 +238,9 @@ Rules:
 # gripper lowered or set down rather than an arm parked.
 HANDHELD_WORDING = [
     ("<free-form verb phrase for what the arm does>", "<free-form verb phrase for what the gripper does>"),
-    ("so the other arm can work", "so the other gripper can work"),
-    ('"idle": the arm is not engaged in the task.', '"idle": the gripper is not engaged in the task.'),
+    ("for the other arm is advancing too, because the other arm's work depends on it.",
+     "for the other gripper is advancing too, because the other gripper's work depends on it."),
+    ('"idle": the arm is not doing anything to the objects.', '"idle": the gripper is not doing anything to the objects.'),
     ("It is NOT when the arms finish moving.", "It is NOT when the grippers finish moving."),
     ("retracting, parking, returning the arms home,\n  withdrawing the hands,",
      "lowering, setting down or pointing away a gripper,\n  withdrawing the hands,"),
@@ -355,26 +352,22 @@ Rules:
 - Name objects by what you actually see. There is no fixed vocabulary.
   If you cannot tell what something is, describe it by shape/colour.
 - Only claim what the frames show; when unsure, say so in notes rather than guessing.
-- contribution and progress are judged IN CONTEXT of the whole episode so far
-  and the overall goal, NEVER as an isolated snapshot. You see the entire video,
-  so reason over the full trajectory: what state had the task reached by this
-  step, and does this step move it toward the goal FROM THERE.
-- contribution says what a stretch did for what the operator was trying to do at that moment, judged by
-  its effect, not by how the motion looks. The aim is the operator's own, read from what they do: what the
-  motion is directed at, and above all what they do next. Retrying the same thing, fetching an object back
-  or putting something back supports a failed-attempt interpretation; building on the result and
-  moving on supports success. These are evidence of intent, not categorical proof. Where there is no outside goal, the operator's own aims are all there is; never
-  judge a stretch against a task you imagine for them.
-    "advancing": gets, or moves toward, what the operator was aiming at. This includes recovering after a
-      failure and indirect but effective means (bracing an object so the other arm can work).
-    "wasteful": motion that serves no aim that is met: every try at an aim except the one that works,
-      whether or not the tries differ; a fumble; a detour; motion the operator later undoes; hesitating
-      with an object in hand.
-    "idle": the hand is not engaged in the task.
-  A motion that gets what it was aimed at is never wasteful, however unusual or slow it looks (a regrasp to
-  change an object's orientation, setting one object down to free a hand, a probe or tilt to look), and
-  imprecision the operator leaves may be intentional. Check the visible result and declared goal rather than
-  assuming either error or success from the absence of a correction.
+- contribution and progress are judged with the whole video in view, NEVER as an isolated snapshot: you see
+  what happens after every step, so use it. For progress, ask what state the task had reached by this step and
+  whether this step moves it toward the goal FROM THERE.
+- contribution says whether a step helped. To decide, look at what happens after the step, not at what the
+  step seems to be trying to do.
+    "advancing": the step's result lasts and the work that follows needs it, or the step is itself part of
+      the work the operator is doing. The object it grasped stays grasped, the piece it placed stays placed,
+      or the thing it set up is what the next steps build on, however roundabout the way there. A step that
+      only holds or steadies something for the other hand is advancing too, because the other hand's work depends on it.
+    "wasteful": the step's result does not last or is never used, or the operator could have left the step
+      out and still done the same work. That covers a grasp that slips, a fit that does not hold, a piece
+      that gets dropped, a try that has to be repeated, a move that changes nothing the rest of the work
+      relies on, and work the operator later takes apart or abandons. When the operator tries the same
+      thing several times, only the try that finally works is advancing; the ones before it are wasteful.
+    "idle": the hand is not doing anything to the objects.
+  Judge every step this way, whatever the task is and whether or not the task as a whole succeeds.
 - A failure is an attempt that does not get what it was aimed at, or an outcome nobody aimed at: an object
   that unintentionally slips, falls, rolls or is knocked is a failure, even if it is recovered afterwards.
   An intentionally released, dropped or rolled object is judged against its evident aim. Each failed
@@ -746,15 +739,15 @@ not as the truth about the video. The label uses it in two different ways, for t
 purposes. The timeline describes the trajectory, so it follows what the operator is ACTUALLY,
 demonstrably doing (your independently-inferred task_summary), not the given goal. The outcome is
 what a policy learns the instruction means, so it follows the instruction:
-- contribution (advancing/wasteful/idle) measures competence toward the operator's OWN evident
-  objective. "wasteful" means genuinely wasted motion (fumbles, dead-ends, redundant
-  repositioning, dropped grasps), NOT motion that simply fails to serve the given goal.
+- contribution (advancing/wasteful/idle) is judged by what happens after each step, as the schema
+  says, never by whether the step serves the given instruction: a step whose result lasts and is
+  used is advancing even when the operator is doing something other than what was asked.
 - progress, like the outcome, is measured against the given goal: how much of what was ASKED
   holds at that instant. It reaches 1.0 only when success_predicate holds, so a demo that never
   reaches the given goal never reaches 1.0, however well it does its own task.
 - CRITICAL: if the operator is clearly performing a different-but-coherent task than the given
-  instruction, do NOT mark their competent, purposeful actions wasteful. Grade those steps as
-  advancing toward the task they are actually doing, and record the divergence in goal_alignment
+  instruction, judge their steps by what happens after each one, as everywhere else, and record
+  the divergence in goal_alignment
   and as an instruction_mismatch data issue. A competent demonstration is good data even when it
   is mislabeled; the dense timeline must stay a faithful description of the real behavior.
 - An instruction can say HOW as well as WHAT: a direction, a hand, a grip, the order of steps. A
@@ -904,8 +897,8 @@ emit them as a top-level "tasks" list, in time order:
   the rest of that task's span: the last action that puts the task's objects into their final state, not when the
   grippers move on. null if the end-state is never reached.
 - progress in the timeline is toward the CURRENT task, not the whole session: 0 when a task starts, 1.0 when its
-  end-state is reached, then it resets for the next task. contribution is judged against the task the
-  demonstrator is working on at that step.
+  end-state is reached, then it resets for the next task. contribution is judged by what
+  happens after each step, as everywhere else.
 - task_summary is one sentence summarising the session's activities. instruction_variants rephrase the activity
   that fills most of the recording.
 - completion: there is no single goal, so set task_completed, success_predicate, completed_at_s,
