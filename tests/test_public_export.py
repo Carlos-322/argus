@@ -45,6 +45,17 @@ def test_billing_refusal_reaches_viewer_without_exposing_private_error(outcome, 
     # Projection also validates typed status fields on older directly written board files.
     assert project({'_label_failed': {'status': 'no_reply', 'why': record['no_reply'],
                     'final_dispatch_outcome': outcome, 'no_reply_kind': kind}})['_label_failed'] == failure
+    part = {'part': 1, 't0_s': 0, 't1_s': 4.199, 'why': record['no_reply'],
+            'final_dispatch_outcome': outcome, 'no_reply_kind': kind}
+    split = project({'_label_failed': {'status': 'no_part', 'parts': [part]},
+                     '_stitched': {'parts': 1, 'missing': [part]}})
+    public_part = split['_label_failed']['parts'][0]
+    assert public_part == split['_stitched']['missing'][0]
+    assert public_part['why'] == 'No verified labels were recorded for this part.'
+    assert ('final_dispatch_outcome' in public_part) == (outcome in ('claimed', 'unverified', 'not dispatched'))
+    assert ('no_reply_kind' in public_part) == (kind == 'spend_cap' and outcome == 'not dispatched')
+    assert project(split) == split
+    assert 'token=secret' not in json.dumps(split)
     program = """
 const {piece} = require('./tests/page_functions')('./board/serve.py');
 const render = new Function(piece('esc') + piece('fmtDur') + piece('cmpFailHtml')

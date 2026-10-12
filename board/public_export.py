@@ -502,6 +502,26 @@ def _reader_issue(value: dict) -> dict:
     return result
 
 
+def _part_failures(parts: list) -> list:
+    """Typed machine failure spans, with operational diagnostics retained privately."""
+    public = []
+    for part in parts:
+        if not isinstance(part, dict):
+            public.append(part)
+            continue
+        row = dict(part)
+        if row.get('final_dispatch_outcome') not in ('claimed', 'unverified', 'not dispatched'):
+            row.pop('final_dispatch_outcome', None)
+        if row.get('no_reply_kind') != 'spend_cap' or row.get('final_dispatch_outcome') != 'not dispatched':
+            row.pop('no_reply_kind', None)
+        if row.get('finish_reason') != 'length':
+            row.pop('finish_reason', None)
+        if 'why' in row:
+            row['why'] = 'No verified labels were recorded for this part.'
+        public.append(row)
+    return public
+
+
 def _label_failure(value: dict) -> dict:
     result = dict(value)
     for key, allowed in (('final_dispatch_outcome', ('claimed', 'unverified', 'not dispatched')),
@@ -513,8 +533,7 @@ def _label_failure(value: dict) -> dict:
     elif value.get('status') == 'no_reply' and 'why' in value:
         result['why'] = 'No verified model reply was recorded.'
     elif value.get('status') == 'no_part' and isinstance(value.get('parts'), list):
-        result['parts'] = [{**part, 'why': 'No verified labels were recorded for this part.'}
-                           if isinstance(part, dict) and 'why' in part else part for part in value['parts']]
+        result['parts'] = _part_failures(value['parts'])
     return result
 
 
@@ -603,6 +622,8 @@ def _project(value, field: str = '', attribute_owner: str = '', native_fields: b
                 continue
             if key == '_label_failed' and isinstance(item, dict) and not native_fields:
                 item = _label_failure(item)
+            if key == '_stitched' and isinstance(item, dict) and not native_fields and isinstance(item.get('missing'), list):
+                item = {**item, 'missing': _part_failures(item['missing'])}
             name = _name(key)
             attribute = _reader_attribute(key) if not native_fields else None
             owner = _name(attribute) if attribute is not None else attribute_owner

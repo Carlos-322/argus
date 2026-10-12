@@ -456,8 +456,28 @@ def _part_reply(src: Path, name: str) -> tuple[dict | None, str | None]:
     fields of the wrong type left out, label/harness.py typed_labels), else (what came back, why it gave no labels):
     not parsing, cut off at the output limit (the harness's failed_<part>.json), an output file that does not read, or
     no reply at all, with why when the harness recorded it (noreply_<part>.json)."""
-    from label.harness import typed_labels
+    from label.harness import typed_labels, billing_record
     q, f, nr = src / f"{name}.json", src / f"failed_{name}.json", src / f"noreply_{name}.json"
+    # A strictly newer durable attempt supersedes an old label. Equal-index legacy files
+    # keep their established primary, failed, no-reply precedence.
+    try:
+        latest = billing_record(src, name + '.json')
+    except (OSError, ValueError, TypeError):
+        present = [path for path in (q, f, nr) if path.exists()]
+        if len(present) == 1:
+            _, error = _read(present[0])
+            if error:
+                return None, error
+        return None, 'saved billing receipts could not be verified'
+    first = next((path for path in (q, f, nr) if path.exists()), None)
+    if latest is not None and first is not None and latest[0] != first:
+        original, _ = _read(first)
+        if original and latest[1].get('final_attempt_index', 0) > original.get('final_attempt_index', 0):
+            record = latest[1]
+            if latest[0] == f:
+                return record, "the model's reply was cut off at the output limit"
+            if latest[0] == nr:
+                return record, f"the model gave no reply ({record['no_reply']})" if record.get('no_reply') else "the model gave no reply"
     r, bad = _read(q) if q.exists() else (None, None)
     if bad:
         return None, bad
@@ -482,6 +502,24 @@ def _raw_head(r: dict | None) -> str:
     lab = (r or {}).get("labels") if isinstance((r or {}).get("labels"), dict) else {}
     raw = lab.get("_raw") if lab.get("_raw") is not None else (r or {}).get("content_tail") or ""
     return str(raw)[:3000]
+
+
+def _part_dispatch(record: dict | None) -> dict:
+    """Only dispatch states established by the part's own durable receipt."""
+    record = record or {}
+    outcome = record.get('final_dispatch_outcome')
+    reserve = record.get('final_reserved_usd')
+    usage = record.get('usage') if isinstance(record.get('usage'), dict) else {}
+    if outcome == 'not dispatched' and (type(reserve) not in (int, float) or reserve != 0
+            or record.get('parse_ok') is not False or usage.get('est_cost_usd') not in (None, 0)
+            or record.get('finish_reason') == 'length' or _raw_head(record)):
+        outcome = None
+    return {**({'final_dispatch_outcome': outcome}
+               if outcome in ('claimed', 'unverified', 'not dispatched') else {}),
+            **({'finish_reason': 'length'} if record.get('finish_reason') == 'length' else {}),
+            **({'no_reply_kind': 'spend_cap'} if outcome == 'not dispatched'
+               and record.get('no_reply_kind') == 'spend_cap'
+               and record.get('parse_ok') is False and record.get('final_reserved_usd') == 0 else {})}
 
 
 def stitch_run(job: Path, eps: Path, long_eps: dict, out: Path) -> dict:
@@ -539,6 +577,7 @@ def stitch_run(job: Path, eps: Path, long_eps: dict, out: Path) -> dict:
             piece = pc["piece"]
             # with the start of what came back, so the board can show it (board/to_board.py label_failed)
             missing.append({"part": piece["index"], "t0_s": piece["t0_s"], "t1_s": piece["t1_s"], "why": why,
+                            **_part_dispatch(r),
                             **({"raw_head": _raw_head(r)} if _raw_head(r) else {})})
             failed.append((pc, r))
         if got:
@@ -557,13 +596,15 @@ def stitch_run(job: Path, eps: Path, long_eps: dict, out: Path) -> dict:
                 for key in ('prompt_tokens', 'completion_tokens', 'reasoning_tokens', 'cached_tokens',
                             'cache_write_tokens', 'latency_s', 'est_cost_usd'):
                     result['usage'][key] = round(result['usage'][key] + float(u.get(key) or 0), 4)
-                result['config']['pieces'][int(pc['piece']['index']) - 1].update(
+                part_record = result['config']['pieces'][int(pc['piece']['index']) - 1]
+                part_record.update(
                     episode_dir=r.get('episode_dir'), example_dir=r.get('example_dir'),
-                    final_dispatch_outcome=r.get('final_dispatch_outcome'), cost_usd=u.get('est_cost_usd'),
+                    cost_usd=u.get('est_cost_usd'),
                     annotation_policy=r.get('annotation_policy'),
                     usage=u, provider=r.get('provider'), generation_id=r.get('generation_id'),
                     finish_reason=r.get('finish_reason'), resolution_route=(r.get('config') or {}).get('resolution_route'),
                     config=copy.deepcopy(r.get('config') or {}))
+                part_record.update(_part_dispatch(r))
             _combine_request_config(result['config'])
             routes = [((r or {}).get('config') or {}).get('resolution_route') or {}
                       for _, r in sorted(got + failed, key=lambda item: item[0]['piece']['index'])]
@@ -607,7 +648,7 @@ def unlabelled(ep_dir: Path, failed: list[tuple[dict, dict | None]], missing: li
                                'cost_usd': round(sum(float(route.get('cost_usd') or 0) for route in routes), 6)}
     cfg['pieces'] = [{**pc.get('piece', {}), 'episode_dir': (r or {}).get('episode_dir'),
                       'example_dir': (r or {}).get('example_dir'),
-                      'final_dispatch_outcome': (r or {}).get('final_dispatch_outcome'),
+                      **_part_dispatch(r),
                       'annotation_policy': (r or {}).get('annotation_policy'),
                       'usage': (r or {}).get('usage') or {}, 'provider': (r or {}).get('provider'),
                       'generation_id': (r or {}).get('generation_id'), 'finish_reason': (r or {}).get('finish_reason'),
@@ -1047,7 +1088,7 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
         still += _shift(r.get("arm_still_spans") or [], t0)
         part_info.append({"part": i, "t0_s": t0, "t1_s": t1, "episode_dir": r.get("episode_dir"),
                           "example_dir": r.get("example_dir"),
-                          "final_dispatch_outcome": r.get("final_dispatch_outcome"),
+                          **_part_dispatch(r),
                           **({'annotation_policy': copy.deepcopy(r['annotation_policy'])}
                              if r.get('annotation_policy') else {}),
                           'config': copy.deepcopy(cfg),

@@ -1098,9 +1098,45 @@ def test_an_output_with_no_parse_flag_is_read_as_the_labels_it_holds():
     assert to_board.label_failed({"finish_reason": "length"})["status"] == "cut_off"
 
 
-def test_an_unreadable_output_is_an_episode_with_a_data_issue_and_the_build_names_what_it_skipped(tmp_path):
+@pytest.mark.parametrize('dry,newer_dry', [(False, False), (True, False), (True, True)])
+def test_newer_receipt_uses_physical_filename_and_retains_episode_owner(tmp_path, dry, newer_dry):
+    primary = _output('episode_owned')
+    primary['final_attempt_index'] = 0
+    if dry:
+        primary = {'episode_dir': primary['episode_dir'], 'dry_run': True, 'final_attempt_index': 0}
+    path = tmp_path / 'episode_file.json'
+    path.write_text(json.dumps(primary))
+    newer = {'episode_dir': primary['episode_dir'], 'parse_ok': False, 'no_reply': 'Unknown response.',
+             'final_dispatch_outcome': 'unverified', 'final_reserved_usd': 6.4, 'final_attempt_index': 2}
+    if newer_dry:
+        newer = {'episode_dir': primary['episode_dir'], 'dry_run': True, 'final_attempt_index': 2}
+    claim = tmp_path / 'noreply_episode_file.json'
+    claim.write_text(json.dumps(newer))
+    unrelated = _output('episode_unrelated')
+    unrelated['final_attempt_index'] = 3
+    (tmp_path / 'episode_owned.json').write_text(json.dumps(unrelated))
+    before = {p: p.read_bytes() for p in tmp_path.glob('*.json')}
+    selected, skipped = to_board.label_outputs(tmp_path)
+    if newer_dry:
+        assert skipped == [path.name + ': dry run', claim.name + ': dry run']
+        assert set(selected) == {'episode_unrelated'}
+    else:
+        assert not skipped
+        assert set(selected) == {'episode_owned', 'episode_unrelated'}
+        assert selected['episode_owned'][0] == claim
+        assert selected['episode_owned'][1] == newer
+        assert to_board.convert(selected['episode_owned'][1])['_label_failed']['status'] == 'no_reply'
+    assert selected['episode_unrelated'][1] == unrelated
+    assert before == {p: p.read_bytes() for p in tmp_path.glob('*.json')}
+
+
+@pytest.mark.parametrize('prefix', ['', 'failed_', 'noreply_'])
+@pytest.mark.parametrize('bad_receipt', ['{not json', '[]', 'null'])
+def test_an_unreadable_output_is_an_episode_with_a_data_issue_and_the_build_names_what_it_skipped(tmp_path, prefix, bad_receipt):
     run = _run(tmp_path / "runs" / "demo", "20260101-0000_full_abc1234", "success", "aligned")
-    (run / "out" / "episode_000001.json").write_text("{not json")
+    (run / "out" / "episode_000001.json").unlink()
+    (run / "out" / "failed_episode_000001.json").unlink()
+    (run / "out" / (prefix + "episode_000001.json")).write_text(bad_receipt)
     (run / "out" / "episode_000002.json").write_text(json.dumps({"episode_dir": "/x/episode_000002",
                                                                  "dry_run": True}))
     eps = _episodes(tmp_path / "episodes" / "demo")

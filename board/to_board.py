@@ -75,8 +75,14 @@ def label_failed(result: dict) -> dict | None:
     st = result.get("stitched") if isinstance(result.get("stitched"), dict) else {}
     if result.get("no_part") and st.get("missing"):
         # a long recording none of whose parts gave labels (label/pieces.py unlabelled): each part and why
-        return {"status": "no_part", "parts": [{k: g.get(k) for k in ("part", "t0_s", "t1_s", "why", "raw_head")
-                                                if k in g} for g in st["missing"] if isinstance(g, dict)]}
+        return {"status": "no_part", "parts": [{
+            **{k: g.get(k) for k in ("part", "t0_s", "t1_s", "why", "raw_head") if k in g},
+            **({'final_dispatch_outcome': g['final_dispatch_outcome']}
+               if g.get('final_dispatch_outcome') in ('claimed', 'unverified', 'not dispatched') else {}),
+            **({'finish_reason': 'length'} if g.get('finish_reason') == 'length' else {}),
+            **({'no_reply_kind': 'spend_cap'} if g.get('no_reply_kind') == 'spend_cap'
+               and g.get('final_dispatch_outcome') == 'not dispatched' else {})}
+            for g in st["missing"] if isinstance(g, dict)]}
     if result.get("finish_reason") == "length" and "labels" not in result:
         return {"status": "cut_off", "out_tokens": (result.get("usage") or {}).get("completion_tokens"),
                 "tail": (result.get("content_tail") or "")[-TAIL:]}
@@ -310,16 +316,21 @@ def label_outputs(in_dir: Path) -> tuple[dict, list[str]]:
     a dry run, parsed or not, and for an episode with none, the reply cut off at the output limit that the harness kept
     as failed_<episode>.json (read with parse_ok false), else the record of why it got no reply (noreply_<episode>.json,
     label/harness.py run_batch). A file that does not read is its episode's output too, with no labels and the error
-    (unreadable, label_failed). Also one line per file skipped: a dry run, which asked nothing."""
-    outs, skipped = {}, []
+    (unreadable, label_failed). Strictly newer indexed receipts supersede older replies;
+    ambiguous billing receipts withhold labels. Equal-index legacy precedence stays unchanged.
+    Also one line per file skipped: a dry run, which asked nothing."""
+    outs, skipped, dry_outputs = {}, [], []
     for f in sorted(in_dir.glob("episode_*.json")):
         try:
             r = json.loads(f.read_text())
+            if not isinstance(r, dict):
+                raise ValueError('saved billing receipt is not an object')
         except (OSError, ValueError) as e:
             outs[f.stem] = (f, {"parse_ok": False, "unreadable": f"{f.name}: {type(e).__name__}: {e}"})
             continue
         if r.get("dry_run"):
             skipped.append(f"{f.name}: dry run")
+            dry_outputs.append((Path(r.get('episode_dir') or f.stem).name, (f, r)))
             continue
         outs[Path(r.get("episode_dir", f.stem)).name] = (f, r)
     for f in sorted(in_dir.glob("failed_episode_*.json")):
@@ -328,6 +339,8 @@ def label_outputs(in_dir: Path) -> tuple[dict, list[str]]:
             continue                      # the episode has an output, so this is an earlier cut-off reply
         try:
             r = json.loads(f.read_text())
+            if not isinstance(r, dict):
+                raise ValueError('saved billing receipt is not an object')
         except (OSError, ValueError) as e:
             outs.setdefault(name, (f, {"parse_ok": False, "unreadable": f"{f.name}: {type(e).__name__}: {e}"}))
             continue
@@ -338,9 +351,39 @@ def label_outputs(in_dir: Path) -> tuple[dict, list[str]]:
             continue                      # an earlier attempt's record; the episode has a reply now
         try:
             r = json.loads(f.read_text())
+            if not isinstance(r, dict):
+                raise ValueError('saved billing receipt is not an object')
         except (OSError, ValueError) as e:
             r = {"no_reply": f"{f.name} does not read ({type(e).__name__}: {e})"}
         outs.setdefault(name, (f, {**r, "parse_ok": False, "no_reply": r.get("no_reply") or "no reason recorded"}))
+    from label.harness import billing_record
+    represented = {path.stem.removeprefix('failed_').removeprefix('noreply_') for path, _ in outs.values()}
+    candidates = list(outs.items()) + [(name, (path, record)) for name, (path, record) in dry_outputs
+        if path.stem not in represented]
+    for name, (path, record) in candidates:
+        canonical = path.name.removeprefix('failed_').removeprefix('noreply_')
+        try:
+            latest = billing_record(in_dir, canonical)
+        except (OSError, ValueError, TypeError):
+            if not record.get('unreadable'):
+                outs[name] = (path, {'parse_ok': False,
+                    'unreadable': name + '.json: saved billing receipts could not be verified'})
+            continue
+        if latest is None or latest[1].get('final_attempt_index', 0) <= record.get('final_attempt_index', 0):
+            continue
+        selected_path, selected = latest
+        if record.get('dry_run') and not selected.get('dry_run'):
+            skipped = [line for line in skipped if line != path.name + ': dry run']
+        if selected.get('dry_run'):
+            outs.pop(name, None)
+            skipped.append(selected_path.name + ': dry run')
+        elif selected_path.name.startswith('noreply_'):
+            outs[name] = (selected_path, {**selected, 'parse_ok': False,
+                'no_reply': selected.get('no_reply') or 'no reason recorded'})
+        elif selected_path.name.startswith('failed_'):
+            outs[name] = (selected_path, {**selected, 'parse_ok': False})
+        else:
+            outs[name] = latest
     return outs, skipped
 
 

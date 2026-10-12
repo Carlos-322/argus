@@ -10,7 +10,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const src = require('./page_functions')(process.argv[2]).src;
+const {src, piece} = require('./page_functions')(process.argv[2]);
 const e0 = src.indexOf('\nfunction esc('), e1 = src.indexOf('\nfunction isNullish(');
 const t0 = src.indexOf('\nfunction fmtT('), t1 = src.indexOf('\n', t0 + 1);
 const r0 = src.indexOf('\nfunction readerIssueRows(');
@@ -22,7 +22,7 @@ const r1 = src.indexOf('\n}\n', r0) + 3;
 const NAMES = {'clip-frames': 'Camera video has fewer frames than the episode',
                'camera-undecodable': 'Camera video does not decode', 'label-failed': 'Model reply gave no labels'};
 const LISTS = {'label-failed': 'labelling'};
-const T = new Function('famName', 'famList', src.slice(e0, e1) + src.slice(t0, t1) + src.slice(r0, r1)
+const T = new Function('famName', 'famList', piece('partFailureReason') + src.slice(e0, e1) + src.slice(t0, t1) + src.slice(r0, r1)
   + 'return {readerIssueRows};')(s => NAMES[s] || String(s).slice(2), s => LISTS[s] || 'data');
 
 let bad = 0;
