@@ -21,7 +21,7 @@ text { font-family: 'EB Garamond', Georgia, serif; font-weight: 400; fill:#29282
 
 <rect x="760" y="28" width="692" height="113" rx="5" fill="#f6f5f1" stroke="#c7c2b9" stroke-width="1.2"/>
 <text x="784" y="65" class="heading" data-width="644">Annotation settings</text>
-<text x="784" y="99" class="body" data-width="644">Teleoperated robots / handheld grippers / first-person video</text>
+<text x="784" y="99" class="body" data-width="644">Teleop / UMI / human ego</text>
 <text x="784" y="127" class="small" data-width="644">Task scope, model, frame sampling and request limits</text>
 <path d="M1106 141 V181" class="edge"/>
 <text x="32" y="174" class="stage">Source formats</text>

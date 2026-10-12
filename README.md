@@ -59,10 +59,10 @@ uv run python -m board serve --board data/review/mine --clips data/review/mine/c
 
 | Default or optional setting | Behavior |
 |---|---|
-| Astra, the default | `openai/gpt-6-astra`, medium reasoning; a regular sample every 1.5s for robot arms, 1s for handheld grippers and 0.5s for human first-person video, plus eligible boundaries and first/last frames. |
+| Astra, the default | `openai/gpt-6-astra`, medium reasoning; a regular sample every 1.5s for teleop, 1s for UMI and 0.5s for human ego, plus eligible boundaries and first/last frames. |
 | Sol 6.1 High | `--model openai/gpt-6.1-sol --reasoning high`; defaults to 1 FPS on all recording setups and requires at least 1 FPS. |
 | Faster actions | `--sample-fps 2` is recommended for subsecond fumbles and rapid recoveries. More images shorten the available request window and can increase cost. |
-| Task scope | Source declarations establish episode or session scope. `--task-mode episode` or `session` overrides it; missing instructions alone do not imply a session. Human first-person annotations retain their activities schema. |
+| Task scope | Source declarations establish episode or session scope. `--task-mode episode` or `session` overrides it; missing instructions alone do not imply a session. Human ego annotations retain their activities schema. |
 
 One recording remains one public episode. Internal request parts rejoin on its original clock; session tasks annotate activities within it. Explicit preparation limits report trimming; missing parts and processing failures remain visible alongside usable footage and evidence.
 
