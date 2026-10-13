@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="1888" viewBox="0 0 1120 1888" role="img" aria-labelledby="title description">
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="1214" viewBox="0 0 1120 1888" role="img" aria-labelledby="title description">
 <title id="title">Multimodal annotation pipeline</title>
 <desc id="description">Format readers retain episode cameras, state, sensors and task context. Field interpretation and recording checks prepare the episode. Recording type, model and task scope determine sampling and request limits. Model inputs contain timestamped camera grids, task context and checks, with optional task-based image resolution. The selected VLM annotates behavior and can select and inspect episode sensor evidence through a separate optional loop. Request chunks rejoin on the original timeline for video overlays and JSON exports. Input verification, receipts, spending caps and verified resume apply across the run.</desc>
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1 L8 5 L2 9" fill="none" stroke="#716d64" stroke-width="1.4"/></marker></defs>
@@ -12,8 +12,8 @@ text { font-family:'EB Garamond',Georgia,serif; font-weight:400; fill:#292820; }
 .stage { font-size:25px; fill:#625d54; }
 .edge { fill:none; stroke:#716d64; stroke-width:1.5; marker-end:url(#arrow); stroke-linejoin:round; }
 .optional { stroke-dasharray:5 5; }
-.flow { fill:none; stroke:#526f8c; stroke-width:3.5; stroke-linecap:round; stroke-linejoin:round; stroke-dasharray:8 18; animation:move 2.6s linear infinite; }
-@keyframes move { to { stroke-dashoffset:-26; } }
+.flow { fill:none; stroke:#245d7b; stroke-width:5; stroke-linecap:round; stroke-linejoin:round; stroke-dasharray:14 16; animation:move 1.2s linear infinite; }
+@keyframes move { to { stroke-dashoffset:-30; } }
 @media (prefers-reduced-motion:reduce) { .flow { display:none; } }
 </style><rect width="1120" height="1888" rx="10" fill="#fff"/>
 <text x="24" y="40" class="heading" data-width="1072">Dataset formats</text>
