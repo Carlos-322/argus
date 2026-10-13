@@ -1,8 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="900" height="450" viewBox="0 0 1440 720" role="img" aria-labelledby="title description">
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="626.389" viewBox="0 0 1440 820" role="img" aria-labelledby="title description">
 <title id="title">Multimodal annotation pipeline</title>
 <desc id="description">Supported formats yield episode RGB, state and actions, depth, tactile, other fields and task context. Field interpretation and recording checks preserve native units and clocks. Run settings determine timestamped frame grids, task context, checks and request boundaries. The selected VLM annotates each request. Optional model-guided evidence selection reads additional episode data before the final annotation call and may repeat. Request chunks rejoin on the original timeline, preserving gaps, then feed the video viewer and JSON exports. Verification, receipts, spending caps and verified resume apply across the run.</desc>
-<defs><clipPath id="canvas"><rect x="8" y="8" width="1424" height="704"/></clipPath><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#716d64" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<defs><clipPath id="canvas"><rect x="8" y="8" width="1424" height="804"/></clipPath><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#716d64" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
 <style>
+svg {max-width:100%;height:auto;aspect-ratio:1440/820}
 text {font-family:'EB Garamond',Georgia,serif;fill:#292820;font-weight:400}
 .stage {font-size:30px;font-weight:600}
 .heading {font-size:27px;font-weight:600}
@@ -10,124 +11,138 @@ text {font-family:'EB Garamond',Georgia,serif;fill:#292820;font-weight:400}
 .caption {font-size:23px;fill:#625d54}
 .edge {fill:none;stroke:#716d64;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
 .optional {stroke-dasharray:5 5}
-.packet {fill:#245d7b}
-@media (prefers-reduced-motion:reduce) {.packet {display:none}}
-</style><rect width="1440" height="720" fill="#fff" rx="8"/><g clip-path="url(#canvas)">
-<text x="24.000" y="49" class="stage" data-width="224">Dataset input</text>
-<text x="272.000" y="49" class="stage" data-width="228">Preparation</text>
-<text x="1244.000" y="245" class="stage" data-width="184">Outputs</text>
-<rect id="dataset" x="24" y="94" width="224" height="402" rx="5" fill="#fbfaf8" stroke="#c7c2b9" stroke-width="1.5"/>
-<text x="38.000" y="123" class="heading" data-width="196">Formats</text>
-<rect id="format-0" x="36" y="138" width="96" height="36" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
-<text x="41.928" y="163" class="body" data-width="86">LeRobot</text>
-<rect id="format-1" x="140" y="138" width="96" height="36" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
-<text x="153.740" y="163" class="body" data-width="86">MCAP</text>
-<rect id="format-2" x="36" y="182" width="96" height="36" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
-<text x="53.328" y="207" class="body" data-width="86">HDF5</text>
-<rect id="format-3" x="140" y="182" width="96" height="36" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
-<text x="160.304" y="207" class="body" data-width="86">Video</text>
-<rect id="format-4" x="36" y="226" width="200" height="36" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
-<text x="83.572" y="251" class="body" data-width="190">ZIP / TAR</text>
-<path d="M38 277 H234" stroke="#c7c2b9" stroke-width="1"/>
-<text x="38.000" y="309" class="heading" data-width="196">Episode data</text>
-<rect id="modality-0" x="36" y="326" width="96" height="46" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
-<text x="59.652" y="355" class="body" data-width="86">RGB</text>
-<rect id="modality-1" x="140" y="326" width="96" height="46" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
-<text x="165.416" y="346" class="body" data-width="86">State</text>
-<text x="155.468" y="367" class="body" data-width="86">actions</text>
-<rect id="modality-2" x="36" y="380" width="96" height="46" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
-<text x="54.096" y="409" class="body" data-width="86">Depth</text>
-<rect id="modality-3" x="140" y="380" width="96" height="46" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
-<text x="156.020" y="409" class="body" data-width="86">Tactile</text>
-<rect id="modality-4" x="36" y="434" width="96" height="46" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
-<text x="56.208" y="454" class="body" data-width="86">Other</text>
-<text x="59.736" y="475" class="body" data-width="86">fields</text>
-<rect id="modality-5" x="140" y="434" width="96" height="46" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
-<text x="165.668" y="454" class="body" data-width="86">Task</text>
-<text x="153.464" y="475" class="body" data-width="86">context</text>
-<text x="24.000" y="522" class="caption" data-width="204">Native units and</text>
-<text x="24.000" y="548" class="caption" data-width="204">clocks retained</text>
-<rect id="interpret" x="272" y="148" width="228" height="112" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
-<text x="284.000" y="180" class="heading" data-width="204">Interpret fields</text>
-<text x="284.000" y="216" class="body" data-width="204">Roles and units</text>
-<text x="284.000" y="246" class="body" data-width="204">Human overrides first</text>
-<rect id="checks" x="272" y="298" width="228" height="112" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
-<text x="284.000" y="330" class="heading" data-width="204">Recording checks</text>
-<text x="284.000" y="366" class="body" data-width="204">Cameras and clocks</text>
-<text x="284.000" y="396" class="body" data-width="204">State and sensors</text>
-<rect id="settings" x="744" y="94" width="324" height="146" rx="5" fill="#f6f5f1" stroke="#c7c2b9" stroke-width="1.5"/>
-<text x="760.000" y="126" class="heading" data-width="292">Run settings</text>
-<text x="760.000" y="163" class="body" data-width="292">Recording type</text>
-<text x="760.000" y="193" class="body" data-width="292">Model and reasoning</text>
-<text x="760.000" y="223" class="body" data-width="292">Sampling and task scope</text>
-<rect id="request" x="520" y="276" width="236" height="156" rx="5" fill="#fafbf9" stroke="#c7c2b9" stroke-width="1.5"/>
-<text x="532.000" y="310" class="heading" data-width="212">Build VLM input</text>
-<text x="532.000" y="348" class="body" data-width="212">RGB frame grids</text>
-<text x="532.000" y="378" class="body" data-width="212">Task context, checks</text>
-<text x="532.000" y="408" class="body" data-width="212">Request windows</text>
-<rect id="annotate" x="788" y="276" width="236" height="156" rx="5" fill="#f0f4ef" stroke="#c7c2b9" stroke-width="1.5"/>
-<text x="800.000" y="310" class="heading" data-width="212">Annotate episode</text>
-<text x="800.000" y="341" class="body" data-width="212">Actions, subgoals</text>
-<text x="800.000" y="367" class="body" data-width="212">Outcomes, errors</text>
-<text x="800.000" y="393" class="body" data-width="212">Recoveries</text>
-<text x="800.000" y="419" class="body" data-width="212">Sensor findings</text>
-<rect id="stitch" x="1056" y="276" width="164" height="156" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
-<text x="1072.000" y="303" class="heading" data-width="132">Rejoin</text>
-<text x="1072.000" y="332" class="heading" data-width="132">chunks</text>
-<text x="1072.000" y="365" class="body" data-width="132">Original</text>
-<text x="1072.000" y="391" class="body" data-width="132">timeline</text>
-<text x="1072.000" y="420" class="caption" data-width="132">Gaps retained</text>
-<rect id="viewer" x="1244" y="272" width="184" height="76" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
-<text x="1259.000" y="302" class="heading" data-width="154">Video viewer</text>
-<text x="1259.000" y="330" class="body" data-width="154">Visual overlays</text>
-<rect id="json" x="1244" y="360" width="184" height="76" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
-<text x="1259.000" y="390" class="heading" data-width="154">JSON exports</text>
-<text x="1259.000" y="418" class="body" data-width="154">With evidence</text>
-<path id="ingest-interpret" d="M248 354 L260 354 L260 204 L272 204" class="edge" marker-end="url(#arrow)"/>
-<circle class="packet" r="5.5"><animateMotion dur="1.491s" repeatCount="indefinite" path="M248 354 L260 354 L260 204 L262 204"/></circle>
-<path id="interpret-check" d="M386 260 L386 298" class="edge" marker-end="url(#arrow)"/>
-<circle class="packet" r="5.5"><animateMotion dur="0.800s" repeatCount="indefinite" path="M386 260 L386 288"/></circle>
-<path id="checks-request" d="M500 354 L520 354" class="edge" marker-end="url(#arrow)"/>
-<circle class="packet" r="5.5"><animateMotion dur="0.800s" repeatCount="indefinite" path="M500 354 L510 354"/></circle>
-<path id="settings-request" d="M744 167 L638 167 L638 276" class="edge" marker-end="url(#arrow)"/>
-<path id="settings-annotation" d="M906 240 L906 276" class="edge" marker-end="url(#arrow)"/>
-<path id="request-annotation" d="M756 354 L788 354" class="edge" marker-end="url(#arrow)"/>
-<circle class="packet" r="5.5"><animateMotion dur="0.800s" repeatCount="indefinite" path="M756 354 L778 354"/></circle>
-<path id="annotation-timeline" d="M1024 354 L1056 354" class="edge" marker-end="url(#arrow)"/>
-<circle class="packet" r="5.5"><animateMotion dur="0.800s" repeatCount="indefinite" path="M1024 354 L1046 354"/></circle>
-<path id="timeline-fork" d="M1220 354 L1232 354" class="edge"/>
-<path id="fork-viewer" d="M1232 354 L1232 310 L1244 310" class="edge" marker-end="url(#arrow)"/>
-<circle class="packet" r="5.5"><animateMotion dur="0.800s" repeatCount="indefinite" path="M1232 354 L1232 310 L1234 310"/></circle>
-<path id="fork-json" d="M1232 354 L1232 398 L1244 398" class="edge" marker-end="url(#arrow)"/>
-<circle class="packet" r="5.5"><animateMotion dur="0.800s" repeatCount="indefinite" path="M1232 354 L1232 398 L1234 398"/></circle>
-<rect id="inspection-group" x="506" y="470" width="536" height="116" rx="5" fill="#fafbf9" stroke="#c7c2b9" stroke-width="1.5" stroke-dasharray="5 5"/>
-<text x="520.000" y="457" class="heading" data-width="506">Evidence inspection (optional)</text>
-<rect id="select" x="520" y="486" width="236" height="78" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
-<text x="532.000" y="516" class="heading" data-width="212">Select evidence</text>
-<text x="532.000" y="546" class="body" data-width="212">Fields and time ranges</text>
-<rect id="read" x="788" y="486" width="236" height="78" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
-<text x="800.000" y="516" class="heading" data-width="212">Read episode data</text>
-<text x="800.000" y="546" class="body" data-width="212">Samples, images, ROIs</text>
-<path id="request-selection" d="M638 432 L494 432 L494 525 L520 525" class="edge optional" marker-end="url(#arrow)"/>
-<circle class="packet" r="5.5"><animateMotion dur="2.300s" repeatCount="indefinite" path="M638 432 L494 432 L494 525 L510 525"/></circle>
-<path id="selection-read" d="M756 525 L788 525" class="edge optional" marker-end="url(#arrow)"/>
-<circle class="packet" r="5.5"><animateMotion dur="0.800s" repeatCount="indefinite" path="M756 525 L778 525"/></circle>
-<path id="read-annotation" d="M906 486 L906 432" class="edge optional" marker-end="url(#arrow)"/>
-<circle class="packet" r="5.5"><animateMotion dur="0.800s" repeatCount="indefinite" path="M906 486 L906 442"/></circle>
-<path id="read-selection-repeat" d="M906 564 L906 580 L638 580 L638 564" class="edge optional" marker-end="url(#arrow)"/>
-<rect x="661" y="565" width="208" height="27" fill="#fff"/>
-<text x="691.423" y="587" class="caption" data-width="202">Repeat if needed</text>
-<text x="24.000" y="611" class="heading" data-width="1392">Shared run controls</text>
-<rect id="control-0" x="24" y="630" width="330" height="66" rx="5" fill="#f6f5f1" stroke="#c7c2b9" stroke-width="1.5"/>
-<text x="40.000" y="656" class="heading" data-width="298">Input verification</text>
-<text x="40.000" y="686" class="body" data-width="298">Source and settings hashes</text>
-<rect id="control-1" x="378" y="630" width="330" height="66" rx="5" fill="#f6f5f1" stroke="#c7c2b9" stroke-width="1.5"/>
-<text x="394.000" y="656" class="heading" data-width="298">Request receipts</text>
-<text x="394.000" y="686" class="body" data-width="298">Inputs, evidence and charges</text>
-<rect id="control-2" x="732" y="630" width="330" height="66" rx="5" fill="#f6f5f1" stroke="#c7c2b9" stroke-width="1.5"/>
-<text x="748.000" y="656" class="heading" data-width="298">Spending cap</text>
-<text x="748.000" y="686" class="body" data-width="298">Reserve before model calls</text>
-<rect id="control-3" x="1086" y="630" width="330" height="66" rx="5" fill="#f6f5f1" stroke="#c7c2b9" stroke-width="1.5"/>
-<text x="1102.000" y="656" class="heading" data-width="298">Verified resume</text>
-<text x="1102.000" y="686" class="body" data-width="298">Reuse matching requests</text>
+.flow {fill:none;stroke:#245d7b;stroke-width:3.5;stroke-linecap:round;stroke-linejoin:round}
+@media (prefers-reduced-motion:reduce) {.flow {display:none}}
+</style><rect width="1440" height="820" fill="#fff" rx="8"/><g clip-path="url(#canvas)">
+<rect id="stage-input" x="24" y="24" width="236" height="586" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
+<rect x="25" y="25" width="234" height="57" rx="4" fill="#edf1f3"/>
+<path d="M24 82 H260" stroke="#c7c2b9" stroke-width="1.5"/>
+<text x="40.000" y="63" class="stage" data-width="204">1. Dataset input</text>
+<rect id="stage-prepare" x="292" y="24" width="236" height="586" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
+<rect x="293" y="25" width="234" height="57" rx="4" fill="#edf1f3"/>
+<path d="M292 82 H528" stroke="#c7c2b9" stroke-width="1.5"/>
+<text x="308.000" y="63" class="stage" data-width="204">2. Preparation</text>
+<rect id="stage-request" x="560" y="24" width="268" height="418" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
+<rect x="561" y="25" width="266" height="57" rx="4" fill="#edf1f3"/>
+<path d="M560 82 H828" stroke="#c7c2b9" stroke-width="1.5"/>
+<text x="576.000" y="63" class="stage" data-width="236">3. Model input</text>
+<rect id="stage-annotation" x="860" y="24" width="268" height="418" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
+<rect x="861" y="25" width="266" height="57" rx="4" fill="#edf1f3"/>
+<path d="M860 82 H1128" stroke="#c7c2b9" stroke-width="1.5"/>
+<text x="876.000" y="63" class="stage" data-width="236">4. Annotation</text>
+<rect id="stage-output" x="1160" y="24" width="256" height="586" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
+<rect x="1161" y="25" width="254" height="57" rx="4" fill="#edf1f3"/>
+<path d="M1160 82 H1416" stroke="#c7c2b9" stroke-width="1.5"/>
+<text x="1176.000" y="63" class="stage" data-width="224">5. Outputs</text>
+<text x="40.000" y="120" class="heading" data-width="204">Formats</text>
+<rect id="format-0" x="40" y="140" width="96" height="36" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
+<text x="45.928" y="165" class="body" data-width="86">LeRobot</text>
+<rect id="format-1" x="148" y="140" width="96" height="36" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
+<text x="161.740" y="165" class="body" data-width="86">MCAP</text>
+<rect id="format-2" x="40" y="186" width="96" height="36" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
+<text x="57.328" y="211" class="body" data-width="86">HDF5</text>
+<rect id="format-3" x="148" y="186" width="96" height="36" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
+<text x="168.304" y="211" class="body" data-width="86">Video</text>
+<rect id="format-4" x="40" y="232" width="204" height="36" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
+<text x="89.572" y="257" class="body" data-width="194">ZIP / TAR</text>
+<text x="40.000" y="308" class="heading" data-width="204">Episode data</text>
+<rect id="modality-0" x="40" y="326" width="96" height="52" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
+<text x="63.652" y="358" class="body" data-width="86">RGB</text>
+<rect id="modality-1" x="148" y="326" width="96" height="52" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
+<text x="173.416" y="348" class="body" data-width="86">State</text>
+<text x="163.468" y="370" class="body" data-width="86">actions</text>
+<rect id="modality-2" x="40" y="386" width="96" height="52" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
+<text x="58.096" y="418" class="body" data-width="86">Depth</text>
+<rect id="modality-3" x="148" y="386" width="96" height="52" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
+<text x="164.020" y="418" class="body" data-width="86">Tactile</text>
+<rect id="modality-4" x="40" y="446" width="96" height="52" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
+<text x="60.208" y="468" class="body" data-width="86">Other</text>
+<text x="63.736" y="490" class="body" data-width="86">fields</text>
+<rect id="modality-5" x="148" y="446" width="96" height="52" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
+<text x="173.668" y="468" class="body" data-width="86">Task</text>
+<text x="161.464" y="490" class="body" data-width="86">context</text>
+<text x="40.000" y="540" class="caption" data-width="204">Available inputs</text>
+<text x="40.000" y="568" class="caption" data-width="204">vary by recording</text>
+<text x="308.000" y="148" class="heading" data-width="204">Interpret fields</text>
+<text x="308.000" y="190" class="body" data-width="204">Roles and units</text>
+<text x="308.000" y="222" class="body" data-width="204">Human overrides first</text>
+<text x="308.000" y="306" class="heading" data-width="204">Recording checks</text>
+<text x="308.000" y="344" class="body" data-width="204">Cameras and clocks</text>
+<text x="308.000" y="376" class="body" data-width="204">State and sensors</text>
+<text x="308.000" y="540" class="caption" data-width="204">Native units and</text>
+<text x="308.000" y="568" class="caption" data-width="204">clocks retained</text>
+<text x="592.000" y="132" class="heading" data-width="204">Run settings</text>
+<text x="592.000" y="168" class="body" data-width="204">Recording type</text>
+<text x="592.000" y="201" class="body" data-width="204">Model and reasoning</text>
+<text x="592.000" y="234" class="body" data-width="204">Sampling and scope</text>
+<rect id="request" x="576" y="274" width="236" height="152" rx="5" fill="#fafbf9" stroke="#c7c2b9" stroke-width="1.5"/>
+<text x="592.000" y="306" class="heading" data-width="204">Build VLM input</text>
+<text x="592.000" y="346" class="body" data-width="204">RGB frame grids</text>
+<text x="592.000" y="378" class="body" data-width="204">Task context, checks</text>
+<text x="592.000" y="410" class="body" data-width="204">Request windows</text>
+<text x="876.000" y="144" class="heading" data-width="236">VLM analysis</text>
+<text x="876.000" y="200" class="body" data-width="236">Actions and subgoals</text>
+<text x="876.000" y="240" class="body" data-width="236">Outcomes and errors</text>
+<text x="876.000" y="280" class="body" data-width="236">Recoveries</text>
+<text x="876.000" y="320" class="body" data-width="236">Sensor findings</text>
+<rect id="stitch" x="1176" y="136" width="208" height="128" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
+<text x="1192.000" y="168" class="heading" data-width="176">Rejoin chunks</text>
+<text x="1192.000" y="209" class="body" data-width="176">Original timeline</text>
+<text x="1192.000" y="246" class="caption" data-width="176">Gaps retained</text>
+<rect id="viewer" x="1176" y="344" width="208" height="84" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
+<text x="1192.000" y="378" class="heading" data-width="176">Video viewer</text>
+<text x="1192.000" y="411" class="body" data-width="176">Visual overlays</text>
+<rect id="json" x="1176" y="478" width="208" height="84" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
+<text x="1192.000" y="512" class="heading" data-width="176">JSON exports</text>
+<text x="1192.000" y="545" class="body" data-width="176">With evidence</text>
+<path id="ingest-interpret" d="M260 175 L292 175" class="edge" marker-end="url(#arrow)"/>
+<path class="flow" d="M260 175 L282 175" opacity="0" stroke-dasharray="9.900 71.700"><animate attributeName="stroke-dashoffset" values="17.900;-30.000" begin="-0.00s" dur="2.400s" repeatCount="indefinite"/><animate attributeName="opacity" values="0;0.9;0.9;0" keyTimes="0;0.15;0.8;1" calcMode="spline" keySplines="0.4 0 0.6 1;0 0 1 1;0.4 0 0.6 1" begin="-0.00s" dur="2.400s" repeatCount="indefinite"/></path>
+<path id="interpret-check" d="M410 238 L410 276" class="edge" marker-end="url(#arrow)"/>
+<path class="flow" d="M410 238 L410 266" opacity="0" stroke-dasharray="12.600 85.800"><animate attributeName="stroke-dashoffset" values="20.600;-36.000" begin="-0.22s" dur="2.400s" repeatCount="indefinite"/><animate attributeName="opacity" values="0;0.9;0.9;0" keyTimes="0;0.15;0.8;1" calcMode="spline" keySplines="0.4 0 0.6 1;0 0 1 1;0.4 0 0.6 1" begin="-0.22s" dur="2.400s" repeatCount="indefinite"/></path>
+<path id="checks-request" d="M528 350 L576 350" class="edge" marker-end="url(#arrow)"/>
+<path class="flow" d="M528 350 L566 350" opacity="0" stroke-dasharray="17.100 109.300"><animate attributeName="stroke-dashoffset" values="25.100;-46.000" begin="-0.44s" dur="2.400s" repeatCount="indefinite"/><animate attributeName="opacity" values="0;0.9;0.9;0" keyTimes="0;0.15;0.8;1" calcMode="spline" keySplines="0.4 0 0.6 1;0 0 1 1;0.4 0 0.6 1" begin="-0.44s" dur="2.400s" repeatCount="indefinite"/></path>
+<path id="settings-request" d="M694 250 L694 274" class="edge" marker-end="url(#arrow)"/>
+<path id="request-annotation" d="M812 350 L860 350" class="edge" marker-end="url(#arrow)"/>
+<path class="flow" d="M812 350 L850 350" opacity="0" stroke-dasharray="17.100 109.300"><animate attributeName="stroke-dashoffset" values="25.100;-46.000" begin="-0.88s" dur="2.400s" repeatCount="indefinite"/><animate attributeName="opacity" values="0;0.9;0.9;0" keyTimes="0;0.15;0.8;1" calcMode="spline" keySplines="0.4 0 0.6 1;0 0 1 1;0.4 0 0.6 1" begin="-0.88s" dur="2.400s" repeatCount="indefinite"/></path>
+<path id="annotation-timeline" d="M1128 350 L1144 350 L1144 200 L1176 200" class="edge" marker-end="url(#arrow)"/>
+<path class="flow" d="M1128 350 L1144 350 L1144 200 L1166 200" opacity="0" stroke-dasharray="32.000 304.000"><animate attributeName="stroke-dashoffset" values="40.000;-196.000" begin="-1.10s" dur="2.400s" repeatCount="indefinite"/><animate attributeName="opacity" values="0;0.9;0.9;0" keyTimes="0;0.15;0.8;1" calcMode="spline" keySplines="0.4 0 0.6 1;0 0 1 1;0.4 0 0.6 1" begin="-1.10s" dur="2.400s" repeatCount="indefinite"/></path>
+<path id="timeline-fork" d="M1280 264 L1280 306" class="edge"/>
+<path id="fork-viewer" d="M1280 306 L1280 344" class="edge" marker-end="url(#arrow)"/>
+<path class="flow" d="M1280 306 L1280 334" opacity="0" stroke-dasharray="12.600 85.800"><animate attributeName="stroke-dashoffset" values="20.600;-36.000" begin="-1.54s" dur="2.400s" repeatCount="indefinite"/><animate attributeName="opacity" values="0;0.9;0.9;0" keyTimes="0;0.15;0.8;1" calcMode="spline" keySplines="0.4 0 0.6 1;0 0 1 1;0.4 0 0.6 1" begin="-1.54s" dur="2.400s" repeatCount="indefinite"/></path>
+<path id="fork-json" d="M1280 306 L1400 306 L1400 520 L1384 520" class="edge" marker-end="url(#arrow)"/>
+<path class="flow" d="M1280 306 L1400 306 L1400 520 L1394 520" opacity="0" stroke-dasharray="32.000 456.000"><animate attributeName="stroke-dashoffset" values="40.000;-348.000" begin="-1.76s" dur="4.000s" repeatCount="indefinite"/><animate attributeName="opacity" values="0;0.9;0.9;0" keyTimes="0;0.15;0.8;1" calcMode="spline" keySplines="0.4 0 0.6 1;0 0 1 1;0.4 0 0.6 1" begin="-1.76s" dur="4.000s" repeatCount="indefinite"/></path>
+<rect id="inspection-group" x="560" y="468" width="568" height="182" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
+<rect x="561" y="469" width="566" height="39" rx="4" fill="#edf1f3"/>
+<path d="M560 508 H1128" stroke="#c7c2b9" stroke-width="1.5"/>
+<text x="576.000" y="496" class="heading" data-width="536">Optional evidence inspection</text>
+<rect id="select" x="572" y="526" width="244" height="80" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
+<text x="588.000" y="554" class="heading" data-width="212">Select evidence</text>
+<text x="588.000" y="590" class="body" data-width="212">Fields and time ranges</text>
+<rect id="read" x="872" y="526" width="244" height="80" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
+<text x="888.000" y="554" class="heading" data-width="212">Read episode data</text>
+<text x="888.000" y="590" class="body" data-width="212">Samples, images, ROIs</text>
+<path id="request-selection" d="M694 426 L544 426 L544 566 L572 566" class="edge optional" marker-end="url(#arrow)"/>
+<path class="flow" d="M694 426 L544 426 L544 566 L562 566" opacity="0" stroke-dasharray="32.000 424.000"><animate attributeName="stroke-dashoffset" values="40.000;-316.000" begin="-1.98s" dur="3.624s" repeatCount="indefinite"/><animate attributeName="opacity" values="0;0.9;0.9;0" keyTimes="0;0.15;0.8;1" calcMode="spline" keySplines="0.4 0 0.6 1;0 0 1 1;0.4 0 0.6 1" begin="-1.98s" dur="3.624s" repeatCount="indefinite"/></path>
+<path id="selection-read" d="M816 566 L872 566" class="edge optional" marker-end="url(#arrow)"/>
+<path class="flow" d="M816 566 L862 566" opacity="0" stroke-dasharray="20.700 128.100"><animate attributeName="stroke-dashoffset" values="28.700;-54.000" begin="-2.20s" dur="2.400s" repeatCount="indefinite"/><animate attributeName="opacity" values="0;0.9;0.9;0" keyTimes="0;0.15;0.8;1" calcMode="spline" keySplines="0.4 0 0.6 1;0 0 1 1;0.4 0 0.6 1" begin="-2.20s" dur="2.400s" repeatCount="indefinite"/></path>
+<path id="read-annotation" d="M994 526 L994 442" class="edge optional" marker-end="url(#arrow)"/>
+<path class="flow" d="M994 526 L994 452" opacity="0" stroke-dasharray="32.000 190.000"><animate attributeName="stroke-dashoffset" values="40.000;-82.000" begin="-2.42s" dur="2.400s" repeatCount="indefinite"/><animate attributeName="opacity" values="0;0.9;0.9;0" keyTimes="0;0.15;0.8;1" calcMode="spline" keySplines="0.4 0 0.6 1;0 0 1 1;0.4 0 0.6 1" begin="-2.42s" dur="2.400s" repeatCount="indefinite"/></path>
+<path id="read-selection-repeat" d="M994 606 L994 634 L694 634 L694 606" class="edge optional" marker-end="url(#arrow)"/>
+<rect x="743" y="615" width="202" height="27" fill="#fff"/>
+<text x="770.423" y="638" class="caption" data-width="196">Repeat if needed</text>
+<rect id="controls-group" x="24" y="672" width="1392" height="120" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5"/>
+<rect x="25" y="673" width="1390" height="39" rx="4" fill="#edf1f3"/>
+<path d="M24 712 H1416" stroke="#c7c2b9" stroke-width="1.5"/>
+<text x="40.000" y="700" class="heading" data-width="1360">Run controls for all stages</text>
+<text x="40.000" y="744" class="heading" data-width="316">Input verification</text>
+<text x="40.000" y="776" class="body" data-width="316">Source and settings hashes</text>
+<path d="M372 728 V778" stroke="#c7c2b9" stroke-width="1"/>
+<text x="388.000" y="744" class="heading" data-width="316">Request receipts</text>
+<text x="388.000" y="776" class="body" data-width="316">Inputs, evidence and charges</text>
+<path d="M720 728 V778" stroke="#c7c2b9" stroke-width="1"/>
+<text x="736.000" y="744" class="heading" data-width="316">Spending cap</text>
+<text x="736.000" y="776" class="body" data-width="316">Reserve before model calls</text>
+<path d="M1068 728 V778" stroke="#c7c2b9" stroke-width="1"/>
+<text x="1084.000" y="744" class="heading" data-width="316">Verified resume</text>
+<text x="1084.000" y="776" class="body" data-width="316">Reuse matching requests</text>
 </g></svg>
