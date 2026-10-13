@@ -363,3 +363,172 @@ def test_missing_sensor_rows_use_the_qualified_display_clock_for_their_gap_marke
     with np.load(ep / 'times.npz') as z:
         np.testing.assert_array_equal(z['exo'], raw['exo'])
         np.testing.assert_array_equal(z['exo_pts'], raw['exo_pts'])
+
+
+def addressed_camera_episode(tmp_path, names=None):
+    ep = tied_recording(tmp_path, 'unique', n=30,
+                        topics=['/top/image/compressed', '/left/image/compressed', '/right/image/compressed'])
+    path = ep / 'context.json'
+    ctx = json.loads(path.read_text())
+    for view, label in (names or {'exo': 'overview_rgb', 'left': 'wrist_a', 'right': 'wrist_b'}).items():
+        ctx['cameras'][view]['name'] = label
+    path.write_text(json.dumps(ctx))
+    return ep
+
+
+def test_request_camera_labels_bind_native_caption_addresses_for_public_download(tmp_path, monkeypatch):
+    import copy
+    from label import harness
+    from board import dictionary_projection, serve, static, to_board
+    ep = addressed_camera_episode(tmp_path)
+    request = episode.build_request(ep, cell_w=128)
+    labels = {'exo': 'overview_rgb', 'left': 'wrist_a', 'right': 'wrist_b'}
+    assert request['camera_observation_views'] == ['exo', 'left', 'right']
+    assert any('cameras overview_rgb, wrist_a, wrist_b stacked top to bottom' in p.get('text', '')
+               for p in request['content'])
+    rows = [{'view': label, 'content': 'scene' if view == 'exo' else 'sensor',
+             'evidence': 'Visible workspace.' if view == 'exo' else 'Visible recorded sensor surface.'}
+            for view, label in labels.items()]
+    monkeypatch.setattr(harness, 'call_model_once', lambda *a, **k: {
+        'choices': [{'finish_reason': 'stop', 'message': {'content': json.dumps({
+            'timeline': [], 'camera_observations': rows})}}], 'usage': {'cost': 0.0}})
+    saved = tmp_path / 'reply.json'
+    result = harness.label_episode(ep, saved, model='openai/gpt-6.1-sol', reasoning='high',
+        api_key='offline', max_tokens=2000, timeout=1, cell_w=128)
+    original = saved.read_bytes()
+    assert result['labels']['camera_observations'] == rows
+    bound = result['camera_observations']
+    assert not bound['withheld_observations']
+    assert request['camera_observation_labels'] == labels
+    assert result['config']['camera_observation_labels'] == labels
+    assert [row['view'] for row in bound['observations']] == ['exo', 'left', 'right']
+    assert bound['displayed_labels'] == labels and bound['reported_observations'] == rows
+    assert bound['address_resolutions'] == [
+        {'reported_view': label, 'view': view, 'basis': 'displayed_label'} for view, label in labels.items()]
+    ctx = json.loads((ep / 'context.json').read_text())
+    public = serve.public_label(dictionary_projection.apply(to_board.convert(result, 'native address'), ctx, ep))
+    assert public['camera_observations']['source_current'] is True
+    assert [row['view'] for row in public['camera_observations']['observations']] == ['exo', 'left', 'right']
+    assert public['camera_presentation']['exo'] == {'role': 'scene', 'provenance': 'observed'}
+    assert static.shown_cams(public)[0] == 'exo'
+    authoritative = copy.deepcopy(ctx)
+    authoritative['cameras']['exo']['role'] = 'sensor_view'
+    overridden = dictionary_projection.apply(to_board.convert(result, 'native address'), authoritative, ep)
+    assert overridden['camera_presentation']['exo'] == {'role': 'sensor'}
+    broken = copy.deepcopy(to_board.convert(result, 'native address'))
+    broken['camera_observations']['displayed_labels']['exo'] = 'different printed label'
+    assert not dictionary_projection.apply(broken, ctx, ep)['camera_observations']['observations']
+    assert saved.read_bytes() == original
+
+
+def test_camera_label_map_uses_actual_decoded_subset_not_global_view_order(tmp_path, monkeypatch):
+    ep = addressed_camera_episode(tmp_path)
+    actual = episode.frames
+    def without_left(*args, **kwargs):
+        decoded = actual(*args, **kwargs)
+        decoded.pop('left')
+        return decoded
+    monkeypatch.setattr(episode, 'frames', without_left)
+    request = episode.build_request(ep, cell_w=128)
+    assert request['views'] == ['exo', 'left', 'right']
+    assert request['cam_labels'] == ['overview_rgb', 'wrist_b']
+    assert request['camera_observation_views'] == ['exo', 'right']
+    assert request['camera_observation_labels'] == {'exo': 'overview_rgb', 'right': 'wrist_b'}
+
+
+@pytest.mark.parametrize('problem', ['ambiguous_label', 'canonical_collision', 'duplicate', 'missing',
+                                    'unknown', 'partial_proof', 'stale_source', 'tampered_resolution', 'missing_map'])
+def test_request_camera_aliases_withhold_complete_set_when_ambiguous_or_unverified(tmp_path, problem):
+    import copy
+    from label import evidence_access, harness
+    from board import dictionary_projection, to_board
+    names = {'exo': 'overview_rgb', 'left': 'wrist_a', 'right': 'wrist_b'}
+    if problem == 'ambiguous_label':
+        names['left'] = names['exo']
+    if problem == 'canonical_collision':
+        names['exo'] = 'left'
+    ep = addressed_camera_episode(tmp_path, names)
+    req = episode.build_request(ep, cell_w=128)
+    ctx = json.loads((ep / 'context.json').read_text())
+    fields = {'config': {'views': req['views'], 'camera_observation_views': req['camera_observation_views'],
+                         'camera_observation_labels': req['camera_observation_labels'],
+                         'schema_fields': req['schema_fields']},
+              'input_identity': {'source_proof': evidence_access.source_proof(ctx, ep)}}
+    rows = [{'view': names[view], 'content': 'scene', 'evidence': 'Visible source image.'}
+            for view in ('exo', 'left', 'right')]
+    if problem == 'duplicate':
+        rows.append({**rows[0], 'view': 'exo'})
+    elif problem == 'missing':
+        rows.pop()
+    elif problem == 'unknown':
+        rows[0]['view'] = 'unrecorded label'
+    elif problem == 'partial_proof':
+        fields['input_identity']['source_proof'] = [p for p in fields['input_identity']['source_proof']
+                                                  if p['name'] != 'rgb:right:packed']
+    bound = harness.bind_camera_observations(rows, fields)
+    result = {**fields, 'episode_dir': str(ep), 'parse_ok': True,
+              'labels': {'timeline': [], 'camera_observations': rows}, 'camera_observations': bound}
+    if problem == 'stale_source':
+        path = ep / 'context.json'
+        changed = json.loads(path.read_text())
+        changed['cameras']['exo']['name'] = 'new source caption'
+        path.write_text(json.dumps(changed))
+        ctx = changed
+    elif problem == 'missing_map':
+        result['camera_observations'].pop('displayed_labels')
+    elif problem == 'tampered_resolution':
+        result['camera_observations']['address_resolutions'][0]['view'] = 'left'
+    projected = dictionary_projection.apply(to_board.convert(copy.deepcopy(result), 'invalid address'), ctx, ep)
+    assert not projected['camera_observations']['observations']
+    assert projected['camera_observations']['withheld_observations']
+    assert all(row.get('provenance') != 'observed' for row in projected.get('camera_presentation', {}).values())
+    assert result['labels']['camera_observations'] == rows
+
+
+def test_legacy_camera_receipts_remain_exact_only_despite_current_display_names(tmp_path):
+    from label import evidence_access, harness
+    ep = addressed_camera_episode(tmp_path)
+    ctx = json.loads((ep / 'context.json').read_text())
+    fields = {'config': {'views': ['exo', 'left', 'right'], 'cam_labels': ['overview_rgb', 'wrist_a', 'wrist_b'],
+                         'camera_observation_views': ['exo', 'left', 'right'],
+                         'schema_fields': ['camera_observations']},
+              'input_identity': {'source_proof': evidence_access.source_proof(ctx, ep)}}
+    rows = [{'view': v, 'content': 'scene', 'evidence': 'Visible source image.'} for v in ('exo', 'left', 'right')]
+    exact = harness.bind_camera_observations(rows, fields)
+    assert exact['observations'] == rows and 'displayed_labels' not in exact
+    alias = harness.bind_camera_observations([{**rows[0], 'view': 'overview_rgb'}, *rows[1:]], fields)
+    assert not alias['observations'] and alias['withheld_observations']
+
+
+def test_stitched_camera_addresses_keep_owned_child_resolution_proof(tmp_path, monkeypatch):
+    import copy
+    from label import evidence_access, harness, pieces
+    from board import dictionary_projection, serve, to_board
+    ep = addressed_camera_episode(tmp_path)
+    monkeypatch.setattr(pieces, 'choose_cuts', lambda *a: [{'frame': 10}, {'frame': 20}])
+    folders = pieces.write_pieces(ep, tmp_path / 'job/pieces')
+    assert len(folders) == 3
+    records = []
+    contexts = []
+    for folder in folders:
+        ctx = json.loads((folder / 'context.json').read_text())
+        req = episode.build_request(folder, cell_w=128)
+        fields = {'config': {'views': req['views'], 'camera_observation_views': req['camera_observation_views'],
+                             'camera_observation_labels': req['camera_observation_labels'],
+                             'schema_fields': req['schema_fields']},
+                  'input_identity': {'source_proof': evidence_access.source_proof(ctx, folder)}}
+        rows = [{'view': label, 'content': 'scene' if view == 'exo' else 'sensor',
+                 'evidence': 'Visible owned native frames.'} for view, label in req['camera_observation_labels'].items()]
+        records.append({**fields, 'episode_dir': str(folder), 'parse_ok': True,
+                        'labels': {'timeline': [], 'camera_observations': rows},
+                        'camera_observations': harness.bind_camera_observations(rows, fields)})
+        contexts.append(ctx)
+    joined = pieces.stitch(ep, list(zip(contexts, records)))
+    parent = json.loads((ep / 'context.json').read_text())
+    public = serve.public_label(dictionary_projection.apply(to_board.convert(joined, 'addressed parts'), parent, ep))
+    assert public['camera_observations']['source_current'] is True
+    assert len(public['camera_observations']['observations']) == 3
+    assert all(part['record']['address_resolutions'] for part in public['camera_observations']['parts'])
+    changed = copy.deepcopy(to_board.convert(joined, 'addressed parts'))
+    changed['camera_observations']['parts'][1]['record']['displayed_labels']['exo'] = 'foreign caption'
+    assert not dictionary_projection.apply(changed, parent, ep)['camera_observations']['observations']

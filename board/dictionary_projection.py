@@ -16,12 +16,16 @@ def current_camera_observations(record: dict, ctx: dict, episode_dir: Path) -> l
     from label.harness import bind_camera_observations, camera_observation_sources_match
     from label.evidence_access import same_source_proof, resolve_piece
     try:
-        checked = bind_camera_observations(record.get('observations'), {
+        addressed = any(key in record for key in ('displayed_labels', 'reported_observations', 'address_resolutions'))
+        checked = bind_camera_observations(record.get('reported_observations') if addressed else record.get('observations'), {
             'config': {'views': record.get('views'), 'camera_observation_views': record.get('views'),
-                       'schema_fields': ['camera_observations']},
+                       'schema_fields': ['camera_observations'],
+                       **({'camera_observation_labels': record.get('displayed_labels')} if addressed else {})},
             'input_identity': {'source_proof': record.get('source_proof')}})
         valid = (not record.get('withheld_observations') and not checked['withheld_observations'] and
                  bool(checked['observations']) and
+                 (not addressed or (checked['observations'] == record.get('observations') and
+                    checked['address_resolutions'] == record.get('address_resolutions'))) and
                  same_source_proof(record.get('source_proof'), ctx, episode_dir))
         for part in record.get('parts') or []:
             owner = part.get('source_piece') or {}

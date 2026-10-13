@@ -268,7 +268,8 @@ def label_episode(ep_dir: Path, out_path: Path, *, model: str, reasoning: str, a
         # the recording's contacts (label/contacts.py) and the strips each one shown was drawn with (checks/contacts.py)
         **({"contacts": req["contacts"], "contact_views": req["contact_views"]} if req.get("contact_views") else {}),
         "config": {"views": req["views"], "cam_labels": req["cam_labels"], "layout": "grid",
-                   **({'camera_observation_views': req['camera_observation_views']}
+                   **({'camera_observation_views': req['camera_observation_views'],
+                       'camera_observation_labels': req['camera_observation_labels']}
                       if 'camera_observations' in req['schema_fields'] else {}),
                    "grid_cols": req["grid_cols"], "cell": req["cell"],
                    "n_timesteps": len(pl["ks"]), "n_frames_sent": len(pl["ks"]) * len(req["cam_labels"]),
@@ -700,7 +701,7 @@ def camera_observation_source(proof, views) -> bool:
 
 
 def bind_camera_observations(rows, fields: dict) -> dict:
-    """Bind optional final-label observations to requested IDs and immutable native inputs."""
+    """Bind exact request IDs or unambiguous recorded captions to immutable native inputs."""
     from collections import Counter
     config = fields.get('config') or {}
     views = config.get('camera_observation_views') or []
@@ -709,26 +710,49 @@ def bind_camera_observations(rows, fields: dict) -> dict:
                 and len(views) == len(set(views)) and all(v in (config.get('views') or []) for v in views)
                 and 'camera_observations' in (config.get('schema_fields') or []))
     native_verified = supplied and camera_observation_source(proof, views)
+    has_labels = 'camera_observation_labels' in config
+    displayed = config.get('camera_observation_labels')
+    labels_valid = (not has_labels or (supplied and isinstance(displayed, dict)
+                    and set(displayed) == set(views)
+                    and all(isinstance(label, str) and label.strip() for label in displayed.values())))
     result = {'version': 1, 'views': list(views) if isinstance(views, list) else [],
               'source_proof': copy.deepcopy(proof), 'observations': [], 'withheld_observations': []}
-    counts = Counter(row.get('view') for row in rows if isinstance(row, dict) and isinstance(row.get('view'), str)) \
-        if isinstance(rows, list) else {}
-    for row in rows if isinstance(rows, list) else [rows]:
+    if has_labels:
+        result.update(displayed_labels=copy.deepcopy(displayed), reported_observations=copy.deepcopy(rows),
+                      address_resolutions=[])
+
+    def resolve(value):
+        if not isinstance(value, str) or not labels_valid or not supplied:
+            return None
+        matches = [view for view, label in displayed.items() if label == value] if has_labels else []
+        if value in views:
+            return None if any(view != value for view in matches) else value
+        return matches[0] if len(matches) == 1 else None
+
+    addressed = [(row, resolve(row.get('view')) if isinstance(row, dict) else None)
+                 for row in rows] if isinstance(rows, list) else [(rows, None)]
+    counts = Counter(view for _, view in addressed if view is not None)
+    for row, view in addressed:
         why = None
         if not supplied:
             why = 'Camera observations were not requested with exact supplied view IDs.'
         elif not native_verified:
             why = 'Native camera source identities are missing or cannot be verified.'
-        elif not isinstance(row, dict) or row.get('view') not in views:
-            why = 'The observation does not name an exact supplied view ID.'
-        elif counts[row['view']] != 1:
+        elif not labels_valid:
+            why = 'Recorded camera display labels do not match the supplied view IDs.'
+        elif view is None:
+            why = 'The observation does not name an exact supplied ID or unique recorded display label.'
+        elif counts[view] != 1:
             why = 'More than one observation names this view; no observation is selected.'
         elif row.get('content') not in ('scene', 'sensor', 'unclear') or not isinstance(row.get('evidence'), str) or not row['evidence'].strip():
             why = 'The observation needs a known content class and visible evidence.'
         if why:
             result['withheld_observations'].append({'observation': copy.deepcopy(row), 'why': why})
         else:
-            result['observations'].append({key: row[key] for key in ('view', 'content', 'evidence')})
+            result['observations'].append({'view': view, 'content': row['content'], 'evidence': row['evidence']})
+            if has_labels:
+                result['address_resolutions'].append({'reported_view': row['view'], 'view': view,
+                    'basis': 'stable_id' if row['view'] == view else 'displayed_label'})
     if (result['withheld_observations'] or not supplied
             or {row['view'] for row in result['observations']} != set(views)):
         result['withheld_observations'].extend({'observation': row,
