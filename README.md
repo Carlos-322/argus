@@ -16,7 +16,7 @@ This release extends annotation to depth, tactile and other sensor data, and con
 Argus is a multimodal annotation harness for robot learning data. The VLM jointly interprets multi-view RGB, proprioception, actions, depth, tactile and other episode data to produce dense annotations of **actions, subgoals, outcomes, operator mistakes and recoveries**. A shared pipeline handles ingestion, frame sampling and sensor inspection across teleop, UMI and human ego datasets, preserving source timing and measurement semantics without dataset-specific prompts. We believe this combination of broad format support and joint visual/sensor reasoning distinguishes Argus among open-source robotics annotation tools.
 
 <p align="center">
-  <img src="media/architecture.svg" width="720" alt="Annotation pipeline: format ingestion, field interpretation, visual and sensor evidence selection, VLM annotation, temporal stitching, viewer and JSON exports.">
+  <img src="media/architecture.svg" width="900" alt="Annotation pipeline: format ingestion, field interpretation, visual and sensor evidence selection, VLM annotation, temporal stitching, viewer and JSON exports.">
 </p>
 
 **Data:** teleop, UMI and human ego. **Formats:** LeRobot v2.0/v2.1/v3.0, MCAP, HDF5, video files and folders, and ZIP/TAR archives, with JSON/CSV/Parquet sidecars. Nine public dataset adapters provide download and sample-selection entrypoints.
