@@ -156,7 +156,7 @@ def prepare(job: Path, eps: Path, ids: list[str], *, free: bool, cap: float,
             if not refused:
                 write_atomic(status_p, {'status': 'pending', 'projected_upper_usd': bound}, indent=1)
                 result = dd.prepare_upload(job, paths, key, call_model or harness.call_model_once,
-                                           dry_run=free, planned_request=plan)
+                                           dry_run=free, planned_request=plan, api_keys=keys or None)
                 from label.dictionary_context import apply_context
                 overrides_p = job / 'dictionary_overrides.json'
                 overrides = json.loads(overrides_p.read_text()) if overrides_p.exists() else None

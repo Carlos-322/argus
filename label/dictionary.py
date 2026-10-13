@@ -1,4 +1,4 @@
-"""One attributed inventory and one durable interpretation attempt for an upload."""
+"""One attributed inventory and one paid interpretation request for an upload."""
 from __future__ import annotations
 
 import hashlib
@@ -14,6 +14,8 @@ import zipfile
 from pathlib import Path, PureWindowsPath
 
 import numpy as np
+
+from label.errors import KeyExhausted
 
 SCHEMA = 1
 CHUNK_VALUES = 65_536
@@ -549,8 +551,8 @@ def _base(inv, status):
 
 
 def prepare_upload(job: Path, episodes: list[Path], api_key, call_model, *, dry_run=False, timeout=120,
-                   planned_request: dict | None = None) -> dict:
-    """One permanent claim permits one attempt. Inject a client whose transport does not retry paid calls."""
+                   planned_request: dict | None = None, api_keys: list[str] | None = None) -> dict:
+    """A permanent claim permits one paid request; proved unpaid keys can fail over within it."""
     inv = inventory(episodes)
     job = Path(job)
     receipt, claim = job / "dictionary.json", job / "dictionary.claim"
@@ -592,7 +594,11 @@ def prepare_upload(job: Path, episodes: list[Path], api_key, call_model, *, dry_
         job.mkdir(parents=True, exist_ok=True)
         _save(receipt, result)
         return result
-    if dry_run or not api_key:
+    keys = api_keys if api_keys is not None else ([api_key] if api_key else [])
+    if not isinstance(keys, (list, tuple)) or any(not isinstance(key, str) or not key for key in keys):
+        raise ValueError('dictionary keys must be nonempty strings')
+    keys = list(dict.fromkeys(keys))
+    if dry_run or not keys:
         return _base(inv, "dry_run")
     job.mkdir(parents=True, exist_ok=True)
     owner = {"pid": os.getpid(), "host": socket.gethostname()}
@@ -606,25 +612,59 @@ def prepare_upload(job: Path, episodes: list[Path], api_key, call_model, *, dry_
     result["owner"] = owner
     try:
         with os.fdopen(fd, "w") as stream:
-            stream.write(_json({"schema": SCHEMA, "inventory_digest": inv["digest"], **owner}))
+            plan = planned_request if planned_request is not None else request_plan(inv)
+            content, supplied, deferred = plan['content'], plan['field_ids'], plan['deferred_fields']
+            token_limit = plan['max_tokens']
+            request_digest = _digest({'inventory_digest': inv['digest'], 'content': content,
+                                      'model': MODEL, 'reasoning': REASONING, 'max_tokens': token_limit})
+            stream.write(_json({"schema": SCHEMA, "inventory_digest": inv["digest"],
+                                'request_digest': request_digest, 'attempt': 1, **owner}))
             stream.flush()
             os.fsync(stream.fileno())
         _save(receipt, result)
-        plan = planned_request if planned_request is not None else request_plan(inv)
-        content, supplied, deferred = plan['content'], plan['field_ids'], plan['deferred_fields']
         result['request_field_ids'] = supplied
         result['deferred_fields'] = deferred
         if deferred:
             result['limitations'].append(f"{len(deferred)} descriptors deferred from the bounded interpretation request; full inventory retained")
         result["attempted"] = True
         _save(receipt, result)
-        token_limit = plan['max_tokens']
         result['max_tokens'] = token_limit
-        response = call_model(content, MODEL, REASONING, api_key, max_tokens=token_limit, timeout=timeout)
+        result['request_digest'] = request_digest
+        result['dispatch_attempts'] = []
+        for index, key in enumerate(keys):
+            if index:
+                retry = job / f'dictionary.retry{index}.claim'
+                with retry.open('x') as stream:
+                    stream.write(_json({'schema': SCHEMA, 'inventory_digest': inv['digest'],
+                                        'request_digest': result['request_digest'],
+                                        'attempt': index + 1, **owner}))
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            attempt = {'attempt': index + 1, 'state': 'dispatched'}
+            result['dispatch_attempts'].append(attempt)
+            result['cost_usd'] = None
+            _save(receipt, result)
+            try:
+                response = call_model(content, MODEL, REASONING, key, max_tokens=token_limit, timeout=timeout)
+            except KeyExhausted as error:
+                if (error.verified_unpaid is not True or type(error.http_status) is not int
+                        or error.http_status not in (401, 402)):
+                    raise
+                attempt.update(state='rejected unpaid', http_status=error.http_status,
+                               http_attempt=1, verified_unpaid=True, cost_usd=0.0)
+                result['cost_usd'] = 0.0
+                _save(receipt, result)
+                if index + 1 == len(keys):
+                    raise
+                continue
+            attempt['state'] = 'received'
+            break
         usage = response.get("usage") or {}
         result["usage"] = usage if isinstance(usage, dict) else {}
         cost = result["usage"].get("cost", result["usage"].get("list_cost"))
-        result["cost_usd"] = float(cost) if isinstance(cost, (float, int)) and math.isfinite(cost) and cost >= 0 else None
+        result["cost_usd"] = float(cost) if type(cost) in (float, int) and math.isfinite(cost) and cost >= 0 else None
+        attempt['cost_usd'] = result['cost_usd']
+        _save(receipt, result)
         raw = response["choices"][0]["message"]["content"]
         if not isinstance(raw, str):
             raise ValueError("dictionary response content is not text")

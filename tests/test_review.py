@@ -216,6 +216,87 @@ def test_review_cli_raw_hdf_dictionary_gate(tmp_path, monkeypatch, extra, cap, e
         assert ctx['data_dictionary']['entries']
 
 
+@pytest.mark.parametrize('status', [401, 402])
+def test_review_native_dictionary_retires_only_verified_unpaid_key(tmp_path, monkeypatch, status):
+    import io
+    import hashlib
+    import h5py
+    import urllib.error
+    from review import __main__ as rv
+    from label import dictionary, dictionary_stage, harness
+    from test_prepare import joint_names
+
+    upload = tmp_path / 'upload'
+    upload.mkdir()
+    raw = upload / 'recording.h5'
+    recorded_times = np.int64(1790000000000000000) + np.arange(12, dtype=np.int64) * 100000000
+    with h5py.File(raw, 'w') as source:
+        source.attrs['fps'] = 10
+        source.create_dataset('timestamps', data=recorded_times)
+        image = source.create_dataset('images/top', data=np.full((12, 36, 64, 3), 60, np.uint8))
+        image.attrs['calibration'] = 'fixture camera calibration'
+        source.create_dataset('observations/qpos', data=np.zeros((12, 14))).attrs['names'] = joint_names()
+    raw_hash = hashlib.sha256(raw.read_bytes()).hexdigest()
+    job = tmp_path / 'job'
+    requests = []
+    def transport(req, timeout):
+        body = json.loads(req.data)
+        key = req.get_header('Authorization').split()[-1]
+        requests.append((key, body))
+        assert body['model'] == 'openai/gpt-6-sol'
+        if key == 'sk-or-empty':
+            raise urllib.error.HTTPError(req.full_url, status, 'Rejected', {}, io.BytesIO(b'{}'))
+        assert key == 'sk-or-funded'
+        fields = dictionary.inventory(list((job / 'episodes').glob('episode_*')))['fields']
+        native_state = next(field for field in fields if field['kind'] == 'state' and field['name'] == 'observations/qpos')
+        answer = {'entries': [{'id': native_state['id'], 'meaning': 'Recorded joint positions from observations/qpos',
+                               'role': 'joint_state'}]}
+        return io.BytesIO(json.dumps({'choices': [{'finish_reason': 'stop', 'message': {
+            'content': json.dumps(answer)}}], 'usage': {'cost': .01}}).encode())
+    class ReachedChecks(Exception):
+        pass
+    monkeypatch.setenv('OPENROUTER_API_KEYS', 'sk-or-empty,sk-or-funded')
+    monkeypatch.delenv('OPENROUTER_API_KEY', raising=False)
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', transport)
+    monkeypatch.setattr(rv, 'run_step', lambda *a, **k: (_ for _ in ()).throw(ReachedChecks()))
+    monkeypatch.setattr(sys, 'argv', ['review', '--data', str(upload), '--rig', 'teleop_arms',
+                                     '--out', str(job), '--cap', '20'])
+    with pytest.raises(ReachedChecks):
+        rv.main()
+    saved = json.loads((job / 'dictionary.json').read_text())
+    assert saved['status'] == 'success' and saved['cost_usd'] == .01
+    assert len(requests) == 2 and requests[0][1] == requests[1][1]
+    assert [a['state'] for a in saved['dispatch_attempts']] == ['rejected unpaid', 'received']
+    rejected = saved['dispatch_attempts'][0]
+    assert rejected['attempt'] == 1 and rejected['http_status'] == status
+    assert rejected['http_attempt'] == 1 and rejected['verified_unpaid'] is True and rejected['cost_usd'] == 0
+    assert saved['dispatch_attempts'][1]['attempt'] == 2 and saved['dispatch_attempts'][1]['cost_usd'] == .01
+    assert saved['request_digest']
+    assert 'sk-or-empty' not in json.dumps(saved) and 'sk-or-funded' not in json.dumps(saved)
+    assert dictionary_stage.dictionary_spend(job) == {'cost_usd': .01, 'reserved_usd': .01, 'complete': True}
+    contexts = list((job / 'episodes').glob('*/context.json'))
+    assert len(contexts) == 1
+    context = json.loads(contexts[0].read_text())
+    assert context['data_dictionary']['status'] == 'success'
+    native_state = next(field for field in context['data_dictionary']['fields'] if field['kind'] == 'state')
+    entry = context['data_dictionary']['entries'][native_state['id']]
+    assert entry['meaning'] == 'Recorded joint positions from observations/qpos' and entry['role'] == 'joint_state'
+    assert entry['provenance'] == 'machine' and native_state['episodes'] == [contexts[0].parent.name]
+    assert context['real_times'] == 'times.npz'
+    with np.load(contexts[0].parent / 'times.npz') as clocks:
+        np.testing.assert_allclose(clocks['exo'], np.arange(12) / 10, atol=1e-12)
+    with np.load(contexts[0].parent / context['recorded_container_times']['file']) as clocks:
+        np.testing.assert_array_equal(clocks['timestamps'], recorded_times)
+    assert any(field.get('object') == 'images/top' and field.get('attribute') == 'calibration'
+               for field in context['recorded_hdf5_metadata']['fields'])
+    assert hashlib.sha256(raw.read_bytes()).hexdigest() == raw_hash
+    receipt_before = (job / 'dictionary.json').read_bytes()
+    with pytest.raises(ReachedChecks):
+        rv.main()
+    assert (job / 'dictionary.json').read_bytes() == receipt_before
+    assert len(requests) == 2
+
+
 @pytest.mark.parametrize('change', [None, 'source_in_job', 'source', 'resource', 'settings', 'preparation_settings',
                                      'producer', 'prepared', 'report', 'legacy'])
 def test_review_reuses_real_preparation_and_refuses_unverified_paid_resume(tmp_path, monkeypatch, change):
