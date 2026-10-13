@@ -168,6 +168,148 @@ def test_failure_receipts_survive_resume_and_free_runs_do_not_claim(tmp_path, re
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize('outcome', ['timeout', 'http200_error', 'http429', 'bare_key_exhausted', 'untyped_key_proof', 'paid_malformed'])
+def test_dictionary_unknown_or_paid_response_does_not_try_next_key(tmp_path, monkeypatch, outcome):
+    import io
+    import urllib.error
+    from label import dictionary as dd, dictionary_stage, harness
+    ep = episode(tmp_path, 'one', [('pressure', np.array([[1., 2.], [3., 4.]]),
+                                  {'names': ['pad0', 'pad1'], 'source': 'native.h5/pressure'})],
+                 extra={'recorded_metadata': {'operator_note': 'Original source task description.'}})
+    job = tmp_path / 'job'
+    job.mkdir()
+    (job / 'dictionary_status.json').write_text(json.dumps({'projected_upper_usd': .37}))
+    calls = []
+    def transport(req, timeout):
+        calls.append(req.get_header('Authorization').split()[-1])
+        if outcome == 'timeout':
+            raise TimeoutError('Reply may have been paid before the timeout')
+        if outcome == 'untyped_key_proof':
+            error = harness.KeyExhausted('Malformed unpaid proof')
+            error.http_status = 402
+            error.verified_unpaid = 'true'
+            raise error
+        if outcome == 'bare_key_exhausted':
+            raise harness.KeyExhausted('Legacy exception without unpaid HTTP proof')
+        if outcome == 'http429':
+            raise urllib.error.HTTPError(req.full_url, 429, 'Limited', {}, io.BytesIO(b'{}'))
+        if outcome == 'http200_error':
+            return io.BytesIO(b'{"error":{"code":402,"message":"quota"}}')
+        return io.BytesIO(json.dumps({'choices': [{'message': {'content': 'not JSON'}}],
+                                    'usage': {'cost': .01}}).encode())
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', transport)
+    record = dd.prepare_upload(job, [ep], 'sk-or-first', harness.call_model_once,
+                               api_keys=['sk-or-first', 'sk-or-next'])
+    assert record['status'] == 'failed' and record['entries'] == {}
+    assert calls == ['sk-or-first']
+    spend = dictionary_stage.dictionary_spend(job)
+    if outcome == 'paid_malformed':
+        assert record['raw_text'] == 'not JSON' and record['cost_usd'] == .01
+        assert spend == {'cost_usd': .01, 'reserved_usd': .01, 'complete': True}
+    else:
+        assert record['cost_usd'] is None
+        assert spend == {'cost_usd': None, 'reserved_usd': .37, 'complete': False}
+    before = {name: (job / name).read_bytes() for name in ('dictionary.json', 'dictionary.claim')}
+    resumed = dd.prepare_upload(job, [ep], 'sk-or-next', harness.call_model_once,
+                                api_keys=['sk-or-next'])
+    assert resumed['status'] == 'failed'
+    assert calls == ['sk-or-first']
+    assert all((job / name).read_bytes() == value for name, value in before.items())
+
+
+@pytest.mark.parametrize('terminal', ['all_rejected', 'next_unknown'])
+def test_dictionary_only_proven_unpaid_attempts_clear_reservation(tmp_path, monkeypatch, terminal):
+    import io
+    import urllib.error
+    from label import dictionary as dd, dictionary_stage, harness
+    ep = episode(tmp_path, 'one', [('pressure', np.array([[1., 2.], [3., 4.]]),
+                                  {'names': ['pad0', 'pad1'], 'source': 'native.h5/pressure'})])
+    job = tmp_path / 'job'
+    job.mkdir()
+    (job / 'dictionary_status.json').write_text(json.dumps({'projected_upper_usd': .37}))
+    calls = []
+    def transport(req, timeout):
+        key = req.get_header('Authorization').split()[-1]
+        calls.append((key, json.loads(req.data)))
+        if key == 'sk-or-empty':
+            raise urllib.error.HTTPError(req.full_url, 402, 'Rejected', {}, io.BytesIO(b'{}'))
+        assert key == 'sk-or-next'
+        if terminal == 'all_rejected':
+            raise urllib.error.HTTPError(req.full_url, 401, 'Rejected', {}, io.BytesIO(b'{}'))
+        raise TimeoutError('Second dispatch outcome is unknown')
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', transport)
+    record = dd.prepare_upload(job, [ep], 'sk-or-empty', harness.call_model_once,
+                               api_keys=['sk-or-empty', 'sk-or-next'])
+    assert record['status'] == 'failed' and record['entries'] == {}
+    assert len(calls) == 2 and calls[0][1] == calls[1][1]
+    assert record['dispatch_attempts'][0]['state'] == 'rejected unpaid'
+    spend = dictionary_stage.dictionary_spend(job)
+    if terminal == 'all_rejected':
+        assert [a['state'] for a in record['dispatch_attempts']] == ['rejected unpaid', 'rejected unpaid']
+        assert record['cost_usd'] == 0 and spend == {'cost_usd': 0., 'reserved_usd': 0., 'complete': True}
+    else:
+        assert record['dispatch_attempts'][1]['state'] != 'rejected unpaid'
+        assert record['cost_usd'] is None and spend == {'cost_usd': None, 'reserved_usd': .37, 'complete': False}
+    before = {p.name: p.read_bytes() for p in job.iterdir() if p.is_file()}
+    assert dd.prepare_upload(job, [ep], 'sk-or-new', harness.call_model_once,
+                             api_keys=['sk-or-new'])['status'] == 'failed'
+    assert len(calls) == 2
+    assert all((job / name).read_bytes() == value for name, value in before.items())
+
+
+@pytest.mark.parametrize('crash_at', ['saved_refusal', 'next_dispatch'])
+def test_dictionary_refusal_and_next_claim_survive_crash_without_resume_replay(tmp_path, monkeypatch, crash_at):
+    import io
+    import urllib.error
+    from label import dictionary as dd, harness
+    ep = episode(tmp_path, 'one', [('pressure', np.array([[1., 2.], [3., 4.]]),
+                                  {'names': ['pad0', 'pad1'], 'source': 'native.h5/pressure'})],
+                 extra={'recorded_metadata': {'operator_note': 'Retain the native task description.'}})
+    job = tmp_path / 'job'
+    class Crash(BaseException):
+        pass
+    original_save = dd._save
+    def save_then_crash(path, value):
+        original_save(path, value)
+        attempts = value.get('dispatch_attempts') or []
+        if crash_at == 'saved_refusal' and attempts and attempts[-1]['state'] == 'rejected unpaid':
+            raise Crash()
+    monkeypatch.setattr(dd, '_save', save_then_crash)
+    calls = []
+    def transport(req, timeout):
+        key = req.get_header('Authorization').split()[-1]
+        calls.append(key)
+        if key == 'sk-or-empty':
+            raise urllib.error.HTTPError(req.full_url, 402, 'Rejected', {}, io.BytesIO(b'{}'))
+        assert key == 'sk-or-funded' and crash_at == 'next_dispatch'
+        saved = json.loads((job / 'dictionary.json').read_text())
+        assert [a['state'] for a in saved['dispatch_attempts']] == ['rejected unpaid', 'dispatched']
+        retry = json.loads((job / 'dictionary.retry1.claim').read_text())
+        assert retry['attempt'] == 2 and retry['request_digest'] == saved['request_digest']
+        raise Crash()
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', transport)
+    with pytest.raises(Crash):
+        dd.prepare_upload(job, [ep], 'sk-or-empty', harness.call_model_once,
+                          api_keys=['sk-or-empty', 'sk-or-funded'])
+    saved = json.loads((job / 'dictionary.json').read_text())
+    proof = saved['dispatch_attempts'][0]
+    assert proof['attempt'] == 1 and proof['state'] == 'rejected unpaid'
+    assert proof['http_status'] == 402 and proof['http_attempt'] == 1
+    assert proof['verified_unpaid'] is True and proof['cost_usd'] == 0
+    assert saved['request_digest']
+    claim = json.loads((job / 'dictionary.claim').read_text())
+    assert claim['attempt'] == 1 and claim['request_digest'] == saved['request_digest']
+    assert ('sk-or-empty' not in json.dumps(saved) and 'sk-or-funded' not in json.dumps(saved))
+    assert calls == (['sk-or-empty'] if crash_at == 'saved_refusal' else ['sk-or-empty', 'sk-or-funded'])
+    before = {p.name: p.read_bytes() for p in job.iterdir() if p.is_file()}
+    monkeypatch.setattr(dd, '_save', original_save)
+    resumed = dd.prepare_upload(job, [ep], 'sk-or-funded', harness.call_model_once,
+                               api_keys=['sk-or-funded'])
+    assert resumed['status'] in ('pending', 'interrupted')
+    assert all((job / name).read_bytes() == value for name, value in before.items())
+    assert len(calls) == (1 if crash_at == 'saved_refusal' else 2)
+
+
 def _claim_worker(job, ep, started, release, calls, output):
     from label import dictionary as dd
     def fake(*args, **kwargs):
