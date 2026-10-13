@@ -2511,6 +2511,7 @@ def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int 
             "grid_cols": grid_cols, "decode_failed": decode_failures(ep),
             "still_spans": describe_spans(ep, pl["spans"]), "views": views(ep),
             'camera_observation_views': pl['camera_observation_views'],
+            'camera_observation_labels': {v: cam_name(ep, v) for v in pl['camera_observation_views']},
             "sampling": f"{rig(ep)}-every-{every_s(ep):g}s",
             "annotation_policy": ep['context']['annotation_policy'],
             "blocks": [b.name for b in blocks],

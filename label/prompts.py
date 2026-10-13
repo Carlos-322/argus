@@ -802,8 +802,10 @@ what a policy learns the instruction means, so it follows the instruction:
   A step whose result already holds at the first frame (a cap already off, a plug already in) is
   part of the end state that holds, not part of the goal that never happened: keep the relation
   aligned. Absence of that motion alone is not an instruction_mismatch unless the source explicitly asserts
-  its occurrence within this recording or declared timed coverage. Keep that unobserved motion as a coverage
-  limitation; still report observed task, method or order violations and missing required end states.
+  its occurrence within this recording or declared timed coverage. Describe the missing observation as a
+  coverage limitation, without inferring from the initial state or missing motion that the action occurred
+  before recording. An initially satisfied state does not establish which earlier actions produced it.
+  Still report observed task, method or order violations and missing required end states.
 - Judge quantity and completion from the instruction's actual constraints. When its goal is satisfied
   and the operator repeats it or performs compatible additional activity, relation narrower can describe
   that added scope. Extra activity that preserves the requested result and violates no explicit constraint
