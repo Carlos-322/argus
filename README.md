@@ -60,12 +60,16 @@ uv sync --frozen
 
 Paid annotation requires [`OPENROUTER_API_KEYS`](label/harness.py#L1046) (comma-separated keys) or [`OPENAI_API_KEY`](label/harness.py#L1046) in your shell or secret manager. Gated Hugging Face datasets require accepting their terms and setting [`HF_TOKEN`](prepare/hub.py#L21). Keep inputs and outputs under the ignored [`data/`](.gitignore#L1) directory.
 
+Prepare and inspect base requests without model calls.
+
 ```console
-# Prepare and inspect base requests without model calls.
 uv run python -m review --data path/to/dataset --rig teleop_arms \
   --dataset-note "Two arms arrange blocks on a tray." --out data/review/mine --free
+```
 
-# Annotate the same job under a spending cap, then open its board.
+Annotate the same job under a spending cap, then open its board.
+
+```console
 uv run python -m review --data path/to/dataset --rig teleop_arms \
   --dataset-note "Two arms arrange blocks on a tray." --out data/review/mine --cap 20
 uv run python -m board serve --board data/review/mine --clips data/review/mine/clips
