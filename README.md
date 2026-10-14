@@ -21,13 +21,11 @@ Argus now annotates depth, tactile and other sensor data jointly with video, sta
 
 ## Overview
 
-Argus is an open source dataset-and-format-agnostic harness for the densest annotation of robot learning data.
-
-To my knowledge, Argus is the only open-source annotation harness that combines native multi-format ingestion, joint visual/sensor reasoning, and dense annotations of **actions, subgoals, outcomes, operator mistakes, recoveries and object-state changes**. It reads multi-view RGB alongside state/action trajectories, depth, tactile and other recorded fields, preserving their timing and measurement semantics. The VLM can inspect additional samples or image regions to support a finding; evidence, confidence and limitations remain available in the viewer and JSON exports.
+To my knowledge, Argus is the most advanced open-source robot learning annotation harness. It is the only harness to combine native multi-format ingestion, joint visual/sensor reasoning, and dense annotations of **actions, subgoals, outcomes, operator mistakes, recoveries and object-state changes**. It reads multi-view RGB alongside state/action trajectories, depth, tactile and other recorded fields, preserving their timing and measurement semantics. The VLM can inspect additional samples or image regions to support a finding; evidence, confidence and limitations remain available in the viewer and JSON exports.
 
 <p align="center">
-  <a href="https://raw.githubusercontent.com/Pantheon-Industries-Inc/argus/refs/heads/main/media/architecture.svg?v=f6b0a956672e">
-    <img src="media/architecture.svg?v=f6b0a956672e" width="1400" alt="Annotation pipeline: format ingestion, field interpretation, visual, state and sensor evidence, VLM annotation of behavior and state changes, issue detection, temporal stitching, viewer and JSON exports.">
+  <a href="https://raw.githubusercontent.com/Pantheon-Industries-Inc/argus/refs/heads/main/media/architecture.svg?v=ea2ebc75c66e">
+    <img src="media/architecture.svg?v=ea2ebc75c66e" width="1400" alt="Annotation pipeline: format ingestion, field interpretation, visual, state and sensor evidence, VLM annotation of behavior and state changes, issue detection, temporal stitching, viewer and JSON exports.">
   </a>
 </p>
 
