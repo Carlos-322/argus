@@ -4,9 +4,10 @@ Most tasks read well at low resolution (whole objects, where they are, whether t
 judged with fine detail. Before an episode of a routed rig (label/episode.py ROUTE_WIDTHS) is labelled, a small
 model reads the episode's own task text, never its frames, and says which. A task that needs fine detail gets the
 wide cells, every other task the narrow cells plus contact detail views. The call costs a fraction of a cent, its
-answer is recorded in the episode's output (config.resolution_route), and a failed call, an unclear answer, a dry
-run or an episode with no task text all get the wide cells. Episodes with the same task text share one answer
-within a run; the cost is recorded on the episode whose call it was (label.harness.episode_cost).
+answer is recorded in the episode's output (config.resolution_route). Missing task text uses narrow cells without
+a routing call; a failed call, an unclear answer or a dry run with task text uses wide cells. Episodes with the
+same task text share one answer within a run; the cost is recorded on the episode whose call it was
+(label.harness.episode_cost).
 
 The answer is sampled, so two runs over the same episodes can send some of them at different widths. A model
 comparison seeds the answers instead (seed(), label/harness.py --route-seeds): every model's run starts with the
@@ -183,11 +184,12 @@ def route_width(ep_dir: Path, api_key: str | None, call_model, timeout: int = 12
     low, high = me.ROUTE_WIDTHS[r]
     ctx = ep["context"]
     # a plain video's task label is only its file name, which says nothing about the task
-    real = any((ctx.get(k) or "") for k in ("instruction", "annotation_subtasks", "uploader_annotation"))
+    real = any(value.strip() if isinstance(value, str) else value
+               for value in (ctx.get(k) for k in ("instruction", "annotation_subtasks", "uploader_annotation")))
     from_video = (ctx.get("source") or {}).get("format") == "video files"
-    has_task = real or (bool(ctx.get("task_label")) and not from_video)
+    has_task = real or (not from_video and any(label.strip() for label in ctx.get("task_label") or []))
     if not has_task:
-        return high, {"routed": True, "fine_detail": None, "why": "no task text", "cell_w": high}
+        return low, {"routed": True, "fine_detail": None, "why": "no task text", "cell_w": low}
     if not api_key:
         return high, {"routed": True, "fine_detail": None, "why": "no key (dry run)", "cell_w": high}
     text = route_text(ep)

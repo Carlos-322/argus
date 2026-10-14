@@ -339,7 +339,7 @@ def _route_call(answers):
     return call, calls
 
 
-def test_routing_reads_the_task_text_and_falls_back_to_wide_cells(tmp_path, monkeypatch):
+def test_routing_uses_task_detail_and_defaults_missing_text_to_narrow_cells(tmp_path, monkeypatch):
     from label import route
     monkeypatch.setattr(route, "_CACHE", {})
     ep, _ = _packed_episode(tmp_path)
@@ -366,11 +366,25 @@ def test_routing_reads_the_task_text_and_falls_back_to_wide_cells(tmp_path, monk
     # a plain video's task label is its file name, which is no task text
     (ep / "context.json").write_text(json.dumps({**ctx, "state_kind": "none", "task_label": ["take_03"],
                                                  "source": {"format": "video files", "file": "take_03.mp4"}}))
-    no_text = (448, {"routed": True, "fine_detail": None, "why": "no task text", "cell_w": 448})
+    no_text = (224, {"routed": True, "fine_detail": None, "why": "no task text", "cell_w": 224})
     assert route.route_width(ep, "sk-or-x", call) == no_text
     ctx.pop("task_label")
     (ep / "context.json").write_text(json.dumps(ctx))
     assert route.route_width(ep, "sk-or-x", call) == no_text
+    request = me.build_request(ep, max_cell_w=no_text[0])
+    assert request["cell"][0] == 224
+    assert request["contact_s"]
+    details = [part["text"] for part in request["content"]
+               if part["type"] == "text" and part["text"].startswith("=== detail")]
+    assert "first frame" in details[0] and "last frame" in details[-1]
+    ctx.update(instruction=" \n\t", task_label=[" "], uploader_annotation=" ")
+    (ep / "context.json").write_text(json.dumps(ctx))
+    assert route.route_width(ep, "sk-or-x", call) == no_text
+    result = harness.label_episode(ep, tmp_path / 'no_task.json', api_key='', model=harness.DEFAULT_MODEL,
+        reasoning='medium', max_tokens=2000, timeout=1, dry_run=True)
+    assert result['config']['cell'][0] == 224
+    assert result['config']['resolution_route']['why'] == 'no task text'
+    assert result['config']['contact_detail_s'] and result['config']['fullres_frames'] == ['first', 'last']
     ctx["profile"] = "handheld_gripper"
     (ep / "context.json").write_text(json.dumps(ctx))
     assert route.route_width(ep, "sk-or-x", call) == (None, {"routed": False})
@@ -663,18 +677,18 @@ def test_request_grid_receipt_rebuilds_actual_dense_inputs(tmp_path, monkeypatch
         grids.rebuild(result, ep)
 
 
-@pytest.mark.parametrize('module_name', ['formats', 'dictionary_context', 'lens', 'errors'])
+@pytest.mark.parametrize('module_name', ['formats', 'dictionary_context', 'lens', 'errors', 'route'])
 def test_prepare_helper_changes_invalidate_annotation_identity_without_changing_rgb(tmp_path, monkeypatch, module_name):
     from prepare import formats
-    from label import dictionary_context, lens, errors
+    from label import dictionary_context, lens, errors, route
     folder, _ = _packed_episode(tmp_path)
     kwargs = dict(model='openai/gpt-6.1-sol', reasoning='high', max_tokens=2000,
-                  cell_w=128, example_dir=None)
+                  cell_w=0 if module_name == 'route' else 128, example_dir=None)
     before = harness.input_identity(folder, **kwargs)
     request = me.build_request(folder, cell_w=128)
     original = Path.read_bytes
     watched = Path({'formats': formats, 'dictionary_context': dictionary_context,
-                    'lens': lens, 'errors': errors}[module_name].__file__).resolve()
+                    'lens': lens, 'errors': errors, 'route': route}[module_name].__file__).resolve()
     def changed_bytes(path):
         data = original(path)
         return data + b'\n# changed request helper\n' if path.resolve() == watched else data

@@ -58,7 +58,7 @@ cd argus
 uv sync --frozen
 ```
 
-Paid annotation requires [`OPENROUTER_API_KEYS`](label/harness.py#L1044) (comma-separated keys) or [`OPENAI_API_KEY`](label/harness.py#L1044) in your shell or secret manager. Gated Hugging Face datasets require accepting their terms and setting [`HF_TOKEN`](prepare/hub.py#L21). Keep inputs and outputs under the ignored [`data/`](.gitignore#L1) directory.
+Paid annotation requires [`OPENROUTER_API_KEYS`](label/harness.py#L1046) (comma-separated keys) or [`OPENAI_API_KEY`](label/harness.py#L1046) in your shell or secret manager. Gated Hugging Face datasets require accepting their terms and setting [`HF_TOKEN`](prepare/hub.py#L21). Keep inputs and outputs under the ignored [`data/`](.gitignore#L1) directory.
 
 ```console
 # Prepare and inspect base requests without model calls.

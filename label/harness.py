@@ -321,6 +321,8 @@ def input_identity(ep_dir: Path, *, model: str, reasoning: str, max_tokens: int,
             stat = path.stat()
             examples.append({"name": path.name, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns,
                              "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+    routing_code = (Path(me.__file__).with_name('route.py').read_bytes()
+                    if not cell_w and resolved['rig'] in me.ROUTE_WIDTHS else b'')
     settings = {"model": resolved["model"], "reasoning": resolved["reasoning"], "max_tokens": max_tokens, "cell_w": cell_w,
                 "detail": DETAIL, "grid_cols": GRID_COLS, "examples": examples,
                 "annotation_policy": resolved, "jaw_algorithm_sha256": jaw_algorithm,
@@ -333,7 +335,7 @@ def input_identity(ep_dir: Path, *, model: str, reasoning: str, max_tokens: int,
                     Path(me.__file__).with_name('errors.py'),
                     Path(me.__file__).with_name('lens.py'),
                     Path(me.__file__).parent.parent / 'prepare' / 'formats.py',
-                    Path(me.__file__).with_name('dictionary_context.py')))).hexdigest()}
+                    Path(me.__file__).with_name('dictionary_context.py'))) + routing_code).hexdigest()}
     return {"version": 2, "source_proof": source_proof(ctx, ep_dir), "settings": settings}
 
 
