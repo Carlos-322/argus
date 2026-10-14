@@ -21,7 +21,7 @@ Argus now annotates depth, tactile and other sensor data jointly with video, sta
 
 ## Overview
 
-To my knowledge, Argus is the most advanced open-source robot learning annotation harness.
+To my knowledge, Argus is the most advanced open-source robot learning annotation harness (a/o 2026).
 
 It is the only harness to combine native multi-format ingestion, joint visual/sensor reasoning, and dense annotations of **actions, subgoals, outcomes, operator mistakes, recoveries and object-state changes**. It reads multi-view RGB alongside state/action trajectories, depth, tactile and other recorded fields, preserving their timing and measurement semantics. The VLM can inspect additional samples or image regions to support a finding; evidence, confidence and limitations remain available in the viewer and JSON exports.
 
