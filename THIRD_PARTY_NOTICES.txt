@@ -1,9 +1,9 @@
 Third-party material in Argus
 
 The repository is licensed under Apache-2.0 (LICENSE). The files listed here contain material that keeps its own
-license. Everything else the pipeline uses (the datasets, the ACE-Ego-Hand code and checkpoints, Wan2.2-Fun-5B-Control,
-VideoX-Fun, smplx, MANO and the Python packages) is downloaded when you run it, is not included here, and is listed with
-its license in the README under Licenses.
+license. Full datasets and optional components (ACE-Ego-Hand code and checkpoints, Wan2.2-Fun-5B-Control, VideoX-Fun,
+smplx, MANO and the Python packages) are downloaded when you run the pipeline. Their licenses are listed in the
+README under Licenses. The architecture chart includes the attributed image excerpts listed below.
 
 label/fonts/DejaVuSans-Bold.ttf
     DejaVu Sans Bold, version 2.37, unmodified. Bitstream Vera Fonts Copyright (c) 2003 by Bitstream, Inc., Arev Fonts
@@ -31,3 +31,27 @@ configs/examples/example_teleop_arms.json
     Pantheon's annotation of the MolmoAct2-BimanualYAM episode 017777, whose instruction it quotes.
     MolmoAct2-BimanualYAM-Dataset is published by Ai2 (https://huggingface.co/datasets/allenai/MolmoAct2-BimanualYAM-Dataset)
     under Apache-2.0 (the text is in LICENSE).
+
+media/architecture.svg
+media/architecture.source.svg
+    Tactile image excerpts: TacVerse/xtac-umi-g1-insert-optical-module, published by TacVerse under CC BY-SA 4.0
+    (https://creativecommons.org/licenses/by-sa/4.0/). Source: https://huggingface.co/datasets/TacVerse/xtac-umi-g1-insert-optical-module.
+    Episode 000000, right tactile pad at 54s and 55s; cropped and scaled by Pantheon. These adapted image excerpts
+    retain CC BY-SA 4.0.
+
+    RGB and depth drawer excerpts: RoboMIND, distributed in Voxel51's native multimodal MCAP subset under Apache-2.0.
+    Sources: https://huggingface.co/datasets/Voxel51/RoboMIND and https://huggingface.co/datasets/x-humanoid-robomind/RoboMIND.
+    Tien Kung drawer recording, frame at 33s; RGB scaling and depth color rendering by Pantheon.
+
+    The UMI playback uses Pantheon's standalone demonstration in media/board_demo.webp. The model annotations in
+    the chart and the README's sensor-finding excerpt are Pantheon annotations, licensed CC BY 4.0 as stated in
+    the README. The recorded imagery retains its source license.
+
+    State/video comparison excerpts: 10Kh-RealOmin-OpenData, published by GenRobot under CC BY-SA 4.0
+    (https://creativecommons.org/licenses/by-sa/4.0/). Source: https://huggingface.co/datasets/genrobot2025/10Kh-RealOmin-OpenData.
+    Clutter Tidy-Up [Stage2]/00002/00264.mcap, right camera at 4s and 6s; scaled by Pantheon. These adapted image
+    excerpts retain CC BY-SA 4.0. The recorded right-gripper opening is fixed at 0.103m; the dashboard finding
+    compares that reading with visible closure.
+
+    The recovery example uses Pantheon's UMI handoff recording at 3s and 5s. Image excerpts are cropped and scaled;
+    source footage rights are unchanged.
