@@ -50,7 +50,7 @@ To my knowledge, Argus is the only open-source annotation harness that combines 
 
 ## Install and review
 
-You need Python 3.11, [uv](https://docs.astral.sh/uv/), and `ffmpeg`/`ffprobe` 5.1 or newer.
+You need Python 3.11, [uv](https://docs.astral.sh/uv/), and [`ffmpeg`](https://ffmpeg.org/ffmpeg.html)/[`ffprobe`](https://ffmpeg.org/ffprobe.html) 5.1 or newer.
 
 ```console
 git clone https://github.com/Pantheon-Industries-Inc/argus.git
@@ -58,7 +58,7 @@ cd argus
 uv sync --frozen
 ```
 
-Paid annotation requires `OPENROUTER_API_KEYS` (comma-separated keys) or `OPENAI_API_KEY` in your shell or secret manager. Gated Hugging Face datasets require accepting their terms and setting `HF_TOKEN`. Keep inputs and outputs under the ignored `data/` directory.
+Paid annotation requires [`OPENROUTER_API_KEYS`](label/harness.py#L1044) (comma-separated keys) or [`OPENAI_API_KEY`](label/harness.py#L1044) in your shell or secret manager. Gated Hugging Face datasets require accepting their terms and setting [`HF_TOKEN`](prepare/hub.py#L21). Keep inputs and outputs under the ignored [`data/`](.gitignore#L1) directory.
 
 ```console
 # Prepare and inspect base requests without model calls.
@@ -71,18 +71,18 @@ uv run python -m review --data path/to/dataset --rig teleop_arms \
 uv run python -m board serve --board data/review/mine --clips data/review/mine/clips
 ```
 
-`--data` accepts a folder, file, archive or HTTP(S) URL. Set `--rig` to `teleop_arms`, `handheld_gripper` or `ego_head` for teleop, UMI or human ego, respectively. Argus detects the format and available evidence; RGB-only data follows the same pipeline without requiring sensor inputs. [Data Review](https://data.pantheon.inc/review) uses the same default policy, though its deployed version and upload limits can differ.
+[`--data`](review/__main__.py#L209) accepts a folder, file, archive or HTTP(S) URL. Set [`--rig`](review/__main__.py#L210) to [`teleop_arms`](review/__main__.py#L210), [`handheld_gripper`](review/__main__.py#L210) or [`ego_head`](review/__main__.py#L210) for teleop, UMI or human ego, respectively. Argus detects the format and available evidence; RGB-only data follows the same pipeline without requiring sensor inputs. [Data Review](https://data.pantheon.inc/review) uses the same default policy, though its deployed version and upload limits can differ.
 
 | Default or optional setting | Behavior |
 |---|---|
-| Astra, the default | `openai/gpt-6-astra`, medium reasoning; a regular sample every 1.5s for teleop, 1s for UMI and 0.5s for human ego, plus eligible boundaries and first/last frames. |
-| Sol 6.1 High | `--model openai/gpt-6.1-sol --reasoning high`; defaults to 1 FPS on all recording setups and requires at least 1 FPS. |
-| Faster actions | `--sample-fps 2` is recommended for subsecond fumbles and rapid recoveries. More images shorten the available request window and can increase cost. |
-| Task scope | Episode/session scope follows source metadata; `--task-mode episode` or `session` overrides it. A missing instruction does not automatically imply a session. Human ego uses the activities schema. |
+| Astra, the default | [`openai/gpt-6-astra`](label/policy.py#L8), medium reasoning; a regular sample every 1.5s for teleop, 1s for UMI and 0.5s for human ego, plus eligible boundaries and first/last frames. |
+| Sol 6.1 High | [`--model openai/gpt-6.1-sol --reasoning high`](label/policy.py#L78); defaults to 1 FPS on all recording setups and requires at least 1 FPS. |
+| Faster actions | [`--sample-fps 2`](label/policy.py#L80) is recommended for subsecond fumbles and rapid recoveries. More images shorten the available request window and can increase cost. |
+| Task scope | Episode/session scope follows source metadata; [`--task-mode episode`](label/policy.py#L82) or [`session`](label/policy.py#L52) overrides it. A missing instruction does not automatically imply a session. Human ego uses the activities schema. |
 
 Each recording produces one public episode. Long recordings are split to fit API request limits and rejoined on the original timeline; internal chunk boundaries are not treated as recording truncation. Session mode annotates activities within the recording. Preparation limits, missing chunks and processing failures are reported alongside any usable results.
 
-Rerunning a review job with the same `--out` preserves its settings and reuses outputs whose inputs and selected evidence still match. Changes to paid request semantics require a new job. `--free` skips paid field interpretation, image-detail routing and evidence selection, so it previews base requests rather than the full paid evidence path. Spending caps account for all applicable calls and outstanding reservations; unresolved charges stay reserved.
+Rerunning a review job with the same [`--out`](review/__main__.py#L211) preserves its settings and reuses outputs whose inputs and selected evidence still match. Changes to paid request semantics require a new job. [`--free`](review/__main__.py#L213) skips paid field interpretation, image-detail routing and evidence selection, so it previews base requests rather than the full paid evidence path. Spending caps account for all applicable calls and outstanding reservations; unresolved charges stay reserved.
 
 ## Results and further use
 
@@ -112,7 +112,7 @@ This is an excerpt from a tactile episode's downloadable JSON. Evidence IDs reso
 }
 ```
 
-A review job contains prepared `episodes/`, base requests in `dry/`, model inputs and receipts in `run/`, rejoined labels in `run_final/`, and the board. Action phases distinguish advancing, wasteful and idle behavior. Sensor findings include evidence, confidence and alternative explanations; inconclusive evidence need not produce a finding. Exports omit internal access metadata.
+A review job contains prepared [`episodes/`](review/__main__.py#L258), base requests in [`dry/`](review/__main__.py#L307), model inputs and receipts in [`run/`](review/__main__.py#L316), rejoined labels in [`run_final/`](review/__main__.py#L344), and the board. Action phases distinguish advancing, wasteful and idle behavior. Sensor findings include evidence, confidence and alternative explanations; inconclusive evidence need not produce a finding. Exports omit internal access metadata.
 
 Field definitions supplied by the dataset publisher or user override inferred meanings and layouts without changing recorded measurements. Changes to source data or field interpretations invalidate stale findings. Shared footage retains its source license and access policy.
 
@@ -130,7 +130,7 @@ uv run python -m label --dataset mine --episodes data/episodes/mine/all --kind d
 uv run python -m label --dataset mine --episodes data/episodes/mine/all --kind full --cap 20
 ```
 
-Public adapters are `molmo`, `abc130k`, `galaxea`, `habit`, `fastumi`, `realomin`, `egocentric100k`, `genhumanego` and `openaoe`; `configs/slices/` records published selections. Generic readers preserve source fields instead of applying corpus-release cropping or task selection.
+Public adapters are [`molmo`](prepare/molmo.py), [`abc130k`](prepare/abc130k.py), [`galaxea`](prepare/galaxea.py), [`habit`](prepare/habit.py), [`fastumi`](prepare/fastumi.py), [`realomin`](prepare/realomin.py), [`egocentric100k`](prepare/egocentric100k.py), [`genhumanego`](prepare/genhumanego.py) and [`openaoe`](prepare/openaoe.py); [`configs/slices/`](configs/slices/) records published selections. Generic readers preserve source fields instead of applying corpus-release cropping or task selection.
 
 For example, download and prepare the single MolmoAct2 episode listed in the quickstart:
 
@@ -141,7 +141,7 @@ uv run python -m prepare molmo prepare --episodes configs/quickstart/teleop.txt 
 
 The adapter retrieves the source files needed for that episode, including shared video packs, and preserves its camera offsets and state/action trajectories. Preparation makes no model calls.
 
-For a custom board, create `data/boards/mine/manifest.json` with the dataset, prepared episodes and run paths. [configs/quickstart/board.json](configs/quickstart/board.json) shows the structure with published-dataset severity rules. Use `python -m board build`, `clips`, `serve`, and `static media`/`static site`; each takes `--help`. Refresh the board after changing field definitions. To edit them in the local viewer, add `--dictionary-job JOB` to `board serve`.
+For a custom board, create [`data/boards/mine/manifest.json`](configs/quickstart/board.json) with the dataset, prepared episodes and run paths. [configs/quickstart/board.json](configs/quickstart/board.json) shows the structure with published-dataset severity rules. Use [`python -m board build`](board/build.py), [`clips`](board/clips.py), [`serve`](board/serve.py#L1123), and [`static media`](board/static.py#L44)/[`static site`](board/static.py#L45); each takes [`--help`](board/__main__.py). Refresh the board after changing field definitions. To edit them in the local viewer, add [`--dictionary-job JOB`](board/serve.py#L1135) to [`board serve`](board/serve.py#L1123).
 
 Export the same review job as a static viewer by preparing the media first, then building the site:
 
@@ -150,11 +150,11 @@ uv run python -m board static media --board data/review/mine --clips data/review
 uv run python -m board static site --board data/review/mine --clips data/review/mine/clips
 ```
 
-The site is written to `data/review/mine/static/<build_id>/`, with shared media in `data/review/mine/static/media/`.
+The site is written to [`data/review/mine/static/<build_id>/`](board/static.py#L598), with shared media in [`data/review/mine/static/media/`](board/static.py#L447).
 
-Paid staged runs require a clean tracked checkout. `--resume RUN --why "reason"` retains the run and remaining budget. Repeat `--dataset`, `--episodes` and `--kind`; pass the original harness options after `--`. `python -m label.reparse RUN` reparses stored replies without another call. Receipts survive failures. `board grids` reconstructs base request grids only when original input hashes can be verified; detail/sensor images are counted but not reconstructed there.
+Paid staged runs require a clean tracked checkout. [`--resume RUN --why "reason"`](label/run.py#L154) retains the run and remaining budget. Repeat [`--dataset`](label/run.py#L146), [`--episodes`](label/run.py#L147) and [`--kind`](label/run.py#L148); pass the original harness options after [`--`](label/run.py#L156). [`python -m label.reparse RUN`](label/reparse.py) reparses stored replies without another call. Receipts survive failures. [`board grids`](board/grids.py) reconstructs base request grids only when original input hashes can be verified; detail/sensor images are counted but not reconstructed there.
 
-`checks.timebase scan` proposes clock corrections; inspect them before `apply`. Capture, source and sensor check failures are distinct from clean results. Optional hand pose uses `board/hand_pose/modal_app.py` and `board/hands.py`; it is separate from ordinary annotation and has the licenses below.
+[`checks.timebase scan`](checks/timebase.py#L325) proposes clock corrections; inspect them before [`apply`](checks/timebase.py#L331). Capture, source and sensor check failures are distinct from clean results. Optional hand pose uses [`board/hand_pose/modal_app.py`](board/hand_pose/modal_app.py) and [`board/hands.py`](board/hands.py); it is separate from ordinary annotation and has the licenses below.
 
 </details>
 
@@ -170,19 +170,19 @@ uv run python -m gate prepare
 uv run python -m gate label --kind full --cap 20
 ```
 
-Comparison caps apply per model run and gate caps per recording setup. Sampling may differ by model: compare saved requests before claiming identical inputs. `--with-example` supplies a reference annotation; `--routes` reuses resolution choices. [gate/selection.json](gate/selection.json) and [gate/cases.json](gate/cases.json) define the selected cases; `gate score` evaluates the supplied runs.
+Comparison caps apply per model run and gate caps per recording setup. Sampling may differ by model: compare saved requests before claiming identical inputs. [`--with-example`](compare/__main__.py#L211) supplies a reference annotation; [`--routes`](compare/__main__.py#L216) reuses resolution choices. [gate/selection.json](gate/selection.json) and [gate/cases.json](gate/cases.json) define the selected cases; [`gate score`](gate/score.py) evaluates the supplied runs.
 
-`uv run --frozen --offline pytest -q -ra` runs offline tests; viewer tests also require Node.js. CI uses the locked environment, Node, ffmpeg and ffprobe without provider credentials or dataset access. Secret scans cover the committed tree and reachable history; they do not grant permission to publish uploaded data.
+[`uv run --frozen --offline pytest -q -ra`](.github/workflows/ci.yml) runs offline tests; viewer tests also require Node.js. CI uses the locked environment, Node, ffmpeg and ffprobe without provider credentials or dataset access. Secret scans cover the committed tree and reachable history; they do not grant permission to publish uploaded data.
 
 </details>
 
 ## Credits
 
-The capture checks in `checks/vendor/public_dataset_adapter_qc.py` are Sambhav Gupta's, from public-dataset-adapter (commit 99d0a9e), with the changes listed in that file's header. The hand pose model is ACE-Ego-Hand (Yufei Liu et al., [arXiv:2608.20308](https://arxiv.org/abs/2608.20308)), built on Wan2.2, VideoX-Fun and MANO (Romero, Tzionas and Black, 2017).
+The capture checks in [`checks/vendor/public_dataset_adapter_qc.py`](checks/vendor/public_dataset_adapter_qc.py) are Sambhav Gupta's, from public-dataset-adapter (commit 99d0a9e), with the changes listed in that file's header. The hand pose model is ACE-Ego-Hand (Yufei Liu et al., [arXiv:2608.20308](https://arxiv.org/abs/2608.20308)), built on Wan2.2, VideoX-Fun and MANO (Romero, Tzionas and Black, 2017).
 
 ## Licenses
 
-The code is Apache-2.0 (`LICENSE`), and the few files that carry material under another license are listed in [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt). Full datasets and optional components are downloaded at run time; the architecture chart includes attributed image excerpts. The labels Pantheon publishes, on the data dashboard, in its downloads and in the release, are licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), so anyone may use them for any purpose with credit to Pantheon. The footage they describe keeps its dataset's license.
+The code is Apache-2.0 ([`LICENSE`](LICENSE)), and the few files that carry material under another license are listed in [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt). Full datasets and optional components are downloaded at run time; the architecture chart includes attributed image excerpts. The labels Pantheon publishes, on the data dashboard, in its downloads and in the release, are licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), so anyone may use them for any purpose with credit to Pantheon. The footage they describe keeps its dataset's license.
 
 <details>
 <summary>Dataset and optional component licenses</summary>
@@ -190,15 +190,15 @@ The code is Apache-2.0 (`LICENSE`), and the few files that carry material under 
 | Component | License | Source |
 |---|---|---|
 | ACE-Ego-Hand code (commit 9757868) | MIT | [github.com/ggxxii/ACE-Ego-Hand](https://github.com/ggxxii/ACE-Ego-Hand/blob/97578680931b3f1c8111396c100d595b98857fb8/LICENSE) |
-| ACE-Ego-Hand checkpoints (`ace_ego_hand_k.pt`, `ace_ego_hand_kfree.pt`) | CC BY-NC 4.0, non-commercial | [huggingface.co/acerobotics2025/ACE-Ego-Hand](https://huggingface.co/acerobotics2025/ACE-Ego-Hand) |
+| ACE-Ego-Hand checkpoints ([`ace_ego_hand_k.pt`](https://huggingface.co/acerobotics2025/ACE-Ego-Hand), [`ace_ego_hand_kfree.pt`](https://huggingface.co/acerobotics2025/ACE-Ego-Hand)) | CC BY-NC 4.0, non-commercial | [huggingface.co/acerobotics2025/ACE-Ego-Hand](https://huggingface.co/acerobotics2025/ACE-Ego-Hand) |
 | Wan2.2-Fun-5B-Control (weights, VAE, umT5-XXL text encoder and tokenizer) | Apache-2.0 | [huggingface.co/alibaba-pai/Wan2.2-Fun-5B-Control](https://huggingface.co/alibaba-pai/Wan2.2-Fun-5B-Control) |
 | VideoX-Fun (commit 968f0e2) | Apache-2.0 | [github.com/aigc-apps/VideoX-Fun](https://github.com/aigc-apps/VideoX-Fun) |
 | smplx 0.1.28 | Max Planck license for non-commercial scientific research | [github.com/vchoutas/smplx](https://github.com/vchoutas/smplx/blob/main/LICENSE) |
 | MANO (you register and download it yourself) | Max Planck license for non-commercial scientific research, no redistribution | [mano.is.tue.mpg.de/license.html](https://mano.is.tue.mpg.de/license.html) |
-| Python packages in `uv.lock` | Each package retains its own license | Package metadata and source distributions |
+| Python packages in [`uv.lock`](uv.lock) | Each package retains its own license | Package metadata and source distributions |
 | MolmoAct2-BimanualYAM-Dataset (Ai2) | Apache-2.0 | [allenai/MolmoAct2-BimanualYAM-Dataset](https://huggingface.co/datasets/allenai/MolmoAct2-BimanualYAM-Dataset) |
 | ABC-130k (XDOF) | Apache-2.0 | [XDOF/ABC-130k](https://huggingface.co/datasets/XDOF/ABC-130k) |
-| Galaxea Open-World Dataset (Galaxea) | CC BY-NC-SA 4.0, non-commercial | [OpenGalaxea/Galaxea-Open-World-Dataset](https://huggingface.co/datasets/OpenGalaxea/Galaxea-Open-World-Dataset); the adapter reads the copy at `RogersPyke/Galaxea-Open-World-Dataset_10K_20260123`; accept Galaxea's terms on its page before using it |
+| Galaxea Open-World Dataset (Galaxea) | CC BY-NC-SA 4.0, non-commercial | [OpenGalaxea/Galaxea-Open-World-Dataset](https://huggingface.co/datasets/OpenGalaxea/Galaxea-Open-World-Dataset); the adapter reads the copy at [`RogersPyke/Galaxea-Open-World-Dataset_10K_20260123`](https://huggingface.co/datasets/RogersPyke/Galaxea-Open-World-Dataset_10K_20260123); accept Galaxea's terms on its page before using it |
 | HABIT (Config) | CC BY 4.0 | [configinc/HABIT](https://huggingface.co/datasets/configinc/HABIT) |
 | FastUMI-100K | Apache-2.0 | [IPEC-COMMUNITY/FastUMI_100k_lerobot](https://huggingface.co/datasets/IPEC-COMMUNITY/FastUMI_100k_lerobot) |
 | 10Kh-RealOmin-OpenData (GenRobot) | CC BY-SA 4.0 | [genrobot2025/10Kh-RealOmin-OpenData](https://huggingface.co/datasets/genrobot2025/10Kh-RealOmin-OpenData) |
