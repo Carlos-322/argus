@@ -1,27 +1,43 @@
-# Argus
+<h1 align="center">Argus</h1>
 
-[![Python 3.11](https://img.shields.io/badge/python-3.11-455468)](pyproject.toml)
-[![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-455468)](LICENSE)
+<p align="center">
+  <a href="pyproject.toml"><img src="https://img.shields.io/badge/python-3.11-455468" alt="Python 3.11"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-455468" alt="Apache-2.0"></a>
+</p>
 
-### Update v2: Midcentury on WGO-Bench
+<table align="center">
+  <tr>
+    <td><h3><a href="https://pantheon.inc/research/argus">Blog</a> | <a href="https://pantheon.inc/data-board">Data</a></h3></td>
+  </tr>
+</table>
 
-Recently, [Midcentury AI](https://www.midcentury.xyz/blog/optimizing-argus) pushed an adaptation of Argus to SOTA (**50.2% semantic F1**) on WGO-Bench. However, this uses **Sol 6.1 High**, meaning comparisons with published results from older models do not isolate the harness's contribution.
+### → WGO-Bench (October 2026)
 
-### Update v1: Format and sensor support
+Recently, [Midcentury AI](https://www.midcentury.xyz/blog/optimizing-argus) pushed an adaptation of Argus to SOTA (**50.2% semantic F1**) on WGO-Bench. However, this result uses **Sol 6.1 High**, so its advantage over older-model baselines cannot be attributed to the harness alone.
 
-This release extends annotation to depth, tactile and other sensor data, and consolidates teleop, UMI and human ego under one harness. Format readers preserve source fields and timestamps; long recordings are annotated in chunks and rejoined on the original timeline. Behavioral and sensor annotations are available in both the viewer and JSON exports.
+### → Depth and tactile annotations (October 2026)
+
+Argus now annotates depth, tactile and other sensor data jointly with video, state and actions. Sensor findings appear as video overlays and in the JSON export, with supporting evidence and uncertainty.
 
 ## Overview
 
-Argus is a multimodal annotation harness for robot learning data. The VLM jointly interprets multi-view RGB, proprioception, actions, depth, tactile and other episode data to produce dense annotations of **actions, subgoals, outcomes, operator mistakes and recoveries**. A shared pipeline handles ingestion, frame sampling and sensor inspection across teleop, UMI and human ego datasets, preserving source timing and measurement semantics without dataset-specific prompts. We believe this combination of broad format support and joint visual/sensor reasoning distinguishes Argus among open-source robotics annotation tools.
+Argus is an open source dataset-and-format-agnostic harness for the densest annotation of robot learning data.
+
+To my knowledge, Argus is the only open-source annotation harness that combines native multi-format ingestion, joint visual/sensor reasoning, and dense annotations of **actions, subgoals, outcomes, operator mistakes, recoveries and object-state changes**. It reads multi-view RGB alongside state/action trajectories, depth, tactile and other recorded fields, preserving their timing and measurement semantics. The VLM can inspect additional samples or image regions to support a finding; evidence, confidence and limitations remain available in the viewer and JSON exports.
 
 <p align="center">
   <a href="https://raw.githubusercontent.com/Pantheon-Industries-Inc/argus/refs/heads/main/media/architecture.svg">
-    <img src="media/architecture.svg" width="1100" alt="Annotation pipeline: format ingestion, field interpretation, visual and sensor evidence selection, VLM annotation, temporal stitching, viewer and JSON exports.">
+    <img src="media/architecture.svg" width="1100" alt="Annotation pipeline: format ingestion, field interpretation, visual, state and sensor evidence, VLM annotation of behavior and state changes, issue detection, temporal stitching, viewer and JSON exports.">
   </a>
 </p>
 
-**Data:** teleop, UMI and human ego. **Formats:** LeRobot v2.0/v2.1/v3.0, MCAP, HDF5, video files and folders, and ZIP/TAR archives, with JSON/CSV/Parquet sidecars. Nine public dataset adapters provide download and sample-selection entrypoints.
+| Input support | Details |
+|---|---|
+| Recording types | Teleop, UMI and human ego |
+| Native formats | LeRobot v2.0/v2.1/v3.0, MCAP, HDF5, video files and folders |
+| Archives | ZIP and TAR |
+| Sidecar metadata | JSON, CSV and Parquet |
+| Public dataset adapters | Nine adapters for downloading datasets and selecting episode samples |
 
 | Available evidence | How it contributes |
 |---|---|
@@ -34,7 +50,7 @@ Argus is a multimodal annotation harness for robot learning data. The VLM jointl
 
 ## Install and review
 
-You need Python 3.11, [uv](https://docs.astral.sh/uv/), Node.js for viewer checks, and `ffmpeg`/`ffprobe` 5.1 or newer.
+You need Python 3.11, [uv](https://docs.astral.sh/uv/), and `ffmpeg`/`ffprobe` 5.1 or newer.
 
 ```bash
 git clone https://github.com/Pantheon-Industries-Inc/argus.git
@@ -66,19 +82,43 @@ uv run python -m board serve --board data/review/mine --clips data/review/mine/c
 
 Each recording produces one public episode. Long recordings are split to fit API request limits and rejoined on the original timeline; internal chunk boundaries are not treated as recording truncation. Session mode annotates activities within the recording. Preparation limits, missing chunks and processing failures are reported alongside any usable results.
 
-Resume preserves the original settings, input verification and evidence selection. Changes to paid request semantics require a new run. `--free` skips paid field interpretation, image-detail routing and evidence selection, so it previews base requests rather than the full paid evidence path. Spending caps account for all applicable calls and outstanding reservations; unresolved charges stay reserved.
+Rerunning a review job with the same `--out` preserves its settings and reuses outputs whose inputs and selected evidence still match. Changes to paid request semantics require a new job. `--free` skips paid field interpretation, image-detail routing and evidence selection, so it previews base requests rather than the full paid evidence path. Spending caps account for all applicable calls and outstanding reservations; unresolved charges stay reserved.
 
 ## Results and further use
 
-The output schema includes action phases (advancing, wasteful or idle), subgoals, key events, outcomes, operator mistakes, recoveries, scene changes and recording quality. Sensor findings include evidence, confidence and limitations; inspection can yield no additional finding when the signal is inconclusive.
+Live and static boards use the same [viewer](board/index.html), with behavioral and sensor annotations overlaid on the footage and supporting measurements alongside it. The same findings are available as episode JSON, filtered JSON Lines and static exports.
 
-A review job contains prepared `episodes/`, base requests in `dry/`, receipts in `run/`, rejoined labels in `run_final/`, and the board. Episode JSON, filtered JSON Lines and static exports retain annotations and supporting evidence while omitting internal access metadata. Human field overrides take precedence, including a blank role; source or interpretation changes invalidate stale findings.
+This is an excerpt from a tactile episode's downloadable JSON. Evidence IDs resolve to recorded streams and samples in the full export:
 
-Live and static boards use the same [viewer](board/index.html), with behavioral and sensor annotations overlaid on the footage and supporting measurements available alongside it. Shared footage remains subject to its source license and access policy.
+```json
+{
+  "sensor_evidence": {
+    "findings": [
+      {
+        "start_s": 54.0,
+        "end_s": 55.0,
+        "headline": "The held module's contact shifts during insertion",
+        "overlay_detail": "The pad deforms during seating; this does not establish that the module slipped.",
+        "confidence": "medium",
+        "evidence": [
+          {
+            "sensor_id": "camera:extra4",
+            "time_s": [54.0, 55.0]
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+A review job contains prepared `episodes/`, base requests in `dry/`, model inputs and receipts in `run/`, rejoined labels in `run_final/`, and the board. Action phases distinguish advancing, wasteful and idle behavior. Sensor findings include evidence, confidence and alternative explanations; inconclusive evidence need not produce a finding. Exports omit internal access metadata.
+
+Field definitions supplied by the dataset publisher or user override inferred meanings and layouts without changing recorded measurements. Changes to source data or field interpretations invalidate stale findings. Shared footage retains its source license and access policy.
 
 ![Two-camera UMI annotation walkthrough, with action phases, subgoals and goal reasoning over the footage.](media/board_demo.webp)
 
-Animated WebP from the standalone demonstration. [Browse example annotations](https://pantheon.inc/data-board).
+[Browse example annotations](https://pantheon.inc/data-board).
 
 <details>
 <summary>Individual stages, dataset adapters and custom boards</summary>
@@ -92,9 +132,27 @@ uv run python -m label --dataset mine --episodes data/episodes/mine/all --kind f
 
 Public adapters are `molmo`, `abc130k`, `galaxea`, `habit`, `fastumi`, `realomin`, `egocentric100k`, `genhumanego` and `openaoe`; `configs/slices/` records published selections. Generic readers preserve source fields instead of applying corpus-release cropping or task selection.
 
-For a custom board, create `data/boards/mine/manifest.json` with the dataset, prepared episodes and run paths. [configs/quickstart/board.json](configs/quickstart/board.json) shows the structure with published-dataset severity rules. Use `python -m board build`, `clips`, `serve`, and `static media`/`static site`; each takes `--help`. Refresh the board after dictionary edits. Owner editing requires `board serve --dictionary-job JOB`.
+For example, download and prepare the single MolmoAct2 episode listed in the quickstart:
 
-Paid staged runs require a clean tracked checkout. `--resume RUN --why "reason"` uses saved settings and remaining budget; `python -m label.reparse RUN` reparses stored replies without another call. Receipts survive failures. `board grids` reconstructs base request grids only when original input hashes can be verified; detail/sensor images are counted but not reconstructed there.
+```bash
+uv run python -m prepare molmo prepare --episodes configs/quickstart/teleop.txt \
+  --out data/episodes/molmo/quickstart
+```
+
+The adapter retrieves the source files needed for that episode, including shared video packs, and preserves its camera offsets and state/action trajectories. Preparation makes no model calls.
+
+For a custom board, create `data/boards/mine/manifest.json` with the dataset, prepared episodes and run paths. [configs/quickstart/board.json](configs/quickstart/board.json) shows the structure with published-dataset severity rules. Use `python -m board build`, `clips`, `serve`, and `static media`/`static site`; each takes `--help`. Refresh the board after changing field definitions. To edit them in the local viewer, add `--dictionary-job JOB` to `board serve`.
+
+Export the same review job as a static viewer by preparing the media first, then building the site:
+
+```bash
+uv run python -m board static media --board data/review/mine --clips data/review/mine/clips
+uv run python -m board static site --board data/review/mine --clips data/review/mine/clips
+```
+
+The site is written to `data/review/mine/static/<build_id>/`, with shared media in `data/review/mine/static/media/`.
+
+Paid staged runs require a clean tracked checkout. `--resume RUN --why "reason"` retains the run and remaining budget. Repeat `--dataset`, `--episodes` and `--kind`; pass the original harness options after `--`. `python -m label.reparse RUN` reparses stored replies without another call. Receipts survive failures. `board grids` reconstructs base request grids only when original input hashes can be verified; detail/sensor images are counted but not reconstructed there.
 
 `checks.timebase scan` proposes clock corrections; inspect them before `apply`. Capture, source and sensor check failures are distinct from clean results. Optional hand pose uses `board/hand_pose/modal_app.py` and `board/hands.py`; it is separate from ordinary annotation and has the licenses below.
 
@@ -107,13 +165,14 @@ Paid staged runs require a clean tracked checkout. `--resume RUN --why "reason"`
 uv run python -m compare prepare --selection configs/compare/main.json
 uv run python -m compare label --selection configs/compare/main.json --models astra,sol61_high --kind full --cap 20
 uv run python -m compare board --entries data/runs/compare/main.json --out data/boards/compare
+uv run python -m board build data/boards/compare
 uv run python -m gate prepare
 uv run python -m gate label --kind full --cap 20
 ```
 
 Comparison caps apply per model run and gate caps per recording setup. Sampling may differ by model: compare saved requests before claiming identical inputs. `--with-example` supplies a reference annotation; `--routes` reuses resolution choices. [gate/selection.json](gate/selection.json) and [gate/cases.json](gate/cases.json) define the selected cases; `gate score` evaluates the supplied runs.
 
-`uv run --frozen --offline pytest -q -ra` runs offline tests. CI uses the locked environment, Node, ffmpeg and ffprobe without provider credentials or dataset access. Secret scans cover the committed tree and reachable history; they do not grant permission to publish uploaded data.
+`uv run --frozen --offline pytest -q -ra` runs offline tests; viewer tests also require Node.js. CI uses the locked environment, Node, ffmpeg and ffprobe without provider credentials or dataset access. Secret scans cover the committed tree and reachable history; they do not grant permission to publish uploaded data.
 
 </details>
 
@@ -123,7 +182,10 @@ The capture checks in `checks/vendor/public_dataset_adapter_qc.py` are Sambhav G
 
 ## Licenses
 
-The code is Apache-2.0 (`LICENSE`), and the few files that carry material under another license are listed in `THIRD_PARTY_NOTICES.txt`. The components below are downloaded at run time and are not included here. The labels Pantheon publishes, on the data dashboard, in its downloads and in the release, are licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), so anyone may use them for any purpose with credit to Pantheon. The footage they describe keeps its dataset's license.
+The code is Apache-2.0 (`LICENSE`), and the few files that carry material under another license are listed in [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt). Full datasets and optional components are downloaded at run time. The labels Pantheon publishes, on the data dashboard, in its downloads and in the release, are licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), so anyone may use them for any purpose with credit to Pantheon. The footage they describe keeps its dataset's license.
+
+<details>
+<summary>Dataset and optional component licenses</summary>
 
 | Component | License | Source |
 |---|---|---|
@@ -145,3 +207,5 @@ The code is Apache-2.0 (`LICENSE`), and the few files that carry material under 
 | OpenAoE-2000h (inclusionAI) | Open-AoE Dataset License, attribution required; its MANO-derived files, which the adapter never reads, also fall under MANO's license | [inclusionAI/OpenAoE-2000h](https://huggingface.co/datasets/inclusionAI/OpenAoE-2000h/blob/main/LICENSE) |
 
 Running a dataset through this pipeline does not change its license, so credit each dataset as its license asks when you publish its footage or labels. The hand keypoints come from the ACE-Ego-Hand checkpoints (CC BY-NC 4.0) and a model built on MANO (non-commercial research only), so use them only for non-commercial purposes and credit ACE-Ego-Hand.
+
+</details>

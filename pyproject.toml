@@ -1,7 +1,7 @@
 [project]
 name = "argus"
 version = "1.0.0"
-description = "Audit robot-learning datasets and annotate every episode densely with a vision-language model and deterministic checks."
+description = "Argus is an open source dataset-and-format-agnostic harness for the densest annotation of robot learning data."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = "==3.11.*"
