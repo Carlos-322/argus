@@ -166,6 +166,7 @@ let scheduled=null;
 const queue=E.setupSensorEvidence(E.sensorEvidence({sensor_evidence:{version:1,findings:[
  {start_s:1,end_s:1.1,headline:'Brief source change',adds_beyond_video:true}]}}),()=>{},()=>{},()=>{},null,null,()=>{},
  {schedule:fn=>(scheduled=fn),cancel:()=>{scheduled=null;}});
+queue.setPlaybackActive(true);
 queue.sync(1.05);assert(seekStrip.innerHTML.includes('Brief source change'));
 assert.equal(seekDock.scrollTop,0,'each newly selected card starts at its header');
 seekDock.scrollTop=6;queue.sync(1.06);assert.equal(seekDock.scrollTop,6,'ordinary playback keeps reading position');

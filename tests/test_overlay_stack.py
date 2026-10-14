@@ -288,7 +288,8 @@ const fs=require('fs'),assert=require('assert');
 const src=fs.readFileSync(process.argv[1],'utf8');
 const begin=src.indexOf('// ================= sensor evidence:'),end=src.indexOf('// ================= touch:',begin);
 const strip={innerHTML:'',hidden:true,dataset:{},querySelectorAll:()=>[]};
-const doc={getElementById:id=>id==='grip-finding-overlay'?strip:null,querySelectorAll:()=>[]};
+const detail={innerHTML:''};
+const doc={getElementById:id=>id==='grip-finding-overlay'?strip:id==='sensor-evidence-now'?detail:null,querySelectorAll:()=>[]};
 const api=new Function('esc','fmtT','document',src.slice(begin,end)
  +'return {sensorEvidence,setupSensorEvidence};')(String,t=>t.toFixed(1)+'s',doc);
 const findings=JSON.parse(fs.readFileSync(process.argv[2],'utf8')).findings;
@@ -301,11 +302,23 @@ let pending=null, readingMs=0;
 const presentation={schedule(fn,ms){pending=fn;readingMs=ms;return fn;},cancel(){pending=null;}};
 const wire=api.setupSensorEvidence(E,()=>{},()=>{},()=>{},null,null,()=>{},presentation);
 wire.sync(1.1);wire.setCapacity(200);assert(strip.innerHTML.includes(findings[0].headline));
+assert.equal(pending,null,'a paused finding does not start an independent slideshow');
+wire.setPlaybackActive(true);
 assert(readingMs>3500,'the recorded explanation needs more reading time than a headline alone');
 wire.sync(2.46244);wire.sync(4.1);
 assert(strip.innerHTML.includes(findings[0].headline),'first finding retains its reading time');
 assert(pending,'concurrent findings must progress without manual selection');
 function advance(){const fn=pending;pending=null;assert(fn);fn();}
+const stoppedCard=strip.innerHTML,stoppedDetail=detail.innerHTML,lateCallback=pending;
+wire.setPlaybackActive(false);
+assert.equal(pending,null,'pause or video end cancels automatic advancement');
+lateCallback();
+assert.equal(strip.innerHTML,stoppedCard,'a late timer cannot alter the stopped frame');
+assert.equal(detail.innerHTML,stoppedDetail,'stopping does not reset supporting evidence');
+wire.setPlaybackActive(true);
+const resumedCallback=pending;
+lateCallback();
+assert.equal(pending,resumedCallback,'a cancelled slot cannot retire the same finding after resume');
 wire.setPresentationVisible(false);assert.equal(pending,null,'offscreen or hidden card cancels its reading slot');
 wire.setPresentationVisible(true);
 doc.hidden=true;advance();assert(strip.innerHTML.includes(findings[0].headline),'hidden tab cannot consume reading time');
@@ -313,8 +326,10 @@ doc.hidden=false;advance();assert(strip.innerHTML.includes('Touch and video cloc
 assert(strip.innerHTML.includes('Earlier'));assert(strip.innerHTML.includes('2.4s to 2.6s'));
 wire.setCapacity(0);assert.equal(pending,null,'blocked time cannot consume the warning');
 wire.setCapacity(200);advance();
-assert(strip.innerHTML.includes(findings[1].headline),'brief sound event receives its own reading time after playback ends');
+assert(strip.innerHTML.includes(findings[1].headline),'brief sound event remains reachable during playback');
+const lastDetail=detail.innerHTML;
 advance();assert(strip.hidden,'every queued finding retires after readable display time');
+assert.equal(detail.innerHTML,lastDetail,'overlay retirement must not reset the evidence panel to the first finding');
 assert(!strip.innerHTML.includes('Rejected warning'));
 wire.sync(0);assert(strip.hidden,'backward seek clears the presentation queue');
 assert.equal(JSON.stringify(E),original,'presentation preserves recorded annotations');
@@ -323,6 +338,7 @@ const withContact=api.sensorEvidence({sensor_evidence:{version:1,findings},conta
  {id:'reported-slip',start_s:2.4,end_s:2.6,shown:true,seen:{slip:'yes',touch_seen:'yes'}}
 ]});
 const contactWire=api.setupSensorEvidence(withContact,()=>{},()=>{},()=>{},null,null,()=>{},presentation);
+contactWire.setPlaybackActive(true);
 contactWire.sync(2.46244);contactWire.setCapacity(200);
 assert(strip.innerHTML.includes('Slip reported'),'the shared dock preserves existing contact anomalies');
 contactWire.dispose();

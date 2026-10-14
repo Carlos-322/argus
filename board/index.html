@@ -1038,8 +1038,6 @@ aside.left .cam-row-grippers:has(.sensor-overlay-stack) .cam-cell.cam-exo { grid
     left: calc(var(--fx-left, 0px) + 8px); }
   .sensor-overlay-stack:has(.gf-pressure) {
     width: min(260px, 70%, calc(100% - var(--fx-left, 0px) - var(--fx-right, 0px) - 24px)); }
-  /* Keep the observation and recorded chart together; supporting prose remains in the evidence panel. */
-  .sensor-overlay-stack.tight:has(.gf-pressure) .gf-detail { display: none; }
   .sensor-overlay-stack.tight:has(.gf-pressure) .grip-finding-overlay { padding: 3px 8px; }
   .sensor-overlay-stack.tight:has(.gf-pressure) .gf-copy { gap: 2px; }
   .sensor-overlay-stack.tight:has(.gf-pressure) .gf-title { font-size: 12px; line-height: 1.3; }
@@ -4749,7 +4747,7 @@ function gripFindingStripHtml(f, G = null, pager = '') {
     <span class="gf-meta"><span class="gf-phase${f.phase === 'Now' ? ' is-now' : ''}">${esc(f.phase)}</span>
       <span class="gf-time">${f.start === f.end ? fmtT(f.start) : `${fmtT(f.start)} to ${fmtT(f.end)}`}</span>${pager}</span>
     <button type="button" class="gf-title" title="Replay this finding">${f.generic ? genericSensorHeadlineHtml(f.headline, f.anatomical) : gripFingerHtml(f.headline)}</button>
-    ${f.generic && (f.kind === 'insight' || f.kind === 'anomaly') && (f.overlayDetail || f.claim || f.detail) ? `<span class="gf-detail">${esc(f.overlayDetail || f.claim || f.detail)}</span>` : ''}
+    ${(f.kind === 'insight' || f.kind === 'anomaly') && (f.overlayDetail || f.detail || f.claim) ? `<span class="gf-detail">${esc(f.overlayDetail || (f.generic ? f.claim || f.detail : f.detail || f.claim))}</span>` : ''}
     ${f.kind === 'insight' ? gripOverlayPressureHtml(G, f, 2) : ''}</span>
     <span class="gf-inspect" aria-hidden="true">↗</span>`;
 }
@@ -5039,25 +5037,29 @@ function setupSensorEvidence(E, seek, on, inspectContact, d = null, file = null,
   });
   let signature = null, stripKey = null, stripFindingIndex = null, plottedGrip = (E.insights || [])[0] || null;
   const deferred = new Map(), presented = new Set();
-  let presentationTimer = null, presentationKey = null, presentationVisible = true, disposed = false;
+  let presentationTimer = null, presentationKey = null, presentationEpoch = 0;
+  let presentationVisible = true, playbackActive = false, disposed = false;
   function cancelPresentation() {
+    presentationEpoch++;
     if (presentationTimer != null) presentation.cancel(presentationTimer);
     presentationTimer = null; presentationKey = null;
   }
   function schedulePresentation() {
     if (!presentation) return;
-    const key = strip && !blocked && presentationVisible && displayedGrip && deferred.has(displayedGrip.findingIndex)
+    const key = strip && !blocked && playbackActive && presentationVisible && displayedGrip && deferred.has(displayedGrip.findingIndex)
       ? displayedGrip.findingIndex : null;
     if (key === presentationKey) return;
     cancelPresentation();
     if (key == null) return;
     presentationKey = key;
-    const explanation = displayedGrip.generic ? displayedGrip.overlayDetail || displayedGrip.claim || displayedGrip.detail || '' : '';
+    const explanation = displayedGrip.overlayDetail || (displayedGrip.generic
+      ? displayedGrip.claim || displayedGrip.detail : displayedGrip.detail || displayedGrip.claim) || '';
     const words = (displayedGrip.headline + ' ' + explanation).trim().split(/\s+/).length;
     const readingMs = Math.max(3500, 1000 + words * 220);
+    const epoch = presentationEpoch;
     presentationTimer = presentation.schedule(() => {
+      if (disposed || !playbackActive || presentationEpoch !== epoch) return;
       presentationTimer = null; presentationKey = null;
-      if (disposed) return;
       const bounds = strip && strip.getBoundingClientRect?.();
       const viewport = document.documentElement;
       const scroller = strip?.closest?.('.sensor-overlay-stack');
@@ -5085,6 +5087,10 @@ function setupSensorEvidence(E, seek, on, inspectContact, d = null, file = null,
         deferred.set(finding.findingIndex, {finding, visibleSeconds: 0});
     }
     wire.sync(currentTime);
+  }, setPlaybackActive(active) {
+    if (playbackActive === active) return;
+    playbackActive = active;
+    schedulePresentation();
   }, setPresentationVisible(visible) {
     if (presentationVisible === visible) return;
     presentationVisible = visible;
@@ -5165,7 +5171,7 @@ function setupSensorEvidence(E, seek, on, inspectContact, d = null, file = null,
       line.setAttribute('x1', x); line.setAttribute('x2', x);
     }
     const measurements = profiles.map(p => sensorProfileHtml(p, t)).join('');
-    const selected = displayedGrip && displayedGrip.kind === 'insight' ? displayedGrip : (E.insights || [])[0];
+    const selected = displayedGrip && displayedGrip.kind === 'insight' ? displayedGrip : plottedGrip;
     if (selected && (!plottedGrip || selected.findingIndex !== plottedGrip.findingIndex)) {
       const panel = document.getElementById('grip-evidence-panel');
       if (panel) panel.innerHTML = gripEvidencePanelHtml(E.grip, selected);
@@ -7159,7 +7165,11 @@ function renderEp(d, opts) {
       evidenceWire.reset(vid.currentTime, true);
     });
     on(vid, 'seeked', () => syncAll(vid.currentTime));
-    on(vid, 'play', () => { if (vid.currentTime <= 1e-6) evidenceWire.reset(vid.currentTime); });
+    const syncPresentationPlayback = () => evidenceWire.setPlaybackActive(!vid.paused && !vid.ended && !vid.seeking && vid.readyState >= 3);
+    on(vid, 'play', () => { if (vid.currentTime <= 1e-6) evidenceWire.reset(vid.currentTime); syncPresentationPlayback(); });
+    for (const event of ['playing', 'pause', 'ended', 'seeking', 'seeked']) on(vid, event, syncPresentationPlayback);
+    for (const event of ['waiting', 'emptied']) on(vid, event, () => evidenceWire.setPlaybackActive(false));
+    syncPresentationPlayback();
   }
   setupSensors(_activeFile, duration, seek, on, vid, v => v === mainCam && isEgo ? 'head' : camLabel(v), camViews,
     touch.contacts.length > 0);

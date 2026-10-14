@@ -245,7 +245,8 @@ assert.equal(JSON.stringify(raw),before,'display formatting preserves original s
 assert.equal(E.insights[0].headline,'Thumb and index finger pressure increase');
 const html=api.gripFindingStripHtml({...E.insights[0],phase:'Now'});
 assert(html.includes('<span class="grip-finger-name" data-finger="thumb">Thumb</span> and <span class="grip-finger-name" data-finger="index">index finger</span> pressure increase'));
-assert(!html.includes('gf-detail')&&!html.includes('gf-confidence'),'the overlay keeps only the finding and pressure visual');
+assert(html.includes('<span class="gf-detail">Index finger pressure rises</span>'),'the explanation accompanies the pressure visual');
+assert(!html.includes('gf-confidence'),'confidence does not displace the evidence');
 assert.equal(api.gripFingerHtml('<img src=x onerror=alert(1)> thumb').includes('<img'),false);
 assert(!source.includes('id="grip-hand-overlay"'));
 assert(!source.includes('title="${gripFingerHtml('),'rich text is never interpolated into HTML attributes');
