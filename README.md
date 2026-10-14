@@ -52,7 +52,7 @@ To my knowledge, Argus is the only open-source annotation harness that combines 
 
 You need Python 3.11, [uv](https://docs.astral.sh/uv/), and `ffmpeg`/`ffprobe` 5.1 or newer.
 
-```bash
+```console
 git clone https://github.com/Pantheon-Industries-Inc/argus.git
 cd argus
 uv sync --frozen
@@ -60,7 +60,7 @@ uv sync --frozen
 
 Paid annotation requires `OPENROUTER_API_KEYS` (comma-separated keys) or `OPENAI_API_KEY` in your shell or secret manager. Gated Hugging Face datasets require accepting their terms and setting `HF_TOKEN`. Keep inputs and outputs under the ignored `data/` directory.
 
-```bash
+```console
 # Prepare and inspect base requests without model calls.
 uv run python -m review --data path/to/dataset --rig teleop_arms \
   --dataset-note "Two arms arrange blocks on a tray." --out data/review/mine --free
@@ -123,7 +123,7 @@ Field definitions supplied by the dataset publisher or user override inferred me
 <details>
 <summary>Individual stages, dataset adapters and custom boards</summary>
 
-```bash
+```console
 uv run python -m prepare folder prepare --root path/to/data --rig teleop_arms --out data/episodes/mine/all
 uv run python -m checks data/episodes/mine/all
 uv run python -m label --dataset mine --episodes data/episodes/mine/all --kind dry
@@ -134,7 +134,7 @@ Public adapters are `molmo`, `abc130k`, `galaxea`, `habit`, `fastumi`, `realomin
 
 For example, download and prepare the single MolmoAct2 episode listed in the quickstart:
 
-```bash
+```console
 uv run python -m prepare molmo prepare --episodes configs/quickstart/teleop.txt \
   --out data/episodes/molmo/quickstart
 ```
@@ -145,7 +145,7 @@ For a custom board, create `data/boards/mine/manifest.json` with the dataset, pr
 
 Export the same review job as a static viewer by preparing the media first, then building the site:
 
-```bash
+```console
 uv run python -m board static media --board data/review/mine --clips data/review/mine/clips
 uv run python -m board static site --board data/review/mine --clips data/review/mine/clips
 ```
@@ -161,7 +161,7 @@ Paid staged runs require a clean tracked checkout. `--resume RUN --why "reason"`
 <details>
 <summary>Model comparisons, gate cases and offline verification</summary>
 
-```bash
+```console
 uv run python -m compare prepare --selection configs/compare/main.json
 uv run python -m compare label --selection configs/compare/main.json --models astra,sol61_high --kind full --cap 20
 uv run python -m compare board --entries data/runs/compare/main.json --out data/boards/compare
