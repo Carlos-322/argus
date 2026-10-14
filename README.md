@@ -7,7 +7,7 @@
 
 <table align="center">
   <tr>
-    <td><h3><a href="https://pantheon.inc/research/argus">Blog</a> | <a href="https://pantheon.inc/data-board">Data</a></h3></td>
+    <td><strong><a href="https://pantheon.inc/research/argus">Blog</a> | <a href="https://pantheon.inc/data-board">Data</a></strong></td>
   </tr>
 </table>
 
