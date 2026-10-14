@@ -523,6 +523,7 @@ aside.left .video-wrap {
      so nothing in it paints over the sticky episode header when the video scrolls under it */
   isolation: isolate;
 }
+aside.left .cam-cell.cam-exo > video { scroll-margin-top: calc(var(--header-h) + 8px); }
 /* Cam layout: big exo on top (full width), wrist L+R side-by-side below.
    The exo view is the most useful (third-person workspace); the wrist
    cams are reference views. Bigger video player means the scrubber bar
@@ -692,13 +693,25 @@ aside.left .cam-cell.cam-exo .cam-label { top: calc(var(--fx-top, 0px) + 8px); l
 .top-hud { position: absolute; z-index: 4; top: calc(var(--fx-top, 0px) + 8px);
   left: calc(var(--fx-left, 0px) + 8px); right: calc(var(--fx-right, 0px) + 8px); container: hud / inline-size;
   pointer-events: none; }
-.top-hud-in { display: grid; grid-template-columns: minmax(max-content, 1fr) auto minmax(26px, 1fr); column-gap: 8px;
-  align-items: start; }
+.top-hud-in { display: grid; grid-template-columns: minmax(max-content, 1fr) minmax(0, auto) minmax(26px, 1fr); column-gap: 8px;
+  align-items: start; min-height: 26px; }
 .top-hud .prog-overlay { position: static; justify-self: start; }
-@container hud (max-width: 480px) { .top-hud .prog-overlay .po-svg { display: none; } }
-@container hud (max-width: 330px) { .top-hud .prog-overlay .po-sub { display: none; } }
+.top-hud .po-pct { min-width: 4ch; }
+.top-hud .th-l { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.top-hud-scene .top-hud-in { display: flex; flex-wrap: wrap; gap: 8px; padding-right: 34px; }
+.top-hud-scene .prog-overlay { flex: 0 0 auto; box-sizing: border-box; max-width: 100%; }
+aside.left .cam-cell.cam-exo .top-hud .cam-label { position: static; box-sizing: border-box;
+  white-space: normal; max-width: 100%; overflow-wrap: anywhere; }
+aside.left .cam-row-grippers .top-hud-scene .top-hud-in { flex-direction: column; align-items: flex-start; }
+@container hud (max-width: 480px) { .top-hud:not(.top-hud-scene) .prog-overlay .po-svg { display: none; } }
+@container hud (max-width: 330px) {
+  .top-hud:not(.top-hud-scene) .prog-overlay .po-sub { display: none; }
+  .ego-status .es-pov { white-space: normal; text-align: center; }
+}
+@container hud (max-width: 260px) { .top-hud-scene .prog-overlay .po-svg { display: none; } }
+@container hud (max-width: 180px) { .top-hud-scene .prog-overlay .po-sub { display: none; } }
 .ego-status {
-  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 0;
 }
 .ego-status .es-pov, .ego-status .es-hand {
   display: inline-flex; align-items: center; gap: 7px;
@@ -6360,18 +6373,20 @@ function renderEp(d, opts) {
           <div class="recovery-overlay" id="recovery-overlay"></div>
           <div class="video-overlay" id="video-overlay"></div>
   `;
+  const mainCameraLabel = isEgo && !unshownCams(d).some(u => u.view === mainCam) ? ''
+    : `<span class="cam-label" title="${esc(camLabel(mainCam))}">${esc(unshownCams(d).some(u => u.view === mainCam)
+      && cameraPresentation(d, mainCam) === 'scene' ? 'scene' : camLabel(mainCam))}</span>`;
   leftCol.innerHTML = `
     <div class="video-wrap">
       <div class="cam-row${isEgo ? ' cam-row-single' : (!hasTop ? ' cam-row-grippers' + (sideCams.length ? ''
         : ' cam-row-single') : '')}">
         <div class="cam-cell cam-exo">
-          ${isEgo && !unshownCams(d).some(u => u.view === mainCam) ? '' : `<span class="cam-label" title="${esc(camLabel(mainCam))}">${esc(unshownCams(d).some(u => u.view === mainCam) && cameraPresentation(d, mainCam) === 'scene' ? 'scene' : camLabel(mainCam))}</span>`}
           <button class="fs-btn" id="fs-btn" title="fullscreen (keeps overlays)">&#9974;</button>
           <video id="video" data-view="${esc(mainCam)}" controls controlslist="nofullscreen" preload="auto" playsinline${keep ? '' : ` src="${esc(videoUrl)}"${posterAttr(eidEnc,
             mainCam)}`}></video>${dpHtml(mainCam, dpViews)}
           ${isEgo ? '<canvas class="hp-canvas" id="hp-canvas" aria-hidden="true"></canvas>' : ''}
           ${isEgo ? `<div class="top-hud" id="top-hud"><div class="top-hud-in">
-            <div class="th-l">${progOverlayHtml}</div>
+            <div class="th-l">${mainCameraLabel}${progOverlayHtml}</div>
             <div class="ego-status" id="ego-status">
               <span class="es-pov ${d.viewpoint === 'third_person' ? 'exo' : ''}">${
                 d.viewpoint === 'third_person' ? '&#9673; exo &middot; third-person'
@@ -6380,7 +6395,7 @@ function renderEp(d, opts) {
               <span class="es-hand" id="es-hand"></span>
             </div>
             <div class="th-r"></div>
-          </div></div>` : progOverlayHtml}
+          </div></div>` : `<div class="top-hud top-hud-scene" id="top-hud"><div class="top-hud-in">${mainCameraLabel}${progOverlayHtml}</div></div>`}
           ${(evidence.insights.length || evidence.warnings.length || evidence.contacts.length || evidence.moments.length) ? `<div class="sensor-overlay-stack" id="sensor-overlay-stack" tabindex="0" aria-label="Sensor findings">
             ${evidence.insights.length || evidence.warnings.length ? '<div class="grip-finding-overlay" id="grip-finding-overlay" role="group" aria-label="Sensor findings" hidden></div>' : '<button type="button" class="sensor-overlay" id="sensor-overlay" aria-label="Inspect current tactile evidence"></button>'}
           </div>` : ''}
@@ -6823,6 +6838,11 @@ function renderEp(d, opts) {
   const sensorOverlay = document.getElementById('sensor-overlay');
   const gripFindingOverlay = document.getElementById('grip-finding-overlay');
   let evidenceWire = null;
+  if (topHud && typeof ResizeObserver !== 'undefined') {
+    const hudObserver = new ResizeObserver(scheduleTopPlacement);
+    hudObserver.observe(topHud);
+    window._epCleanup.push(() => hudObserver.disconnect());
+  }
   function placeTop() {
     if (!exoCell) return;
     const cr = exoCell.getBoundingClientRect();
@@ -6856,8 +6876,14 @@ function renderEp(d, opts) {
     if (depthControl) {
       depthControl.style.top = '';
       const r = depthControl.getBoundingClientRect();
+      const hudItems = topHud ? [...(topHud.querySelectorAll?.('.prog-overlay, .cam-label, .es-pov, .es-hand') || [])]
+        : progOverlay ? [progOverlay] : [];
+      const hudBlocks = hudItems.filter(el => {
+        const s = getComputedStyle(el);
+        return s.visibility !== 'hidden' && +s.opacity > .001 && el.getBoundingClientRect().height > 0;
+      }).map(rect);
       let top = r.top;
-      for (const block of occupied.slice().sort((a, b) => a.top - b.top)) {
+      for (const block of [...occupied, ...hudBlocks].sort((a, b) => a.top - b.top)) {
         if (r.left < block.right && r.right > block.left && top < block.bottom + 8 && top + r.height > block.top - 8)
           top = block.bottom + 8;
       }
@@ -6945,7 +6971,7 @@ function renderEp(d, opts) {
     if (topPlacementFrame) cancelAnimationFrame(topPlacementFrame);
     topPlacementFrame = requestAnimationFrame(() => {
       topPlacementFrame = 0;
-      placeSensors();
+      placeTop();
     });
   }
   let _recSig = null;

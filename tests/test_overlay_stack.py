@@ -239,24 +239,24 @@ def test_paused_blocked_pending_card_keeps_measurement_until_readable_space_retu
 const fs=require('fs'),assert=require('assert');
 const s=fs.readFileSync(process.argv[1],'utf8');
 const begin=s.indexOf('// ================= sensor evidence:'),end=s.indexOf('// ================= touch:',begin);
-const placementStart=s.indexOf('  function placeSensors() {'),placementEnd=s.indexOf('  let _recSig',placementStart);
+const placementStart=s.indexOf('  function placeTop() {'),placementEnd=s.indexOf('  let _recSig',placementStart);
 const pending=new Map();let frameId=0,active=true,wire;
 const readonly=()=>new Proxy({}, {set(){throw Error('sensor changed existing layout');}});
 const rect=(left,top,width,height)=>({left,top,right:left+width,bottom:top+height,width,height});
 const strip={innerHTML:'',hidden:true,querySelectorAll:()=>[]};
 const stack={style:{},dataset:{},get scrollHeight(){return strip.hidden?0:100;},
   classList:{remove(){},toggle(){}},getBoundingClientRect:()=>rect(12,0,210,100)};
-const recovery={style:readonly(),classList:{contains:()=>active},closest:()=>null,
+const recovery={style:{},classList:{contains:()=>active},closest:()=>null,
   getBoundingClientRect:()=>rect(12,46,680,534)};
 const host={style:readonly(),getBoundingClientRect:()=>rect(0,0,700,600),querySelector:()=>null};
 const doc={getElementById:id=>id==='grip-finding-overlay'?strip:id==='sensor-overlay-stack'?stack:null,
   querySelectorAll:()=>[]};
 const api=new Function('esc','fmtT','document',s.slice(begin,end)
   +'return {sensorEvidence,setupSensorEvidence};')(String,t=>t.toFixed(1)+'s',doc);
-const placement=new Function('exoCell','topHud','progOverlay','stateToast','recOverlay','document',
+const placement=new Function('exoCell','topHud','progOverlay','stateToast','recOverlay','fsBtn','document',
   'getComputedStyle','evidenceWire','requestAnimationFrame','cancelAnimationFrame',
   s.slice(placementStart,placementEnd)+'return {placeSensors,scheduleTopPlacement};')(
-    host,null,null,null,recovery,doc,()=>({position:'absolute',opacity:'0',getPropertyValue:()=> '0px'}),
+    host,null,null,null,recovery,null,doc,()=>({position:'absolute',opacity:'0',getPropertyValue:()=> '0px'}),
     {setCapacity:height=>wire.setCapacity(height)},
     fn=>{pending.set(++frameId,fn);return frameId;},id=>pending.delete(id));
 const E=api.sensorEvidence({sensor_evidence:{version:1,findings:[
