@@ -4707,7 +4707,7 @@ function gripOverlayPressureHtml(G, f, limit = 3) {
           ${v.depthRegion ? '' : `<line x1="0" x2="180" y1="${y(0)}" y2="${y(0)}" stroke="currentColor" opacity=".3" stroke-dasharray="2 3"/>`}
           ${points}<path d="${path.trim()}" fill="none" stroke="currentColor" opacity=".65" stroke-width="1.2" vector-effect="non-scaling-stroke"/>
           <circle data-grip-mini-dot="${k}" cx="0" cy="0" r="2.8" fill="currentColor" visibility="hidden"/>
-        </svg><span class="gf-pressure-gap" data-grip-mini-gap="${k}" visibility="hidden">${G.generic ? 'Not sampled' : 'No reading'}</span></span></span>`;
+        </svg>${G.generic ? '' : `<span class="gf-pressure-gap" data-grip-mini-gap="${k}" visibility="hidden">No reading</span>`}</span></span>`;
     }).join('')}
     </span>`;
 }
