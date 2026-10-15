@@ -127,10 +127,10 @@ assert.equal(api.activeSensorEvidence(evidence,.7)?.headline,'Likely grip tighte
 assert.equal(api.activeSensorEvidence(evidence,1),null,'do not extend an inferred change outside its span');
 assert.equal(api.displayGripFinding(evidence,0),null);
 assert.equal(api.displayGripFinding(evidence,.7).phase,'Now');
-assert.equal(api.displayGripFinding(evidence,1).phase,'Earlier');
-assert.equal(api.displayGripFinding(evidence,1).headline,'Likely grip tightening');
+assert.equal(api.displayGripFinding(evidence,.87),null,'the source end caps a subsecond card');
+assert.equal(api.displayGripFinding(evidence,1),null,'ended findings do not linger');
 assert.equal(api.displayGripFinding(evidence,2.8).headline,'Thumb response eases');
-assert.equal(api.displayGripFinding(evidence,3.8).phase,'Earlier');
+assert.equal(api.displayGripFinding(evidence,3.8),null);
 assert.equal(api.displayGripFinding(evidence,.2),null,'backward seeking clears later findings');
 assert.equal(api.displayGripFinding(evidence,.7).end,.87,'display persistence does not change the evidence interval');
 const detail=api.gripFindingDetailHtml(evidence.insights[0]);

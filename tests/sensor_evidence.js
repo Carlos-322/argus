@@ -158,22 +158,16 @@ assert.deepEqual(cameraApi.episodeCams(retained).views,['exo'],'model input orde
 assert.deepEqual(cameraApi.supportingCameras(retained).map(c=>c.view),['exo']);
 assert.equal(cameraApi.episodeCams({camera_views:['exo','left'],camera_presentation:{exo:{role:'other'},left:{role:'scene'}}}).main,'left');
 
-// Native seeks explicitly discard old reading queues, even forward or at the same time.
-const seekDock={scrollTop:14};
-const seekStrip={innerHTML:'',hidden:true,dataset:{},querySelectorAll:()=>[],classList:{toggle(){}},closest:()=>seekDock};
+// Seeks show the destination, without replaying annotations from skipped footage.
+const seekStrip={innerHTML:'',hidden:true,querySelectorAll:()=>[]};
 global.document={getElementById:id=>id==='grip-finding-overlay'?seekStrip:null,querySelectorAll:()=>[]};
-let scheduled=null;
-const queue=E.setupSensorEvidence(E.sensorEvidence({sensor_evidence:{version:1,findings:[
- {start_s:1,end_s:1.1,headline:'Brief source change',adds_beyond_video:true}]}}),()=>{},()=>{},()=>{},null,null,()=>{},
- {schedule:fn=>(scheduled=fn),cancel:()=>{scheduled=null;}});
-queue.setPlaybackActive(true);
-queue.sync(1.05);assert(seekStrip.innerHTML.includes('Brief source change'));
-assert.equal(seekDock.scrollTop,0,'each newly selected card starts at its header');
-seekDock.scrollTop=6;queue.sync(1.06);assert.equal(seekDock.scrollTop,6,'ordinary playback keeps reading position');
-queue.reset(100);assert(!seekStrip.innerHTML.includes('Brief source change') && scheduled===null);
-queue.reset(0);assert(seekStrip.hidden);
-queue.sync(1.05);queue.reset(1.05);assert(seekStrip.innerHTML.includes('Brief source change'),'same-time seek re-evaluates destination');
-queue.dispose();delete global.document;
+const view=E.setupSensorEvidence(E.sensorEvidence({sensor_evidence:{version:1,findings:[
+ {start_s:1,end_s:1.1,headline:'Brief source change',adds_beyond_video:true}]}}),()=>{},()=>{},()=>{});
+view.sync(1.05);assert(seekStrip.innerHTML.includes('Brief source change'));
+view.reset(100);assert(seekStrip.hidden);
+view.reset(0);assert(seekStrip.hidden);
+view.sync(1.05);view.reset(1.05);assert(seekStrip.innerHTML.includes('Brief source change'),'same-time seek re-evaluates the destination');
+view.dispose();delete global.document;
 
 (async () => {
   fine.active[3] = 1;
