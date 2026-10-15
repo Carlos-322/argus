@@ -5075,12 +5075,12 @@ function setupSensorEvidence(E, seek, on, inspectContact, d = null, file = null,
     const e = activeSensorEvidence(E, t);
     if (strip) {
       const key = JSON.stringify(available.map(f => [f.findingIndex, f.phase]));
+      strip.hidden = !available.length;
       if (stripKey !== key) {
         strip.innerHTML = available.map(f => `<div class="grip-finding-overlay sensor-finding-card${f.kind === 'quality' ? ' sensor-quality' : ''}" data-sensor-finding="${f.findingIndex}">${gripFindingStripHtml(f, E.grip)}</div>`).join('');
         stripKey = key;
         relayout();
       }
-      strip.hidden = !available.length;
       for (const card of strip.querySelectorAll('[data-sensor-finding]')) {
         const f = available.find(f => f.findingIndex === +card.dataset.sensorFinding);
         if (f?.kind === 'insight') syncGripOverlayPressure(E.grip, f, t, card, 2);
@@ -7047,7 +7047,10 @@ function renderEp(d, opts) {
       Number(el.dataset.i) === idx));
   }
   let tcWire = null;            // the Touch lane and its card (setupTouch), on an episode with contacts
-  evidenceWire = setupSensorEvidence(evidence, seek, on, (k, t) => { if (tcWire) tcWire.inspect(k, t); }, d, _activeFile, scheduleTopPlacement);
+  evidenceWire = setupSensorEvidence(evidence, seek, on, (k, t) => { if (tcWire) tcWire.inspect(k, t); }, d, _activeFile, () => {
+    placeSensors();
+    scheduleTopPlacement();
+  });
   window._epCleanup.push(() => evidenceWire.dispose());
   const syncEvidence = t => {
     evidenceWire.sync(t);

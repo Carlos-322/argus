@@ -147,7 +147,9 @@ const E=api.sensorEvidence({sensor_evidence:{version:1,findings},tactile_qc:{ver
  {start_s:2.4,end_s:2.6,headline:'Touch and video clocks disagree',detail:'Measured offset exceeds the review threshold.'},
  {start_s:2.4,end_s:2.6,headline:'Rejected warning',review_status:'rejected'}
 ]}});
-const original=JSON.stringify(E),wire=api.setupSensorEvidence(E,()=>{},()=>{},()=>{});
+const original=JSON.stringify(E),wire=api.setupSensorEvidence(E,()=>{},()=>{},()=>{},null,null,()=>{
+ if(strip.innerHTML.includes('data-sensor-finding')) assert(!strip.hidden,'new cards must be measurable when placement runs');
+});
 wire.sync(1.1);assert(strip.innerHTML.includes(findings[0].headline));
 wire.sync(2.46244);
 assert(strip.innerHTML.includes(findings[0].headline)&&strip.innerHTML.includes(findings[0].detail),'the long hold gets its full two-second minimum');
