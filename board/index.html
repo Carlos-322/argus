@@ -1016,6 +1016,9 @@ aside.left .grip-strip .sensor-overlay { position: static; order: 2; max-width: 
   position: absolute; min-width: 0; max-width: none; margin: 0; box-sizing: border-box;
   width: min(300px, 42%, calc(100% - var(--fx-left, 0px) - var(--fx-right, 0px) - 24px));
   padding: 9px 11px; pointer-events: auto; }
+.sensor-finding-card {
+  transition: top 240ms cubic-bezier(.22,.61,.36,1), left 240ms cubic-bezier(.22,.61,.36,1); }
+@media (prefers-reduced-motion: reduce) { .sensor-finding-card { transition: none; } }
 .sensor-evidence-band { grid-column: 1 / -1; background: #000; }
 .sensor-evidence-band[hidden] { display: none; }
 .sensor-overlay-stack .gf-title { display: block; width: 100%; padding: 0; border: 0; background: transparent;
@@ -6833,6 +6836,17 @@ function renderEp(d, opts) {
     }
     const imageLeft = cr.left + (parseFloat(style.getPropertyValue('--fx-left')) || 0);
     const imageRight = cr.right - (parseFloat(style.getPropertyValue('--fx-right')) || 0);
+    const positionCard = (card, left, top) => {
+      const firstPlacement = !card.style.left || !card.style.top;
+      if (firstPlacement) card.style.transition = 'none';
+      card.style.left = left + 'px';
+      card.style.top = top + 'px';
+      if (firstPlacement) {
+        // A new card starts in its assigned slot; retained cards move between slots.
+        card.getBoundingClientRect();
+        card.style.transition = '';
+      }
+    };
     const occupiedAll = [...occupied, ...(depthControl ? [depthControl.getBoundingClientRect()] : [])];
     const placements = [];
     for (const card of cards) {
@@ -6863,8 +6877,7 @@ function renderEp(d, opts) {
     if (placements.length === cards.length) {
       if (band) { band.hidden = true; band.style.height = ''; }
       cards.forEach((card, i) => {
-        card.style.left = placements[i].left - cr.left + 'px';
-        card.style.top = placements[i].top - cr.top + 'px';
+        positionCard(card, placements[i].left - cr.left, placements[i].top - cr.top);
       });
       stack.dataset.layout = 'overlay';
       return;
@@ -6881,8 +6894,7 @@ function renderEp(d, opts) {
       for (let j = 0; j < columns && i + j < cards.length; j++) {
         const card = cards[i + j];
         card.style.width = width + 'px';
-        card.style.left = br.left - cr.left + 12 + j * (width + 8) + 'px';
-        card.style.top = y + 'px';
+        positionCard(card, br.left - cr.left + 12 + j * (width + 8), y);
         height = Math.max(height, card.getBoundingClientRect().height);
       }
       y += height + 8;
