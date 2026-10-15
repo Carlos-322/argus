@@ -22,12 +22,15 @@ const findings = JSON.parse(process.argv[2]).findings;
 const E = api.sensorEvidence({sensor_evidence:{version:1,findings}});
 assert.deepEqual(api.displayGripFindings(E,.9),[], 'do not announce future observations');
 let shown = api.displayGripFindings(E,2.46244);
-assert.deepEqual(shown.map(f=>[f.findingIndex,f.phase]),[[1,'Now']],
-  'the later sound transient replaces a hold that has already been shown for a second');
+assert.deepEqual(shown.map(f=>[f.findingIndex,f.phase]),[[1,'Now'],[0,'Now']],
+  'the hold remains until its two-second minimum while the transient is introduced');
 assert.equal(shown[0].end,2.595846,'presentation does not change the source interval');
 assert(api.gripFindingStripHtml(shown[0]).includes('2.595846'));
 shown = api.displayGripFindings(E,2.76247);
-assert.deepEqual(shown,[], 'the superseded hold cannot return after the transient ends');
+assert.deepEqual(shown.map(f=>[f.findingIndex,f.phase]),[[1,'Earlier'],[0,'Now']]);
+assert.deepEqual(api.displayGripFindings(E,3).map(f=>f.findingIndex),[1],
+  'the superseded hold cannot return after its minimum');
+assert.deepEqual(api.displayGripFindings(E,4.4),[], 'the transient expires two seconds after its onset');
 assert.deepEqual(api.displayGripFindings(E,6),[], 'ended findings do not persist indefinitely');
 assert.deepEqual(api.displayGripFindings(E,.9),[], 'seeking backwards clears retained findings');
 const rejected = api.sensorEvidence({sensor_evidence:{version:1,findings:
@@ -147,22 +150,24 @@ const E=api.sensorEvidence({sensor_evidence:{version:1,findings},tactile_qc:{ver
 const original=JSON.stringify(E),wire=api.setupSensorEvidence(E,()=>{},()=>{},()=>{});
 wire.sync(1.1);assert(strip.innerHTML.includes(findings[0].headline));
 wire.sync(2.46244);
-assert(!strip.innerHTML.includes(findings[0].headline),'a newer onset supersedes the long hold');
+assert(strip.innerHTML.includes(findings[0].headline)&&strip.innerHTML.includes(findings[0].detail),'the long hold gets its full two-second minimum');
 assert(strip.innerHTML.includes(findings[1].headline)&&strip.innerHTML.includes(findings[1].detail));
 assert(strip.innerHTML.includes('Touch and video clocks disagree')&&strip.innerHTML.includes('Measured offset exceeds the review threshold.'));
-assert.equal((strip.innerHTML.match(/data-sensor-finding=/g)||[]).length,2,'nearby short findings coexist until their own ends');
+assert.equal((strip.innerHTML.match(/data-sensor-finding=/g)||[]).length,3,'nearby findings each receive their minimum presentation time');
 assert(!strip.innerHTML.includes('data-overlay-finding')&&!strip.innerHTML.includes('gf-pager'),'no unseen finding is behind a selector');
 assert(!strip.innerHTML.includes('Rejected warning'));
 const paused=strip.innerHTML;wire.sync(2.46244);assert.equal(strip.innerHTML,paused,'paused playback has no independent presentation clock');
-wire.sync(2.76247);assert(strip.hidden,'source ends cap both short findings and superseded cards never return');
-wire.sync(4.1);assert(strip.hidden,'the recording end cannot leave an ended observation on screen');
-const stopped=strip.innerHTML;wire.sync(4.1);assert.equal(strip.innerHTML,stopped);
+wire.sync(2.76247);assert(strip.innerHTML.includes('Earlier'),'retained findings are distinguished from source-active findings');
+wire.sync(3.1);assert(!strip.innerHTML.includes(findings[0].headline),'the superseded hold stays retired');
+wire.sync(4.1);assert.equal((strip.innerHTML.match(/data-sensor-finding=/g)||[]).length,2);
+wire.sync(4.5);assert(strip.hidden,'minimum presentation time does not create unbounded persistence');
+const stopped=strip.innerHTML;wire.sync(4.5);assert.equal(strip.innerHTML,stopped);
 wire.reset(0);assert(strip.hidden,'replay clears previously displayed findings');
-wire.reset(4.1);assert(strip.hidden,'a seek does not fabricate presentation of old findings');
+wire.reset(4.5);assert(strip.hidden,'a seek does not revive expired findings');
 wire.sync(2.46244);const lastDetail=detail.innerHTML;wire.sync(20);assert(strip.hidden);
 assert.equal(detail.innerHTML,lastDetail,'retiring an overlay does not reset its evidence');
 assert.equal(JSON.stringify(E),original,'rendering never changes annotations');
-// Real OpenTouch intervals coexist briefly, but cannot outlive their source ends.
+// Real OpenTouch subsecond intervals each receive two seconds, with source timestamps intact.
 const short=api.sensorEvidence({grip_evidence:{version:1,findings:[
  {start_s:1.79971,end_s:2.2663,headline:'Pressure shifts across the thumb',detail:'Compared with the start, one part of the thumb presses harder and a nearby part presses less.'},
  {start_s:2.13298,end_s:3.23281,headline:'Pressure shifts toward the index fingertip',detail:'Pressure shifts along the index finger toward the fingertip area.'}
@@ -170,9 +175,12 @@ const short=api.sensorEvidence({grip_evidence:{version:1,findings:[
 const fast=api.setupSensorEvidence(short,()=>{},()=>{},()=>{});
 fast.sync(1.9);assert(strip.innerHTML.includes(short.insights[0].detail));
 fast.sync(2.2);assert.equal((strip.innerHTML.match(/data-sensor-finding=/g)||[]).length,2);
-fast.sync(2.4);assert.equal((strip.innerHTML.match(/data-sensor-finding=/g)||[]).length,1);
-assert(!strip.innerHTML.includes(short.insights[0].detail),'a delayed update does not revive an ended interval');
-// Long intervals get one second before replacement, not an arbitrary fixed expiry.
+fast.sync(2.4);assert.equal((strip.innerHTML.match(/data-sensor-finding=/g)||[]).length,2);
+assert(strip.innerHTML.includes('Earlier'));
+fast.sync(3.8);assert.equal((strip.innerHTML.match(/data-sensor-finding=/g)||[]).length,1);
+assert(!strip.innerHTML.includes(short.insights[0].detail),'the earlier card retires at onset plus two seconds');
+fast.sync(4.14);assert(strip.hidden);
+// Long intervals yield to later onsets after their two-second minimum.
 const timeline=api.sensorEvidence({grip_evidence:{version:1,findings:[
  {start_s:1.5,end_s:10,headline:'Hold continues',detail:'First long observation.'},
  {start_s:2.7,end_s:10,headline:'Pressure increases',detail:'Second long observation.'},
@@ -182,12 +190,15 @@ const timeline=api.sensorEvidence({grip_evidence:{version:1,findings:[
 ]}});
 const shownAt=t=>api.displayGripFindings(timeline,t).map(f=>f.headline);
 assert.deepEqual(shownAt(2.69),['Hold continues']);
-assert.deepEqual(shownAt(2.7),['Pressure increases']);
-assert.deepEqual(shownAt(3.1),['Contact shifts','State changes','Pressure increases']);
-assert.deepEqual(shownAt(3.7),['Contact shifts','State changes']);
-assert.deepEqual(shownAt(3.85),['Brief release','Contact shifts','State changes']);
-assert.deepEqual(shownAt(4.05),['Brief release']);
-assert.deepEqual(shownAt(4.1),[],'the actual end overrides the one-second minimum');
+assert.deepEqual(shownAt(2.7),['Pressure increases','Hold continues']);
+assert.deepEqual(shownAt(3.1),['Contact shifts','State changes','Pressure increases','Hold continues']);
+assert.deepEqual(shownAt(3.5),['Contact shifts','State changes','Pressure increases']);
+assert.deepEqual(shownAt(3.7),['Contact shifts','State changes','Pressure increases']);
+assert.deepEqual(shownAt(3.85),['Brief release','Contact shifts','State changes','Pressure increases']);
+assert.deepEqual(shownAt(4.05),['Brief release','Contact shifts','State changes','Pressure increases']);
+assert.deepEqual(shownAt(4.7),['Brief release','Contact shifts','State changes']);
+assert.deepEqual(shownAt(5.1),['Brief release']);
+assert.deepEqual(shownAt(5.8),[],'the subsecond finding also receives two seconds');
 assert.deepEqual(shownAt(7),[],'superseded long intervals never return');
 fast.dispose();
 wire.dispose();

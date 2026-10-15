@@ -4658,16 +4658,13 @@ function sensorFindingWindows(E) {
   const findings = E.overlayFindings || E.insights || [];
   const starts = [...new Set(findings.map(f => f.start))].sort((a, b) => a - b);
   const nextStarts = new Map(starts.map((start, i) => [start, starts[i + 1] ?? Infinity]));
-  return new Map(findings.map(f => {
-    // Point events have no interval to cap. Give them one second of media time.
-    const end = f.end > f.start ? f.end : f.start + 1;
-    return [f.findingIndex, Math.min(end, Math.max(f.start + 1, nextStarts.get(f.start)))];
-  }));
+  return new Map(findings.map(f => [f.findingIndex,
+    Math.max(f.start + 2, Math.min(f.end, nextStarts.get(f.start)))]));
 }
 function displayGripFindings(E, t, windows = sensorFindingWindows(E)) {
   const findings = E.overlayFindings || E.insights || [];
-  // Equal onsets coexist. A distinct onset replaces earlier findings after one
-  // second, capped by the source end. Superseded findings never return later.
+  // Equal onsets coexist. Every finding gets at least two seconds of media time,
+  // including subsecond intervals. Superseded findings never return later.
   return findings.filter(f => t + 1e-6 >= f.start && t < windows.get(f.findingIndex))
     .map(f => ({...f, phase: t <= f.end + 1e-6 ? 'Now' : 'Earlier'}))
     .sort((a, b) => b.priority - a.priority || b.start - a.start);
