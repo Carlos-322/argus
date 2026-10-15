@@ -82,7 +82,7 @@ const caption=element(rect(160,470,380,36));
 const host={style:readonly(),getBoundingClientRect:()=>cr,querySelector:q=>q==='#video-overlay'?caption:null};
 const cards=[0,1].map(()=>({style:{},getBoundingClientRect:()=>rect(0,0,210,100)}));
 const stack={style:{},dataset:{},classList:{toggle(){}},querySelectorAll:()=>cards};
-const band={style:{},hidden:true};
+const band={style:{},hidden:true,getBoundingClientRect:()=>rect(cr.left,cr.bottom,cr.width,0)};
 const page={getElementById:id=>id==='sensor-overlay-stack'?stack:id==='sensor-evidence-band'?band:null};
 const computed=()=>({position:'absolute',opacity:'1',getPropertyValue:k=>({
  '--fx-left':'100px','--fx-right':'100px','--fx-top':'100px','--fx-bottom':'100px'}[k]||'')});

@@ -1036,7 +1036,7 @@ aside.left .grip-strip .sensor-overlay { position: static; order: 2; max-width: 
 .sensor-overlay-stack.tight .grip-finding-overlay { padding: 6px 8px; }
 .sensor-overlay-stack.tight .gf-copy { gap: 4px; }
 .sensor-overlay-stack.tight .gf-title { font-size: 13px; line-height: 1.3; }
-aside.left .cam-row-grippers:has(.sensor-overlay-stack) .cam-cell.cam-exo { grid-column: 1 / span 2; }
+aside.left .cam-row-grippers.cam-main-scene:has(.sensor-overlay-stack) .cam-cell.cam-exo { grid-column: 1 / span 2; }
 .sensor-overlay-stack .sensor-quality { border-left-color: #f1c85a; }
 @media (max-width: 600px) {
   .sensor-overlay-stack .grip-finding-overlay { width: min(260px, 54%, calc(100% - var(--fx-left, 0px) - var(--fx-right, 0px) - 16px));
@@ -2467,8 +2467,8 @@ function cameraSectionLabel(role) {
   return role === 'sensor' ? 'Sensor views' : role === 'tactile' ? 'Tactile cameras' : '';
 }
 function sceneFirstLayout(d) {
-  const {views, main} = episodeCams(d);
-  return views.includes('exo') || (cameraPresentation(d, main) === 'scene'
+  const {main} = episodeCams(d), role = cameraPresentation(d, main);
+  return (main === 'exo' && !['sensor', 'tactile'].includes(role)) || (role === 'scene'
     && supportingCameras(d).some(c => ['sensor', 'tactile'].includes(c.role)));
 }
 function cameraCaption(d, view) {
@@ -6274,6 +6274,9 @@ function renderEp(d, opts) {
   `;
 
   const gripOnly = !isEgo && !hasTop;
+  const mainIsScene = cameraPresentation(d, mainCam) === 'scene';
+  const sensorBand = '<div class="sensor-evidence-band" id="sensor-evidence-band" hidden></div>';
+  const bandAfterMain = isEgo || hasTop || mainIsScene || !sideCams.length;
   const notesHtml = `
           <div class="state-toast" id="state-toast"></div>
           <div class="recovery-overlay" id="recovery-overlay"></div>
@@ -6285,7 +6288,7 @@ function renderEp(d, opts) {
   leftCol.innerHTML = `
     <div class="video-wrap">
       <div class="cam-row${isEgo ? ' cam-row-single' : (!hasTop ? ' cam-row-grippers' + (sideCams.length ? ''
-        : ' cam-row-single') : '')}">
+        : ' cam-row-single') : '')}${mainIsScene ? ' cam-main-scene' : ''}">
         <div class="cam-cell cam-exo">
           <button class="fs-btn" id="fs-btn" title="fullscreen (keeps overlays)">&#9974;</button>
           <video id="video" data-view="${esc(mainCam)}" controls controlslist="nofullscreen" preload="auto" playsinline${keep ? '' : ` src="${esc(videoUrl)}"${posterAttr(eidEnc,
@@ -6307,7 +6310,7 @@ function renderEp(d, opts) {
           </div>` : ''}
           ${gripOnly ? '' : notesHtml}
         </div>
-        <div class="sensor-evidence-band" id="sensor-evidence-band" hidden></div>
+        ${bandAfterMain ? sensorBand : ''}
         ${supportCams.map((c, i) => {
           const v = c.view;
           const sectionLabel = cameraSectionLabel(c.role);
@@ -6323,6 +6326,7 @@ function renderEp(d, opts) {
             dpViews)}
         </div>`;
         }).join('')}
+        ${bandAfterMain ? '' : sensorBand}
       </div>${unshownNote(d)}
       ${gripOnly ? `<div class="grip-strip">${sideCams.length ? '' : `<p class="grip-note">One camera view is shown.</p>`}${notesHtml}</div>` : ''}
     </div>
@@ -6856,23 +6860,25 @@ function renderEp(d, opts) {
       stack.dataset.layout = 'overlay';
       return;
     }
-    // All findings stay visible when the image has no safe space. The strip
-    // follows the primary camera, before supporting views, without resizing it.
-    const columns = cards.length > 1 && cr.width >= 320 ? 2 : 1;
-    const width = Math.max(0, (cr.width - 24 - (columns - 1) * 8) / columns);
-    let y = cr.height + 8;
+    // Reserve the actual band's space, including layouts with equal camera cells.
+    if (band) { band.hidden = false; band.style.height = '0px'; }
+    const br = band ? band.getBoundingClientRect() : cr;
+    const bandTop = band ? br.top - cr.top : cr.height;
+    const columns = cards.length > 1 && br.width >= 320 ? 2 : 1;
+    const width = Math.max(0, (br.width - 24 - (columns - 1) * 8) / columns);
+    let y = bandTop + 8;
     for (let i = 0; i < cards.length; i += columns) {
       let height = 0;
       for (let j = 0; j < columns && i + j < cards.length; j++) {
         const card = cards[i + j];
         card.style.width = width + 'px';
-        card.style.left = 12 + j * (width + 8) + 'px';
+        card.style.left = br.left - cr.left + 12 + j * (width + 8) + 'px';
         card.style.top = y + 'px';
         height = Math.max(height, card.getBoundingClientRect().height);
       }
       y += height + 8;
     }
-    if (band) { band.hidden = false; band.style.height = y - cr.height + 'px'; }
+    if (band) band.style.height = y - bandTop + 'px';
     stack.dataset.layout = 'attached';
 
   }
