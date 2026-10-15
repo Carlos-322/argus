@@ -10,6 +10,24 @@ SOURCE = HERE.parent / 'board/index.html'
 pytestmark = pytest.mark.skipif(not shutil.which('node'), reason='no node')
 
 
+# A small DOM boundary for exercising the real timeline with retained node identities.
+CARD_DOM = r'''
+const cardDocument = () => {
+ const children=[];
+ const strip={hidden:true,append(card){children.push(card);},
+  get innerHTML(){return children.map(c=>`<div data-sensor-finding="${c.dataset.sensorFinding}">${c.innerHTML}</div>`).join('');},
+  querySelectorAll(){return [...children];},
+  querySelector(selector){const id=selector.match(/="(\d+)"/)[1];return children.find(c=>c.dataset.sensorFinding===id)||null;}};
+ const createElement=()=>{
+  const phase={textContent:'',classList:{toggle(){}}};
+  return {dataset:{},innerHTML:'',querySelector:()=>phase,querySelectorAll:()=>[],
+   remove(){children.splice(children.indexOf(this),1);}};
+ };
+ return {strip,createElement};
+};
+'''
+
+
 def test_new_onsets_replace_older_findings_without_changing_source_intervals():
     script = r'''
 const assert = require('assert');
@@ -37,11 +55,11 @@ const rejected = api.sensorEvidence({sensor_evidence:{version:1,findings:
   findings.map(f=>({...f,review_status:'rejected'}))}});
 assert.deepEqual(api.displayGripFindings(rejected,2.46244),[], 'human rejection stays authoritative');
 // Equal inspection times still refer to different findings and must remain selectable.
-const strip={innerHTML:'',hidden:true,querySelectorAll:()=>[]};
+const {strip,createElement}=cardDocument();
 const buttons=[0,1].map(i=>({dataset:{gripFinding:String(i),evidenceT:'2.46244',evidencePause:'true'},
   setAttribute(k,v){this[k]=v;}}));
 const callbacks=new Map();
-const doc={getElementById:id=>id==='grip-finding-overlay'?strip:null,
+const doc={createElement,getElementById:id=>id==='grip-finding-overlay'?strip:null,
   querySelectorAll:q=>['[data-evidence-t]','[data-grip-finding]'].includes(q)?buttons:[]};
 const interactive=new Function('esc','fmtT','document',src.slice(begin,end)
   +'return {sensorEvidence,setupSensorEvidence};')(String,String,doc);
@@ -64,7 +82,7 @@ wire.sync(7);
 callbacks.get(buttons[0])();assert.deepEqual(buttons.map(b=>b['aria-pressed']),['true','false']);
 assert(strip.innerHTML.includes(findings[0].headline),'backward replay selects the clicked finding');
 '''
-    subprocess.run(['node', '-e', script, str(HERE / 'page_functions.js'),
+    subprocess.run(['node', '-e', CARD_DOM + script, str(HERE / 'page_functions.js'),
                     (HERE / 'fixtures/overlapping_sensor_findings.json').read_text()], check=True)
 
 
@@ -86,14 +104,18 @@ const band={style:{},hidden:true,getBoundingClientRect:()=>rect(cr.left,cr.botto
 const page={getElementById:id=>id==='sensor-overlay-stack'?stack:id==='sensor-evidence-band'?band:null};
 const computed=()=>({position:'absolute',opacity:'1',getPropertyValue:k=>({
  '--fx-left':'100px','--fx-right':'100px','--fx-top':'100px','--fx-bottom':'100px'}[k]||'')});
-const place=new Function('exoCell','topHud','progOverlay','stateToast','recOverlay','document','getComputedStyle',
- s.slice(start,end)+'return placeSensors;')(host,null,anchor,state,recovery,page,computed);
+const presentation={};
+const place=new Function('d','exoCell','topHud','progOverlay','stateToast','recOverlay','document','getComputedStyle',
+ s.slice(start,end)+'return placeSensors;')(presentation,host,null,anchor,state,recovery,page,computed);
 const before=[anchor,recovery,state,caption].map(el=>({...el.getBoundingClientRect()}));
 place();
 assert.equal(stack.dataset.layout,'overlay');assert(band.hidden);
 const positions=cards.map(c=>rect(cr.left+parseFloat(c.style.left),cr.top+parseFloat(c.style.top),210,100));
 assert.deepEqual(positions.map(p=>[p.left,p.top]),[[142,308],[408,348]],'both findings receive separate unobstructed regions');
 for(const p of positions) for(const r of before) assert(p.right<=r.left||p.left>=r.right||p.bottom<=r.top||p.top>=r.bottom);
+presentation.viewer_presentation={sensor_overlay_side:'right'};
+for(const card of cards) card.style.left='';
+place();assert(parseFloat(cards[0].style.left)>parseFloat(cards[1].style.left),'a right-side preference changes sensor placement without moving existing overlays');
 recovery.getBoundingClientRect=()=>rect(142,130,500,500);
 place();
 assert.equal(stack.dataset.layout,'attached');assert.equal(band.hidden,false);
@@ -102,7 +124,7 @@ assert(parseFloat(band.style.height)>=100,'the attached strip reserves real spac
 assert.deepEqual([anchor,state,caption].map(el=>el.getBoundingClientRect()),[before[0],before[2],before[3]]);
 assert.deepEqual(host.getBoundingClientRect(),cr,'findings do not resize the camera');
 """
-    subprocess.run(['node', '-e', script, str(SOURCE)], check=True)
+    subprocess.run(['node', '-e', CARD_DOM + script, str(SOURCE)], check=True)
 
 
 def test_anomalous_contact_updates_without_changing_numeric_profiles():
@@ -130,7 +152,7 @@ const ordinary=api.sensorEvidence({contacts:[{id:'ordinary',start_s:1,end_s:2,sh
 api.setupSensorEvidence(ordinary,()=>{},()=>{},()=>{}).sync(1.2);
 assert.equal(overlay.classList.active,false,'ordinary contact does not add a redundant warning');
 '''
-    subprocess.run(['node', '-e', script, str(SOURCE)], check=True)
+    subprocess.run(['node', '-e', CARD_DOM + script, str(SOURCE)], check=True)
 
 
 def test_concurrent_recorded_findings_and_quality_warning_are_all_rendered_without_a_carousel():
@@ -138,11 +160,19 @@ def test_concurrent_recorded_findings_and_quality_warning_are_all_rendered_witho
 const fs=require('fs'),assert=require('assert');
 const src=fs.readFileSync(process.argv[1],'utf8');
 const begin=src.indexOf('// ================= sensor evidence:'),end=src.indexOf('// ================= touch:',begin);
-const strip={innerHTML:'',hidden:true,querySelectorAll:()=>[]},detail={innerHTML:''};
-const doc={getElementById:id=>id==='grip-finding-overlay'?strip:id==='sensor-evidence-now'?detail:null,querySelectorAll:()=>[]};
+const {strip,createElement}=cardDocument(),detail={innerHTML:''};
+const doc={createElement,getElementById:id=>id==='grip-finding-overlay'?strip:id==='sensor-evidence-now'?detail:null,querySelectorAll:()=>[]};
 const api=new Function('esc','fmtT','document',src.slice(begin,end)
- +'return {sensorEvidence,setupSensorEvidence,displayGripFindings};')(String,t=>t.toFixed(1)+'s',doc);
+ +'return {sensorEvidence,setupSensorEvidence,displayGripFindings,gripFindingDetailHtml,gripFindingStripHtml};')(String,t=>t.toFixed(1)+'s',doc);
 const findings=JSON.parse(fs.readFileSync(process.argv[2],'utf8')).findings;
+const verbose={...findings[0],claim:'The repeated excursions are consistent with changing contact or loading during the held-object motion. Unknown response polarity and occluded contact geometry prevent identifying tighter grip, looser grip, or a surface tap.'};
+const projected=api.sensorEvidence({sensor_evidence:{version:1,findings:[verbose]}}).insights[0];
+assert(!api.gripFindingStripHtml(projected).includes(verbose.claim),'physical interpretation is not an automatic video caption');
+assert(api.gripFindingDetailHtml(projected).includes(verbose.claim),'the complete interpretation remains inspectable');
+const concise='Two drops and rebounds occur while the block remains held.';
+assert(api.gripFindingStripHtml({...projected,overlayDetail:concise}).includes(concise),'explicit overlay copy remains intact');
+assert(!api.gripFindingStripHtml({...projected,overlayDetail:''}).includes('gf-detail'),'an explicitly empty overlay caption does not fall back to prose');
+
 const E=api.sensorEvidence({sensor_evidence:{version:1,findings},tactile_qc:{version:1,warnings:[
  {start_s:2.4,end_s:2.6,headline:'Touch and video clocks disagree',detail:'Measured offset exceeds the review threshold.'},
  {start_s:2.4,end_s:2.6,headline:'Rejected warning',review_status:'rejected'}
@@ -151,15 +181,20 @@ const original=JSON.stringify(E),wire=api.setupSensorEvidence(E,()=>{},()=>{},()
  if(strip.innerHTML.includes('data-sensor-finding')) assert(!strip.hidden,'new cards must be measurable when placement runs');
 });
 wire.sync(1.1);assert(strip.innerHTML.includes(findings[0].headline));
+const heldCard=strip.querySelector('[data-sensor-finding="0"]');
+const heldMarkup=heldCard.innerHTML;
 wire.sync(2.46244);
-assert(strip.innerHTML.includes(findings[0].headline)&&strip.innerHTML.includes(findings[0].detail),'the long hold gets its full two-second minimum');
-assert(strip.innerHTML.includes(findings[1].headline)&&strip.innerHTML.includes(findings[1].detail));
+assert.equal(strip.querySelector('[data-sensor-finding="0"]'),heldCard,'introducing a new finding must retain the earlier DOM node');
+assert.equal(heldCard.innerHTML,heldMarkup,'an accompanying card cannot restart the retained card or its plots');
+assert(strip.innerHTML.includes(findings[0].headline),'the long hold gets its full two-second minimum');
+assert(!strip.innerHTML.includes(findings[0].detail),'full reasoning stays in the evidence panel');
+assert(strip.innerHTML.includes(findings[1].headline));
 assert(strip.innerHTML.includes('Touch and video clocks disagree')&&strip.innerHTML.includes('Measured offset exceeds the review threshold.'));
 assert.equal((strip.innerHTML.match(/data-sensor-finding=/g)||[]).length,3,'nearby findings each receive their minimum presentation time');
 assert(!strip.innerHTML.includes('data-overlay-finding')&&!strip.innerHTML.includes('gf-pager'),'no unseen finding is behind a selector');
 assert(!strip.innerHTML.includes('Rejected warning'));
 const paused=strip.innerHTML;wire.sync(2.46244);assert.equal(strip.innerHTML,paused,'paused playback has no independent presentation clock');
-wire.sync(2.76247);assert(strip.innerHTML.includes('Earlier'),'retained findings are distinguished from source-active findings');
+wire.sync(2.76247);assert(strip.querySelectorAll().some(c=>c.querySelector('.gf-phase').textContent==='Earlier'),'retained findings are distinguished from source-active findings');
 wire.sync(3.1);assert(!strip.innerHTML.includes(findings[0].headline),'the superseded hold stays retired');
 wire.sync(4.1);assert.equal((strip.innerHTML.match(/data-sensor-finding=/g)||[]).length,2);
 wire.sync(4.5);assert(strip.hidden,'minimum presentation time does not create unbounded persistence');
@@ -178,7 +213,7 @@ const fast=api.setupSensorEvidence(short,()=>{},()=>{},()=>{});
 fast.sync(1.9);assert(strip.innerHTML.includes(short.insights[0].detail));
 fast.sync(2.2);assert.equal((strip.innerHTML.match(/data-sensor-finding=/g)||[]).length,2);
 fast.sync(2.4);assert.equal((strip.innerHTML.match(/data-sensor-finding=/g)||[]).length,2);
-assert(strip.innerHTML.includes('Earlier'));
+assert(strip.querySelectorAll().some(c=>c.querySelector('.gf-phase').textContent==='Earlier'));
 fast.sync(3.8);assert.equal((strip.innerHTML.match(/data-sensor-finding=/g)||[]).length,1);
 assert(!strip.innerHTML.includes(short.insights[0].detail),'the earlier card retires at onset plus two seconds');
 fast.sync(4.14);assert(strip.hidden);
@@ -205,7 +240,7 @@ assert.deepEqual(shownAt(7),[],'superseded long intervals never return');
 fast.dispose();
 wire.dispose();
 """
-    subprocess.run(['node', '-e', script, str(SOURCE), str(HERE / 'fixtures/overlapping_sensor_findings.json')], check=True)
+    subprocess.run(['node', '-e', CARD_DOM + script, str(SOURCE), str(HERE / 'fixtures/overlapping_sensor_findings.json')], check=True)
 
 
 def test_static_camera_order_matches_retained_scene_presentation(tmp_path):

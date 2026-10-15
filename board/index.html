@@ -1031,11 +1031,7 @@ aside.left .grip-strip .sensor-overlay { position: static; order: 2; max-width: 
 .sensor-overlay-stack .gf-pressure-row svg { height: 20px; }
 .sensor-overlay-stack .gf-pressure-range, .sensor-overlay-stack .gf-pressure-value { display: none; }
 .sensor-overlay-stack .gf-pressure-gap { display: none; }
-.sensor-overlay-stack.tight .gf-pressure { gap: 2px; }
 .sensor-overlay-stack .gf-meta { position: static; }
-.sensor-overlay-stack.tight .grip-finding-overlay { padding: 6px 8px; }
-.sensor-overlay-stack.tight .gf-copy { gap: 4px; }
-.sensor-overlay-stack.tight .gf-title { font-size: 13px; line-height: 1.3; }
 aside.left .cam-row-grippers.cam-main-scene:has(.sensor-overlay-stack) .cam-cell.cam-exo { grid-column: 1 / span 2; }
 .sensor-overlay-stack .sensor-quality { border-left-color: #f1c85a; }
 @media (max-width: 600px) {
@@ -1043,12 +1039,6 @@ aside.left .cam-row-grippers.cam-main-scene:has(.sensor-overlay-stack) .cam-cell
     left: calc(var(--fx-left, 0px) + 8px); }
   .sensor-overlay-stack .grip-finding-overlay:has(.gf-pressure) {
     width: min(260px, 70%, calc(100% - var(--fx-left, 0px) - var(--fx-right, 0px) - 24px)); }
-  .sensor-overlay-stack.tight:has(.gf-pressure) .grip-finding-overlay { padding: 3px 8px; }
-  .sensor-overlay-stack.tight:has(.gf-pressure) .gf-copy { gap: 2px; }
-  .sensor-overlay-stack.tight:has(.gf-pressure) .gf-title { font-size: 12px; line-height: 1.3; }
-  .sensor-overlay-stack.tight:has(.gf-pressure) .gf-phase { padding: 1px 3px; }
-  .sensor-overlay-stack.tight:has(.gf-pressure) .gf-pressure { padding-top: 3px; }
-  .sensor-overlay-stack.tight:has(.gf-pressure) .gf-pressure-row svg { height: 14px; }
 }
 
 /* ---------- sensors: the recording's other signals and depth (board/sensors.py) ----------
@@ -4593,7 +4583,7 @@ function sensorEvidence(d) {
       visual: f.confidence === 'high' ? 'High confidence' : f.confidence === 'medium' ? 'Medium confidence' : 'Low confidence',
       t: finite(f.inspect_s) && f.inspect_s >= f.start_s && f.inspect_s <= f.end_s ? f.inspect_s : f.start_s,
       timing: '', alternative: copy(f.alternative), observation: copy(f.observation), claim: copy(f.claim),
-      overlayDetail: typeof f.overlay_detail === 'string' ? copy(f.overlay_detail) : '',
+      overlayDetail: typeof f.overlay_detail === 'string' ? copy(f.overlay_detail) : null,
       quotedTimeOffset: finite(f.quoted_time_offset_s) ? f.quoted_time_offset_s : 0,
       generic: !!grip.generic, evidence: grip.generic && Array.isArray(f.evidence) ? f.evidence : [],
       addsBeyond: f.adds_beyond_video === true || f.adds_beyond_rgb_pose === true, cellGroups: Array.isArray(f.cell_groups) ? f.cell_groups : []});
@@ -4755,11 +4745,13 @@ function syncGripOverlayPressure(G, f, t, scope = document, limit = 3) {
 }
 function gripFindingStripHtml(f, G = null) {
   if (!f) return '';
+  // Do not use a full interpretation as a fallback for missing overlay copy.
+  const detail = f.overlayDetail ?? (f.generic && f.kind === 'insight' ? '' : f.detail || f.claim || '');
   return `<span class="gf-copy">
     <span class="gf-meta"><span class="gf-phase${f.phase === 'Now' ? ' is-now' : ''}">${esc(f.phase)}</span>
       <span class="gf-time">${f.start === f.end ? fmtT(f.start) : `${fmtT(f.start)} to ${fmtT(f.end)}`}</span></span>
     <button type="button" class="gf-title" title="Replay this finding">${f.generic ? genericSensorHeadlineHtml(f.headline, f.anatomical) : gripFingerHtml(f.headline)}</button>
-    ${(f.kind === 'insight' || f.kind === 'anomaly' || f.kind === 'quality') && (f.overlayDetail || f.detail || f.claim) ? `<span class="gf-detail">${esc(f.overlayDetail || (f.generic ? f.claim || f.detail : f.detail || f.claim))}</span>` : ''}
+    ${detail ? `<span class="gf-detail">${esc(detail)}</span>` : ''}
     ${f.kind === 'insight' ? gripOverlayPressureHtml(G, f, 2) : ''}</span>
     <span class="gf-inspect" aria-hidden="true">↗</span>`;
 }
@@ -5077,7 +5069,22 @@ function setupSensorEvidence(E, seek, on, inspectContact, d = null, file = null,
       const key = JSON.stringify(available.map(f => [f.findingIndex, f.phase]));
       strip.hidden = !available.length;
       if (stripKey !== key) {
-        strip.innerHTML = available.map(f => `<div class="grip-finding-overlay sensor-finding-card${f.kind === 'quality' ? ' sensor-quality' : ''}" data-sensor-finding="${f.findingIndex}">${gripFindingStripHtml(f, E.grip)}</div>`).join('');
+        const retained = new Set(available.map(f => String(f.findingIndex)));
+        for (const card of strip.querySelectorAll('[data-sensor-finding]'))
+          if (!retained.has(card.dataset.sensorFinding)) card.remove();
+        for (const f of [...available].sort((a, b) => a.start - b.start || a.findingIndex - b.findingIndex)) {
+          let card = strip.querySelector(`[data-sensor-finding="${f.findingIndex}"]`);
+          if (!card) {
+            card = document.createElement('div');
+            card.className = `grip-finding-overlay sensor-finding-card${f.kind === 'quality' ? ' sensor-quality' : ''}`;
+            card.dataset.sensorFinding = String(f.findingIndex);
+            card.innerHTML = gripFindingStripHtml(f, E.grip);
+            strip.append(card);
+          }
+          const phase = card.querySelector('.gf-phase');
+          phase.textContent = f.phase;
+          phase.classList.toggle('is-now', f.phase === 'Now');
+        }
         stripKey = key;
         relayout();
       }
@@ -6819,7 +6826,6 @@ function renderEp(d, opts) {
     const caption = exoCell.querySelector('#video-overlay');
     const end = Math.min(imageBottom - 44, visible(caption) ? rect(caption).top - 8 : imageBottom - 44);
     const cards = [...stack.querySelectorAll('.sensor-finding-card, .sensor-overlay.active')];
-    stack.classList.toggle('tight', cards.length > 1);
     if (!cards.length) {
       if (band) { band.hidden = true; band.style.height = ''; }
       stack.dataset.layout = 'overlay';
@@ -6830,12 +6836,15 @@ function renderEp(d, opts) {
     const occupiedAll = [...occupied, ...(depthControl ? [depthControl.getBoundingClientRect()] : [])];
     const placements = [];
     for (const card of cards) {
-      card.style.width = cards.length > 1 ? Math.max(0, Math.min(300, (imageRight - imageLeft - 36) / 2)) + 'px' : '';
+      card.style.width = Math.max(0, Math.min(300, (imageRight - imageLeft - 36) / 2)) + 'px';
       const size = card.getBoundingClientRect();
-      const lanes = [...new Set([imageLeft + 12, imageRight - size.width - 12])];
+      const sides = [imageLeft + 12, imageRight - size.width - 12];
+      if (d.viewer_presentation?.sensor_overlay_side === 'right') sides.reverse();
+      const previousLeft = cr.left + parseFloat(card.style.left);
+      const lanes = [...new Set([previousLeft, ...sides].filter(Number.isFinite))];
       let placement = null;
       for (const left of lanes) {
-        if (left < imageLeft + 12 - .1) continue;
+        if (left < imageLeft + 12 - .1 || left + size.width > imageRight - 12 + .1) continue;
         let top = start;
         const blocks = [...occupiedAll, ...placements].filter(r => r.left < left + size.width && r.right > left)
           .sort((a, b) => a.top - b.top);
@@ -6864,7 +6873,7 @@ function renderEp(d, opts) {
     if (band) { band.hidden = false; band.style.height = '0px'; }
     const br = band ? band.getBoundingClientRect() : cr;
     const bandTop = band ? br.top - cr.top : cr.height;
-    const columns = cards.length > 1 && br.width >= 320 ? 2 : 1;
+    const columns = br.width >= 500 ? 2 : 1;
     const width = Math.max(0, (br.width - 24 - (columns - 1) * 8) / columns);
     let y = bandTop + 8;
     for (let i = 0; i < cards.length; i += columns) {
