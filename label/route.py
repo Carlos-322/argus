@@ -22,9 +22,9 @@ import threading
 from contextlib import nullcontext
 from pathlib import Path
 
-from label import episode as me
+from label import episode as me, providers
 
-ROUTE_MODEL = "openai/gpt-6-sol"
+ROUTE_MODEL = providers.default_model("openai/gpt-6-sol")
 ROUTE_REASONING = "low"
 ROUTE_MAX_TOKENS = 2000
 ROUTE_PROMPT = (
@@ -81,7 +81,7 @@ def request(ep: dict) -> list:
 
 def _paid_route(ep, api_key, call_model, timeout, receipt_path, identity, reserve_dispatch, settle_dispatch, billing_fields, force_refresh):
     from label.errors import KeyExhausted, SpendCap
-    from label.harness import OPENAI_PRICES, _verified_final_cost, persist_final_claim, same_input_identity
+    from label.harness import model_prices, _verified_final_cost, persist_final_claim, same_input_identity
     text = route_text(ep)
     routing_identity = {'version': 1, 'task_sha256': hashlib.sha256(text.encode()).hexdigest(),
                         'rig': me.rig(ep), 'model': ROUTE_MODEL, 'reasoning': ROUTE_REASONING,
@@ -122,7 +122,7 @@ def _paid_route(ep, api_key, call_model, timeout, receipt_path, identity, reserv
         persist(hit)
         return hit
     content = request(ep)
-    rates = OPENAI_PRICES[ROUTE_MODEL.split('/', 1)[-1]][1]
+    rates = model_prices(ROUTE_MODEL)
     bound = (len(content[0]['text'].encode('utf-8')) + 1024) * rates[0] + ROUTE_MAX_TOKENS * rates[2]
     if reserve_dispatch is not None and not reserve_dispatch(bound):
         persist({'fine_detail': None, 'why': 'routing exceeds the remaining batch spend cap',

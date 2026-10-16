@@ -4,6 +4,8 @@ from __future__ import annotations
 import math
 import re
 
+from label import providers
+
 VERSION = 1
 ASTRA = 'openai/gpt-6-astra'
 SOL61 = 'openai/gpt-6.1-sol'
@@ -25,11 +27,12 @@ def resolve(ctx: dict, *, model: str | None = None, reasoning: str | None = None
     rig = ctx.get('profile') or 'teleop_arms'
     if rig not in PERIODS:
         raise ValueError(f'unknown recording rig {rig!r}')
-    model = model or saved.get('model') or ASTRA
+    model = model or saved.get('model') or providers.default_model(ASTRA)
     if not isinstance(model, str) or not model.strip():
         raise ValueError('model must be a nonempty identifier')
+    providers.validate_model(model)
     prior_reasoning = saved.get('reasoning') if saved.get('model') == model else None
-    reasoning = reasoning or prior_reasoning or ('high' if model.split('/')[-1] == 'gpt-6.1-sol' else 'medium')
+    reasoning = reasoning or prior_reasoning or ('high' if model.split('/')[-1] in ('gpt-6.1-sol', 'deepseek-flash') else 'medium')
     if reasoning not in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh'):
         raise ValueError('unsupported reasoning effort')
     if sample_fps is None:
@@ -75,7 +78,7 @@ def effective(ctx: dict) -> dict:
 
 def add_arguments(parser) -> None:
     """Shared optional controls; omitted values inherit source policy or defaults."""
-    parser.add_argument('--model', default=None, help='model identifier (default openai/gpt-6-astra)')
+    parser.add_argument('--model', default=None, help='model identifier (Astra by default; deepseek-flash with ARGUS_PROVIDER=deepseek)')
     parser.add_argument('--reasoning', default=None, help='reasoning effort (Astra medium; GPT-6.1 Sol high)')
     parser.add_argument('--sample-fps', type=float, default=None,
                         help='optional sampling override; GPT-6.1 Sol defaults to at least 1 FPS')

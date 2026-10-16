@@ -16,12 +16,14 @@ from pathlib import Path, PureWindowsPath
 import numpy as np
 
 from label.errors import KeyExhausted
+from label import providers
 
 SCHEMA = 1
 CHUNK_VALUES = 65_536
 REQUEST_BYTES = 512_000
 RESPONSE_BYTES = 256_000
-MODEL = "openai/gpt-6-sol"
+
+MODEL = providers.default_model("openai/gpt-6-sol")
 REASONING = "low"
 MAX_TOKENS = 8_000
 MAX_OUTPUT_TOKENS = 32_000

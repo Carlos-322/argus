@@ -30,6 +30,7 @@ import sys
 from pathlib import Path
 
 from label.harness import get_keys, is_openrouter_key
+from label import providers
 from label.dictionary_stage import output_spend
 from label.atomic import write_atomic
 
@@ -40,7 +41,7 @@ PY = Path(sys.executable)
 def _keys() -> str:
     keys = get_keys()
     if not keys:
-        raise SystemExit("set OPENROUTER_API_KEYS (comma-separated OpenRouter keys) or OPENAI_API_KEY")
+        raise SystemExit("set DEEPSEEK_API_KEY with ARGUS_PROVIDER=deepseek; otherwise OPENROUTER_API_KEYS or OPENAI_API_KEY")
     return ",".join(keys)
 
 
@@ -91,8 +92,13 @@ def harness_cmd(slice_dir: Path, run: Path, kind: str, cap: float, concurrency: 
 def finish(run: Path, info: dict, cmd: list, slice_dir: Path, mode: str) -> None:
     env = dict(os.environ)
     keys = _keys().split(",") if info["kind"] != "dry" else []
-    env["OPENROUTER_API_KEYS"] = ",".join(k for k in keys if is_openrouter_key(k))
-    env["OPENAI_API_KEY"] = ",".join(k for k in keys if not is_openrouter_key(k))
+    if providers.deepseek_enabled():
+        env["DEEPSEEK_API_KEY"] = ",".join(keys)
+        env.pop("OPENROUTER_API_KEYS", None)
+        env.pop("OPENAI_API_KEY", None)
+    else:
+        env["OPENROUTER_API_KEYS"] = ",".join(k for k in keys if is_openrouter_key(k))
+        env["OPENAI_API_KEY"] = ",".join(k for k in keys if not is_openrouter_key(k))
     env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
     # few malloc arenas, so a long multithreaded run does not keep freed frame buffers in per-thread heaps
     env.setdefault("MALLOC_ARENA_MAX", "2")

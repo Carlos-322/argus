@@ -26,7 +26,10 @@ episode with that reply, as it shows one whose reply did not parse. An episode t
 cap reached, every key out of credit, a request that could not be built, a call that failed) has
 noreply_<episode>.json saying why, so the board shows it too.
 
-Keys: OPENROUTER_API_KEYS, a comma-separated list, or when it holds none OPENAI_API_KEY, which sends every call
+DeepSeek direct mode: set ARGUS_PROVIDER=deepseek and DEEPSEEK_API_KEY before launching Python.
+All stages then use deepseek-flash; costs use peak USD list-price estimates.
+
+Keys in the original mode: OPENROUTER_API_KEYS, a comma-separated list, or when it holds none OPENAI_API_KEY, which sends every call
 straight to OpenAI and so only runs OpenAI models; keys are used round robin, and a key that runs out of
 credit is retired for the rest of the batch. RDA_DECODE_CONCURRENCY (default 12) bounds the frame decodes
 running at once across the batch. A dry run builds every request exactly as it would be sent (frames decoded,
@@ -52,14 +55,14 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from label import episode as me, policy
+from label import episode as me, policy, providers
 from label.atomic import write_atomic
 from label.errors import KeyExhausted, SpendCap, Truncated
 from label.route import route_width
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
-DEFAULT_MODEL = "openai/gpt-6-astra"
+DEFAULT_MODEL = providers.default_model("openai/gpt-6-astra")
 DEFAULT_REASONING = "medium"
 DETAIL = "high"
 GRID_COLS = 4
@@ -128,7 +131,7 @@ def _verified_final_cost(usage: dict, model: str) -> tuple[float | None, str]:
         value = usage.get(key)
         try:
             if type(value) in (int, float) and math.isfinite(value) and value >= 0:
-                return float(value), source
+                return float(value), ("peak_list_estimate" if key == "list_cost" and usage.get("price_basis") else source)
         except OverflowError:
             pass
     if not _complete_token_usage(usage):
@@ -144,8 +147,31 @@ def _verified_final_cost(usage: dict, model: str) -> tuple[float | None, str]:
     return None, "unverified"
 
 
+def model_prices(model: str, n_in: int = LONG_PROMPT_TOKENS) -> tuple:
+    """USD reservation rates for direct providers (DeepSeek uses peak list rates)."""
+    if providers.is_deepseek_model(model):
+        return providers.DEEPSEEK_PRICES
+    return OPENAI_PRICES[model.split("/", 1)[-1]][n_in >= LONG_PROMPT_TOKENS]
+
+
+def validate_transport(model: str, key: str) -> None:
+    if providers.deepseek_enabled():
+        providers.validate_model(model)
+        providers.validate_key(key)
+    elif not is_openrouter_key(key) and not model.startswith("openai/"):
+        raise ValueError(f"{model} requires an OpenRouter key or ARGUS_PROVIDER=deepseek with DEEPSEEK_API_KEY")
+
+
 def call_model(content: list, model: str, reasoning: str, api_key: str, max_tokens: int, timeout: int,
                *, attempts: int = 6) -> dict:
+    if providers.deepseek_enabled():
+        validate_transport(model, api_key)
+        body = providers.request_body(content, model, reasoning, max_tokens)
+        resp = _post(providers.DEEPSEEK_URL, body, api_key, timeout, attempts=attempts)
+        resp.setdefault("provider", "DeepSeek")
+        if isinstance(resp.get("usage"), dict):
+            providers.normalize_usage(resp["usage"])
+        return resp
     if not is_openrouter_key(api_key):
         return _call_openai(content, model, reasoning, api_key, max_tokens, timeout, attempts=attempts)
     if content and content[0].get("type") == "text" and len(content[0].get("text", "")) > 4000:
@@ -231,8 +257,8 @@ def label_episode(ep_dir: Path, out_path: Path, *, model: str, reasoning: str, a
     resolved = policy.resolve(context, model=model, reasoning=reasoning, sample_fps=sample_fps,
                               task_mode=task_mode, dataset_note=dataset_note)
     model, reasoning = resolved['model'], resolved['reasoning']
-    if not dry_run and not is_openrouter_key(api_key) and not model.startswith('openai/'):
-        raise ValueError(f'{model} requires an OpenRouter key; no request was dispatched.')
+    if not dry_run:
+        validate_transport(model, api_key)
     identity = input_identity(ep_dir, model=model, reasoning=reasoning, max_tokens=max_tokens,
                               cell_w=cell_w, example_dir=example_dir, sample_fps=sample_fps,
                               task_mode=task_mode, dataset_note=dataset_note)
@@ -508,6 +534,10 @@ def final_cost_bound(content: list, max_tokens: int) -> float:
             raw = base64.b64decode(part['image_url']['url'].split(',', 1)[1])
             with Image.open(io.BytesIO(raw)) as image:
                 images += estimate_image_tokens(*image.size)
+    if providers.deepseek_enabled():
+        count = sum(p.get('type') == 'image_url' for p in content)
+        p_in, _, p_out = providers.DEEPSEEK_PRICES
+        return math.ceil(((text_bytes + count * 1024 + 1024) * p_in + max_tokens * p_out) * 1e6) / 1e6
     return round((text_bytes + 4 * images + 1024) * max(PRICE_IN, 2.0e-5)
                  + max_tokens * max(PRICE_OUT, 7.5e-5), 6)
 
@@ -822,6 +852,8 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
                 return response
             # Reserve the maximum output and a conservative input allowance before each selection dispatch.
             def reserve(parts):
+                if providers.deepseek_enabled():
+                    return final_cost_bound(parts, ea.MAX_SELECTION_TOKENS)
                 import io
                 from PIL import Image
                 text_tokens = sum(len(c.get('text', '')) for c in parts) / 3
@@ -982,7 +1014,7 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
         "model": model,
         "reasoning_effort": reasoning,
         **fields,
-        "provider": "openrouter" if is_openrouter_key(api_key) else "openai",
+        "provider": "deepseek" if providers.deepseek_enabled() else ("openrouter" if is_openrouter_key(api_key) else "openai"),
         **_served(resp),
         "finish_reason": finish,
         "parse_ok": parse_ok,
@@ -990,6 +1022,7 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
         "usage": {"prompt_tokens": n_in, "completion_tokens": n_out,
                   "reasoning_tokens": n_reason, "est_cost_usd": cost,
                   "cost_source": cost_source,
+                  **({"price_basis": usage["price_basis"]} if "price_basis" in usage else {}),
                   "cached_tokens": ptd.get("cached_tokens"), "cache_write_tokens": ptd.get("cache_write_tokens"),
                   "latency_s": round(elapsed, 1)},
     }
@@ -1050,6 +1083,8 @@ def get_keys() -> list[str]:
     in OPENAI_API_KEY is ignored too."""
     def split(var):
         return [k.strip() for k in os.environ.get(var, "").split(",") if k.strip()]
+    if providers.deepseek_enabled():
+        return [k for k in split("DEEPSEEK_API_KEY") if not is_openrouter_key(k)]
     return ([k for k in split("OPENROUTER_API_KEYS") if is_openrouter_key(k)]
             or [k for k in split("OPENAI_API_KEY") if not is_openrouter_key(k)])
 
@@ -1381,11 +1416,14 @@ def main() -> int:
 
     keys = get_keys() or (["dry-run"] if args.dry_run else [])
     if not keys:
-        print("set OPENROUTER_API_KEYS (comma-separated OpenRouter keys) or OPENAI_API_KEY", file=sys.stderr)
+        print("set DEEPSEEK_API_KEY when ARGUS_PROVIDER=deepseek; otherwise OPENROUTER_API_KEYS or OPENAI_API_KEY", file=sys.stderr)
         return 2
-    if not args.dry_run and not is_openrouter_key(keys[0]) and args.model and not args.model.startswith("openai/"):
-        print(f"{args.model} is not an OpenAI model, so it needs OPENROUTER_API_KEYS", file=sys.stderr)
-        return 2
+    if not args.dry_run and args.model:
+        try:
+            validate_transport(args.model, keys[0])
+        except ValueError as error:
+            print(str(error), file=sys.stderr)
+            return 2
     if args.route_seeds:
         from label import route
         n = route.seed(json.loads(args.route_seeds.read_text()), args.route_seeds.name)

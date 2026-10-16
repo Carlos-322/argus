@@ -147,7 +147,7 @@ def prepare(job: Path, eps: Path, ids: list[str], *, free: bool, cap: float,
                 inv = dd.inventory(paths)
                 plan = dd.request_plan(inv)
                 n_in = len(json.dumps(plan['content'], ensure_ascii=False).encode('utf-8')) + 1024
-                prices = harness.OPENAI_PRICES[dd.MODEL.split('/', 1)[-1]][n_in >= harness.LONG_PROMPT_TOKENS]
+                prices = harness.model_prices(dd.MODEL, n_in)
                 bound = n_in * prices[0] + plan['max_tokens'] * prices[2]
                 available = max(0.0, min(DICTIONARY_MAX_USD, cap - label_spend(job)))
                 if bound > available:
