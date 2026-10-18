@@ -140,7 +140,47 @@ const shown = P => ({active: P.ctx.__nav.active(), drawn: P.ctx.__nav.drawn(), s
     }
   }
 
-  // 4. Random clicks, tabs, labellers, the comparison and Back, each made before the last one's responses arrive, and
+  // 4. An episode drawn in full (its header, downloads, buttons, grids and dictionary), then another whose read fails:
+  // nothing of the first is left on any element of the page's markup. The reference is a page that opened only the
+  // failing episode, never the first.
+  {
+    const failing = (bad, setup) => {
+      const P = page([
+        {match: u => /api\/episode\?file=/.test(u) && fileOf(u) === bad, answer: async () => Response.json(
+          {error: 'The saved document could not be read.'}, {status: 500})},
+        ...filledIn(async () => {}),
+      ], FILLED_IN + 'BOARD.footage = true; BOARD.hands = true;');
+      // the first episode carries everything a draw puts beside it: a raw id unlike its name, its dataset's source,
+      // reader notes, a head camera (the hand pose switch) and frame grids
+      const ep = P.ctx.fetchEpisode;
+      P.ctx.fetchEpisode = file => ep(file).then(d => d && Object.assign(d, {_rig: 'ego_head',
+        dataset_source: {name: 'Probe source', license: 'CC0', hub: 'https://example.org/' + file},
+        reader_notes: {state_note: 'Probe note for ' + file, left_out: {cameras: ['probe_cam']}},
+        _meta: {...d._meta, episode_id: 'episode_dual_arm__probe__' + file.replace(/\D/g, '')}}));
+      return P;
+    };
+    const P0 = page([]);
+    await P0.ctx.loadEpisodes(); await P0.settle();
+    const [a, b] = P0.ctx.__nav.eps();
+    done(P0);
+    const diff = (x, y) => Object.keys(x).filter(id => JSON.stringify(x[id]) !== JSON.stringify(y[id]))
+      .map(id => ({id, left: x[id], reference: y[id]}));
+    // the reference: only b opened, and its read fails
+    const R = failing(b.file);
+    R.ctx.history.replaceState(null, '', '?ep=' + encodeURIComponent(b.file));
+    await R.ctx.loadEpisodes(); await R.settle();
+    // a opened and drawn in full, then b, whose read fails
+    const P = failing(b.file);
+    P.ctx.history.replaceState(null, '', '?ep=' + encodeURIComponent(a.file));
+    await P.ctx.loadEpisodes(); await P.settle();
+    const drawnA = {drawn: P.ctx.__nav.drawn(), differs: diff(P.state(), R.state()).map(x => x.id)};
+    await P.ctx.setDataset(b.dataset, b.file); await P.settle();
+    out.failed_after_drawn = {a: a.file, b: b.file, drawn_a: drawnA, reference_error: shown(R).error,
+      error: shown(P).error, drawn: P.ctx.__nav.drawn(), left: diff(P.state(), R.state())};
+    done(P); done(R);
+  }
+
+  // 5. Random clicks, tabs, labellers, the comparison and Back, each made before the last one's responses arrive, and
   // every response late by a random time: once all have arrived, the page shows what its URL says (the comparison
   // exactly when the URL asks for it, otherwise the URL's episode drawn under the URL's labeller, and no fade left on),
   // and the frame grids and dictionary rows on the pane are the drawn episode's (no grids under another labeller's).

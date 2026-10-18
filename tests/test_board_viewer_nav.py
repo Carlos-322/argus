@@ -52,6 +52,15 @@ def test_navigation_outrunning_requests(tmp_path, monkeypatch):
         case = res[kind + "_replaced"]
         assert case["drawn"] == case["active"] == case["b"], kind
         assert case["grids"] == "fp:" + case["b"] and case["dictionary"] == case["b"], kind
+    # an episode drawn in full, then another whose read fails: every element of the page's markup ends as it does on a
+    # page that only ever opened the failing one (the page before this fix kept the first episode's JSON download link)
+    gone = res["failed_after_drawn"]
+    assert gone["error"] and gone["reference_error"] and gone["drawn"] is None
+    assert gone["left"] == [], gone["left"]
+    # and the first episode had filled in the header, so the check is not passing on an empty draw
+    assert gone["drawn_a"]["drawn"] == gone["a"]
+    assert {"current-ep-raw", "current-ep-src", "current-ep-reader", "hp-btn", "vd", "ms-btn", "dl-json"} <= set(
+        gone["drawn_a"]["differs"])
     # random clicks, tabs, labellers, comparisons and Backs, each outrunning randomly late responses: the page always
     # ends showing what its URL says (the page before this fix ended wrong in 8 of these 25), with the drawn episode's
     # own frame grids and dictionary rows (the page that tied them to the navigation lost them in 4 of these 25, and in
