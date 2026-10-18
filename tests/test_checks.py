@@ -188,6 +188,30 @@ def test_recorded_jump_the_camera_shows(tmp_path):
     assert [e["visual_jump"] for e in r["events"] if e["actor"] == "left"] == [True]
 
 
+@pytest.mark.parametrize("mapping", ["floor", "nearest"])
+@pytest.mark.parametrize("seen", [True, False])
+def test_recorded_jump_on_a_half_rate_camera(tmp_path, mapping, seen):
+    """A camera at half the anchor's rate, paired by its frame for each anchor frame: a leap after any anchor step
+    shows in the camera interval that holds that step, so the camera showing it is never flagged and the camera not
+    showing it always is. Both anchor frames of a step can show the same camera frame; the leap is then read on the
+    interval on either side of it, where it used to be read on the interval before only."""
+    for i in (58, 59, 60, 61):
+        s, vL, vR = two_grippers(14)
+        s[i + 1:, 7] += 0.10
+        own = np.array([vR[2 * j] + vR[2 * j + 1] for j in range(T // 2 - 1)])
+        if seen:
+            own[-(-(i + 1) // 2) - 1] += 10.0          # own frame j is taken at anchor 2j
+        d = write_episode(tmp_path / f"{i}" / "episode_000000", s, {"left": levels_for(vL)})
+        write_video(d / "right.mp4", levels_for(own))
+        km = np.arange(T) // 2 if mapping == "floor" else np.minimum((np.arange(T) + 1) // 2, T // 2 - 1)
+        np.save(d / "kmap_right.npy", km)
+        src = json.loads((d / "sources.json").read_text())
+        src["right"] = {"packed": str(d / "right.mp4"), "base_s": 0.0, "n_frames": T // 2, "kmap": "kmap_right.npy"}
+        (d / "sources.json").write_text(json.dumps(src))
+        ev = [e for e in stream_pairing.jumps(d)["events"] if e["actor"] == "right" and e["step"] > 9]
+        assert ev and all(e["visual_jump"] is seen for e in ev), (i, ev)
+
+
 def test_no_jump_in_smooth_motion(tmp_path):
     s, vL, vR = two_grippers(2)
     d = write_episode(tmp_path / "episode_000000", s, {"left": levels_for(vL), "right": levels_for(vR)})
