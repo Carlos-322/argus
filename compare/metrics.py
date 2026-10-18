@@ -240,97 +240,21 @@ def _list(L: dict, key: str) -> list:
 
 
 def schema_violations(L: dict, config: dict | None = None) -> list[str]:
-    """Where a parsed response departs from the schema every model was given. Head-camera responses carry
-    tasks instead of one completion. An episode with a single camera, named for its actor
-    (FastUMI's one-gripper tasks: the prompt names the camera "gripper" and still lists left, right or both),
-    may name that actor: the ambiguity is the prompt's, and counting it would score our wording as the model's
-    failure to follow it."""
+    """Where a parsed response departs from the schema every model was given: the board's own list
+    (board/label_projection.py project and schema_rules), so a model is never scored on a rule the board does not
+    show."""
     from board.to_board import typed
+    from board.label_projection import diagnostics
     projected, dropped = typed({"labels": L, "config": config})
-    from board.label_projection import diagnostics, field_identity, source_row_indices
-    violations = diagnostics(projected, dropped)
-    L = projected
-    mappings = {}
-    def add(field, message, row=None):
-        if row is not None:
-            scope = field.split('.')[0]
-            if scope not in mappings:
-                mappings[scope] = source_row_indices(L, scope, dropped)
-            if row < len(mappings[scope]):
-                row = mappings[scope][row]
-        violations.setdefault(field_identity(field, row), message)
-    arms = {"left", "right", "both"}
-    labels = (config or {}).get("cam_labels") or []
-    if len((config or {}).get("views") or []) == 1 and labels:
-        arms |= {str(labels[0])}
-    req = {"scene": dict, "timeline": list, "task_summary": str, "key_events": list, "state_changes": list,
-           "scene_graph": list, "recovery": list, "instruction_variants": list, "performance_review": str,
-           "data_issues": list}
-    for k, t in req.items():
-        if k not in L:
-            add(k, f"{k} missing")
-        elif not isinstance(L[k], t):
-            add(k, f"{k} is not a {t.__name__}")
-    if "tasks" in L:
-        if not isinstance(L["tasks"], list):
-            add('tasks', "tasks is not a list")
-        else:
-            for i, task in enumerate(L["tasks"]):
-                if not isinstance(task, dict):
-                    add('tasks', f"task {i}: outcome", i)
-                elif str(task.get("outcome") or "").lower() not in TASK_OUTCOMES:
-                    add('tasks.outcome', f"task {i}: outcome", i)
-    else:
-        c = L.get("completion")
-        if not isinstance(c, dict):
-            add('completion', "completion missing")
-        elif str(c.get("task_completed") or "").lower() not in OUTCOMES:
-            add('completion.task_completed', f"completion: task_completed {c.get('task_completed')!r}")
-    for i, segment in enumerate(_list(L, "timeline")):
-        if not isinstance(segment, dict):
-            add('timeline', f"timeline {i}: not a segment", i)
-            continue
-        for key in ('start_s', 'end_s'):
-            if not _num(segment.get(key)):
-                add('timeline.' + key, f"timeline {i}: {key} is not a time", i)
-        if (_num(segment.get('start_s')) and _num(segment.get('end_s'))
-                and segment['end_s'] < segment['start_s']):
-            add('timeline.end_s.order', f"timeline {i}: ends before it starts", i)
-        if not isinstance(segment.get("arm"), str) or segment["arm"] not in arms:
-            add('timeline.arm', f"timeline {i}: arm {segment.get('arm')!r}", i)
-        if segment.get("contribution") not in ("advancing", "wasteful", "idle"):
-            add('timeline.contribution', f"timeline {i}: contribution {segment.get('contribution')!r}", i)
-        if segment.get("progress") is not None and not (_num(segment['progress']) and 0 <= segment['progress'] <= 1):
-            add('timeline.progress', f"timeline {i}: progress {segment.get('progress')!r}", i)
-    for i, event in enumerate(_list(L, "key_events")):
-        if not isinstance(event, dict):
-            add('key_events', f"key event {i}: time", i)
-        elif not _num(event.get("t_s")):
-            add('key_events.t_s', f"key event {i}: time", i)
-        elif str(event.get("outcome") or "").lower() not in ("success", "failure", "unclear"):
-            add('key_events.outcome', f"key event {i}: outcome {event.get('outcome')!r}", i)
-    for key in LISTS:
-        items = L.get(key)
-        if items is None:
-            continue
-        if not isinstance(items, list):
-            add(key, f"{key} is not a list")
-            continue
-        for i, item in enumerate(items):
-            if not isinstance(item, dict):
-                add(key, f"{key} {i}: no description", i)
-            elif not str(item.get("issue") or "").strip():
-                add(key + '.issue', f"{key} {i}: no description", i)
-            elif str(item.get("severity") or "").lower() not in ("low", "medium", "high"):
-                add(key + '.severity', f"{key} {i}: severity {item.get('severity')!r}", i)
-    return list(violations.values())
+    return list(diagnostics(projected, dropped).values())
 
 
 def measure(L: dict, dataset: str | None, config: dict | None = None) -> dict:
     """The counts one parsed response contributes."""
     from board.to_board import typed
-    violations = schema_violations(L, config)
-    L, _ = typed({"labels": L, "config": config})
+    from board.label_projection import diagnostics, issues, severity
+    L, dropped = typed({"labels": L, "config": config})
+    violations = list(diagnostics(L, dropped).values())
     tl = [s for s in _list(L, "timeline") if isinstance(s, dict) and s.get("start_s") is not None]
     ke = [k for k in _list(L, "key_events") if isinstance(k, dict)]
     m = {"segments": len(tl), "key_events": len(ke),
@@ -338,10 +262,10 @@ def measure(L: dict, dataset: str | None, config: dict | None = None) -> dict:
          "violations": violations}
     fams = set()
     for key in LISTS:
-        items = [i for i in _list(L, key) if isinstance(i, dict) and str(i.get("issue") or "").strip()]
+        items = issues(L, key)
         n = sum(1 for i in items if FAMILIES.counts(key, i))
         m[key] = n
-        unrated = sum(item.get('severity') not in ('low', 'medium', 'high') for item in items)
+        unrated = sum(severity(item) is None for item in items)
         m[key + "_unrated"] = unrated
         m[key + "_minor"] = len(items) - n - unrated
         fams |= {FAMILIES.family_of(key, i, dataset) for i in items}
