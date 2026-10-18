@@ -11,11 +11,11 @@
   </tr>
 </table>
 
-### → WGO-Bench (October 2026)
+### \* WGO-Bench (October 2026)
 
 Recently, [Midcentury AI](https://www.midcentury.xyz/blog/optimizing-argus) pushed an adaptation of Argus to SOTA (**50.2% semantic F1**) on WGO-Bench. However, this result uses **Sol 6.1 High**, so its advantage over older-model baselines cannot be attributed to the harness alone.
 
-### → Depth and tactile annotations (October 2026)
+### \* Depth and tactile annotations (October 2026)
 
 Argus now annotates depth, tactile and other sensor data jointly with video, state and actions. Sensor findings appear as video overlays and in the JSON export, with supporting evidence and uncertainty.
 
