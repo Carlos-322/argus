@@ -76,6 +76,12 @@ def _publishing() -> bool:
     flag = _PUBLISH.get()
     return _PUBLISH_DEFAULT if flag is None else flag
 
+
+def publication_policy() -> dict:
+    """Every setting of this module that changes what a public output contains. A build's identity includes it
+    (board/static.py cmd_site), so a build made under another policy gets another id."""
+    return {'uploader_values': _publishing()}
+
 # These reader-owned note maps use source files as their keys. Keys inside the
 # recorded fields remain native identifiers, including absolute HDF paths.
 _NOTE_SOURCE_MAPS = frozenset({

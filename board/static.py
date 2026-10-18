@@ -80,7 +80,7 @@ from board import clips as bc
 from board import hands as hands_overlay
 from board import serve as sa
 from board.to_board import dumps
-from board.public_export import project as public_json, public_build_manifest
+from board.public_export import project as public_json, public_build_manifest, publication_policy
 from label.atomic import write_atomic
 
 HERE_DIR = Path(__file__).resolve().parent
@@ -657,8 +657,8 @@ def build_id_for(qa: Path, files: list, compare: Path | None = None, hands: Path
             sp = sensors / f
             if sp.exists():
                 h.update(f"sensors|{f}|".encode() + sp.read_bytes())
-    # the frames on disk are part of the build (the page lists only those), so a build made before the media finish
-    # gets a new id once they have
+    # the frames and web copies on disk are part of the build (the page lists only those frames, and a hand pose file
+    # needs its web copy), so a build made before the media finish gets a new id once they have
     for rel in frames or []:
         h.update(f"frame|{rel}\n".encode())
     if keypoints is not None:
@@ -705,6 +705,14 @@ def media_status(eps, media_root: Path):
     return st, missing
 
 
+# Options that steer how a build is made or where it is written, never what it publishes. The folders the path options
+# name enter the identity by their content (build_id_for, read_header), not by their paths. Every other option enters
+# the identity as given (cmd_site), so forgetting an option here costs a new build id, never a stale one.
+_UNPUBLISHED_OPTIONS = frozenset({'cmd', 'board', 'qa', 'clips', 'out', 'jobs', 'threads', 'limit_per_dataset',
+                                  'dataset', 'samples', 'first', 'build_id', 'force', 'compare', 'hands', 'keypoints',
+                                  'sensors', 'dictionary_job', 'header'})
+
+
 def cmd_site(a):
     if a.public_base and public_json({'public_base': a.public_base}).get('public_base') != a.public_base:
         raise ValueError('--public-base must be a public URL without credentials or signed access parameters')
@@ -717,13 +725,18 @@ def cmd_site(a):
     hands = hands_dir(a.qa, a.hands)
     keypoints = keypoints_dir(a.qa, a.keypoints)
     sensors = sensors_dir(a.qa, getattr(a, "sensors", None))
-    present = sorted(f["rel"] for e in eps for f in e["frames"].values() if (a.out / "media" / f["rel"]).exists())
+    # The frames and web copies already made are part of the build: the page lists only the frames on disk, and a hand
+    # pose file is published only once its web copy exists.
+    present = sorted(m["rel"] for e in eps for m in [*e["frames"].values(), *e["media"].values()]
+                     if (a.out / "media" / m["rel"]).exists())
     identity = build_id_for(a.qa, files, compare, hands, keypoints, present, sensors,
                             getattr(a, "dictionary_job", None),
                             media=sorted(m['rel'] for e in eps for m in e['media'].values()))
-    # Page settings and board metadata also change the exported site.
-    presentation = dumps([a.title, a.public_base, sa.board_name(a.board), sa.labels_license(a.board),
-                          sa.read_header(getattr(a, 'header', None))], sort_keys=True)
+    # Page settings, board metadata and the publication policy also change the exported site. Every option enters
+    # unless it is known not to change what is published, so an option added later cannot reuse an old build id.
+    options = {k: v for k, v in vars(a).items() if k not in _UNPUBLISHED_OPTIONS}
+    presentation = dumps([options, sa.board_name(a.board), sa.labels_license(a.board),
+                          sa.read_header(getattr(a, 'header', None)), publication_policy()], sort_keys=True, default=str)
     bid = a.build_id or identity + '-' + _h(presentation, 8)
     if not bid or Path(bid).name != bid or bid.startswith('.'):
         raise ValueError('build id must be a single visible directory name')
