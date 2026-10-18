@@ -738,3 +738,33 @@ FOURTH = [
     ('evidence_field', 'orientation: OK', 'exposure: washed out after 1:20', 'L'),
     ('evidence_field', 'Lens is clean and uncovered.', 'Later in the clip the wrist camera is rotated so it faces the wearer.', 'F'),
 ]
+
+# A first impression followed by a second look at the footage (review 10, finding 9). A second look that confirms the
+# impression or only describes it keeps the problem; one that denies it, says what it really is, or finds all in
+# order withdraws it. Saying the footage was looked at again decides nothing either way.
+SECOND_LOOK = [
+    ('second-look-confirms', 'The camera looks frozen. On closer inspection, the timestamps advance while the same frame is repeated.', '', 'I'),
+    ('second-look-confirms', 'The feed appears frozen. On review, the same frame repeats for the rest of the clip.', '', 'I'),
+    ('second-look-confirms', 'The image looks frozen. On closer inspection it really is frozen.', '', 'I'),
+    ('second-look-confirms', 'The view seems stale. Rewatching confirms it: the picture never changes.', '', 'I'),
+    ('second-look-confirms', 'It looks like glare on the plate. On a second look, the glare hides the cup.', '', 'L'),
+    ('second-look-confirms', "The lens appears covered. On closer inspection, the operator's palm rests on it the whole time.", '', 'F'),
+    ('second-look-confirms', 'The camera seems to point away from the table. On re-examination, the table is out of view throughout.', '', 'F'),
+    ('second-look-confirms', 'The video looks frozen. Update: the picture stays the same until the end.', '', 'I'),
+    ('second-look-confirms', 'The image appears overexposed. On closer inspection the highlights are pure white.', '', 'L'),
+    ('second-look-confirms', 'The camera looks frozen. On closer inspection, the timestamps do not change either.', '', 'I'),
+    ('second-look-confirms', 'The image seems frozen, but on closer inspection it really is frozen.', '', 'I'),
+    ('second-look-confirms', 'The view looks frozen. On review, it turns out the feed is frozen for the whole clip.', '', 'I'),
+    ('second-look-confirms', 'The lens looks covered.', 'On rewatch, a finger stays over the lens. Nobody corrects it.', 'F'),
+    ('second-look-corrects', 'The camera looks frozen. On closer inspection, it is not frozen; the scene is just static.', '', 'D'),
+    ('second-look-corrects', 'The camera looks frozen. On closer inspection, the arm is simply holding still.', '', 'D'),
+    ('second-look-corrects', 'The image looks overexposed. On review, it is a white tablecloth.', '', 'D'),
+    ('second-look-corrects', 'The lens appears covered. On closer inspection, nothing covers it.', '', 'D'),
+    ('second-look-corrects', 'The feed seems frozen. On rewatch, the video plays normally.', '', 'D'),
+    ('second-look-corrects', 'It looks like glare. On a second look, that is not the case.', '', 'D'),
+    ('second-look-corrects', 'The camera appears rotated. Upon review, the camera is actually level.', '', 'D'),
+    ('second-look-corrects', 'The view looks frozen. On closer inspection, it is not.', '', 'D'),
+    ('second-look-corrects', 'The camera seems frozen. Update: it was a slow scene, not a freeze.', '', 'D'),
+    ('second-look-corrects', 'The view looked frozen. On review, it turned out the operator had paused.', '', 'D'),
+    ('second-look-corrects', 'Possible occlusion flagged by the detector.', 'Checked: nothing occludes the lens at any time.', 'D'),
+]

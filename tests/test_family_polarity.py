@@ -282,10 +282,24 @@ def reviewer_corpus():
     ('written independently', [(i, e, CODE[x]) for _, i, e, x in wordings.INDEPENDENT], 0.95),
     ('third independent set', [(i, e, CODE[x]) for _, i, e, x in wordings.THIRD], 0.95),
     ('fourth independent set', [(i, e, CODE[x]) for _, i, e, x in wordings.FOURTH], 0.94),
+    ('second looks', [(i, e, CODE[x]) for _, i, e, x in wordings.SECOND_LOOK], 1.0),
 ])
 def test_family_precision_and_recall_over_corpora(name, items, bound):
     worst, wrong = worst_precision_recall(items)
     assert worst >= bound, (name, worst, wrong[:10])
+
+
+def test_a_second_look_retracts_only_with_corrective_content():
+    """Review 10, finding 9: "on closer inspection" retracted the observation before it even when the second look
+    confirmed it. Only what the second look says (a denial, what it really is, all in order) withdraws it."""
+    from board.polarity import denied_spans
+    text = 'The camera looks frozen. On closer inspection, the timestamps advance while the same frame is repeated.'
+    assert not any(a <= text.index('frozen') < b for a, b in denied_spans(text))
+    assert family(text) == 'camera-image'
+    for second in ('On closer inspection, it is not frozen.', 'On closer inspection, it is just a static scene.',
+                   'On closer inspection, the video plays normally.', 'Correction: it never was.'):
+        note = 'The camera looks frozen. ' + second
+        assert any(a <= note.index('frozen') < b for a, b in denied_spans(note)), note
 
 
 def test_corpus_has_the_reviewed_size():
