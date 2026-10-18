@@ -146,7 +146,7 @@ from pathlib import Path
 import numpy as np
 
 from label.atomic import write_atomic
-from prepare.hdf_metadata import ForeignStorage, open_hdf5
+from prepare.hdf_metadata import open_hdf5
 from prepare.camera_clock import UNKNOWN_CAMERA_FPS, camera_issue_kind, coarse_rows, presentation_clock
 from prepare.state_notes import STATE_WHY
 from prepare.signal_alignment import ALIGNED_ROWS, ALIGNED_ASSUMED, ALIGNED_CAMERA, COARSE_CLOCK
@@ -186,6 +186,58 @@ def files_under(root: Path) -> list[Path]:
 
 
 # ---------------------------------------------------------------- data issues
+
+class part:
+    """One optional part of an episode: its recorded state and signals, its text and notes, its metadata, a depth
+    stream, a sensor file. An episode is shown and labelled beside its cameras, so nothing that goes wrong reading
+    any other part may cost the cameras: whatever it raises is recorded as damage to that part (on issues, a list
+    of add_issue fields) and the episode goes on without it. This is the one boundary for the class, so a new kind
+    of damage needs no new exception type here. Only cameras, and scope declarations that contradict each other
+    (ScopeConflict, a refusal rather than damage), can fail an episode.
+
+        with part(issues, "the recorded state"):
+            skip_when_cameras_only()
+            state = read_state(...)
+    """
+
+    def __init__(self, issues: list, what: str, kind: str = "part_unreadable"):
+        self.issues, self.what, self.kind = issues, what, kind
+        self.failed: BaseException | None = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, error, tb):
+        if error is None or not isinstance(error, Exception):
+            return False                 # nothing went wrong, or an interrupt: never swallowed
+        from prepare.annotations import ScopeConflict
+        if isinstance(error, ScopeConflict):
+            return False                 # the upload's own declarations refuse the episode; that is not damage
+        if isinstance(error, CamerasOnly):
+            return True                  # left unread on purpose; the retry records why, once (read_episode)
+        self.failed = error
+        detail = str(error).strip().splitlines()[0][:200] if str(error).strip() else ""
+        self.issues.append({"kind": self.kind,
+                            "what": f"{self.what[0].upper()}{self.what[1:]} could not be read "
+                                    f"({type(error).__name__}{': ' + detail if detail else ''}); the episode keeps "
+                                    "its cameras without it."})
+        return True
+
+
+class CamerasOnly(Exception):
+    """Raised at the start of an optional part when the episode is being read with its cameras alone (cameras_only)."""
+
+
+def skip_when_cameras_only() -> None:
+    from prepare.isolation import cameras_only
+    if cameras_only():
+        raise CamerasOnly()
+
+
+def add_part_issues(ctx: dict, issues: list) -> None:
+    for issue in issues:
+        add_issue(ctx, **issue)
+
 
 def add_issue(ctx: dict, kind: str, what: str, camera: str | None = None, signal: str | None = None,
               t0_s: float | None = None, t1_s: float | None = None,
@@ -292,17 +344,47 @@ def _archive_members(path: Path):
     import tarfile
     import zipfile
     out, skipped, bad = [], 0, []
-    from prepare.archive_recovery import zip_member, local_stored_members
+    from contextlib import nullcontext
+    from prepare.archive_recovery import (checked_directory, local_members, local_stored_members, member_opener,
+                                          usable, zip_member)
     if not zipfile.is_zipfile(path):
         with path.open('rb') as source:
             local_zip = source.read(4) == b'PK\x03\x04'
         if local_zip:
-            from contextlib import nullcontext
             out, skipped, bad = local_stored_members(path, _member_parts, UNPACK_MAX_FILES, UNPACK_MAX_BYTES)
             return out, skipped, nullcontext(), bad
     if zipfile.is_zipfile(path):              # by its bytes, not its name: a tar named .zip is opened as a tar
-        zf = zipfile.ZipFile(path)
-        infos = zf.infolist()
+        try:
+            zf = zipfile.ZipFile(path)
+            infos = zf.infolist()
+        except Exception as error:
+            # the directory is one of a ZIP's two indexes; the members' own headers are the other
+            out, skipped, bad = local_members(path, _member_parts, UNPACK_MAX_FILES, UNPACK_MAX_BYTES,
+                                              f"{path.name} has a ZIP directory that could not be read "
+                                              f"({type(error).__name__}); its members were read from their own headers")
+            return out, skipped, nullcontext(), bad
+        infos, replaced, unlisted, lost = checked_directory(path, infos, UNPACK_MAX_FILES, UNPACK_MAX_BYTES)
+        if replaced or unlisted or lost:
+            bad.append(f"{path.name} has a damaged ZIP directory; {len(replaced) + len(unlisted)} member"
+                       f"{'s were' if len(replaced) + len(unlisted) != 1 else ' was'} read from their own headers"
+                       + (f" and {len(lost)} could not be found" if lost else ""))
+            bad.extend(f"{name} (its directory entry matches no member)" for name in lost)
+        for entry in [*replaced.values(), *unlisted]:
+            reason = usable(entry)
+            if reason:
+                bad.append(f"{entry['name']} ({reason}; member was skipped)")
+                continue
+            name = entry['name']
+            if not entry['flags'] & 0x800:
+                try:
+                    name = entry['raw_name'].decode('utf-8')     # zip_name's rule for an unflagged UTF-8 name
+                except UnicodeDecodeError:
+                    pass
+            parts = _member_parts(name)
+            if parts is None or name.endswith('/'):
+                skipped += 1
+                continue
+            out.append((parts, entry['size'], member_opener(path, entry, bad)))
         regular = {"/".join(p) for p in (_member_parts(zip_name(i)) for i in infos
                                         if not i.is_dir() and stat.S_IFMT(i.external_attr >> 16) in (0, stat.S_IFREG)) if p}
         by_parts = {"/".join(p): i for i in infos for p in [_member_parts(zip_name(i))] if p}
@@ -577,13 +659,6 @@ def no_camera_words(root: Path, files: list[Path], sensors: list[Path]) -> str:
     def why(p):
         if p in sensors:
             if p.suffix.lower() in H5_EXT:
-                from prepare.hdf_metadata import foreign_references
-                try:
-                    foreign = foreign_references(p)
-                except Exception as error:
-                    return f"an HDF5 file that could not be opened ({type(error).__name__})"
-                if foreign:
-                    return f"an HDF5 file that was not read because it names storage outside the upload ({foreign[0]})"
                 return "an HDF5 file with no image frames or encoded images"
             return "an MCAP file with no camera channel"
         return "not a recording" if p.suffix.lower() in NOTE_EXT else "not a kind of file a reader opens"
@@ -3150,6 +3225,8 @@ def keep_unshown_clock(ep: Path, entry: dict | None, capture: np.ndarray, pts: l
 def finish_episode(ep: Path, ctx: dict, sources: dict, state=None, action=None, times: dict | None = None,
                    signals: dict | None = None, nominal_fps: float | None = None) -> dict:
     ep.mkdir(parents=True, exist_ok=True)
+    # damage to the episode's optional parts, collected by its reader (part)
+    add_part_issues(ctx, ctx.pop("_parts", None) or [])
     if state is not None and ctx.get("state_kind") != "none":
         from label import episode as me
         # Resolve once before clipping or reanchoring can remove a mounted camera. Context copies retain this
@@ -3360,6 +3437,25 @@ def video_views_episode(ep: Path, files: dict, rig: str, dataset: str, extra: di
         np.savez(ep / ctx["depth_presentation_times"], **depth_placement)
     return finish_episode(ep, ctx, sources, state=state, action=action, times=times, signals=signals,
                           nominal_fps=nominal_fps)
+
+
+def finish_views(ep: Path, files: dict, rig: str, dataset: str, extra: dict, **kw) -> dict:
+    """video_views_episode, and when writing the episode's recorded state, signals or depth fails, the episode again
+    with its cameras alone, the failure recorded as damage to those parts (part): an episode is never lost to a part
+    it is not shown by."""
+    try:
+        return video_views_episode(ep, files, rig, dataset, extra, **kw)
+    except Exception as error:
+        if not any(kw.get(key) is not None and len(kw[key]) for key in ('signals', 'depth', 'state', 'action')
+                   if hasattr(kw.get(key), '__len__')):
+            raise
+        detail = str(error).strip().splitlines()[0][:200] if str(error).strip() else ''
+        add_issue(extra, 'part_unreadable', "The episode's recorded state, signals and depth could not be written "
+                  f"({type(error).__name__}{': ' + detail if detail else ''}); the episode keeps its cameras "
+                  "without them.")
+        return video_views_episode(ep, files, rig, dataset, extra,
+                                   **{**kw, 'signals': Signals(), 'depth': {}, 'state': None, 'action': None,
+                                      'state_names': None})
 
 
 def episode_name(s: str) -> str:
@@ -4212,12 +4308,22 @@ def packaging_note(window: float) -> str:
 
 
 def convert_video(item: dict, rig: str, out: Path, dataset: str) -> dict:
-    mod = next((m for m in upload_adapters("video") if m.recognizes(item)), None)
+    mod = None if item.get("_generic") else next((m for m in upload_adapters("video") if m.recognizes(item)), None)
     if mod is not None:
         # a folder in a dataset's own layout (OpenAoE's clip with its action segments) goes through its adapter
-        ctx = mod.convert_upload(item, rig, out, dataset)
+        before = {p.name for p in Path(out).iterdir()} if Path(out).exists() else set()
+        try:
+            ctx = mod.convert_upload(item, rig, out, dataset)
+        except Exception as error:
+            # A dataset's own reader refines the generic one; its failure never costs what the generic reader can read.
+            import shutil
+            for name in ({p.name for p in Path(out).iterdir()} - before) if Path(out).exists() else ():
+                shutil.rmtree(Path(out) / name, ignore_errors=True)
+            return generic_after_adapter(error, f"the {mod.__name__.rsplit('.', 1)[-1]} reader", out, None,
+                                         lambda: convert_video({**item, "_generic": True}, rig, out, dataset))
         ctx.setdefault("source", {})["adapter"] = mod.__name__.rsplit(".", 1)[-1]
         return ctx
+    parts: list = []              # damage to the episode's optional parts (part), recorded on it
     fs = item["files"]
     if item["dir"] is None:
         f = fs[0]
@@ -4235,43 +4341,45 @@ def convert_video(item: dict, rig: str, out: Path, dataset: str) -> dict:
         extra["source"]["unused_cameras"] = list(unused)
     # every note file of the episode (episode_notes): one is given as sent, several each under its file name, and a
     # note whose whole text is the task is given once, as the instruction
-    got = episode_notes(item)
-    structured = recorded_video_notes(item)
-    got["read"] = list(dict.fromkeys(got["read"] + structured["read"]))
-    got["issues"] += structured["issues"]
-    if structured["notes"]:
-        got["notes"] = list({**dict(got["notes"]), **structured["notes"]}.items())
-        got["attributed_notes"] += list(structured["notes"])
-    extra["source"].update(structured["source"])
-    if structured["spans"]:
-        extra["annotation_subtasks"] = structured["spans"]
-        extra["annotation_note"] = ("These are recorded atomic action claims. start_ts and end_ts are "
-                                    "displayed as seconds from the video start; their unit, clock relation and "
-                                    "accuracy were not separately recorded. Original fields and boundaries "
-                                    "remain in the attributed notes.")
-    if structured["unresolved"]:
-        extra["annotation_unresolved"] = structured["unresolved"]
-        add_issue(extra, "annotation_unresolved", "Some recorded action claims have invalid boundaries or "
-                  "structure; they remain attributed notes without a precise span.")
-    for issue in got["issues"]:
-        add_issue(extra, issue["kind"], issue["text"])
-    if got["read"]:
-        home = item["note_folder"]["dir"] if item.get("note_folder") else Path(fs[0]).parent
-        extra["source"]["note_files"] = [p.relative_to(home).as_posix() for p in got["read"]]
-    instr = got["instruction"]
-    if instr:
-        extra["instruction"] = instr
-        extra["instruction_note"] = "This instruction is the task text the uploader sent with the episode."
-    if got["disagree"]:
-        add_issue(extra, "task_files_disagree", f"{_and_words(got['disagree'])} name different tasks, so none of them "
-                                                "is given as the task and each is given as a note")
-    notes = [(k, o) for k, o in got["notes"] if k not in got["repeats"]]
-    # a camera's own note (top.txt beside top.mp4 and wrist.mp4) keeps its file name, which says the camera it is about
-    if (len(notes) == 1 and len(got["notes"]) == 1
-            and notes[0][0] not in got["camera_notes"] + got["attributed_notes"]):
-        set_uploader_notes(extra, notes[0][1])
-    elif notes:
-        set_uploader_notes(extra, dict(notes), files=True)
+    with part(parts, "the episode's note files"):
+        skip_when_cameras_only()
+        got = episode_notes(item)
+        structured = recorded_video_notes(item)
+        got["read"] = list(dict.fromkeys(got["read"] + structured["read"]))
+        got["issues"] += structured["issues"]
+        if structured["notes"]:
+            got["notes"] = list({**dict(got["notes"]), **structured["notes"]}.items())
+            got["attributed_notes"] += list(structured["notes"])
+        extra["source"].update(structured["source"])
+        if structured["spans"]:
+            extra["annotation_subtasks"] = structured["spans"]
+            extra["annotation_note"] = ("These are recorded atomic action claims. start_ts and end_ts are "
+                                        "displayed as seconds from the video start; their unit, clock relation and "
+                                        "accuracy were not separately recorded. Original fields and boundaries "
+                                        "remain in the attributed notes.")
+        if structured["unresolved"]:
+            extra["annotation_unresolved"] = structured["unresolved"]
+            add_issue(extra, "annotation_unresolved", "Some recorded action claims have invalid boundaries or "
+                      "structure; they remain attributed notes without a precise span.")
+        for issue in got["issues"]:
+            add_issue(extra, issue["kind"], issue["text"])
+        if got["read"]:
+            home = item["note_folder"]["dir"] if item.get("note_folder") else Path(fs[0]).parent
+            extra["source"]["note_files"] = [p.relative_to(home).as_posix() for p in got["read"]]
+        instr = got["instruction"]
+        if instr:
+            extra["instruction"] = instr
+            extra["instruction_note"] = "This instruction is the task text the uploader sent with the episode."
+        if got["disagree"]:
+            add_issue(extra, "task_files_disagree", f"{_and_words(got['disagree'])} name different tasks, so none of them "
+                                                    "is given as the task and each is given as a note")
+        notes = [(k, o) for k, o in got["notes"] if k not in got["repeats"]]
+        # a camera's own note (top.txt beside top.mp4 and wrist.mp4) keeps its file name, which says the camera it is about
+        if (len(notes) == 1 and len(got["notes"]) == 1
+                and notes[0][0] not in got["camera_notes"] + got["attributed_notes"]):
+            set_uploader_notes(extra, notes[0][1])
+        elif notes:
+            set_uploader_notes(extra, dict(notes), files=True)
     if item.get("fixed_window_s"):
         extra["collection_note"] = packaging_note(item["fixed_window_s"])
         extra["packaging"] = {"fixed_window_s": item["fixed_window_s"]}
@@ -4295,97 +4403,105 @@ def convert_video(item: dict, rig: str, out: Path, dataset: str) -> dict:
     anchor = me.order_views(files)[0]
     # sensor files of the episode's folder (assign_sensors): by their clock on the capture times, from both starts when
     # they share no clock with the footage, or listed (split_sensors)
-    by_clock, assumed, unplaced = split_sensors(item, real[anchor], real[anchor] is not None)
-    note_sensors(extra, signals, by_clock, assumed, unplaced, q=real[anchor])
-    mcap_files = [p for p in by_clock if p.suffix.lower() == ".mcap"]
-    h5_files = [p for p in by_clock if p.suffix.lower() in H5_EXT]
-    arm_rig = rig == "teleop_arms"
-    # an arm state only when every arm the sensor files may hold was read on the footage's clock (state_blockers): a
-    # file that could not be read, or was damaged where the footage needs it, and an arm placed from both starts
-    # beside files on the footage's clock leave the episode with no arm state, every channel a signal
-    lost: list = []
-    streams = mcap_joint_streams(mcap_files, real[anchor], lost) if arm_rig and mcap_files else {}
-    bad = unreadable_sensors(unplaced) + damaged_files(lost) if rig != "ego_head" else []
-    others = "the other sensor files" if len(by_clock) + len(assumed) + len(unplaced) > len(bad) else None
-    blocked = state_blockers(bad, assumed_arms(assumed, streams) if arm_rig and by_clock else [], others,
-                             unplaced_arms(unplaced, streams) if arm_rig else [])
-    if by_clock:
-        if not arm_rig or not mcap_files:
-            # a glove's pressure and hand pose beside a head camera, a handheld gripper's IMU: every number the MCAP
-            # files record, on the videos' clock (mcap_signals); an MCAP arm channel is read as the state on an arm rig
-            # only, and an HDF5 array named as the state below (h5_state)
-            merge_signals(signals, mcap_signals(mcap_files, real[anchor]) if mcap_files else Signals())
-        else:
-            state, action, note = joint_state(streams, real[anchor]) if not blocked else (None, None, None)
-            merge_signals(signals, mcap_signals(mcap_files, real[anchor], state_fields(streams, state, action)))
-            signals.left_out += joint_left_out(streams, state, action)
-            if note:
-                no_state(extra, note)
-            elif state is not None:
-                record_joint_state_identity(extra, streams)
-                extra["source"]["state"] = [Path(p).name for p in mcap_files]
-                third = third_arms(streams)
-                if third:
-                    extra["state_note"] = (f"The recording has a third arm ({', '.join(third)}) beside the left and "
-                                           "right arms; it is read as neither working arm.")
-                    # a scene camera whose name says it is on an arm, beside a third arm, is carried by that arm
-                    if "exo" in files and is_mount_named(files["exo"][0]):
-                        descs["exo"] = third_arm_camera_desc(third)
-        if h5_files:
-            more = h5_file_signals(h5_files, real[anchor], len(real[anchor]))
-            if state is None and rig != "ego_head" and not blocked:
-                # an HDF5 array named as the state (a robot.h5's qpos beside the videos) is read by the rule an HDF5
-                # episode's is (h5_state), and leaves the signals when it is read
-                state, action, state_names, state_src, h5_note = h5_state(
-                    more, rig, real[anchor], [p.stem for p in h5_files] if len(h5_files) > 1 else None, extra)
-                if state is not None:
-                    extra["source"]["state"] = state_src
-                    drop_no_state(extra)                 # a note on the MCAP arm channels, which are not the state
-                elif h5_note and "state_note" not in extra:
-                    no_state(extra, h5_note)
+    by_clock, assumed, unplaced = [], [], []
+    with part(parts, "the episode's sensor files and recorded state") as sensing:
+        skip_when_cameras_only()
+        by_clock, assumed, unplaced = split_sensors(item, real[anchor], real[anchor] is not None)
+        note_sensors(extra, signals, by_clock, assumed, unplaced, q=real[anchor])
+        mcap_files = [p for p in by_clock if p.suffix.lower() == ".mcap"]
+        h5_files = [p for p in by_clock if p.suffix.lower() in H5_EXT]
+        arm_rig = rig == "teleop_arms"
+        # an arm state only when every arm the sensor files may hold was read on the footage's clock (state_blockers): a
+        # file that could not be read, or was damaged where the footage needs it, and an arm placed from both starts
+        # beside files on the footage's clock leave the episode with no arm state, every channel a signal
+        lost: list = []
+        streams = mcap_joint_streams(mcap_files, real[anchor], lost) if arm_rig and mcap_files else {}
+        bad = unreadable_sensors(unplaced) + damaged_files(lost) if rig != "ego_head" else []
+        others = "the other sensor files" if len(by_clock) + len(assumed) + len(unplaced) > len(bad) else None
+        blocked = state_blockers(bad, assumed_arms(assumed, streams) if arm_rig and by_clock else [], others,
+                                 unplaced_arms(unplaced, streams) if arm_rig else [])
+        if by_clock:
+            if not arm_rig or not mcap_files:
+                # a glove's pressure and hand pose beside a head camera, a handheld gripper's IMU: every number the MCAP
+                # files record, on the videos' clock (mcap_signals); an MCAP arm channel is read as the state on an arm rig
+                # only, and an HDF5 array named as the state below (h5_state)
+                merge_signals(signals, mcap_signals(mcap_files, real[anchor]) if mcap_files else Signals())
+            else:
+                state, action, note = joint_state(streams, real[anchor]) if not blocked else (None, None, None)
+                merge_signals(signals, mcap_signals(mcap_files, real[anchor], state_fields(streams, state, action)))
+                signals.left_out += joint_left_out(streams, state, action)
+                if note:
+                    no_state(extra, note)
+                elif state is not None:
+                    record_joint_state_identity(extra, streams)
+                    extra["source"]["state"] = [Path(p).name for p in mcap_files]
+                    third = third_arms(streams)
+                    if third:
+                        extra["state_note"] = (f"The recording has a third arm ({', '.join(third)}) beside the left and "
+                                               "right arms; it is read as neither working arm.")
+                        # a scene camera whose name says it is on an arm, beside a third arm, is carried by that arm
+                        if "exo" in files and is_mount_named(files["exo"][0]):
+                            descs["exo"] = third_arm_camera_desc(third)
+            if h5_files:
+                more = h5_file_signals(h5_files, real[anchor], len(real[anchor]))
+                if state is None and rig != "ego_head" and not blocked:
+                    # an HDF5 array named as the state (a robot.h5's qpos beside the videos) is read by the rule an HDF5
+                    # episode's is (h5_state), and leaves the signals when it is read
+                    state, action, state_names, state_src, h5_note = h5_state(
+                        more, rig, real[anchor], [p.stem for p in h5_files] if len(h5_files) > 1 else None, extra)
+                    if state is not None:
+                        extra["source"]["state"] = state_src
+                        drop_no_state(extra)                 # a note on the MCAP arm channels, which are not the state
+                    elif h5_note and "state_note" not in extra:
+                        no_state(extra, h5_note)
+                merge_signals(signals, more)
+        if blocked:
+            no_state(extra, blocked)
+        if assumed:
+            t_rel = (np.asarray(real[anchor], dtype=np.float64) - float(real[anchor][0])) if real[anchor] is not None \
+                else seconds(prs[anchor])
+            if arm_rig and state is None and "state_note" not in extra:
+                # no sensor file on the footage's clock: an arm the files record has nothing to place it against
+                no_state(extra, StateNote(
+                    "Labelled from the cameras, because the sensor files share no clock with the videos to place a "
+                    "recorded arm state against; their channels are kept as signals.", "assumed_clock")
+                    if assumed_arms(assumed, {}) else StateNote(
+                    "Labelled from the cameras, because the sensor files beside the videos record no arm state; their "
+                    "channels are kept as signals.", "not_recorded"))
+            merge_signals(signals, sensors_from_start(assumed, t_rel, extra))
+        if item.get("series"):
+            more = table_signals(item["series"], real.get(anchor), prs[anchor], extra)
+            if not hasattr(signals, "meta"):
+                signals = Signals(signals)
             merge_signals(signals, more)
-    if blocked:
-        no_state(extra, blocked)
-    if assumed:
-        t_rel = (np.asarray(real[anchor], dtype=np.float64) - float(real[anchor][0])) if real[anchor] is not None \
-            else seconds(prs[anchor])
-        if arm_rig and state is None and "state_note" not in extra:
-            # no sensor file on the footage's clock: an arm the files record has nothing to place it against
-            no_state(extra, StateNote(
-                "Labelled from the cameras, because the sensor files share no clock with the videos to place a "
-                "recorded arm state against; their channels are kept as signals.", "assumed_clock")
-                if assumed_arms(assumed, {}) else StateNote(
-                "Labelled from the cameras, because the sensor files beside the videos record no arm state; their "
-                "channels are kept as signals.", "not_recorded"))
-        merge_signals(signals, sensors_from_start(assumed, t_rel, extra))
-    if item.get("series"):
-        more = table_signals(item["series"], real.get(anchor), prs[anchor], extra)
-        if not hasattr(signals, "meta"):
-            signals = Signals(signals)
-        merge_signals(signals, more)
+    if sensing.failed is not None:
+        state = action = state_names = None
+        signals = Signals()
     # each camera's depth video, when the folder has one beside its colour video (depth_videos), on the same clock. A
     # depth video stored as an ordinary 8-bit picture (yuv, rgb) holds the recorder's shading, not distances: it is
     # shown as a camera of its own and never decoded as depth
     depth = {}
     for v, (_, p) in list(files.items()):
-        dp = (item.get("depth") or {}).get(str(p))
-        if dp is None:
-            continue
-        try:
-            pr_d = probe_depth(dp)
-            n_d = len(pr_d["pts"])
-        except Exception:
-            pr_d, n_d = None, 0
-        if pr_d is not None and not str(pr_d["pix_fmt"] or "").startswith("gray"):
-            k = 1 + sum(1 for x in files if x.startswith("extra"))
-            files[f"extra{k}"] = (Path(dp).stem, Path(dp))
-            descs[f"extra{k}"] = (f"the depth of {files[v][0]}, stored by the recorder as an ordinary picture, with "
-                                  "its own shading of near and far")
-            prs[f"extra{k}"] = probe(Path(dp))
-            real[f"extra{k}"] = frame_times(Path(dp), len(prs[f"extra{k}"]["pts"]), depth=True)
-            continue
-        depth[v] = {"path": dp, "real": frame_times(Path(dp), n_d, depth=True) if n_d else None,
-                    "scale_m": depth_scale_from(Path(dp).parent), "source": Path(dp).name}
+        with part(parts, 'the depth video beside a camera'):
+            skip_when_cameras_only()
+            dp = (item.get("depth") or {}).get(str(p))
+            if dp is None:
+                continue
+            try:
+                pr_d = probe_depth(dp)
+                n_d = len(pr_d["pts"])
+            except Exception:
+                pr_d, n_d = None, 0
+            if pr_d is not None and not str(pr_d["pix_fmt"] or "").startswith("gray"):
+                k = 1 + sum(1 for x in files if x.startswith("extra"))
+                files[f"extra{k}"] = (Path(dp).stem, Path(dp))
+                descs[f"extra{k}"] = (f"the depth of {files[v][0]}, stored by the recorder as an ordinary picture, with "
+                                      "its own shading of near and far")
+                prs[f"extra{k}"] = probe(Path(dp))
+                real[f"extra{k}"] = frame_times(Path(dp), len(prs[f"extra{k}"]["pts"]), depth=True)
+                continue
+            depth[v] = {"path": dp, "real": frame_times(Path(dp), n_d, depth=True) if n_d else None,
+                        "scale_m": depth_scale_from(Path(dp).parent), "source": Path(dp).name}
     # the cameras the model is not shown go to the board (unshown_cameras), timed on the recorder's clock when the
     # videos carry capture times, else from their own first frame as every separate video file is
     zero = real.get(anchor)[0] if real.get(anchor) is not None else None
@@ -4407,28 +4523,33 @@ def convert_video(item: dict, rig: str, out: Path, dataset: str) -> dict:
                 for q in item.get("unshown") or []]
     ep = unique_dir(out, item.get("output_name") or episode_name(item["name"]))
     ep.mkdir(parents=True, exist_ok=True)
-    for index, (name, entry) in enumerate(unshown):
-        if entry is None:
-            continue
-        path = Path(entry["packed"])
-        original = frame_times(path, entry["n_frames"], native=True)
-        if original is None:
-            continue
-        pr = probe(path)
-        recorded = frame_times(path, len(pr["pts"]))
-        native[f"unshown{index + 1}"] = original
-        if recorded is not None:
-            unshown[index] = (name, keep_unshown_clock(ep, entry, recorded - (zero if zero is not None else recorded[0]),
-                                                       pr["pts"].tolist()))
+    with part(parts, "the unshown cameras' clocks"):
+        skip_when_cameras_only()
+        for index, (name, entry) in enumerate(unshown):
+            if entry is None:
+                continue
+            path = Path(entry["packed"])
+            original = frame_times(path, entry["n_frames"], native=True)
+            if original is None:
+                continue
+            pr = probe(path)
+            recorded = frame_times(path, len(pr["pts"]))
+            native[f"unshown{index + 1}"] = original
+            if recorded is not None:
+                unshown[index] = (name, keep_unshown_clock(ep, entry, recorded - (zero if zero is not None else recorded[0]),
+                                                           pr["pts"].tolist()))
     set_unshown(extra, unshown)
-    if native:
-        home = Path(os.path.commonpath([str(p.parent) for p, _ in native.values()]))
-        key = lambda p: p.relative_to(home).as_posix()
-        clocks = {key(p): a for p, a in native.values()}
-        keep_container_clocks(ep, extra, clocks, {v: key(p) for v, (p, _) in native.items()},
-                              {key(p): {"source": str(p.resolve()), "units": None} for p, _ in native.values()})
-    return video_views_episode(ep, files, rig, dataset, extra, prs=prs, real=real, state=state, action=action,
-                               descs=descs, signals=signals, depth=depth, state_names=state_names)
+    with part(parts, "the videos' recorded clocks"):
+        skip_when_cameras_only()
+        if native:
+            home = Path(os.path.commonpath([str(p.parent) for p, _ in native.values()]))
+            key = lambda p: p.relative_to(home).as_posix()
+            clocks = {key(p): a for p, a in native.values()}
+            keep_container_clocks(ep, extra, clocks, {v: key(p) for v, (p, _) in native.items()},
+                                  {key(p): {"source": str(p.resolve()), "units": None} for p, _ in native.values()})
+    add_part_issues(extra, parts)
+    return finish_views(ep, files, rig, dataset, extra, prs=prs, real=real, state=state, action=action,
+                        descs=descs, signals=signals, depth=depth, state_names=state_names)
 
 
 # ---------------------------------------------------------------- LeRobot: reading a dataset root
@@ -5050,9 +5171,24 @@ def _read_episode_table(path: Path, eidx: int, columns: list[str] | None, exclud
         try:
             decoded = source.read_row_group(group, columns=cols or None)
         except (pa.ArrowException, OSError) as error:
+            # The unit of damage is one column of one row group: read the group's columns one by one, so a damaged
+            # optional column (a state vector) costs that column alone, never the cameras and frame ownership
+            # beside it. Only a group none of whose columns decode is lost whole.
+            wanted, arrays, lost = cols or have, {}, []
+            for column in wanted:
+                try:
+                    arrays[column] = source.read_row_group(group, columns=[column]).column(0)
+                except (pa.ArrowException, OSError):
+                    lost.append(column)
+            if not arrays:
+                damage.append({'row_group': group, 'source': str(path), 'error_type': type(error).__name__,
+                               'what': plain_error(error)})
+                continue
+            rows = len(next(iter(arrays.values())))
+            decoded = pa.table([arrays[c] if c in arrays else pa.nulls(rows, type=source.schema_arrow.field(c).type)
+                                for c in wanted], names=wanted)
             damage.append({'row_group': group, 'source': str(path), 'error_type': type(error).__name__,
-                           'what': plain_error(error)})
-            continue
+                           'what': plain_error(error), 'columns': lost})
         groups.append(decoded)
     metadata_damage = []
     table = pa.concat_tables(groups) if groups else None
@@ -5344,7 +5480,17 @@ def convert_lerobot_item(item: dict, rig: str, out: Path, dataset: str) -> dict:
     if mod is None:
         ctx = convert_lerobot(item, rig, out, dataset)
     else:
-        ctx = mod.convert_upload(item, rig, out, dataset)
+        before = {p.name for p in Path(out).iterdir()} if Path(out).exists() else set()
+        try:
+            ctx = mod.convert_upload(item, rig, out, dataset)
+        except Exception as error:
+            # A dataset's own reader refines the generic one; its failure never costs what the generic reader can read.
+            import shutil
+            for name in ({p.name for p in Path(out).iterdir()} - before) if Path(out).exists() else ():
+                shutil.rmtree(Path(out) / name, ignore_errors=True)
+            name = mod.__name__.rsplit(".", 1)[-1]
+            return generic_after_adapter(error, f"the {name} reader", out, None,
+                                         lambda: convert_lerobot(item, rig, out, dataset))
         ctx["dataset"] = dataset
         ctx.setdefault("source", {})["adapter"] = mod.__name__.rsplit(".", 1)[-1]
         from prepare.state_contract import native_contract
@@ -5753,6 +5899,7 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
     feats = r["features"]
     ep = out / (item.get("output_name") or episode_name(item["name"]))
     notes = []
+    parts: list = []              # damage to the episode's optional parts (part), recorded on it
     df, table_damage, table_metadata_damage = None, [], []
     if row.get("data") is not None:
         try:
@@ -5762,8 +5909,10 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
             table_metadata_damage = df.attrs.get('argus_metadata_damage', [])
             if not len(df):
                 df = None
-        except TableSourceError:
-            notes.append("Labelled from the video: the episode's data file could not be opened.")
+        except Exception as error:
+            # the table is an optional part: the episode is labelled from its video, whatever the table raised
+            notes.append("Labelled from the video: the episode's data file could not be opened"
+                         + ("" if isinstance(error, TableSourceError) else f" ({type(error).__name__}: {error})") + ".")
             df = None
     fps = r["fps"]
     from prepare.lerobot_labels import publisher_columns
@@ -5773,30 +5922,45 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
     row, packed_ownership = canonical_packed_row(r, row, fps)
     # every row as it is, NaN where a cell cannot be read; a frame with no reading is filled or the state is left a
     # signal (state_on_frames), never dropped for one NaN frame
-    state = _cells(df["observation.state"]) if df is not None and "observation.state" in df.columns else None
-    action = _cells(df["action"]) if df is not None and "action" in df.columns else None
+    state = action = state_names = None
     state_columns, action_columns, state_groups, split_note = [], [], [], None
-    if df is not None and rig == "teleop_arms":
-        if state is None:
-            state, state_columns, state_groups, split_note = split_lerobot_columns(df, feats, "observation.state")
-        if action is None:
-            action, action_columns, _, _ = split_lerobot_columns(df, feats, "action")
-    state_names = [name for _, names, _ in state_groups for name in names] \
-        if state_groups and all(names for _, names, _ in state_groups) else state_value_names(feats, state)
-    value_roles, role_sources = recorded_value_roles(feats, state_names, state_columns)
+    value_roles, role_sources = [], []
+    with part(parts, "the recorded state and action columns") as reading:
+        skip_when_cameras_only()
+        state = _cells(df["observation.state"]) if df is not None and "observation.state" in df.columns else None
+        action = _cells(df["action"]) if df is not None and "action" in df.columns else None
+        if df is not None and rig == "teleop_arms":
+            if state is None:
+                state, state_columns, state_groups, split_note = split_lerobot_columns(df, feats, "observation.state")
+            if action is None:
+                action, action_columns, _, _ = split_lerobot_columns(df, feats, "action")
+        state_names = [name for _, names, _ in state_groups for name in names] \
+            if state_groups and all(names for _, names, _ in state_groups) else state_value_names(feats, state)
+        value_roles, role_sources = recorded_value_roles(feats, state_names, state_columns)
+    if reading.failed is not None:
+        state = action = state_names = None
+        state_columns, action_columns, state_groups, split_note = [], [], [], None
+        value_roles, role_sources = [], []
     tasks = list(row.get("tasks") or [])
     task_column = "coarse_task_index" if df is not None and "coarse_task_index" in df else "task_index"
     if not tasks and df is not None and task_column in df.columns and len(df):
         try:
             tasks = constant_index_task(df[task_column], r["tasks_by_index"])
-        except ValueError as error:
+        except Exception as error:
             metadata_failure(r, row["data"], f"{task_column}: {plain_error(error)}; no task was inferred")
     annotated = r["annotated"].get(eidx)
     extra = {"task_label": tasks or [item["name"]], "episode_index": eidx, "robot_type": r["robot_type"],
              "source": {"format": f"lerobot {r['version']}", "episode_index": eidx, "dataset_folder": r["rel"] or None}}
+    extra["_parts"] = parts       # recorded on the episode by finish_lerobot
     if packed_ownership:
         extra['source']['packed_video_ownership'] = packed_ownership
     for damage in table_damage:
+        if damage.get('columns') is not None:
+            add_issue(extra, 'table_row_group_unreadable',
+                      f"{Path(damage['source']).name} row group {damage['row_group']}: the columns "
+                      f"{', '.join(damage['columns'])} could not be decoded ({damage['error_type']}: {damage['what']}) "
+                      "and are missing there; the group's other columns were kept.")
+            continue
         add_issue(extra, 'table_row_group_unreadable',
                   f"{Path(damage['source']).name} row group {damage['row_group']} could not be decoded "
                   f"({damage['error_type']}: {damage['what']}); other readable row groups remain available.")
@@ -5857,8 +6021,13 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
     if r["image_cams"]:
         unused = unused + [f"{k} (images in the data file)" for k in r["image_cams"]]
     extra["source"]["unused_cameras"] = unused
-    kind, note, action, proof = lerobot_physical_state(
-        state, action, rig, state_names, value_roles, feats, state_columns, action_columns, native_adapter)
+    kind, note, proof = "none", None, None
+    with part(parts, "the recorded state's layout") as layout:
+        skip_when_cameras_only()
+        kind, note, action, proof = lerobot_physical_state(
+            state, action, rig, state_names, value_roles, feats, state_columns, action_columns, native_adapter)
+    if layout.failed is not None:
+        state = action = None
     if proof is not None:
         extra["state_contract"] = proof
     if state is not None and kind != "none" and not state_groups:
@@ -5909,7 +6078,10 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
                 expected = ((first + np.arange(n)) / fps) / float(pr["time_base"])
                 grid[v] = bool(np.allclose(pr["pts"], expected, rtol=0, atol=1e-4))
             pts[v] = pr["pts"]
-            encoded_times[v] = pr.get('episode_times', np.arange(n) / fps)
+            # a frame off the declared grid is placed at its own encoded time: the video measures when its pictures
+            # were taken, and a declared rate only names that
+            encoded_times[v] = pr.get('episode_times', np.arange(n) / fps if grid[v] else
+                                      pr['pts'].astype(np.float64) * float(pr['time_base']) - base)
             length = row.get('length')
             if not pr.get('publisher_query') and type(length) is int and n != length:
                 partial_rows[v] = packed_partial_rows(pr, base, to, length, fps)
@@ -5923,7 +6095,7 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
                           camera=key)
             if not grid[v] and not pr.get('publisher_query'):
                 add_issue(extra, "recorded_rate_mismatch", f"{key} PTS do not follow the declared {fps:g} Hz grid. "
-                          "Frames remain mapped by their recorded indices; original encoded PTS are retained separately.",
+                          "Frames are placed at their own encoded times, and stay paired with table rows by index.",
                           camera=key)
             cameras[v] = camera_entry(v, key, pr, rig)
             if key in descs:
@@ -5944,6 +6116,7 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
         vmap = {v: k for v, k in vmap.items() if v in sources}
         # the episode is as long as its main camera's window, as in one file per camera below
         anchor = me.order_views(sources)[0]
+        fps = measured_rate(extra, vmap[anchor], encoded_times[anchor], fps, on_grid=grid[anchor])
         n_frames = sources[anchor]["n_frames"]
         camera_span_issues(extra, {view: encoded_times[view] for view in sources}, anchor,
                            dict(vmap), {"profile": rig, "cameras": cameras})
@@ -5964,7 +6137,8 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
                 extra['source']['packed_partial_rows'] = {'camera': vmap[anchor], 'publisher_rows': owned.tolist(),
                     'basis': 'unique exact encoded PTS against publisher window origin and declared row cadence',
                     'original_table_rows': len(df)}
-        state, action, kind, note, fixes = state_on_frames(aligned_df, state, action, n_frames, fps, kind, note)
+        state, action, kind, note, fixes = lerobot_rows_on_frames(parts, aligned_df, state, action, n_frames, fps,
+                                                                  kind, note)
         ctx = {"dataset": dataset, "profile": rig, "state_kind": kind, "episode_id": ep.name, "fps": fps,
                "n_state_frames": int(len(state)) if state is not None and kind != "none" else int(n_frames),
                "cameras": cameras, "stream_checks": {"episode_length_meta": row.get("length"), "frames_on_grid": grid}, **extra}
@@ -5973,9 +6147,13 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
             no_state(ctx, lerobot_state_note(note, notes))
         for i in fixes:
             add_issue(ctx, **i)
-        lerobot_annotations(ctx, r, df, row.get("data"))
-        write_depth(ep, ctx, *lerobot_depth(ep, r, row, vmap, fps, ctx["n_state_frames"], unused, ctx,
-                                          anchor_times=encoded_times[anchor]))
+        with part(parts, "the dataset's annotations"):
+            skip_when_cameras_only()
+            lerobot_annotations(ctx, r, df, row.get("data"))
+        with part(parts, "the depth streams"):
+            skip_when_cameras_only()
+            write_depth(ep, ctx, *lerobot_depth(ep, r, row, vmap, fps, ctx["n_state_frames"], unused, ctx,
+                                              anchor_times=encoded_times[anchor]))
         times = None
         if not all(grid.values()):
             times = {key: value for v in sources for key, value in
@@ -5987,14 +6165,15 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
                     if not np.array_equal(km, np.arange(len(km))):
                         sources[view]['kmap'] = f'kmap_{view}.npy'
                         np.save(ep / sources[view]['kmap'], km)
-        signals = lerobot_recorded_signals(ep, ctx, r, aligned_df, _used_columns(kind, state, action, state_columns,
-                                           action_columns) | set(hold_back), ctx["n_state_frames"],
-                                           anchor_times=encoded_times[anchor])
-        if partial_rows and df is not None:
-            retain_partial_publisher_table(signals, df, r['features'], hold_back)
-        ctx = finish_episode(ep, ctx, sources, state if kind != "none" else None, action, times=times, signals=signals)
-        archive_lerobot_state(ep, ctx, df, row.get("data"))
-        return ctx
+        signals = None
+        with part(parts, "the recorded signals"):
+            skip_when_cameras_only()
+            signals = lerobot_recorded_signals(ep, ctx, r, aligned_df, _used_columns(kind, state, action, state_columns,
+                                               action_columns) | set(hold_back), ctx["n_state_frames"],
+                                               anchor_times=encoded_times[anchor])
+            if partial_rows and df is not None:
+                retain_partial_publisher_table(signals, df, r['features'], hold_back)
+        return finish_lerobot(ep, ctx, sources, state if kind != "none" else None, action, times, signals, df, row)
     # one file per camera per episode (v2). LeRobot's timestamps are frame_index / fps and state rows follow
     # frames, so frames on the exact k/fps grid need no times; frames off it are decoded by their own pts and
     # timed by frame index, as the dataset defines them
@@ -6002,8 +6181,11 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
     prs = open_cameras(opened, extra)
     vmap = {v: k for v, k in vmap.items() if v in opened}
     anchor = me.order_views(prs)[0]
+    anchor_times = prs[anchor]["pts"].astype(np.float64) * float(prs[anchor]["time_base"])
     if not fps:
-        fps = measured_fps(prs[anchor]["pts"].astype(np.float64) * float(prs[anchor]["time_base"])) or 30.0
+        fps = measured_fps(anchor_times) or 30.0
+    else:
+        fps = measured_rate(extra, vmap[anchor], anchor_times - anchor_times[0], fps)
     sources, cameras, grid = {}, {}, {}
     for v, key in vmap.items():
         pr = prs[v]
@@ -6013,7 +6195,7 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
                        np.array_equal(pr["pts"], np.arange(n) * int(step)))
         if not grid[v]:
             add_issue(extra, "recorded_rate_mismatch", f"{key} PTS do not follow the declared {fps:g} Hz grid. "
-                      "Frames remain mapped by their recorded indices; original encoded PTS are retained separately.",
+                      "Frames are placed at their own encoded times, and stay paired with table rows by index.",
                       camera=key)
         sources[v] = {"packed": str(Path(row["videos"][key]).resolve()), "base_s": 0.0, "n_frames": n, "camera_key": key}
         cameras[v] = camera_entry(v, key, pr, rig)
@@ -6025,14 +6207,17 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
     if not all(grid.values()):
         times = {}
         for v, pr in prs.items():
-            times[v] = np.arange(len(pr["pts"])) / fps
+            # each frame at its own encoded time, from the camera's first frame (a declared rate only names it)
+            own = pr["pts"].astype(np.float64) * float(pr["time_base"])
+            times[v] = np.arange(len(pr["pts"])) / fps if grid[v] else own - own[0]
             times[f"{v}_pts"] = pr["pts"]
     # the episode is as long as its main camera, as its frames are what the table's rows and the labels are on; a
     # shorter camera is flagged with what it does not cover (camera_span_issues) and never shortens the episode
     n_video = sources[anchor]["n_frames"]
     camera_span_issues(extra, {v: np.arange(s["n_frames"]) / fps for v, s in sources.items()}, anchor,
                        {v: k for v, k in vmap.items()}, {"profile": rig, "cameras": cameras})
-    state, action, kind, note, fixes = state_on_frames(df, state, action, sources[anchor]["n_frames"], fps, kind, note)
+    state, action, kind, note, fixes = lerobot_rows_on_frames(parts, df, state, action, sources[anchor]["n_frames"],
+                                                              fps, kind, note)
     ctx = {"dataset": dataset, "profile": rig, "state_kind": kind, "episode_id": ep.name, "fps": fps,
            "n_state_frames": int(len(state)) if state is not None and kind != "none" else int(n_video),
            "cameras": cameras, "stream_checks": {"frames_on_grid": grid, "episode_length_meta": row.get("length")},
@@ -6042,15 +6227,68 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
         no_state(ctx, lerobot_state_note(note, notes))
     for i in fixes:
         add_issue(ctx, **i)
-    lerobot_annotations(ctx, r, df, row.get("data"))
-    write_depth(ep, ctx, *lerobot_depth(ep, r, row, vmap, fps, ctx["n_state_frames"], unused, ctx))
-    ctx = finish_episode(ep, ctx, sources, state if kind != "none" else None, action, times=times,
-                          signals=lerobot_recorded_signals(ep, ctx, r, df, _used_columns(kind, state, action, state_columns,
-                                                   action_columns) | set(hold_back), ctx["n_state_frames"],
-                                                   anchor_times=(times or {}).get(anchor)))
-    archive_lerobot_state(ep, ctx, df, row.get("data"))
+    with part(parts, "the dataset's annotations"):
+        skip_when_cameras_only()
+        lerobot_annotations(ctx, r, df, row.get("data"))
+    with part(parts, "the depth streams"):
+        skip_when_cameras_only()
+        write_depth(ep, ctx, *lerobot_depth(ep, r, row, vmap, fps, ctx["n_state_frames"], unused, ctx))
+    signals = None
+    with part(parts, "the recorded signals"):
+        skip_when_cameras_only()
+        signals = lerobot_recorded_signals(ep, ctx, r, df, _used_columns(kind, state, action, state_columns,
+                                           action_columns) | set(hold_back), ctx["n_state_frames"],
+                                           anchor_times=(times or {}).get(anchor))
+    return finish_lerobot(ep, ctx, sources, state if kind != "none" else None, action, times, signals, df, row)
+
+
+
+def lerobot_rows_on_frames(parts, df, state, action, n, fps, kind, note):
+    """state_on_frames, with the recorded state an optional part: if placing it fails the episode has no state."""
+    with part(parts, "the recorded state's rows") as placing:
+        skip_when_cameras_only()
+        return state_on_frames(df, state, action, n, fps, kind, note)
+    return None, None, "none", StateNote("The recorded state could not be placed on the frames; the episode is "
+                                         "labelled from its video.", "unreadable"), []
+
+
+def finish_lerobot(ep, ctx, sources, state, action, times, signals, df, row):
+    """finish_episode, and when writing the state or signals fails, the episode again with its cameras alone; then
+    the original table archived. Every optional part that failed is recorded on the episode (part)."""
+    parts = ctx.pop("_parts", [])
+    add_part_issues(ctx, parts)
+    try:
+        ctx = finish_episode(ep, ctx, sources, state, action, times=times, signals=signals)
+    except Exception as error:
+        if state is None and action is None and not signals:
+            raise
+        detail = str(error).strip().splitlines()[0][:200] if str(error).strip() else ""
+        add_issue(ctx, "part_unreadable", "The episode's recorded state and signals could not be written "
+                  f"({type(error).__name__}{': ' + detail if detail else ''}); the episode keeps its cameras "
+                  "without them.")
+        ctx["state_kind"] = "none"
+        ctx = finish_episode(ep, ctx, sources, None, None, times=times, signals=None)
+    archived = []
+    with part(archived, "the original table's archive"):
+        skip_when_cameras_only()
+        archive_lerobot_state(ep, ctx, df, row.get("data"))
+    if archived:
+        add_part_issues(ctx, archived)
+        write_atomic(ep / "context.json", ctx, indent=1, default=str)
     return ctx
 
+
+def measured_rate(extra: dict, camera: str, times: np.ndarray, declared: float, on_grid: bool = False) -> float:
+    """The episode's frame rate: the declared one when the camera's own frame times agree with it, else the rate those
+    times measure, with a data issue. A declared 15 on a 30 fps video had shown every frame at twice its time."""
+    if on_grid or declared is None or len(times) < 3:
+        return declared
+    measured = measured_fps(np.asarray(times, dtype=np.float64))
+    if not measured or abs(measured - declared) <= .02 * declared:
+        return declared
+    add_issue(extra, "declared_rate_wrong", f"The dataset declares {declared:g} frames per second, but {camera} "
+              f"records {measured:g}; its frames are placed at their own times, at the recorded rate.", camera=camera)
+    return measured
 
 def colour_depth_views(r: dict, row: dict, vmap: dict) -> dict:
     """{depth feature: its camera line} for each of an episode's depth videos stored as an ordinary picture (an 8-bit
@@ -6692,16 +6930,24 @@ def convert_recording(item: dict, rig: str, out: Path, dataset: str) -> dict:
             signals.left_out.append((Path(item["data"]).name, f"could not be read ({type(e).__name__})"))
         else:
             if len(df) == n:
-                signals = recorded_signals(df.drop(columns=["frame_index"], errors="ignore"), set(), n,
-                                           item["root"]["features"])
+                parts: list = []
+                with part(parts, "the data file's signals"):
+                    skip_when_cameras_only()
+                    signals = recorded_signals(df.drop(columns=["frame_index"], errors="ignore"), set(), n,
+                                               item["root"]["features"])
+                add_part_issues(extra, parts)
             else:
                 signals.left_out.append((Path(item["data"]).name, f"{len(df)} rows while the video has {n} frames, so "
                                                                   "its rows cannot be placed on the frames"))
     ep = unique_dir(out, item.get("output_name") or episode_name(item["name"]))
-    ctx = video_views_episode(ep, files, rig, dataset, extra, signals=signals)
+    ctx = finish_views(ep, files, rig, dataset, extra, signals=signals)
     # An unresolved packed recording has no episode frame-index contract, even if its row count matches.
     if df is not None:
-        lerobot_annotations(ctx, item["root"], df.drop(columns=["frame_index"], errors="ignore"), item["data"])
+        annotations: list = []
+        with part(annotations, "the dataset's annotations"):
+            skip_when_cameras_only()
+            lerobot_annotations(ctx, item["root"], df.drop(columns=["frame_index"], errors="ignore"), item["data"])
+        add_part_issues(ctx, annotations)
         write_atomic(ep / "context.json", ctx, indent=1, default=str)
     return ctx
 
@@ -7167,7 +7413,8 @@ def h5_fps(f, group: str, represented: dict | None = None) -> float | None:
         # {"direct": each attribute as it is, "in JSON": each attribute that holds JSON (a string, bytes, or a
         # one-element string array), parsed}
         direct, in_json = [], []
-        for k, v in g.attrs.items():
+        from prepare.hdf_metadata import attribute_values
+        for k, v in attribute_values(g):
             text = v.ravel()[0] if isinstance(v, np.ndarray) and v.size == 1 and v.dtype.kind in "OSU" else v
             if isinstance(text, bytes):
                 text = text.decode("utf-8", "replace")
@@ -7272,7 +7519,7 @@ def h5_streams(f, group: str) -> dict:
     return out
 
 
-def h5_text(f, group: str, texts: list[dict]) -> tuple[str | None, dict]:
+def h5_text(f, group: str, texts: list[dict], issues: list | None = None) -> tuple[str | None, dict]:
     """(instruction, notes) from an episode's strings and records and the attributes of its group and the file."""
     notes, instr = {}, None
     from prepare.hdf_metadata import value as val
@@ -7300,10 +7547,11 @@ def h5_text(f, group: str, texts: list[dict]) -> tuple[str | None, dict]:
                 notes[f"file {p}"] = val(ds[()])
             except Exception:
                 continue
+    from prepare.hdf_metadata import attribute_values
     for where, g in (("episode", f[group] if group else None), ("file", f)):
         if g is None:
             continue
-        for k, v in g.attrs.items():
+        for k, v in attribute_values(g, issues=issues):
             v = val(v)
             notes[f"{where} attribute {k}"] = v
             if instr is None and TASK_KEY.search(str(k)):
@@ -7312,10 +7560,41 @@ def h5_text(f, group: str, texts: list[dict]) -> tuple[str | None, dict]:
 
 
 def plan_hdf5(det: dict, root: Path) -> list[dict]:
-    """One item per episode of every HDF5 file (h5_episodes), with its length from its clocks or its stated rate."""
-    import h5py
+    """One item per episode of every HDF5 file (h5_episodes), with its length from its clocks or its stated rate.
+    The files are read in a child process (prepare.isolation), as read_episode reads an episode: when it stops
+    responding or dies, each file is read in a child of its own, and a file whose reader stops again is read with
+    its attributes unread, so one damaged file never stops the planning of the others."""
+    from prepare.isolation import ReaderStopped, run_isolated
+    from prepare.hdf_metadata import current_sources
+    files, sources = list(det["files"]), current_sources()
+    try:
+        return run_isolated(with_hdf5_sources, sources, plan_hdf5_files, files, root)
+    except ReaderStopped:
+        pass
     items = []
-    for fpath in det["files"]:
+    for fpath in files:
+        try:
+            items.extend(run_isolated(with_hdf5_sources, sources, plan_hdf5_files, [fpath], root))
+            continue
+        except ReaderStopped:
+            pass
+        try:
+            items.extend(run_isolated(with_hdf5_sources, sources, plan_hdf5_files, [fpath], root, mode='cameras'))
+        except ReaderStopped as stopped:
+            items.append(hdf5_unplanned(fpath, root, f"the HDF5 file could not be read; its reader {stopped}"))
+    return items
+
+
+def hdf5_unplanned(fpath, root: Path, why: str) -> dict:
+    return {"kind": "hdf5", "name": Path(fpath).relative_to(root).with_suffix("").as_posix(), "file": Path(fpath),
+            "group": "", "seconds": None, "has_camera": False, "error": why}
+
+
+def plan_hdf5_files(files: list, root: Path) -> list[dict]:
+    """plan_hdf5's items for these files, read in this process."""
+    from prepare.isolation import progress
+    items = []
+    for fpath in files:
         try:
             with open_hdf5(fpath) as f:
                 groups = h5_episodes(f)
@@ -7337,10 +7616,8 @@ def plan_hdf5(det: dict, root: Path) -> list[dict]:
                     items.append({"kind": "hdf5", "name": f"{rel}/{g.rsplit('/', 1)[-1]}" if g else rel,
                                   "file": Path(fpath), "group": g, "seconds": secs, "has_camera": bool(cams)})
         except Exception as e:
-            items.append({"kind": "hdf5", "name": Path(fpath).relative_to(root).with_suffix("").as_posix(),
-                          "file": Path(fpath), "group": "", "seconds": None, "has_camera": False,
-                          "error": str(e) if isinstance(e, ForeignStorage) else
-                                   f"the HDF5 file could not be opened ({type(e).__name__})"})
+            items.append(hdf5_unplanned(fpath, root, f"the HDF5 file could not be opened ({type(e).__name__})"))
+        progress()
     return items
 
 
@@ -7392,7 +7669,8 @@ def h5_signal_metadata(ds, summarised=False) -> dict:
         if isinstance(x, (list, tuple)):
             return [value(y) for y in x]
         return x
-    metadata = {k: value(v) for k, v in ds.attrs.items() if k in SIGNAL_METADATA_KEYS}
+    from prepare.hdf_metadata import attribute_values
+    metadata = {k: value(v) for k, v in attribute_values(ds, SIGNAL_METADATA_KEYS)}
     if summarised:
         metadata = summary_metadata(metadata)
     return metadata
@@ -7430,11 +7708,11 @@ def h5_signals(f, streams: dict, q_abs: np.ndarray, fps: float | None, n_anchor:
         if not a.shape[1]:
             continue
         names = list(SUMMARY_NAMES) if summarised else None
-        for key in ("names", "columns", "labels", "fields") if not summarised else ():
-            if key in ds.attrs:
-                stated = [x.decode() if isinstance(x, bytes) else str(x) for x in np.asarray(ds.attrs[key]).ravel()]
-                names = value_names(stated, a.shape[1])
-                break
+        from prepare.hdf_metadata import attribute_values
+        for key, stated in attribute_values(ds, ("names", "columns", "labels", "fields") if not summarised else ()):
+            stated = [x.decode() if isinstance(x, bytes) else str(x) for x in np.asarray(stated).ravel()]
+            names = value_names(stated, a.shape[1])
+            break
         same_assumed_rows = (s["clock"] and camera_note is not None and len(a) == len(q)
                           and np.array_equal(streams["clock"][s["clock"]], recorded_q, equal_nan=True))
         if same_assumed_rows:
@@ -7731,15 +8009,22 @@ def convert_hdf5(item: dict, rig: str, out: Path, dataset: str, *, source_scope:
         raise ValueError(item["error"])
     ep = unique_dir(out, item.get("output_name") or episode_name(item["name"]))
     ep.mkdir(parents=True, exist_ok=True)
+    parts: list = []              # damage to the episode's optional parts (part), recorded on it
     with open_hdf5(item["file"]) as f:
         g = item["group"]
         from prepare.annotations import hdf_source_context, merge_source_contexts
-        represented = {}
-        scope = merge_source_contexts(rig, source_scope or {}, hdf_source_context(f, g, rig, represented))
+        represented, own_scope = {}, {}
+        with part(parts, "the file's own source metadata"):
+            skip_when_cameras_only()
+            own_scope = hdf_source_context(f, g, rig, represented)
+        scope = merge_source_contexts(rig, source_scope or {}, own_scope)
         st = h5_streams(f, g)
         if not st["camera"]:
             raise ValueError("the HDF5 episode has no camera (no image frames or encoded images)")
-        fps = h5_fps(f, g, represented)
+        fps = None
+        with part(parts, "the file's stated frame rate"):
+            skip_when_cameras_only()
+            fps = h5_fps(f, g, represented)
         names = [c["name"] for c in st["camera"]]
         vmap, unused = pick_cameras(names, rig, names + [d["name"] for d in st["depth"]])
         by_name = {c["name"]: c for c in st["camera"]}
@@ -7797,14 +8082,15 @@ def convert_hdf5(item: dict, rig: str, out: Path, dataset: str, *, source_scope:
             return t - t0
         files, real = {}, {}
         undecoded, written = [], {}
-        for v, s in chosen.items():
-            ds = f[s["path"]]
-            t = relative_times(s)
+
+        def write_rows(s, path):
+            """Every row of camera s written to path at its frame time: (the writer, closed; the times; frames)."""
+            ds, t = f[s["path"]], relative_times(s)
             display_t, note = presentation_clock(t, fps)
             encoded_t = display_t if note and note.get("clock_problem") else t
             # a frame for every row, black where an encoded image does not decode, so the state's rows stay on
             # their frames (FrameWriter blank)
-            w = written[s["name"]] = FrameWriter(ep / f"{v}.mp4", "", blank=True, fine_clock=coarse)
+            w = written[s["name"]] = FrameWriter(path, "", blank=True, fine_clock=coarse)
             # a float picture stored 0 to 1 is scaled to 0 to 255, judged on its first frame
             scale = picture_scale(ds)
             for i in range(s["n"]):
@@ -7818,35 +8104,52 @@ def convert_hdf5(item: dict, rig: str, out: Path, dataset: str, *, source_scope:
                     w.add(float(encoded_t[i]), b)
                 else:
                     w.add_image(float(encoded_t[i]), picture(x, scale))
-            if not w.close():
+            return w, t, w.close()
+
+        def write_camera(s, path):
+            """camera s written to path, or None when none of it can be shown. A camera is its own unit: whatever
+            goes wrong reading it costs that camera alone."""
+            try:
+                w, t, n = write_rows(s, path)
+            except Exception as error:
+                written.pop(s["name"], None)
+                unused.append(f"{s['name']} (it could not be read: {type(error).__name__})")
+                undecoded.append(s["name"])
+                return None
+            if not n:
                 unused.append(f"{s['name']} (no frame could be decoded)")
                 undecoded.append(s["name"])
+                return None
+            return w, t, n
+
+        # the cameras the profile did not choose stand in, in order, for a chosen one none of whose frames can be
+        # shown, so a file with a readable camera always gives an episode
+        spare = [nm for nm in unused if nm in by_name]
+        for v in list(chosen):
+            got = write_camera(chosen[v], ep / f"{v}.mp4")
+            while got is None and spare:
+                nm = spare.pop(0)
+                unused.remove(nm)
+                chosen[v] = by_name[nm]
+                got = write_camera(chosen[v], ep / f"{v}.mp4")
+            if got is None:
+                del chosen[v]
                 continue
-            files[v] = (s["name"], ep / f"{v}.mp4")
-            real[v] = t
+            files[v] = (chosen[v]["name"], ep / f"{v}.mp4")
+            real[v] = got[1]
         if not files:
             raise ValueError("no frame of the HDF5 episode's cameras could be decoded")
         # the cameras the model is not shown are written too, for the board (unshown_cameras)
         unshown = []
-        for i, nm in enumerate(x for x in unused if x in by_name):
+        for i, nm in enumerate([x for x in unused if x in by_name]):
             s = by_name[nm]
-            ds, t = f[s["path"]], relative_times(s)
-            display_t, note = presentation_clock(t, fps)
-            encoded_t = display_t if note and note.get("clock_problem") else t
-            w = written[nm] = FrameWriter(ep / f"unshown{i + 1}.mp4", "", blank=True, fine_clock=coarse)
-            scale = picture_scale(ds)
-            for k in range(s["n"]):
-                try:
-                    x = ds[k]
-                except OSError:
-                    w.missing(float(encoded_t[k]))
-                    continue
-                b = _h5_bytes(x) if (ds.dtype.kind in "OV" or ds.ndim == 1) else None
-                if b is not None:
-                    w.add(float(encoded_t[k]), b)
-                else:
-                    w.add_image(float(encoded_t[k]), picture(x, scale))
-            n_u = w.close()
+            try:
+                w, t, n_u = write_rows(s, ep / f"unshown{i + 1}.mp4")
+            except Exception as error:
+                written.pop(nm, None)
+                parts.append({"kind": "camera_not_decodable", "camera": nm,
+                              "what": f"The camera {nm} could not be read ({type(error).__name__}), so it is not shown."})
+                continue
             entry = unshown_entry(nm, ep / f"unshown{i + 1}.mp4", unshown_why(nm, rig, names_shown(files)),
                                               n_frames=n_u, start_s=w.pts[0] / TIME_BASE_DEN,
                                               fps=measured_fps(np.asarray(w.pts, dtype=np.float64) / TIME_BASE_DEN)) if n_u else None
@@ -7857,119 +8160,145 @@ def convert_hdf5(item: dict, rig: str, out: Path, dataset: str, *, source_scope:
         # depth: with the camera whose name has its words, else the anchor camera
         depth = {}
         for d in st["depth"]:
-            camera, source = depth_camera(d["name"], {v: nm for v, (nm, _) in files.items()}, anchor)
-            v = available_depth_view(camera, depth)
-            ds = f[d["path"]]
-            t = relative_times(d)
-            display_t = presentation_clock(t, fps)[0] if coarse else t
-            representation = h5_sensor_representation(ds)
-            scale = None if representation == 'disparity' else depth_scale_attr(ds)
-            dw = DepthWriter(ep / f"depth_{v}.mkv")
-            retained = []
-            for i in range(d["n"]):
-                try:
-                    sample = ds[i]
-                except OSError:
-                    continue
-                before = len(dw.pts)
-                dw.add(float(display_t[i]), sample, scale)
-                if len(dw.pts) > before:
-                    retained.append(i)
-            if dw.close():
-                depth[v] = {"path": ep / f"depth_{v}.mkv", "real": t[retained] if coarse else None,
-                            "capture_clock": coarse, "scale_m": dw.scale_m, "source": source,
-                            "source_key": d['name'],
-                            "storage": dw.storage,
-                            "kind": representation,
-                            "paired_camera": camera if v == camera and source == d['name'] else None}
+            with part(parts, f"the depth stream {d['name']}"):
+                skip_when_cameras_only()
+                camera, source = depth_camera(d["name"], {v: nm for v, (nm, _) in files.items()}, anchor)
+                v = available_depth_view(camera, depth)
+                ds = f[d["path"]]
+                t = relative_times(d)
+                display_t = presentation_clock(t, fps)[0] if coarse else t
+                representation = h5_sensor_representation(ds)
+                scale = None if representation == 'disparity' else depth_scale_attr(ds)
+                dw = DepthWriter(ep / f"depth_{v}.mkv")
+                retained = []
+                for i in range(d["n"]):
+                    try:
+                        sample = ds[i]
+                    except OSError:
+                        continue
+                    before = len(dw.pts)
+                    dw.add(float(display_t[i]), sample, scale)
+                    if len(dw.pts) > before:
+                        retained.append(i)
+                if dw.close():
+                    depth[v] = {"path": ep / f"depth_{v}.mkv", "real": t[retained] if coarse else None,
+                                "capture_clock": coarse, "scale_m": dw.scale_m, "source": source,
+                                "source_key": d['name'],
+                                "storage": dw.storage,
+                                "kind": representation,
+                                "paired_camera": camera if v == camera and source == d['name'] else None}
+                    if len(retained) != d['n']:
+                        depth[v].update(owned_times=display_t, retained_rows=retained)
                 if len(retained) != d['n']:
-                    depth[v].update(owned_times=display_t, retained_rows=retained)
-            if len(retained) != d['n']:
-                st['clock_issues'].append({'kind': 'depth_not_read',
-                    'what': f"{d['name']}: {d['n'] - len(retained)} depth rows could not be read or encoded; "
-                            'those source rows remain missing and do not borrow neighboring depth samples.'})
+                    st['clock_issues'].append({'kind': 'depth_not_read',
+                        'what': f"{d['name']}: {d['n'] - len(retained)} depth rows could not be read or encoded; "
+                                'those source rows remain missing and do not borrow neighboring depth samples.'})
         q_selected, anchor_note = presentation_clock(q_abs, fps)
         presentation_q = None
         if anchor_note and anchor_note.get("clock_problem") and not np.isfinite(q_abs[0]):
             # All consumers use the same assumed source origin as the actual camera presentation.
             q_selected = presentation_clock(real[anchor], fps)[0] + t0
             presentation_q = q_selected
-        signals = h5_signals(f, st, q_abs, fps, chosen[anchor]["n"], presentation_q=presentation_q)
+        signals = Signals()
+        with part(parts, "the recorded signals"):
+            skip_when_cameras_only()
+            signals = h5_signals(f, st, q_abs, fps, chosen[anchor]["n"], presentation_q=presentation_q)
         from label.source_eligibility import mark_hdf
-        for stream in [*st['camera'], *st['depth'], *st['signal']]:
-            path = stream['path']
-            if stream in st['signal'] and not any(
-                    meta.get('source') == f'HDF5 dataset {path}' for meta in signals.meta.values()):
-                continue
-            mark_hdf(represented, str(Path(f.filename).resolve()), path)
-            if stream.get('clock'):
-                clock_path = f"{g}/{stream['clock']}" if g else stream['clock']
-                mark_hdf(represented, str(Path(f.filename).resolve()), clock_path)
-                if h5_clock_unit(f[clock_path])[1] is None:
-                    for key in ('unit', 'units'):
-                        if key in f[clock_path].attrs:
-                            mark_hdf(represented, str(Path(f.filename).resolve()), clock_path, key)
-            if stream in st['signal']:
-                ds = f[path]
-                for key in (*SIGNAL_METADATA_KEYS, 'names', 'columns', 'labels', 'fields'):
-                    if key in ds.attrs:
-                        mark_hdf(represented, str(Path(f.filename).resolve()), path, key)
+        with part(parts, "the record of which source members were read"):
+            skip_when_cameras_only()
+            for stream in [*st['camera'], *st['depth'], *st['signal']]:
+                path = stream['path']
+                if stream in st['signal'] and not any(
+                        meta.get('source') == f'HDF5 dataset {path}' for meta in signals.meta.values()):
+                    continue
+                mark_hdf(represented, str(Path(f.filename).resolve()), path)
+                if stream.get('clock'):
+                    clock_path = f"{g}/{stream['clock']}" if g else stream['clock']
+                    mark_hdf(represented, str(Path(f.filename).resolve()), clock_path)
+                    if h5_clock_unit(f[clock_path])[1] is None:
+                        for key in ('unit', 'units'):
+                            if key in f[clock_path].attrs:
+                                mark_hdf(represented, str(Path(f.filename).resolve()), clock_path, key)
+                if stream in st['signal']:
+                    ds = f[path]
+                    for key in (*SIGNAL_METADATA_KEYS, 'names', 'columns', 'labels', 'fields'):
+                        if key in ds.attrs:
+                            mark_hdf(represented, str(Path(f.filename).resolve()), path, key)
         # sensor files of the episode's folder (assign_sensors): on the camera's clock when both are on a recorder's
         # clock, which may give the state; else from both starts, after the state is read, so an assumed alignment
         # is never the recorded state (split_sensors)
-        by_clock, assumed, unplaced = split_sensors(item, q_selected, chosen[anchor]["clock"] is not None)
-        sensor_h5s = [p for p in by_clock if p.suffix.lower() in H5_EXT]
-        sensor_mcaps = [p for p in by_clock if p.suffix.lower() == ".mcap"]
-        if sensor_h5s:
-            merge_signals(signals, h5_file_signals(sensor_h5s, q_abs, len(q_abs), fps=fps,
-                                                 presentation_q=presentation_q))
-        if sensor_mcaps:
-            merge_signals(signals, mcap_signals(sensor_mcaps, q_selected))
+        by_clock, assumed, unplaced = [], [], []
+        with part(parts, "the episode's sensor files"):
+            skip_when_cameras_only()
+            by_clock, assumed, unplaced = split_sensors(item, q_selected, chosen[anchor]["clock"] is not None)
+            sensor_h5s = [p for p in by_clock if p.suffix.lower() in H5_EXT]
+            sensor_mcaps = [p for p in by_clock if p.suffix.lower() == ".mcap"]
+            if sensor_h5s:
+                merge_signals(signals, h5_file_signals(sensor_h5s, q_abs, len(q_abs), fps=fps,
+                                                     presentation_q=presentation_q))
+            if sensor_mcaps:
+                merge_signals(signals, mcap_signals(sensor_mcaps, q_selected))
         identity_extra: dict = {}
-        state, action, state_names, state_src, state_note = h5_state(signals, rig, q_selected, identity_ctx=identity_extra)
+        state, action, state_names, state_src, state_note = None, None, None, None, None
+        with part(parts, "the recorded state"):
+            skip_when_cameras_only()
+            state, action, state_names, state_src, state_note = h5_state(signals, rig, q_selected,
+                                                                         identity_ctx=identity_extra)
         sensor_extra: dict = {}
         if assumed:
-            merge_signals(signals, sensors_from_start(assumed, q_selected - q_selected[0], sensor_extra))
-        instr, notes = h5_text(f, g, st["text"])
+            with part(parts, "the sensor files placed from both starts"):
+                skip_when_cameras_only()
+                merge_signals(signals, sensors_from_start(assumed, q_selected - q_selected[0], sensor_extra))
+        instr, notes = None, {}
+        with part(parts, "the file's text and notes"):
+            skip_when_cameras_only()
+            instr, notes = h5_text(f, g, st["text"], issues=parts)
         from label.source_eligibility import unrepresented_json
-        for note_name, note_value in list(notes.items()):
-            if note_name.startswith('episode attribute '):
-                obj, key = g, note_name.removeprefix('episode attribute ')
-            elif note_name.startswith('file attribute '):
-                obj, key = '', note_name.removeprefix('file attribute ')
-            else:
-                continue
-            member = json.dumps([obj, key], separators=(',', ':'))
-            source_members = represented.get('hdf5', {}).get(str(Path(f.filename).resolve()), {})
-            if member not in source_members:
-                continue
-            paths = source_members[member]
-            if paths is None:
-                del notes[note_name]
-                continue
-            try:
-                value = note_value
-                while isinstance(value, list) and len(value) == 1:
-                    value = value[0]
-                value = json.loads(value) if isinstance(value, str) else value
-            except ValueError:
-                continue
-            selected = unrepresented_json(value, paths)
-            if selected is None:
-                del notes[note_name]
-            else:
-                notes[note_name] = selected
-        episode_groups = h5_episodes(f)
-        original_metadata = h5_original_metadata(f, g, episode_groups)
-        native_meta = {}
-        if st["native_clock"]:
-            for name in st["native_clock"]:
+        with part(parts, "the file's notes already read as other fields"):
+            skip_when_cameras_only()
+            for note_name, note_value in list(notes.items()):
+                if note_name.startswith('episode attribute '):
+                    obj, key = g, note_name.removeprefix('episode attribute ')
+                elif note_name.startswith('file attribute '):
+                    obj, key = '', note_name.removeprefix('file attribute ')
+                else:
+                    continue
+                member = json.dumps([obj, key], separators=(',', ':'))
+                source_members = represented.get('hdf5', {}).get(str(Path(f.filename).resolve()), {})
+                if member not in source_members:
+                    continue
+                paths = source_members[member]
+                if paths is None:
+                    del notes[note_name]
+                    continue
+                try:
+                    value = note_value
+                    while isinstance(value, list) and len(value) == 1:
+                        value = value[0]
+                    value = json.loads(value) if isinstance(value, str) else value
+                except ValueError:
+                    continue
+                selected = unrepresented_json(value, paths)
+                if selected is None:
+                    del notes[note_name]
+                else:
+                    notes[note_name] = selected
+        original_metadata, native_meta = {}, {}
+        with part(parts, "the file's original metadata"):
+            skip_when_cameras_only()
+            original_metadata = h5_original_metadata(f, g, h5_episodes(f))
+        for name in st["native_clock"] or {}:
+            with part(parts, f"the units of the clock {name}"):
+                skip_when_cameras_only()
                 ds = f[f"{g}/{name}" if g else name]
-                units = ds.attrs.get("units", ds.attrs.get("unit"))
+                from prepare.hdf_metadata import attribute_values
+                units = dict(attribute_values(ds, ("unit", "units")))
+                units = units.get("units", units.get("unit"))
                 units = units.decode() if isinstance(units, bytes) else str(units) if units is not None else None
                 native_meta[name] = {"source": ds.name, "units": units}
     extra = {"task_label": [item["name"]],
              "source": {"format": "hdf5", "file": item["file"].name, "group": g or None, "unused_cameras": unused}}
+    add_part_issues(extra, parts)
     for issue in st.get('clock_issues') or []:
         add_issue(extra, **issue)
     extra.update(identity_extra)
@@ -8013,11 +8342,70 @@ def convert_hdf5(item: dict, rig: str, out: Path, dataset: str, *, source_scope:
                      clock_origin_note="The source clock origin is estimated from the first finite camera stamp "
                                        "and its assumed row cadence; sensor placement on these camera frames "
                                        "remains assumed, not measured.")
-    return video_views_episode(ep, files, rig, dataset, extra, shared_clock=True, signals=signals, depth=depth,
-                               real=real if coarse else None, real_origin_s=t0 if coarse else None,
-                               nominal_fps=fps,
-                               state=state, action=action, state_names=state_names,
-                               placeholders={v: written[nm].placeholders() for v, (nm, _) in files.items()})
+    return finish_views(ep, files, rig, dataset, extra, shared_clock=True, signals=signals, depth=depth,
+                        real=real if coarse else None, real_origin_s=t0 if coarse else None,
+                        nominal_fps=fps,
+                        state=state, action=action, state_names=state_names,
+                        placeholders={v: written[nm].placeholders() for v, (nm, _) in files.items()})
+
+
+def with_hdf5_sources(sources, fn, *args, **kwargs):
+    """fn(*args, **kwargs) with the upload's files as the only HDF5 sources (authorized_sources): a child process
+    starts without the context its parent set."""
+    from prepare.hdf_metadata import authorized_sources
+    if sources is None:
+        return fn(*args, **kwargs)
+    with authorized_sources(sources):
+        return fn(*args, **kwargs)
+
+
+def convert_item(it: dict, rig: str, out: Path, dataset: str, scope: dict) -> tuple[dict, dict]:
+    """One upload item converted in this process, by the reader of its kind: (its context, the item as the reader
+    left it, since a reader may add what it learned, such as an MCAP file's topics or a note that it ends early)."""
+    if it["kind"] == "lerobot":
+        ctx = convert_lerobot_item(it, rig, out, dataset)
+    elif it["kind"] == "recording":
+        ctx = convert_recording(it, rig, out, dataset)
+    elif it["kind"] == "mcap":
+        ctx = convert_mcap(it, rig, out, dataset)
+    elif it["kind"] == "hdf5":
+        ctx = convert_hdf5(it, rig, out, dataset, source_scope=scope)
+    else:
+        ctx = convert_video(it, rig, out, dataset)
+    return ctx, it
+
+
+def read_episode(it: dict, rig: str, out: Path, dataset: str, scope: dict) -> dict:
+    """convert_item in a child process (prepare.isolation). A native reader (HDF5's C library, a video or
+    decompression codec) can loop forever or crash on damaged bytes, and no Python boundary stops either. A read that
+    stops responding or dies is tried once more with the episode's cameras alone (every optional part, skipped by
+    skip_when_cameras_only, and every HDF5 attribute left unread), so a damaged part never costs the cameras; only
+    when that fails too is the episode lost, with the reason."""
+    from prepare.isolation import ReaderStopped, run_isolated
+    from prepare.hdf_metadata import current_sources
+    import shutil
+    sources = current_sources()
+    before = {p.name for p in out.iterdir()}
+    try:
+        ctx, after = run_isolated(with_hdf5_sources, sources, convert_item, it, rig, out, dataset, scope, watch=out)
+        stopped = None
+    except ReaderStopped as error:
+        stopped = error
+    if stopped is not None:
+        for name in {p.name for p in out.iterdir()} - before:
+            shutil.rmtree(out / name, ignore_errors=True)
+        try:
+            ctx, after = run_isolated(with_hdf5_sources, sources, convert_item, it, rig, out, dataset, scope,
+                                      watch=out, mode='cameras')
+        except ReaderStopped as again:
+            raise ReaderStopped(f"its reader {stopped}, and read again with its cameras alone it {again}") from again
+        add_issue(ctx, 'part_unreadable', f"The reader of this episode {stopped}, so the episode was read again "
+                  "with its cameras alone; its recorded state, signals, text, metadata and depth were not read.")
+        write_atomic(out / ctx['episode_id'] / 'context.json', ctx, indent=1, default=str)
+    if after is not it:
+        it.clear()
+        it.update(after)
+    return ctx
 
 
 def names_shown(files: dict) -> list[str]:
@@ -8181,6 +8569,28 @@ def convert_mcap(item: dict, rig: str, out: Path, dataset: str) -> dict:
         item.setdefault("notes", []).append("The file ends early, before its index, so it was read from its cameras.")
     if layout == "generic":
         return convert_mcap_generic(item, rig, ep, dataset)
+    try:
+        return _convert_mcap_layout(item, rig, ep, dataset, layout)
+    except Exception as error:
+        # A layout reader refines the generic one; its failure never costs what the generic reader can read.
+        return generic_after_adapter(error, f"the {layout} reader", out, ep,
+                                     lambda: convert_mcap_generic(item, rig, ep, dataset))
+
+
+def generic_after_adapter(error: Exception, reader: str, out: Path, ep: Path | None, generic) -> dict:
+    """The episode read by the generic reader after a dataset's own reader failed, that failure recorded on it."""
+    import shutil
+    if ep is not None:
+        shutil.rmtree(ep, ignore_errors=True)       # what the failed reader half wrote
+    ctx = generic()
+    detail = str(error).strip().splitlines()[0][:200] if str(error).strip() else ""
+    add_issue(ctx, "adapter_failed", f"{reader[0].upper()}{reader[1:]} of this dataset could not read the episode "
+              f"({type(error).__name__}{': ' + detail if detail else ''}), so it was read by the generic reader.")
+    write_atomic(Path(out) / ctx["episode_id"] / "context.json", ctx, indent=1, default=str)
+    return ctx
+
+
+def _convert_mcap_layout(item: dict, rig: str, ep: Path, dataset: str, layout: str) -> dict:
     ctx = mcap_layout_context(item, layout, ep, dataset)
     # the rate and the length come from the anchor camera's real capture times (stations record at 30 or 60 Hz,
     # and no camera runs at exactly its nominal rate), so sampling is one instant per second of real time and the
@@ -9768,16 +10178,28 @@ def mcap_text_clock_proof(camera_kind, text_kind, camera, text):
     rows = camera + text
     if any(row['capture_ns'] > row['log_ns'] for row in rows):
         return None
+    # A shared clock is a declaration; the delivery delay (arrival minus stamp) is the one measurement of it. A text
+    # stream that arrives later than the camera's frames and a text stream whose stamps are offset look the same in
+    # the recording, so the declared clock places the text and the difference is the most its stamps can be off
+    # (offset_ms, flagged on the stream when it exceeds CLOCK_OFFSET_FLAG_MS).
+    delay = lambda records: float(np.median([r['log_ns'] - r['capture_ns'] for r in records])) / 1e6
+    offset_ms = round(abs(delay(text) - delay(camera)), 1)
     ids = {row['capture_clock_id'] for row in rows}
     if len(ids) == 1 and None not in ids:
         return {'basis': 'matching publisher-declared capture clock IDs', 'capture_clock_id': next(iter(ids)),
-                'declaration_sources': sorted({source for row in rows for source in row['clock_declarations']})}
+                'declaration_sources': sorted({source for row in rows for source in row['clock_declarations']}),
+                'delivery_delay_difference_ms': offset_ms}
     if any(row['clock_declarations'] for row in rows):
         return None  # Conflicting or incomplete explicit domains cannot be repaired by numeric coincidence.
     if (all(ordered(records, 'publish_ns') for records in (camera, text)) and
             all(row['capture_ns'] == row['publish_ns'] > 0 and row['publish_ns'] <= row['log_ns'] for row in rows)):
-        return {'basis': 'capture stamps equal recorded MCAP publish_time, with causal publication/log chronology'}
+        return {'basis': 'capture stamps equal recorded MCAP publish_time, with causal publication/log chronology',
+                'delivery_delay_difference_ms': offset_ms}
     return None
+
+
+# A text stream whose delivery delay differs from the camera's by more than this is flagged with the difference.
+CLOCK_OFFSET_FLAG_MS = 10.0
 
 
 def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
@@ -9868,16 +10290,32 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
     registration, depth_shapes = Registration(), {}
     clock_kinds, clock_errors = {}, []
     ep.mkdir(parents=True, exist_ok=True)
+    def lose(topic, msg):
+        # A camera message that could not be read: its writer is told, so the pictures that may reference it wait for
+        # the decoder to recover instead of being shown damaged (FrameWriter.lost), and later frames keep their slots.
+        # Its recorder log time is all that is known of it, and is what its flagged span is placed by.
+        if topic in view_of_topic or topic in unshown_of:
+            w = writers.get(topic)
+            if w is not None:
+                at = transport_counts.get(topic, 0) / 30
+                transport_records.setdefault(topic, {})[w._at(at)] = {'log_ns': int(msg.log_time), 'capture_ns': None}
+                w.lost(at)
+            transport_counts[topic] = transport_counts.get(topic, 0) + 1
+
     with open(item["file"], "rb") as fh:
         try:
             msgs = mcap_messages(fh, item["file"], want, camera_damage)
             for schema, ch, msg in msgs:
                 import hashlib
-                identity = (ch.id, msg.log_time, msg.publish_time, msg.sequence, hashlib.sha256(msg.data).digest())
-                if identity in message_identities:
-                    message_duplicates += 1
-                    continue
-                message_identities.add(identity)
+                # Two identical messages are one message written twice only when the recorder gave them an identity
+                # (a sequence number or a publish time) and it matches. With both unset, a static camera on a coarse
+                # clock sends identical pictures at one stamp, and every one of them is real.
+                if msg.sequence or msg.publish_time:
+                    identity = (ch.id, msg.log_time, msg.publish_time, msg.sequence, hashlib.sha256(msg.data).digest())
+                    if identity in message_identities:
+                        message_duplicates += 1
+                        continue
+                    message_identities.add(identity)
                 if ch.topic in texts and len(texts[ch.topic]) > TEXT_MSGS_MAX and not _is_step(ch.topic):
                     n_text[ch.topic] += 1
                     continue
@@ -9910,19 +10348,32 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
                         dec = compressed_image(schema, ch.message_encoding, msg.data)
                     except CanonicalCDRError:
                         message_failures[ch.topic] = message_failures.get(ch.topic, 0) + 1
+                        lose(ch.topic, msg)
                         continue
                     recovered_schemas[ch.topic] = schema
                 except (json.JSONDecodeError, UnicodeDecodeError, DecodeError) as error:
                     message_failures[ch.topic] = message_failures.get(ch.topic, 0) + 1
+                    lose(ch.topic, msg)
                     continue
                 if ch.topic in view_of_topic or ch.topic in unshown_of or ch.topic in depth_of:
+                    def pictures(dec):
+                        return (mcap_camera_bytes(dec),
+                                depth_image(dec) if ch.topic in depth_of or ch.topic in pictured else None,
+                                raw_image(dec) if ch.topic in raw_topics and ch.topic not in depth_of else None)
                     try:
-                        camera_payload = mcap_camera_bytes(dec)
-                        decoded_depth = depth_image(dec) if ch.topic in depth_of or ch.topic in pictured else None
-                        decoded_image = raw_image(dec) if ch.topic in raw_topics and ch.topic not in depth_of else None
+                        camera_payload, decoded_depth, decoded_image = pictures(dec)
                     except McapPayloadError:
-                        message_failures[ch.topic] = message_failures.get(ch.topic, 0) + 1
-                        continue
+                        # A damaged schema can still decode, into fields that hold no picture. The standard compressed
+                        # image is then read by its typed lengths, as when the schema fails to decode at all.
+                        from prepare.ros2_recovery import compressed_image, CanonicalCDRError
+                        try:
+                            dec = compressed_image(schema, ch.message_encoding, msg.data)
+                            camera_payload, decoded_depth, decoded_image = pictures(dec)
+                            recovered_schemas[ch.topic] = schema
+                        except (CanonicalCDRError, McapPayloadError):
+                            message_failures[ch.topic] = message_failures.get(ch.topic, 0) + 1
+                            lose(ch.topic, msg)
+                            continue
                 capture_stamp, stamp_error = mcap_capture_stamp(dec, schema=schema, message_encoding=ch.message_encoding)
                 stamp = capture_stamp if capture_stamp is not None else int(msg.log_time)
                 clock_record = mcap_clock_record(dec, ch, msg, capture_stamp)
@@ -10098,10 +10549,18 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
     relevant.update(numeric_clock_records)
     relevant.update({topic: rows for topic, rows in text_records.items()
                      if len(rows) > 1 or _is_step(topic)})
-    shared_capture = camera_clock == 'capture' and all(
-        mcap_text_clock_proof('capture', {'capture'} if all(row['capture_ns'] is not None for row in rows)
-                             else {'arrival'}, anchor_records, rows) is not None
-        for topic, rows in relevant.items() if topic != anchor_topic)
+    proofs = {topic: mcap_text_clock_proof('capture', {'capture'} if all(row['capture_ns'] is not None for row in rows)
+                                           else {'arrival'}, anchor_records, rows)
+              for topic, rows in relevant.items() if topic != anchor_topic} if camera_clock == 'capture' else {}
+    shared_capture = camera_clock == 'capture' and all(proof is not None for proof in proofs.values())
+    if shared_capture:
+        for topic, proof in sorted(proofs.items()):
+            if proof.get('delivery_delay_difference_ms', 0) > CLOCK_OFFSET_FLAG_MS:
+                add_issue(extra, 'capture_clock_offset_possible',
+                          f"{topic}: its delay from capture stamp to recording differs from the camera's by "
+                          f"{proof['delivery_delay_difference_ms']:g} ms. It is placed by its own stamps on the "
+                          "declared shared clock, which may be off by up to that much if the difference is a clock "
+                          "offset rather than a later delivery.", signal=topic)
     log_rows = [row for rows in relevant.values() for row in rows]
     log_ids = {row.get('log_clock_id') for row in log_rows}
     common_log = bool(anchor_records and log_rows) and all(
@@ -10234,66 +10693,70 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
         'limitation': 'Publisher clock declarations and recorded publication chronology establish source-domain '
                       'placement only. They do not independently verify physical synchronization or clock accuracy.',
         'topics': {}}
-    for topic, sequence in texts.items():
-        proof = mcap_text_clock_proof(camera_clock, text_clock_kinds.get(topic),
-                                      camera_records.get(anchor_topic, []), text_records.get(topic, []))
-        compatible = proof is not None
-        extra['source']['text_clock_alignment']['topics'][topic] = proof or {'basis': 'unverified publisher clock'}
-        if compatible:
-            placed_texts[topic] = sorted(sequence, key=lambda row: row[0])
-        else:
-            unplaced_texts[topic] = text_records.get(topic, [])
-            add_issue(extra, "text_clock_unverified", f"{topic}: text and camera timestamp sources or origins do not "
-                      "establish a shared episode clock; original text and clocks remain recording metadata.", signal=topic)
-            # A constant task has no timed claim. Keep its instruction without assigning its source clock to footage.
-            if len(sequence) == 1:
-                placed_texts[topic] = sequence
-    instr, notes = mcap_task_texts(placed_texts, n_text, anchor_origin_ns, (end_ns - anchor_origin_ns) / 1e9)
-    if unplaced_texts:
-        extra.setdefault('recorded_metadata', {})['unaligned_text_channels'] = unplaced_texts
-        for topic, records in unplaced_texts.items():
-            origin = records[0]['capture_ns'] if records and records[0]['capture_ns'] is not None else (
-                records[0]['log_ns'] if records else 0)
-            notes[topic] = {'clock_alignment': 'unverified; publisher chronology is not placed on footage',
-                'publisher_relative_timeline': [{'t_s': ((record['capture_ns'] if record['capture_ns'] is not None else
-                    record['log_ns']) - origin) / 1e9, 'text': record['text']} for record in records],
-                'messages': records}
-    if camera_clock == 'capture':
-        timing = {topic: {**extra['source']['text_clock_alignment']['topics'][topic],
-                    'physical_synchronization_verified': False,
-                    'limitation': 'Publisher clock IDs or publication stamps are domain declarations, not an '
-                                  'independent synchronization measurement. Jointly biased capture/publication '
-                                  'stamps or a false shared clock ID cannot be detected here.'}
-                  for topic in placed_texts if topic not in unplaced_texts}
-        if timing:
-            notes['publisher_text_timing'] = timing
-            for topic in timing:
-                add_issue(extra, 'publisher_text_timing_unverified',
-                          f'{topic}: text uses publisher-declared capture timing. Physical synchronization is '
-                          'unverified; a shared clock ID or publication stamp does not measure clock accuracy.',
-                          signal=topic)
-    outside = {topic: [{'offset_s': (stamp - anchor_origin_ns) / 1e9, 'text': value}
-                       for stamp, value in sequence if stamp < anchor_origin_ns or stamp >= end_ns]
-               for topic, sequence in placed_texts.items() if topic not in unplaced_texts}
-    outside = {topic: records for topic, records in outside.items() if records}
-    if outside:
-        notes['publisher_text_outside_footage'] = outside
-        for topic in outside:
-            add_issue(extra, 'publisher_text_outside_footage', f'{topic}: recorded text timestamps extend outside '
-                      'the footage. Intersecting intervals are clipped; all original text remains publisher context.', signal=topic)
-    if instr:
-        extra.update(instruction=instr, instruction_note="This instruction is the task text stored in the MCAP.")
-    if rig == "ego_head":
-        # a head camera's timed steps are the dataset's subtasks (claims to check, as Gen-HumanEgo's are), shown to
-        # the model once, as its annotation, not again among the notes
-        end_s = (end_ns - anchor_origin_ns) / 1e9
-        st, subs = mcap_step_subtasks({topic: sequence for topic, sequence in placed_texts.items()
-                                        if topic not in unplaced_texts}, anchor_origin_ns, end_s)
-        if subs:
-            notes.pop(st, None)
-            extra["annotation_subtasks"] = subs
-    if notes:
-        set_uploader_notes(extra, {t: x for t, x in notes.items()})
+    parts: list = []              # damage to the episode's optional parts (part), recorded on it
+    instr, notes = None, {}
+    with part(parts, "the recording's text channels"):
+        skip_when_cameras_only()
+        for topic, sequence in texts.items():
+            proof = mcap_text_clock_proof(camera_clock, text_clock_kinds.get(topic),
+                                          camera_records.get(anchor_topic, []), text_records.get(topic, []))
+            compatible = proof is not None
+            extra['source']['text_clock_alignment']['topics'][topic] = proof or {'basis': 'unverified publisher clock'}
+            if compatible:
+                placed_texts[topic] = sorted(sequence, key=lambda row: row[0])
+            else:
+                unplaced_texts[topic] = text_records.get(topic, [])
+                add_issue(extra, "text_clock_unverified", f"{topic}: text and camera timestamp sources or origins do not "
+                          "establish a shared episode clock; original text and clocks remain recording metadata.", signal=topic)
+                # A constant task has no timed claim. Keep its instruction without assigning its source clock to footage.
+                if len(sequence) == 1:
+                    placed_texts[topic] = sequence
+        instr, notes = mcap_task_texts(placed_texts, n_text, anchor_origin_ns, (end_ns - anchor_origin_ns) / 1e9)
+        if unplaced_texts:
+            extra.setdefault('recorded_metadata', {})['unaligned_text_channels'] = unplaced_texts
+            for topic, records in unplaced_texts.items():
+                origin = records[0]['capture_ns'] if records and records[0]['capture_ns'] is not None else (
+                    records[0]['log_ns'] if records else 0)
+                notes[topic] = {'clock_alignment': 'unverified; publisher chronology is not placed on footage',
+                    'publisher_relative_timeline': [{'t_s': ((record['capture_ns'] if record['capture_ns'] is not None else
+                        record['log_ns']) - origin) / 1e9, 'text': record['text']} for record in records],
+                    'messages': records}
+        if camera_clock == 'capture':
+            timing = {topic: {**extra['source']['text_clock_alignment']['topics'][topic],
+                        'physical_synchronization_verified': False,
+                        'limitation': 'Publisher clock IDs or publication stamps are domain declarations, not an '
+                                      'independent synchronization measurement. Jointly biased capture/publication '
+                                      'stamps or a false shared clock ID cannot be detected here.'}
+                      for topic in placed_texts if topic not in unplaced_texts}
+            if timing:
+                notes['publisher_text_timing'] = timing
+                for topic in timing:
+                    add_issue(extra, 'publisher_text_timing_unverified',
+                              f'{topic}: text uses publisher-declared capture timing. Physical synchronization is '
+                              'unverified; a shared clock ID or publication stamp does not measure clock accuracy.',
+                              signal=topic)
+        outside = {topic: [{'offset_s': (stamp - anchor_origin_ns) / 1e9, 'text': value}
+                           for stamp, value in sequence if stamp < anchor_origin_ns or stamp >= end_ns]
+                   for topic, sequence in placed_texts.items() if topic not in unplaced_texts}
+        outside = {topic: records for topic, records in outside.items() if records}
+        if outside:
+            notes['publisher_text_outside_footage'] = outside
+            for topic in outside:
+                add_issue(extra, 'publisher_text_outside_footage', f'{topic}: recorded text timestamps extend outside '
+                          'the footage. Intersecting intervals are clipped; all original text remains publisher context.', signal=topic)
+        if instr:
+            extra.update(instruction=instr, instruction_note="This instruction is the task text stored in the MCAP.")
+        if rig == "ego_head":
+            # a head camera's timed steps are the dataset's subtasks (claims to check, as Gen-HumanEgo's are), shown to
+            # the model once, as its annotation, not again among the notes
+            end_s = (end_ns - anchor_origin_ns) / 1e9
+            st, subs = mcap_step_subtasks({topic: sequence for topic, sequence in placed_texts.items()
+                                            if topic not in unplaced_texts}, anchor_origin_ns, end_s)
+            if subs:
+                notes.pop(st, None)
+                extra["annotation_subtasks"] = subs
+        if notes:
+            set_uploader_notes(extra, {t: x for t, x in notes.items()})
     if t0 is not None:
         extra["clock_origin_s"] = t0 / 1e9
     # the arms' joints, on the cameras' clock, when the file records them (joint_state)
@@ -10323,16 +10786,20 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
             clock_arrays[view + '_log_ns'] = np.asarray([row['log_ns'] for row in records], dtype=np.int64)
         np.savez(ep / extra['recorded_camera_clocks'], **clock_arrays)
         q = np.asarray(capture_ns[files[me.order_views(files)[0]][0]], dtype=np.float64) / 1e9
-        for d in depth.values():
-            dp = probe_depth(Path(d["path"]))
-            if camera_clock is None and len(native_camera_ns.get(d['source'], [])) == len(dp['pts']):
-                own = np.asarray(native_camera_ns[d['source']], dtype=np.int64)
-                d['real'] = (own - own[0]) / 1e9
-            elif len(capture_ns.get(d['source'], [])) == len(dp['pts']):
-                d['real'] = (np.asarray(capture_ns[d['source']], dtype=np.int64) - anchor_origin_ns) / 1e9
-            else:
-                d["real"] = (dp["pts"].astype(np.float64) * float(dp["time_base"])
-                             - (anchor_origin_ns - t0) / 1e9)
+        with part(parts, "the depth streams' clocks") as depth_clocks:
+            skip_when_cameras_only()
+            for d in depth.values():
+                dp = probe_depth(Path(d["path"]))
+                if camera_clock is None and len(native_camera_ns.get(d['source'], [])) == len(dp['pts']):
+                    own = np.asarray(native_camera_ns[d['source']], dtype=np.int64)
+                    d['real'] = (own - own[0]) / 1e9
+                elif len(capture_ns.get(d['source'], [])) == len(dp['pts']):
+                    d['real'] = (np.asarray(capture_ns[d['source']], dtype=np.int64) - anchor_origin_ns) / 1e9
+                else:
+                    d["real"] = (dp["pts"].astype(np.float64) * float(dp["time_base"])
+                                 - (anchor_origin_ns - t0) / 1e9)
+    if paired and depth_clocks.failed is not None:
+        depth.clear()             # a depth stream with no clock is not placed on the footage
     if repeated:
         for v in repeated:
             add_issue(extra, "camera_timestamp_repeated", f"{files[v][0]} has distinct frames sharing a recorded "
@@ -10351,48 +10818,60 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
                     'namespace': next(iter(selected_namespaces)) if len(selected_namespaces) == 1 else None,
                     'reference_records': anchor_records}
     extra['source']['presentation_clock']['namespace'] = clock_domain['namespace']
-    by_clock, assumed, unplaced = split_sensors(item, q, True, clock_domain=clock_domain)
-    sensor_mcaps = [p for p in by_clock if p.suffix.lower() == ".mcap"]
-    sensor_h5s = [p for p in by_clock if p.suffix.lower() in H5_EXT]
-    if rig == "teleop_arms":
-        # an arm state only when every arm the recording and its sensor files may hold was read on its clock
-        # (state_blockers), as beside videos
-        lost: list = []
-        streams = mcap_joint_streams([item["file"]] + sensor_mcaps, q, lost, capture_clock=camera_clock == 'capture')
-        streams = compose_mcap_arms(streams, q, camera_clock) if camera_clock else streams
-        bad = unreadable_sensors(unplaced) + damaged_files(lost)
-        others = "the recording's other files" if 1 + len(by_clock) + len(assumed) + len(unplaced) > len(bad) else None
-        blocked = state_blockers(bad, assumed_arms(assumed, streams), others, unplaced_arms(unplaced, streams))
-        if not blocked and (clock_errors and camera_clock != 'arrival' or camera_clock is None):
-            blocked = StateNote("Labelled from the cameras because their declared capture clocks are invalid or mixed "
-                                "with arrival stamps. Precise arm alignment was not inferred.", "assumed_clock")
-        state, action, note = joint_state(streams, q, clock=camera_clock) if not blocked else (None, None, blocked)
-        used = state_fields(streams, state, action)
-    elif rig == "handheld_gripper":
-        from prepare.mcap_pose import pose_state
-        if clock_errors and camera_clock != 'arrival' or camera_clock is None:
-            note = StateNote("Declared camera capture clocks are invalid or mixed with arrival stamps; precise pose "
-                             "alignment was not inferred.", "assumed_clock")
-        else:
-            state, used, pose_extra, limitation = pose_state([item["file"]] + sensor_mcaps, q, camera_clock)
-            extra["source"].update(pose_extra.pop("source", {}))
-            extra.update(pose_extra)
-            if limitation:
-                note = StateNote("Labelled from the cameras because " + limitation, "layout")
+    by_clock, assumed, unplaced, sensor_mcaps, sensor_h5s = [], [], [], [], []
+    with part(parts, "the episode's sensor files"):
+        skip_when_cameras_only()
+        by_clock, assumed, unplaced = split_sensors(item, q, True, clock_domain=clock_domain)
+        sensor_mcaps = [p for p in by_clock if p.suffix.lower() == ".mcap"]
+        sensor_h5s = [p for p in by_clock if p.suffix.lower() in H5_EXT]
+    streams = {}
+    with part(parts, 'the recorded state') as reading_state:
+        skip_when_cameras_only()
+        if rig == "teleop_arms":
+            # an arm state only when every arm the recording and its sensor files may hold was read on its clock
+            # (state_blockers), as beside videos
+            lost: list = []
+            streams = mcap_joint_streams([item["file"]] + sensor_mcaps, q, lost, capture_clock=camera_clock == 'capture')
+            streams = compose_mcap_arms(streams, q, camera_clock) if camera_clock else streams
+            bad = unreadable_sensors(unplaced) + damaged_files(lost)
+            others = "the recording's other files" if 1 + len(by_clock) + len(assumed) + len(unplaced) > len(bad) else None
+            blocked = state_blockers(bad, assumed_arms(assumed, streams), others, unplaced_arms(unplaced, streams))
+            if not blocked and (clock_errors and camera_clock != 'arrival' or camera_clock is None):
+                blocked = StateNote("Labelled from the cameras because their declared capture clocks are invalid or mixed "
+                                    "with arrival stamps. Precise arm alignment was not inferred.", "assumed_clock")
+            state, action, note = joint_state(streams, q, clock=camera_clock) if not blocked else (None, None, blocked)
+            used = state_fields(streams, state, action)
+        elif rig == "handheld_gripper":
+            from prepare.mcap_pose import pose_state
+            if clock_errors and camera_clock != 'arrival' or camera_clock is None:
+                note = StateNote("Declared camera capture clocks are invalid or mixed with arrival stamps; precise pose "
+                                 "alignment was not inferred.", "assumed_clock")
+            else:
+                state, used, pose_extra, limitation = pose_state([item["file"]] + sensor_mcaps, q, camera_clock)
+                extra["source"].update(pose_extra.pop("source", {}))
+                extra.update(pose_extra)
+                if limitation:
+                    note = StateNote("Labelled from the cameras because " + limitation, "layout")
+    if reading_state.failed is not None:
+        state = action = None
+        used = {}
     # every other number the file records, under its own name (mcap_signals)
-    if camera_clock is None:
-        signals = Signals()
-        signals.left_out.extend((topic, 'no shared capture or recorder-log domain establishes placement on footage')
-                                for topic in numeric_clock_records)
-    else:
-        signals = mcap_signals([item["file"]] + sensor_mcaps, q, used, capture_clock=camera_clock == 'capture')
-    if rig == "teleop_arms":
-        signals.left_out += joint_left_out(streams, state, action)
-    if sensor_h5s:
-        merge_signals(signals, h5_file_signals(sensor_h5s, q, len(q)))
-    if assumed:
-        merge_signals(signals, sensors_from_start(assumed, q - q[0], extra))
-    note_sensors(extra, signals, by_clock, assumed, unplaced, q=q)
+    signals = Signals()
+    with part(parts, 'the recorded signals'):
+        skip_when_cameras_only()
+        if camera_clock is None:
+            signals = Signals()
+            signals.left_out.extend((topic, 'no shared capture or recorder-log domain establishes placement on footage')
+                                    for topic in numeric_clock_records)
+        else:
+            signals = mcap_signals([item["file"]] + sensor_mcaps, q, used, capture_clock=camera_clock == 'capture')
+        if rig == "teleop_arms":
+            signals.left_out += joint_left_out(streams, state, action)
+        if sensor_h5s:
+            merge_signals(signals, h5_file_signals(sensor_h5s, q, len(q)))
+        if assumed:
+            merge_signals(signals, sensors_from_start(assumed, q - q[0], extra))
+        note_sensors(extra, signals, by_clock, assumed, unplaced, q=q)
     # motion the file records but this reader does not use (hand, body or camera poses in a human recording, joints
     # in a layout the checks do not read): named on the job page, so a missing check is never a silent gap
     motion = [t for t in item["topics"] if re.search(r"hand|pose|slam|body|joint|odom|/tf$", t, re.I)
@@ -10428,27 +10907,35 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
     if item.get("fixed_window_s"):
         extra["collection_note"] = packaging_note(item["fixed_window_s"])
         extra["packaging"] = {"fixed_window_s": item["fixed_window_s"]}
-    retain_mcap_fields(item["file"], ep, extra, supplied={**used, **{t: None for t in view_of_topic}})
-    if rig == "ego_head":
-        from prepare.mcap_claims import apply_claims
-        apply_claims(extra, claim_records)
-    if camera_clock and not clock_errors:
-        anchor_stamps = np.asarray(capture_ns[files[me.order_views(files)[0]][0]], dtype=np.int64)
-        for view, (topic, _) in files.items():
-            if view == me.order_views(files)[0] or not capture_ns.get(topic):
-                continue
-            stamps = np.asarray(capture_ns[topic], dtype=np.int64)
-            offsets = np.abs(stamps[nearest(stamps, anchor_stamps)] - anchor_stamps) / 1e6
-            facts = extra.setdefault("stream_checks", {}).setdefault("streams", {}).setdefault(topic, {"n": len(stamps)})
-            facts.update(pair_offset_ms_max=round(float(offsets.max()), 1), pair_offset_ms_median=round(float(np.median(offsets)), 2))
-    native_sensor_mcaps = list(dict.fromkeys([*sensor_mcaps,
-        *(Path(path) for path in assumed if Path(path).suffix.lower() == '.mcap'),
-        *(Path(path) for path, _ in unplaced if Path(path).suffix.lower() == '.mcap')]))
-    for i, path in enumerate(native_sensor_mcaps):
-        retained = {}
-        retain_mcap_fields(path, ep, retained, archive_name=f"recorded_sensor_mcap{i}.npz",
-                           supplied=used if path in sensor_mcaps else {})
-        extra.setdefault("recorded_sensor_fields", []).append({"source": str(path), **retained})
+    with part(parts, "the recording's other fields"):
+        skip_when_cameras_only()
+        retain_mcap_fields(item["file"], ep, extra, supplied={**used, **{t: None for t in view_of_topic}})
+    with part(parts, "the recording's annotation claims"):
+        skip_when_cameras_only()
+        if rig == "ego_head":
+            from prepare.mcap_claims import apply_claims
+            apply_claims(extra, claim_records)
+    with part(parts, 'the camera pairing measurement'):
+        skip_when_cameras_only()
+        if camera_clock and not clock_errors:
+            anchor_stamps = np.asarray(capture_ns[files[me.order_views(files)[0]][0]], dtype=np.int64)
+            for view, (topic, _) in files.items():
+                if view == me.order_views(files)[0] or not capture_ns.get(topic):
+                    continue
+                stamps = np.asarray(capture_ns[topic], dtype=np.int64)
+                offsets = np.abs(stamps[nearest(stamps, anchor_stamps)] - anchor_stamps) / 1e6
+                facts = extra.setdefault("stream_checks", {}).setdefault("streams", {}).setdefault(topic, {"n": len(stamps)})
+                facts.update(pair_offset_ms_max=round(float(offsets.max()), 1), pair_offset_ms_median=round(float(np.median(offsets)), 2))
+    with part(parts, "the sensor files' other fields"):
+        skip_when_cameras_only()
+        native_sensor_mcaps = list(dict.fromkeys([*sensor_mcaps,
+            *(Path(path) for path in assumed if Path(path).suffix.lower() == '.mcap'),
+            *(Path(path) for path, _ in unplaced if Path(path).suffix.lower() == '.mcap')]))
+        for i, path in enumerate(native_sensor_mcaps):
+            retained = {}
+            retain_mcap_fields(path, ep, retained, archive_name=f"recorded_sensor_mcap{i}.npz",
+                               supplied=used if path in sensor_mcaps else {})
+            extra.setdefault("recorded_sensor_fields", []).append({"source": str(path), **retained})
     if use_log_clock:
         from prepare.signal_alignment import RECORDER_ARRIVAL
         for metadata in signals.meta.values():
@@ -10456,12 +10943,13 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
                 continue  # A common episode axis does not replace a sidecar's actual placement assumption.
             metadata.update(aligned_by=RECORDER_ARRIVAL, timing_basis='mcap_log_time',
                             physical_synchronization_verified=False)
-    return video_views_episode(ep, files, rig, dataset, extra, shared_clock=True, prs=prs, real=real,
-                               real_origin_s=anchor_origin_ns / 1e9 if real else None,
-                               state=state, action=action,
-                               descs={v: "Recorded camera channel " + topic + ". " + camera_selection
-                                      for v, (topic, _) in files.items()} if rig == "ego_head" else None,
-                               signals=signals, depth=depth)
+    add_part_issues(extra, parts)
+    return finish_views(ep, files, rig, dataset, extra, shared_clock=True, prs=prs, real=real,
+                        real_origin_s=anchor_origin_ns / 1e9 if real else None,
+                        state=state, action=action,
+                        descs={v: "Recorded camera channel " + topic + ". " + camera_selection
+                               for v, (topic, _) in files.items()} if rig == "ego_head" else None,
+                        signals=signals, depth=depth)
 
 
 def nal_units(b: bytes):
@@ -10608,23 +11096,38 @@ class FrameWriter:
         self.pts.append(p)
 
     def _packet_readable(self, payload: bytes, keyframe: bool) -> bool:
-        """A concealed picture invalidates dependent pictures until a clean random-access frame resets references."""
+        """A picture is kept only when the decoder says it is clean. After damage (a picture that does not decode, or
+        one lost before it reached the writer, lost), the pictures that follow may reference it, so they are refused
+        until the decoder itself recovers: at an IDR, or at the recovery point an intra-refresh stream uses instead,
+        which the decoder marks as a key frame. Waiting for an IDR alone dropped the rest of an intra-refresh
+        recording after one bad packet, as its only IDR is its first picture."""
         import av
-        if self.reference_damaged and not keyframe:
-            return False
         if self.packet_decoder is None:
             self.packet_decoder = av.CodecContext.create('hevc' if self.kind == 'hevc' else 'h264', 'r')
             self.packet_decoder.thread_count = 1
             self.packet_decoder.options = {'err_detect': 'explode'}
-        elif self.reference_damaged:
-            self.packet_decoder.flush_buffers()
+        elif self.reference_damaged and keyframe:
+            self.packet_decoder.flush_buffers()          # an IDR needs nothing from before it
         try:
             pictures = self.packet_decoder.decode(av.Packet(payload))
         except av.error.FFmpegError:
             self.reference_damaged = True
             return False
+        if self.reference_damaged:
+            if keyframe or any(picture.key_frame and not picture.is_corrupt for picture in pictures):
+                self.reference_damaged = False
+            else:
+                return False
         self.reference_damaged = any(picture.is_corrupt for picture in pictures)
         return not self.reference_damaged
+
+    def lost(self, t_s: float) -> None:
+        """A picture of this camera lost before it reached the writer (an MCAP message that could not be read). Its
+        time is flagged, and a coded stream's later pictures, which may reference it, wait for the decoder to
+        recover (_packet_readable); a lost JPEG costs only itself."""
+        if self.kind not in (None, "image"):
+            self.reference_damaged = True
+        self._bad(self._at(t_s))
 
     def add_image(self, t_s: float, im) -> None:
         """A picture already decoded (a raw image message), encoded to H.264 like JPEG frames; None is a frame that
@@ -12085,24 +12588,31 @@ def _convert_upload(root, rig, out, dataset, max_seconds, grouping, ownership_co
             # in upload order, as the upload page chooses them (read.js chooseEpisodes)
             report["skipped"].append({"name": it["name"], "why": past})
             continue
+        before = {p.name for p in out.iterdir()}
         try:
             item_root = (it.get('root') or {}).get('dir')
-            own_context = source_context(Path(item_root), rig) if item_root else {}
+            own_context = {}
+            if item_root:
+                own_issues = []
+                with part(own_issues, "the recording's folder metadata"):
+                    own_context = source_context(Path(item_root), rig)
             scope = merge_source_contexts(rig, declared_context, own_context)
-            if it["kind"] == "lerobot":
-                ctx = convert_lerobot_item(it, rig, out, dataset)
-            elif it["kind"] == "recording":
-                ctx = convert_recording(it, rig, out, dataset)
-            elif it["kind"] == "mcap":
-                ctx = convert_mcap(it, rig, out, dataset)
-            elif it["kind"] == "hdf5":
-                ctx = convert_hdf5(it, rig, out, dataset, source_scope=scope)
-            else:
-                ctx = convert_video(it, rig, out, dataset)
-        except (ValueError, OSError) as e:
-            report["failed"].append({"name": it["name"], "why": plain_error(e)})
+            ctx = read_episode(it, rig, out, dataset, scope)
+        except Exception as e:
+            # Every optional part of an episode has its own boundary (part), so what reaches here is an episode
+            # none of whose cameras could be shown, or a reader fault. Either way it costs this episode alone: any
+            # exception, not a list of expected types, is reported with its type, and what the reader left half
+            # written is removed so no later step mistakes it for an episode.
+            import shutil
+            for name in {p.name for p in out.iterdir()} - before:
+                shutil.rmtree(out / name, ignore_errors=True)
+            why = plain_error(e) if isinstance(e, (ValueError, OSError)) else f"it could not be read ({type(e).__name__}: {e})"
+            report["failed"].append({"name": it["name"], "why": why})
             print(f"convert: {it['name']}: {type(e).__name__}: {e}", file=sys.stderr)
             continue
+        if item_root and own_issues:
+            add_part_issues(ctx, own_issues)
+            write_atomic(out / ctx['episode_id'] / 'context.json', ctx, indent=1, default=str)
         if archive_damage:
             for damage in archive_damage:
                 add_issue(ctx, 'archive_damaged', damage)

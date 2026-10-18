@@ -11,6 +11,11 @@ SCOPE_FILES = ('info.json', 'metadata.json', 'dataset.json', 'meta/info.json')
 DESCRIPTION_FIELDS = ('dataset_note', 'dataset_description', 'description', 'collection_note')
 
 
+class ScopeConflict(ValueError):
+    """The upload's own scope declarations contradict each other or name no scope. Labelling the episode under
+    either reading would be a guess at how it was recorded, so this refuses the episode; it is not damage."""
+
+
 def declared_context(declarations, rig: str | None) -> dict:
     """Resolve explicit declarations without inferring scope from descriptive text."""
     context = {'profile': rig} if rig is not None else {}
@@ -18,7 +23,7 @@ def declared_context(declarations, rig: str | None) -> dict:
     for data in declarations:
         mode = data.get('task_mode')
         if mode is not None and mode not in ('episode', 'session'):
-            raise ValueError('Dataset task_mode must be episode or session.')
+            raise ScopeConflict('Dataset task_mode must be episode or session.')
         if mode is not None:
             modes.add(mode)
         elif data.get('sessions') is True:
@@ -28,7 +33,7 @@ def declared_context(declarations, rig: str | None) -> dict:
             if isinstance(note, str) and note.strip() and note not in notes:
                 notes.append(note)
     if len(modes) > 1:
-        raise ValueError('Dataset metadata declares conflicting episode and session task scopes.')
+        raise ScopeConflict('Dataset metadata declares conflicting episode and session task scopes.')
     if modes:
         context['task_mode'] = modes.pop()
     if notes:
@@ -77,11 +82,11 @@ def source_context(upload: Path, rig: str | None) -> dict:
 
 def hdf_source_context(f, group: str, rig: str, coverage: dict) -> dict:
     """Only the file root and the selected recording group can declare recording scope."""
-    from prepare.hdf_metadata import value
+    from prepare.hdf_metadata import attribute_values, value
     from label.source_eligibility import mark_hdf
     owners = [('', f), *([(group, f[group])] if group else [])]
-    declarations = [{key: value(obj.attrs[key]) for key in ('task_mode', 'sessions', *DESCRIPTION_FIELDS)
-                     if key in obj.attrs} for _, obj in owners]
+    declarations = [{key: value(raw) for key, raw in attribute_values(obj, ('task_mode', 'sessions', *DESCRIPTION_FIELDS))}
+                    for _, obj in owners]
     context = declared_context(declarations, rig)
     for (name, _), fields in zip(owners, declarations):
         for key, field in fields.items():

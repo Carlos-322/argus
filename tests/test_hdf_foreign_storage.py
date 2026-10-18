@@ -1,18 +1,18 @@
-"""An uploaded HDF5 file can never make prepare read a file outside the upload.
+"""An uploaded HDF5 file can never make prepare read a file outside the upload, and an object that names outside
+storage costs that object, never the file's cameras.
 
-HDF5 resolves external raw storage against the working directory, falls back to the working directory for links
-and virtual sources missing next to the file, and honours absolute names. A file that names any outside storage is
-refused as a whole at open, so no reader, whatever dataset name it asks for, can be steered to a host file.
+HDF5 resolves external raw storage against the working directory and honours absolute names, so a dataset whose
+raw storage names a file is read only when that name lands on an upload file however HDF5 resolves it. Links and
+virtual sources resolve next to the file and are admitted only when that file is part of the upload.
 """
 import json
-import os
 
 import h5py
 import numpy as np
 import pytest
 
 from prepare import formats
-from prepare.hdf_metadata import ForeignStorage, authorized_sources, foreign_references, open_hdf5
+from prepare.hdf_metadata import authorized_sources, objects
 
 SECRET = b'HOST-SECRET-0123456789'
 
@@ -36,21 +36,34 @@ def host(tmp_path, monkeypatch):
     return cwd, upload
 
 
+def walked(path, upload):
+    with authorized_sources(list(upload.iterdir())), h5py.File(path, 'r') as f:
+        issues = []
+        names = [name for name, _ in objects(f, issues=issues)]
+    return names, issues
+
+
+def assert_no_secret(out, report):
+    for written in (out.rglob('*') if out.exists() else []):
+        if written.is_file():
+            assert SECRET not in written.read_bytes(), written
+    assert SECRET.decode() not in json.dumps(report, default=str)
+
+
 @pytest.mark.parametrize('name', ['secret.bin', 'pyproject.toml', '../outside.bin', '../../outside.bin', 'ABSOLUTE'])
-def test_external_raw_storage_is_refused_whatever_its_name(host, tmp_path, name):
+def test_external_raw_storage_outside_the_upload_is_excluded_whatever_its_name(host, tmp_path, name):
     _, upload = host
     target = str(tmp_path / 'outside.bin') if name == 'ABSOLUTE' else name
     path = upload / 'ep0.h5'
     with h5py.File(path, 'w') as h:
         camera(h)
         h.create_dataset('note', shape=(len(SECRET),), dtype='u1', external=[(target, 0, len(SECRET))])
-    with authorized_sources(list(upload.iterdir())):
-        assert foreign_references(path)
-        with pytest.raises(ForeignStorage):
-            open_hdf5(path)
+    names, issues = walked(path, upload)
+    assert 'note' not in names and 'observations/images/cam_high' in names
+    assert any(i['kind'] == 'external_source_unread' and '/note' in i['what'] for i in issues)
 
 
-def test_external_link_missing_next_to_the_file_is_refused(host):
+def test_external_link_missing_next_to_the_file_is_excluded(host):
     cwd, upload = host
     with h5py.File(cwd / 'host.h5', 'w') as h:
         h['v'] = np.frombuffer(SECRET, dtype=np.uint8)
@@ -58,12 +71,12 @@ def test_external_link_missing_next_to_the_file_is_refused(host):
     with h5py.File(path, 'w') as h:
         camera(h)
         h['observations/qvel'] = h5py.ExternalLink('host.h5', '/v')   # HDF5 falls back to the working directory
-    with authorized_sources(list(upload.iterdir())):
-        with pytest.raises(ForeignStorage):
-            open_hdf5(path)
+    names, issues = walked(path, upload)
+    assert 'observations/qvel' not in names and 'observations/qpos' in names
+    assert any(i['kind'] == 'external_source_unread' for i in issues)
 
 
-def test_virtual_source_outside_the_upload_is_refused(host, tmp_path):
+def test_virtual_source_outside_the_upload_is_excluded(host, tmp_path):
     _, upload = host
     with h5py.File(tmp_path / 'source.h5', 'w') as h:
         h['v'] = np.frombuffer(SECRET, dtype=np.uint8)
@@ -73,12 +86,11 @@ def test_virtual_source_outside_the_upload_is_refused(host, tmp_path):
         layout = h5py.VirtualLayout(shape=(len(SECRET),), dtype='u1')
         layout[:] = h5py.VirtualSource(str(tmp_path / 'source.h5'), 'v', shape=(len(SECRET),))
         h.create_virtual_dataset('vds', layout)
-    with authorized_sources(list(upload.iterdir())):
-        with pytest.raises(ForeignStorage):
-            open_hdf5(path)
+    names, _ = walked(path, upload)
+    assert 'vds' not in names and 'observations/images/cam_high' in names
 
 
-def test_virtual_source_inside_the_upload_that_itself_names_outside_storage_is_refused(host):
+def test_virtual_source_inside_the_upload_that_itself_names_outside_storage_is_excluded(host):
     _, upload = host
     with h5py.File(upload / 'inner.h5', 'w') as h:
         h.create_dataset('v', shape=(len(SECRET),), dtype='u1', external=[('secret.bin', 0, len(SECRET))])
@@ -88,9 +100,8 @@ def test_virtual_source_inside_the_upload_that_itself_names_outside_storage_is_r
         layout = h5py.VirtualLayout(shape=(len(SECRET),), dtype='u1')
         layout[:] = h5py.VirtualSource('inner.h5', 'v', shape=(len(SECRET),))
         h.create_virtual_dataset('vds', layout)
-    with authorized_sources(list(upload.iterdir())):
-        problems = foreign_references(path)
-    assert problems and 'inner.h5' in problems[0]
+    names, _ = walked(path, upload)
+    assert 'vds' not in names
 
 
 def test_links_and_virtual_sources_inside_the_upload_are_read(host):
@@ -105,33 +116,25 @@ def test_links_and_virtual_sources_inside_the_upload_are_read(host):
         layout[:] = h5py.VirtualSource('inner.h5', 'v', shape=(6,))
         h.create_virtual_dataset('vds', layout)
         h['soft'] = h5py.SoftLink('/observations/qpos')
-    with authorized_sources(list(upload.iterdir())):
-        assert foreign_references(path) == []
-        with open_hdf5(path) as f:
-            np.testing.assert_array_equal(f['vds'][:], np.arange(6))
+    names, issues = walked(path, upload)
+    assert {'linked', 'vds', 'soft'} <= set(names) and not issues
 
 
-def test_prepare_never_publishes_host_bytes(host, tmp_path):
+@pytest.mark.parametrize('name', ['pyproject.toml', 'ABSOLUTE'])
+def test_prepare_keeps_the_camera_and_never_publishes_host_bytes(host, tmp_path, name):
     cwd, upload = host
     for p in list(upload.iterdir()):
         p.unlink()
     (upload / 'pyproject.toml').write_bytes(b'decoy-in-the-upload!!')
+    target = str(tmp_path / 'outside.bin') if name == 'ABSOLUTE' else name
     with h5py.File(upload / 'ep0.h5', 'w') as h:
         camera(h)
-        h.create_dataset('leaked_note', shape=(), dtype=h5py.string_dtype(length=len(SECRET)))
-    # rewrite the dataset as external fixed-length storage, as a crafted upload would
-    with h5py.File(upload / 'ep0.h5', 'a') as h:
-        del h['leaked_note']
-        h.create_dataset('leaked_note', shape=(len(SECRET),), dtype='u1',
-                         external=[('pyproject.toml', 0, len(SECRET))])
+        h.attrs['fps'] = 10
+        h.create_dataset('leaked_note', shape=(len(SECRET),), dtype='u1', external=[(target, 0, len(SECRET))])
     out = tmp_path / 'out'
-    try:
-        report = formats.convert(upload, 'teleop_arms', out, 'test', 3600)
-    except formats.UploadInputError as error:
-        report = {'error': str(error)}
-    text = json.dumps(report)
-    for written in (out.rglob('*') if out.exists() else []):
-        if written.is_file():
-            assert SECRET not in written.read_bytes(), written
-    assert SECRET.decode() not in text
-    assert 'outside the upload' in text
+    report = formats.convert(upload, 'teleop_arms', out, 'test', 3600)
+    assert len(report['episodes']) == 1 and not report['failed']
+    context = json.loads((out / report['episodes'][0]['episode_id'] / 'context.json').read_text())
+    assert context['cameras']
+    assert any(i['kind'] == 'external_source_unread' for i in context['reader_issues'])
+    assert_no_secret(out, report)

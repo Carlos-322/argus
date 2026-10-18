@@ -9,114 +9,64 @@ MAX_VALUES = 4096
 _SOURCES = ContextVar('hdf_sources', default=None)
 
 
-MAX_SCANNED_OBJECTS = 2_000_000
-_SCANS = {}
 
-
-class ForeignStorage(ValueError):
-    """An HDF5 file whose links or storage name files outside the upload. It is never opened for reading."""
-
-
-def _allowed_now(path):
-    allowed = _SOURCES.get()
-    return frozenset(allowed) if allowed is not None else frozenset({Path(path).resolve()})
-
-
-def foreign_references(path, allowed=None, _active=None):
-    """Why reading this HDF5 file could touch a file outside `allowed`, or [] when it cannot.
-
-    HDF5 resolves a link's or virtual dataset's file next to the HDF5 file, but falls back to the working directory
-    when that file is missing, and it resolves external raw storage against the working directory and never
-    against the file. An absolute name ignores every prefix. So a reader that opens such a file can be steered to
-    any file on the host by a fixed dataset name, whatever the walker admitted. One scan of every object at open
-    is the only boundary every read passes through."""
+def open_hdf5(path):
+    """Open an uploaded HDF5 file for reading. What its links and storage may reach is decided per object, as the
+    walker reaches it (children, storage_admitted), so an object naming storage outside the upload costs that
+    object and never the file's cameras."""
     import h5py
-    path = Path(path).resolve()
-    allowed = frozenset(allowed) if allowed is not None else _allowed_now(path)
-    stat = path.stat()
-    key = (path, stat.st_size, stat.st_mtime_ns, allowed)
-    if key in _SCANS:
-        return _SCANS[key]
-    active = set() if _active is None else _active
-    if path in active:
-        return []
-    active.add(path)
-    problems = []
-    try:
-        with h5py.File(path, 'r') as f:
-            seen, pending, count = set(), [f], 0
-            while pending and not problems:
-                group = pending.pop()
-                try:
-                    keys = list(group)
-                except (KeyError, OSError, RuntimeError, ValueError):
-                    continue          # an unreadable group cannot be read through by any later reader either
-                for key_name in keys:
-                    count += 1
-                    if count > MAX_SCANNED_OBJECTS:
-                        problems.append(f'more than {MAX_SCANNED_OBJECTS:,} objects to verify')
-                        break
-                    name = group.name.rstrip('/') + '/' + key_name
-                    try:
-                        link = group.get(key_name, getlink=True)
-                    except (KeyError, OSError, RuntimeError, ValueError):
-                        continue
-                    if isinstance(link, h5py.ExternalLink):
-                        target = (path.parent / link.filename).resolve()
-                        if target not in allowed:
-                            problems.append(f'{name} links to {link.filename}')
-                        elif target != path:
-                            nested = foreign_references(target, allowed, active)
-                            if nested:
-                                problems.append(f'{name} links to {link.filename}, which {nested[0]}')
-                        continue
-                    if isinstance(link, h5py.SoftLink):
-                        continue      # names an object in this file, which the hard links reach
-                    try:
-                        obj = group[key_name]
-                    except (KeyError, OSError, RuntimeError, ValueError):
-                        continue
-                    if isinstance(obj, h5py.Group):
-                        address = h5py.h5o.get_info(obj.id).addr
-                        if address not in seen:
-                            seen.add(address)
-                            pending.append(obj)
-                        continue
-                    if not isinstance(obj, h5py.Dataset):
-                        continue
-                    try:
-                        if obj.external:
-                            problems.append(f'{name} stores its values in {obj.external[0][0]}')
-                            break
-                        sources = obj.virtual_sources() if obj.is_virtual else []
-                    except (KeyError, OSError, RuntimeError, ValueError):
-                        continue
-                    for source in sources:
-                        target = path if source.file_name == '.' else (path.parent / source.file_name).resolve()
-                        if target not in allowed:
-                            problems.append(f'{name} reads values from {source.file_name}')
-                            break
-                        if target != path and target.exists():
-                            nested = foreign_references(target, allowed, active)
-                            if nested:
-                                problems.append(f'{name} reads values from {source.file_name}, which {nested[0]}')
-                                break
-                    if problems:
-                        break
-    finally:
-        active.discard(path)
-    _SCANS[key] = problems
-    return problems
-
-
-def open_hdf5(path, allowed=None):
-    """Open an uploaded HDF5 file for reading, or raise ForeignStorage when anything in it names another file."""
-    import h5py
-    problems = foreign_references(path, allowed)
-    if problems:
-        raise ForeignStorage(f'{Path(path).name} was not read because it names storage outside the upload '
-                             f'({problems[0]})')
     return h5py.File(path, 'r')
+
+
+ATTRIBUTE_BYTES = 1 << 20    # an attribute holding more than this is named, not copied into the episode
+
+
+def attribute_values(obj, keys=None, issues=None):
+    """[(name, value)] of obj's attributes (only those named in keys, in that order, when keys is given), each read
+    on its own. A damaged attribute is recorded on issues and skipped, and one holding more than ATTRIBUTE_BYTES is
+    recorded and skipped unread where its size is known, so one attribute never costs the others or the episode.
+    Iterating attrs.items() read every value before any was chosen, so one bad attribute failed the whole read."""
+    from prepare.isolation import cameras_only
+    if cameras_only():
+        return []           # a second attempt after a read that stopped responding reads no attribute (isolation)
+    where = getattr(obj, 'name', '') or '/'
+
+    def note(what, error=None):
+        if issues is not None:
+            issues.append({'kind': 'attribute_unreadable', 'what': f'HDF5 attribute {what} was not read'
+                           + (f' ({type(error).__name__})' if error is not None else '') + '.'})
+    try:
+        names = list(obj.attrs.keys())
+    except Exception as error:
+        note(f'list of {where}', error)
+        return []
+    if keys is not None:
+        present = set(names)
+        names = [key for key in keys if key in present]
+    out = []
+    for name in names:
+        try:
+            size = obj.attrs.get_id(name).get_storage_size()
+            if size > ATTRIBUTE_BYTES:
+                note(f'{name} of {where}, {size:,} bytes,')
+                continue
+            value = obj.attrs[name]
+        except Exception as error:
+            note(f'{name} of {where}', error)
+            continue
+        held = value.nbytes if isinstance(value, np.ndarray) and value.dtype.kind != 'O' else \
+            sum(len(x) for x in np.asarray(value, dtype=object).ravel() if isinstance(x, (str, bytes))) \
+            if isinstance(value, np.ndarray) else len(value) if isinstance(value, (str, bytes)) else 0
+        if held > ATTRIBUTE_BYTES:
+            note(f'{name} of {where}, {held:,} bytes,')
+            continue
+        out.append((name, value))
+    return out
+
+
+def current_sources():
+    """The files authorized_sources admits here, or None outside it."""
+    return _SOURCES.get()
 
 
 @contextmanager
@@ -134,6 +84,22 @@ def object_id(obj):
     return (str(Path(obj.file.filename).resolve()), h5py.h5o.get_info(obj.id).addr)
 
 
+def raw_storage_admitted(path, external, allowed):
+    """Whether every file a dataset's external raw storage names is an upload file. HDF5 resolves such a name
+    against the working directory, or HDF5_EXTFILE_PREFIX when set, and an absolute name as it stands, never
+    against the HDF5 file's folder. A name is admitted only when it lands on an upload file both ways, so neither
+    a decoy beside the file nor a host file of the same name can supply values."""
+    import os
+    if os.environ.get('HDF5_EXTFILE_PREFIX'):
+        return False
+    for name, _, _ in external:
+        name = Path(os.fsdecode(name))
+        places = [name] if name.is_absolute() else [Path.cwd() / name, path.parent / name]
+        if any(place.resolve() not in allowed for place in places):
+            return False
+    return True
+
+
 def storage_admitted(obj, allowed, seen=None):
     """Resolve virtual source datasets too, since their paths can hide external links."""
     import h5py
@@ -142,7 +108,7 @@ def storage_admitted(obj, allowed, seen=None):
         return False
     if not isinstance(obj, h5py.Dataset):
         return True
-    if any((path.parent / name).resolve() not in allowed for name, _, _ in obj.external or []):
+    if obj.external and not raw_storage_admitted(path, obj.external, allowed):
         return False
     if not obj.is_virtual:
         return True
@@ -312,7 +278,7 @@ def read(source, field, pointer):
     import h5py
     path = check_source(source)
     tokens = [t.replace('~1', '/').replace('~0', '~') for t in pointer.split('/')[1:]]
-    with open_hdf5(path, {Path(path).resolve()}) as f:
+    with open_hdf5(path) as f:
         obj = f[field['object'] or '/']
         if Path(obj.file.filename).resolve() != path.resolve():
             raise ValueError('External HDF5 metadata requires its own source inventory')

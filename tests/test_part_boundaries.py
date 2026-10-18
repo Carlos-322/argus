@@ -101,7 +101,8 @@ def test_failed_state_write_keeps_the_episode_with_its_cameras(tmp_path, monkeyp
     original = formats.video_views_episode
 
     def fails_with_state(ep, files, rig, dataset, extra, **kw):
-        if kw.get('state') is not None:
+        # the fixture's qpos names no joints, so it is written as a recorded signal rather than as state
+        if kw.get('state') is not None or len(kw.get('signals') or ()):
             raise ValueError('state rows could not be written')
         return original(ep, files, rig, dataset, extra, **kw)
     monkeypatch.setattr(formats, 'video_views_episode', fails_with_state)

@@ -310,16 +310,6 @@ def test_file_decoder_checks_reference_damage_before_requested_frame(rows, damag
         assert set(extract_frames(source, 0., 120, rows, pts=pts)) == set(rows)
 
 
-def test_conversion_does_not_relabel_programming_errors_as_source_damage(tmp_path, monkeypatch):
-    root = tmp_path / 'source'
-    lerobot_source(root, length=6, offset=0)
-    def broken_reader(*args, **kwargs):
-        raise RuntimeError('table reader implementation regression')
-    monkeypatch.setattr(formats, '_read_episode_table', broken_reader)
-    with pytest.raises(RuntimeError, match='table reader implementation regression'):
-        formats.convert(root, 'teleop_arms', tmp_path / 'out', 'implementation failure', 900)
-
-
 @pytest.mark.parametrize('proven', [False, True])
 def test_mcap_presentation_uses_one_recorded_axis_for_camera_and_text(tmp_path, proven):
     from test_ingestion_v5 import text_recording
