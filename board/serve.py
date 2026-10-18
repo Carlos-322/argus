@@ -57,6 +57,7 @@ import logging
 import math
 import os
 import re
+import selectors
 import shutil
 import socket
 import socketserver
@@ -69,7 +70,7 @@ from contextlib import contextmanager, ExitStack
 from functools import lru_cache, wraps
 import urllib.parse
 import uuid
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from pathlib import Path
 
 from board.families import Families
@@ -1779,6 +1780,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
     timeout = 30
     request_read_timeout = 15
 
+    def setup(self):
+        # BoardHTTPServer hands over one request of a connection it holds, with the head it already received
+        if isinstance(self.request, _HeldRequest):
+            self.connection = self.request.sock
+            self.rfile = self.request.reader
+            self.wfile = socketserver._SocketWriter(self.connection)
+            return
+        super().setup()
+
+    def handle(self):
+        if isinstance(self.request, _HeldRequest):
+            self.close_connection = True
+            self.handle_one_request()
+            self.request.close = self.close_connection
+            return
+        super().handle()
+
+    def finish(self):
+        if isinstance(self.request, _HeldRequest):
+            return
+        super().finish()
+
+    def client(self) -> str:
+        """Who this request comes from (client_key), for per-client bounds."""
+        if isinstance(self.request, _HeldRequest):
+            return self.request.client
+        return client_key(str(self.client_address[0]) if self.client_address else '',
+                          (self.headers.get_all('X-Forwarded-For') or [None])[-1] if self.headers else None)
+
     def _stop_read_deadline(self):
         deadline = getattr(self, '_read_deadline', None)
         if deadline is not None:
@@ -2310,31 +2340,428 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._send(404, {"error": "unknown path"})
 
 
-class BoardHTTPServer(socketserver.ThreadingTCPServer):
-    """Bound idle and slow connections before allocating a handler thread."""
-    daemon_threads = True
+def client_key(peer: str, forwarded: str | None = None) -> str:
+    """Who a request comes from, for sharing workers and download tickets between clients: the peer's address, the
+    /64 network of an IPv6 peer (one host is routinely given a whole /64), or, for a loopback peer (a reverse proxy on
+    this machine), the address that proxy put last in X-Forwarded-For. A forwarded address is trusted only from
+    loopback: anything that can connect there can read the board's files anyway."""
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(peer.split('%')[0])
+    except ValueError:
+        return peer
+    if ip.is_loopback and forwarded:
+        last = forwarded.split(',')[-1].strip()
+        try:
+            ip = ipaddress.ip_address(last.strip('[]').split('%')[0])
+        except ValueError:
+            return 'forwarded ' + last[:64] if last else str(ip)
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return str(ipaddress.ip_network(f'{ip}/64', strict=False)) if ip.version == 6 else str(ip)
+
+
+_FORWARDED_FOR = re.compile(rb'\nx-forwarded-for[ \t]*:[ \t]*([^\r\n]*)', re.I)
+_HEAD_END = re.compile(rb'\r?\n\r?\n')
+
+
+class _Held:
+    """A connection the server holds while no worker serves it: the bytes of its next request head so far, when it
+    was accepted or handed back, and when that head's first byte came."""
+    __slots__ = ('sock', 'address', 'peer', 'client', 'data', 'since', 'first', 'state', 'queued')
+
+    def __init__(self, sock, address):
+        self.sock, self.address, self.peer = sock, address, client_key(address[0])
+        self.client, self.data, self.state, self.queued = self.peer, bytearray(), 'held', 0.0
+        self.since, self.first = time.monotonic(), None
+
+
+class _Reader:
+    """A held connection's request bytes for a handler: what the server already received, then the socket. It never
+    reads ahead of what the handler asks for, so bytes of a pipelined next request stay here for the server."""
+    closed = False
+
+    def __init__(self, sock, data):
+        self.sock, self.buffer = sock, bytearray(data)
+
+    def _fill(self) -> bool:
+        chunk = self.sock.recv(65536)
+        self.buffer += chunk
+        return bool(chunk)
+
+    def readline(self, limit=-1):
+        while True:
+            end = self.buffer.find(b'\n')
+            if end >= 0 and (limit is None or limit < 0 or end < limit):
+                end += 1
+                break
+            if limit is not None and 0 <= limit <= len(self.buffer):
+                end = limit
+                break
+            if not self._fill():
+                end = len(self.buffer)
+                break
+        out = bytes(self.buffer[:end])
+        del self.buffer[:end]
+        return out
+
+    def read(self, n=-1):
+        while (n is None or n < 0 or len(self.buffer) < n) and self._fill():
+            pass
+        end = len(self.buffer) if n is None or n < 0 else min(n, len(self.buffer))
+        out = bytes(self.buffer[:end])
+        del self.buffer[:end]
+        return out
+
+    def close(self):
+        pass
+
+
+class _HeldRequest:
+    """What Handler is given in place of a socket for one request on a held connection."""
+    def __init__(self, sock, reader, client):
+        self.sock, self.reader, self.client, self.close = sock, reader, client, True
+
+
+class BoardHTTPServer(socketserver.TCPServer):
+    """Hold idle and slow connections without a thread each, and share the worker threads fairly between clients.
+
+    One selector thread holds every connection between requests and reads request heads; a worker thread is given a
+    connection only once its request head has arrived, for that one request, and the connection then comes back. A
+    client that keeps sockets idle, or trickles a head byte by byte, so costs file descriptors, never the workers other
+    viewers need. A waiting request goes to the client with the fewest requests in progress, and one client never has
+    more than client_workers. Held connections are bounded: near the bound idle ones are closed after a second, and
+    over it the oldest connection of whichever client holds the most is closed, so a new viewer is queued and served,
+    never refused because someone else holds sockets."""
     allow_reuse_address = True
     request_queue_size = 128
+    max_workers = 64
+    client_workers = 16
+    max_connections = 1024
+    head_bytes = 256 * 1024
+    worker_idle_seconds = 0.5
 
-    def __init__(self, *args, **kwargs):
-        self._connections = threading.BoundedSemaphore(64)
-        super().__init__(*args, **kwargs)
-
-    def process_request(self, request, client_address):
-        if not self._connections.acquire(blocking=False):
-            self.shutdown_request(request)
-            return
+    def __init__(self, server_address, RequestHandlerClass, bind_and_activate=True):
+        super().__init__(server_address, RequestHandlerClass, bind_and_activate)
         try:
-            super().process_request(request, client_address)
-        except BaseException:
-            self._connections.release()
-            raise
+            import resource
+            soft = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+            if soft != resource.RLIM_INFINITY:
+                # leave descriptors for clips, footage, locks and the encoders' pipes
+                self.max_connections = max(16, min(self.max_connections, soft - 128))
+        except (ImportError, OSError, ValueError):
+            pass
+        self._lock = threading.Lock()
+        self._work = threading.Condition(self._lock)
+        self._selector = selectors.DefaultSelector()
+        self._wake_read, self._wake_write = socket.socketpair()
+        self._wake_read.setblocking(False)
+        self._wake_write.setblocking(False)
+        self._by_peer = {}                  # peer -> its connections not being served (held or queued)
+        self._held = set()                  # registered with the selector, reading a head
+        self._ready = OrderedDict()         # client -> deque of connections whose request head has arrived
+        self._busy = {}                     # client -> requests being served
+        self._returned = []                 # connections workers hand back for their next request
+        self._serving = self._workers = self._idle = self._queued = 0
+        self._stopping = threading.Event()
+        self._stopped = threading.Event()
+        self._stopped.set()
+        self._accept_paused_until = 0.0
 
-    def process_request_thread(self, request, client_address):
+    # selector thread ------------------------------------------------------------------------------------------------
+
+    def serve_forever(self, poll_interval=0.25):
+        self._stopping.clear()
+        self._stopped.clear()
+        self.socket.setblocking(False)
+        self._selector.register(self.socket, selectors.EVENT_READ, 'listen')
+        self._selector.register(self._wake_read, selectors.EVENT_READ, 'wake')
         try:
-            super().process_request_thread(request, client_address)
+            while not self._stopping.is_set():
+                for key, _ in self._selector.select(poll_interval):
+                    if key.data == 'listen':
+                        self._accept()
+                    elif key.data == 'wake':
+                        self._adopt()
+                    else:
+                        self._receive(key.data)
+                self._sweep()
         finally:
-            self._connections.release()
+            for fileobj in (self.socket, self._wake_read):
+                try:
+                    self._selector.unregister(fileobj)
+                except (KeyError, ValueError):
+                    pass
+            self._close_all()
+            self._stopped.set()
+
+    def shutdown(self):
+        self._stopping.set()
+        self._wake()
+        self._stopped.wait()
+
+    def server_close(self):
+        super().server_close()
+        self._close_all()
+        for end in (self._wake_read, self._wake_write):
+            end.close()
+        self._selector.close()
+
+    def _connections(self) -> int:
+        return sum(map(len, self._by_peer.values())) + self._serving
+
+    def _accept(self):
+        for _ in range(64):
+            try:
+                sock, address = self.socket.accept()
+            except BlockingIOError:
+                return
+            except OSError as error:
+                if error.errno in (errno.EMFILE, errno.ENFILE, errno.ENOBUFS, errno.ENOMEM):
+                    with self._lock:
+                        evicted = self._evict()
+                    if not evicted:
+                        # nothing to close: stop accepting a moment instead of spinning on the listening socket
+                        self._selector.unregister(self.socket)
+                        self._accept_paused_until = time.monotonic() + 0.1
+                    return
+                if error.errno in (errno.ECONNABORTED, errno.EPROTO, errno.EINTR):
+                    continue
+                raise
+            sock.setblocking(False)
+            held = _Held(sock, address if isinstance(address, tuple) else (str(address), 0))
+            with self._lock:
+                self._track(held)
+                while self._connections() > self.max_connections and self._evict():
+                    pass
+            if held.state == 'held':
+                self._selector.register(sock, selectors.EVENT_READ, held)
+
+    def _track(self, held):
+        self._by_peer.setdefault(held.peer, set()).add(held)
+        self._held.add(held)
+        held.state = 'held'
+
+    def _untrack(self, held):
+        peers = self._by_peer.get(held.peer)
+        if peers is not None:
+            peers.discard(held)
+            if not peers:
+                del self._by_peer[held.peer]
+        self._held.discard(held)
+
+    def _evict(self) -> bool:
+        """Close one connection of the client holding the most: an idle one first, then one still sending its head,
+        then one waiting for a worker; the oldest of each. Called with the lock held."""
+        if not self._by_peer:
+            return False
+        peer = max(self._by_peer, key=lambda p: len(self._by_peer[p]))
+        order = {'held': 0, 'queued': 2}
+        victim = min(self._by_peer[peer], key=lambda h: (order[h.state] + (h.first is not None), h.since))
+        if victim.state == 'queued':
+            waiting = self._ready.get(victim.client)
+            if waiting is not None:
+                waiting.remove(victim)
+                self._queued -= 1
+                if not waiting:
+                    del self._ready[victim.client]
+        else:
+            try:
+                self._selector.unregister(victim.sock)
+            except (KeyError, ValueError):
+                pass
+        self._untrack(victim)
+        victim.state = 'closed'
+        self._close(victim.sock)
+        return True
+
+    def _receive(self, held):
+        try:
+            chunk = held.sock.recv(65536)
+        except (BlockingIOError, InterruptedError):
+            return
+        except OSError:
+            chunk = b''
+        if not chunk:
+            return self._drop(held)
+        if held.first is None:
+            held.first = time.monotonic()
+        held.data += chunk
+        if _HEAD_END.search(held.data):
+            self._selector.unregister(held.sock)
+            with self._lock:
+                self._queue(held)
+        elif len(held.data) > self.head_bytes:
+            self._drop(held)
+
+    def _drop(self, held):
+        try:
+            self._selector.unregister(held.sock)
+        except (KeyError, ValueError):
+            pass
+        with self._lock:
+            self._untrack(held)
+            held.state = 'closed'
+        self._close(held.sock)
+
+    def _adopt(self):
+        try:
+            while self._wake_read.recv(4096):
+                pass
+        except (BlockingIOError, InterruptedError):
+            pass
+        with self._lock:
+            returned, self._returned = self._returned, []
+            for held in returned:
+                self._serving -= 1
+                if self._stopping.is_set():
+                    self._close(held.sock)
+                    continue
+                self._track(held)
+                if _HEAD_END.search(held.data):
+                    self._queue(held)
+            while self._connections() > self.max_connections and self._evict():
+                pass
+        for held in returned:
+            if held.state == 'held':
+                held.sock.setblocking(False)
+                self._selector.register(held.sock, selectors.EVENT_READ, held)
+
+    def _sweep(self):
+        now = time.monotonic()
+        if self._accept_paused_until and now >= self._accept_paused_until:
+            self._accept_paused_until = 0.0
+            self._selector.register(self.socket, selectors.EVENT_READ, 'listen')
+        deadline = float(getattr(self.RequestHandlerClass, 'request_read_timeout', 15))
+        with self._lock:
+            crowded = self._connections() > 0.75 * self.max_connections
+            expired = [h for h in self._held
+                       if now - (h.first if h.first is not None else h.since) >
+                       (1.0 if crowded and h.first is None else deadline)]
+        for held in expired:
+            self._drop(held)
+
+    def _close_all(self):
+        with self._lock:
+            pending = [h for peers in self._by_peer.values() for h in peers] + self._returned
+            self._serving -= len(self._returned)
+            self._returned = []
+            self._by_peer.clear()
+            self._held.clear()
+            self._ready.clear()
+            self._queued = 0
+            self._work.notify_all()
+        for held in pending:
+            try:
+                self._selector.unregister(held.sock)
+            except (KeyError, ValueError, RuntimeError):
+                pass
+            self._close(held.sock)
+
+    @staticmethod
+    def _close(sock):
+        try:
+            sock.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+        sock.close()
+
+    def _wake(self):
+        try:
+            self._wake_write.send(b'.')
+        except (BlockingIOError, OSError):
+            pass
+
+    # workers --------------------------------------------------------------------------------------------------------
+
+    def _queue(self, held):
+        """A connection whose request head has arrived waits for a worker. Called with the lock held."""
+        forwarded = _FORWARDED_FOR.findall(bytes(held.data[:_HEAD_END.search(held.data).end()]))
+        held.client = client_key(held.address[0], forwarded[-1].decode('latin-1') if forwarded else None)
+        self._held.discard(held)
+        held.state, held.queued = 'queued', time.monotonic()
+        self._ready.setdefault(held.client, deque()).append(held)
+        self._queued += 1
+        if self._queued > self._idle and self._workers < self.max_workers:
+            self._workers += 1
+            threading.Thread(target=self._work_loop, name='board-worker', daemon=True).start()
+        self._work.notify()
+
+    def _take(self):
+        """The waiting connection of the client with the fewest requests in progress (the longest waiting of those),
+        skipping clients at their share. Called with the lock held."""
+        best = None
+        for client, waiting in self._ready.items():
+            busy = self._busy.get(client, 0)
+            if busy < self.client_workers and (best is None or (busy, waiting[0].queued) < best[0]):
+                best = ((busy, waiting[0].queued), client)
+        if best is None:
+            return None
+        waiting = self._ready[best[1]]
+        held = waiting.popleft()
+        if not waiting:
+            del self._ready[best[1]]
+        self._queued -= 1
+        self._untrack(held)
+        held.state = 'serving'
+        self._serving += 1
+        self._busy[held.client] = self._busy.get(held.client, 0) + 1
+        return held
+
+    def _work_loop(self):
+        with self._work:
+            try:
+                while True:
+                    held = self._take()
+                    if held is None:
+                        if self._stopping.is_set():
+                            return
+                        self._idle += 1
+                        try:
+                            notified = self._work.wait(self.worker_idle_seconds)
+                        finally:
+                            self._idle -= 1
+                        held = self._take()
+                        if held is None:
+                            if notified and not self._stopping.is_set():
+                                continue
+                            return
+                    client = held.client
+                    self._work.release()
+                    try:
+                        self._serve(held)
+                    finally:
+                        self._work.acquire()
+                        busy = self._busy.get(client, 1) - 1
+                        if busy:
+                            self._busy[client] = busy
+                        else:
+                            self._busy.pop(client, None)
+            finally:
+                self._workers -= 1
+
+    def _serve(self, held):
+        sock, keep = held.sock, False
+        request = None
+        try:
+            sock.setblocking(True)
+            sock.settimeout(getattr(self.RequestHandlerClass, 'timeout', None))
+            request = _HeldRequest(sock, _Reader(sock, held.data), held.client)
+            self.RequestHandlerClass(request, held.address, self)
+            keep = not request.close and not self._stopping.is_set()
+        except Exception:
+            self.handle_error(sock, held.address)
+        if not keep:
+            with self._lock:
+                self._serving -= 1
+            held.state = 'closed'
+            self._close(sock)
+            return
+        held.data = request.reader.buffer
+        held.since, held.first = time.monotonic(), (time.monotonic() if held.data else None)
+        with self._lock:
+            self._returned.append(held)
+        self._wake()
 
 
 def main(argv=None) -> int:
@@ -2371,6 +2798,15 @@ def main(argv=None) -> int:
     _trim_footage_cache()
     for folder in ('.ready', '.tickets'):
         _trim_receipt_temps(FOOTAGE_DIR / folder)
+    try:
+        # idle connections cost only a descriptor each (BoardHTTPServer), so allow enough of them
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        want = 4096 if hard == resource.RLIM_INFINITY else min(hard, 4096)
+        if soft != resource.RLIM_INFINITY and soft < want:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+    except (ImportError, OSError, ValueError):
+        pass
     socketserver.ThreadingTCPServer.allow_reuse_address = True
     # socketserver's default listen backlog is 5: a burst of visitors (or a proxy opening many connections at once)
     # overflows it and those connections wait on SYN retries for up to a minute
