@@ -11128,29 +11128,41 @@ def decoded_damage(path: Path) -> set[int]:
     """The pts of the pictures of a video file used as it was uploaded that do not decode as recorded: a packet the
     decoder refuses, a picture it marks corrupt, and every later picture until the next clean key frame, since those
     are predicted from a damaged reference. The decoder conceals such damage by showing another picture, so without
-    this the file plays with no sign of it. Each file is decoded once, on all of the decoder's threads."""
+    this the file plays with no sign of it. Each file is decoded once, on all of the decoder's threads.
+
+    Damage is named by which picture it is, never by when the decoder reports it: on several threads an error surfaces
+    packets after the one that caused it, so the packet in hand is the wrong picture. A picture is refused when the
+    file holds its packet and the decoder never delivers it, and the pictures predicted from damage follow in the
+    file's own decode order, up to the next key packet that decodes clean."""
     import av
-    damaged: set[int] = set()
+    order: list[tuple[int, bool]] = []          # (pts, key packet) of every picture the file holds, in decode order
+    delivered: dict[int, bool] = {}             # pts -> whether the decoder marked the picture corrupt
     with av.open(str(path)) as container:
         stream = container.streams.video[0]
         stream.thread_type = "AUTO"
-        broken = False
         for packet in container.demux(stream):
             # the last packet demux yields carries no data and drains the decoder, whose threads still hold the last
             # pictures; it is decoded like any other, so those pictures are checked too
+            if packet.size and packet.pts is not None:
+                order.append((int(packet.pts), bool(packet.is_keyframe)))
             try:
                 pictures = packet.decode()
             except av.error.FFmpegError:
-                if packet.pts is not None:
-                    damaged.add(int(packet.pts))
-                broken = True
-                continue
+                continue                        # which picture failed is read from what is delivered, below
             for picture in pictures:
-                if picture.key_frame and not picture.is_corrupt:
-                    broken = False
-                if (picture.is_corrupt or broken) and picture.pts is not None:
-                    damaged.add(int(picture.pts))
-                broken |= picture.is_corrupt
+                if picture.pts is not None:
+                    delivered[int(picture.pts)] = delivered.get(int(picture.pts), False) or bool(picture.is_corrupt)
+    damaged: set[int] = set()
+    broken = False
+    for pts, key in order:
+        bad = delivered.get(pts, True)          # never delivered, or delivered corrupt
+        if bad:
+            damaged.add(pts)
+        elif key:
+            broken = False
+        elif broken:
+            damaged.add(pts)
+        broken |= bad
     return damaged
 
 
