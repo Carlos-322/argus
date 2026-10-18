@@ -1129,3 +1129,14 @@ def test_an_infinite_reading_is_no_reading():
         == [(2.0, round(89 / 30, 3))]
     assert all(v in ("-",) or np.isfinite(float(v)) for _, vals in rows for v in vals)
 
+
+def test_the_depth_legend_names_the_colours_it_draws():
+    """Each distance the metric legend names is drawn in the colour the legend calls it: the words come from the
+    colours picture() draws at those distances (0.5 m is orange, 1 m yellow-green, 5 m light blue), so they cannot
+    drift from the colour map."""
+    text = dp.legend({"scale_m": 0.001})
+    for m in dp.METRIC_TICKS_M:
+        px = np.array(dp.picture(np.array([[int(m * 1000)]], np.uint16), {"scale_m": 0.001}).getpixel((0, 0))) / 255
+        assert f"{dp.colour_word(px)} {m:g} m" in text
+    assert "orange 0.5 m" in text and "yellow-green 1 m" in text and "light blue 5 m" in text
+    assert dp.colour_word((0.48, 0.02, 0.01)) == "dark red" and dp.colour_word((0.27, 0.42, 0.89)) == "blue"
