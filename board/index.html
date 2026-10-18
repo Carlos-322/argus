@@ -2269,18 +2269,28 @@ let ALL_EPS = [];
 // data/ep/<file> (each episode file exactly as stored), data/compare/ (other models' labels, when BOARD.compare),
 // data/hands/<file> (the hand pose drawn over a head camera, when BOARD.hands), data/keypoints/index.json (the hand
 // keypoint downloads, when BOARD.keypoints) and web copies of the clips, goal frames and keypoint downloads under
-// the media base, whose paths each rail record carries in _media and _frames. Relative bases keep a
+// the media base, whose paths each rail record carries in _media and _frames. The <dataset> and <file> in these paths
+// are the names the build gives them (index.json lists and site_names, compare/index.json site_names), never the
+// identifiers themselves, which can hold any character. Relative bases keep a
 // static build working under any sub-path and from any origin. BOARD.models names the pinned models
 // (configs/models.json) by model id.
 const BOARD = __BOARD_CONFIG__;
 const STATIC = BOARD.mode === 'static';
 
+// ---- navigation: what the reader asked to see last ----
+// Every view change (an episode, a dataset tab, a labeller, the comparison, the browser's Back and Forward) starts a
+// navigation with navBegin, or joins the one that called it by taking its token. Work that awaits anything goes on
+// only while navCurrent says its navigation is still the latest, so a slow response never draws over, or takes the
+// view away from, what the reader chose after asking for it.
+let _nav = 0;
+const navBegin = () => ++_nav;
+const navCurrent = tok => tok === _nav;
+
 const msBtn = document.getElementById('ms-btn');
 const msDialog = document.getElementById('ms-dialog');
-let _msView = null, _msToken = 0, _msPending = null;
+let _msView = null, _msPending = null;
 const gridRequestUrl = () => location.protocol !== 'file:' && window.__GRID_REQUEST_URL;
-async function loadModelGrids(file, label) {
-  const token = ++_msToken;
+async function loadModelGrids(file, label, nav) {
   _msView = null; _msPending = null; msBtn.hidden = true;
   msBtn.disabled = false; msBtn.textContent = 'Frame grids shown to the model';
   if (msDialog.open) msDialog.close();
@@ -2291,22 +2301,22 @@ async function loadModelGrids(file, label) {
   _msPending = {file, fingerprint};
   if (gridRequestUrl()) msBtn.hidden = false;
   if (!BOARD.grids || (STATIC && !(ALL_EPS.find(e => e.file === file) || {})._grids)) return;
-  const url = STATIC ? BOARD.data + 'grids/' + encodeURIComponent(file) : 'api/grids?file=' + encodeURIComponent(file) + '&fingerprint=' + encodeURIComponent(fingerprint);
+  const url = STATIC ? BOARD.data + 'grids/' + encodeURIComponent(siteFile(file)) : 'api/grids?file=' + encodeURIComponent(file) + '&fingerprint=' + encodeURIComponent(fingerprint);
   const view = await fetchJson(url);
-  if (token !== _msToken || file !== _activeFile || !view || view.fingerprint !== fingerprint || !Array.isArray(view.grids) || !view.grids.length) return;
+  if (!navCurrent(nav) || file !== _activeFile || !view || view.fingerprint !== fingerprint || !Array.isArray(view.grids) || !view.grids.length) return;
   _msView = view; msBtn.hidden = false;
   msBtn.textContent = view.grids.every(g => g.dispatch_status === 'response_received') ? 'Frame grids shown to the model' : 'Request frame grids';
 }
 async function showModelGrids() {
   if (!_msView && _msPending && gridRequestUrl()) {
-    const pending = _msPending, token = _msToken;
+    const pending = _msPending, nav = _nav;   // part of the navigation that opened the episode
     msBtn.disabled = true; msBtn.textContent = 'Loading frame grids';
     let view = null;
     try {
       const response = await fetch(gridRequestUrl(), {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(pending)});
       if (response.ok) view = await response.json();
     } catch (_) { /* unavailable inputs remain unavailable */ }
-    if (token !== _msToken || pending.file !== _activeFile) return;
+    if (!navCurrent(nav) || pending.file !== _activeFile) return;
     msBtn.disabled = false;
     if (!view || view.fingerprint !== pending.fingerprint || !Array.isArray(view.grids) || !view.grids.length) {
       msBtn.textContent = 'Request frame grids';
@@ -2359,11 +2369,17 @@ function tagName(t, list) {
 // marked minor
 const countsIssue = i => i.counted === true;
 const _dsLoaded = new Set();
+// a static build's own names for a dataset's list and an episode's files (board/static.py site_name): the page fetches
+// by the names the build wrote, never by a name of its own making, so any dataset name or episode file reaches its file
+const DS_LISTS = new Map();
+let EP_SITE = {};
+const siteFile = file => EP_SITE[file] || file;
 async function loadAllEpisodes() {
-  if (!STATIC) return (await fetch('api/episodes', {cache: 'no-store'})).json();
-  const r = await fetch(BOARD.data + 'index.json');
-  if (!r.ok) throw new Error('index.json: ' + r.status);
-  const idx = await r.json();
+  if (!STATIC) return okJson(await fetch('api/episodes', {cache: 'no-store'}), 'api/episodes');
+  const idx = await okJson(await fetch(BOARD.data + 'index.json'), 'index.json');
+  // a build that names no files (another exporter of this page) keeps them under the identifiers themselves
+  idx.datasets.forEach((ds, i) => DS_LISTS.set(ds, (idx.lists || [])[i] || ds + '.json'));
+  EP_SITE = idx.site_names || {};
   // [dataset index, file, duration_s, episode_id if it is not the file name without .json]
   return idx.eps.map(([di, file, dur, id]) => ({episode_id: id || file.replace(/\.json$/, ''), file,
     dataset: idx.datasets[di], duration_s: dur}));
@@ -2371,49 +2387,62 @@ async function loadAllEpisodes() {
 // static: swap one dataset's index stubs for its full rail records (once per dataset)
 async function ensureDataset(ds) {
   if (!STATIC || _dsLoaded.has(ds)) return;
-  const r = await fetch(BOARD.data + 'lists/' + encodeURIComponent(ds) + '.json');
-  if (!r.ok) throw new Error('list ' + ds + ': ' + r.status);
-  const full = new Map((await r.json()).map(e => [e.file, e]));
+  const url = BOARD.data + 'lists/' + encodeURIComponent(DS_LISTS.get(ds));
+  const full = new Map((await okJson(await fetch(url), 'list ' + ds)).map(e => [e.file, e]));
   ALL_EPS = ALL_EPS.map(e => full.get(e.file) || e);
   _dsLoaded.add(ds);
 }
 function episodeUrl(file) {
-  return STATIC ? BOARD.data + 'ep/' + encodeURIComponent(file) : 'api/episode?file=' + encodeURIComponent(file);
+  return STATIC ? BOARD.data + 'ep/' + encodeURIComponent(siteFile(file)) : 'api/episode?file=' + encodeURIComponent(file);
 }
 // each episode's labels are fetched once per page view (a dataset tab fetches its first episode ahead, prefetchDataset)
 const _epCache = new Map();          // file -> Promise of the labels, the most recently used last
 const EP_CACHE_MAX = 60;
 async function fetchEpisodeOnce(file) {
-  if (!STATIC) return (await fetch(episodeUrl(file), {cache: 'no-store'})).json();
+  if (!STATIC) return okJson(await fetch(episodeUrl(file), {cache: 'no-store'}), file);
   const rec = ALL_EPS.find(e => e.file === file);
   if (rec) await ensureDataset(datasetOf(rec));
-  return (await fetch(episodeUrl(file), {cache: 'no-cache'})).json();
+  return okJson(await fetch(episodeUrl(file), {cache: 'no-cache'}), file);
 }
 function fetchEpisode(file) {
   let p = _epCache.get(file);
   if (p) { _epCache.delete(file); _epCache.set(file, p); return p; }
-  p = fetchEpisodeOnce(file);
-  p.catch(() => _epCache.delete(file));
+  p = remember(_epCache, file, fetchEpisodeOnce(file));
   loadSensors(file);            // the episode's sensors file, when it has one, fetched beside its labels
-  _epCache.set(file, p);
   while (_epCache.size > EP_CACHE_MAX) _epCache.delete(_epCache.keys().next().value);
+  return p;
+}
+// A response's JSON. Any answer that is not 2xx is an error, a server's JSON error object among them, so it is never
+// taken for the document asked for.
+async function okJson(r, what) {
+  if (!r.ok) throw new Error(what + ': HTTP ' + r.status);
+  return r.json();
+}
+// Keep a fetch's promise under key while it can still succeed: one that rejects, or resolves to nothing (fetchJson's
+// failure), is dropped, so the next ask fetches again instead of reusing a transient failure for the rest of the visit.
+function remember(cache, key, p) {
+  cache.set(key, p);
+  const drop = () => { if (cache.get(key) === p) cache.delete(key); };
+  p.then(v => { if (v == null) drop(); }, drop);
   return p;
 }
 // other models' labels (compare/, never part of the board's lists or downloads)
 function compareUrl(what) { return STATIC ? BOARD.data + 'compare/' + what + '.json' : 'api/compare/' + what; }
+// a static build's folder name for one model's labels (board/static.py site_name), from its compare index
+const cmpSite = key => ((CMP || {}).site_names || {})[key] || key;
 function compareEpUrl(key, file) {
-  return STATIC ? BOARD.data + 'compare/' + encodeURIComponent(key) + '/' + encodeURIComponent(file)
+  return STATIC ? BOARD.data + 'compare/' + encodeURIComponent(cmpSite(key)) + '/' + encodeURIComponent(siteFile(file))
     : 'api/compare/episode?key=' + encodeURIComponent(key) + '&file=' + encodeURIComponent(file);
 }
 // one model's rail records: the same records the board's own list is made of, from that model's labels
 function cmpListUrl(key) {
-  return STATIC ? BOARD.data + 'compare/lists/' + encodeURIComponent(key) + '.json'
+  return STATIC ? BOARD.data + 'compare/lists/' + encodeURIComponent(cmpSite(key)) + '.json'
     : 'api/compare/list?key=' + encodeURIComponent(key);
 }
-const CMP_LISTS = {};         // key -> Promise of that model's rail records (null when they cannot be had)
+const CMP_LISTS = new Map();  // key -> Promise of that model's rail records (null when they cannot be had)
 function loadCmpList(key) {
-  if (!CMP_LISTS[key]) CMP_LISTS[key] = fetchJson(cmpListUrl(key)).then(r => Array.isArray(r) ? r : null);
-  return CMP_LISTS[key];
+  return CMP_LISTS.get(key)
+    || remember(CMP_LISTS, key, fetchJson(cmpListUrl(key)).then(r => Array.isArray(r) ? r : null));
 }
 // whose labels the board shows (the "Labels by" control): null is the board's own; otherwise one other model's, as a
 // comparison. The rail, the strip under the header and the filter describe the episodes that labeller labelled.
@@ -2554,8 +2583,12 @@ if (STATIC) for (const id of ['dl-json', 'kp-dl']) document.getElementById(id).a
   const a = e.currentTarget;
   if (new URL(a.href, location.href).origin === location.origin) return;
   e.preventDefault();
-  try { saveBlob(await (await fetch(a.href)).blob(), a.getAttribute('download') || 'episode.json'); }
-  catch (err) { alert(err.message); }
+  try {
+    // an error page is not the file: a CDN's 404 or 500 body is never saved under the episode's name
+    const r = await fetch(a.href);
+    if (!r.ok) throw new Error('The download failed: HTTP ' + r.status);
+    saveBlob(await r.blob(), a.getAttribute('download') || 'episode.json');
+  } catch (err) { alert(err.message); }
 });
 
 // The open episode's video to download (api/footage): every camera in one frame, the main one with the others beside
@@ -2906,8 +2939,9 @@ function dictionaryRows(data, endpoint) {
         _epCache.clear();
         const current = _activeFile;
         if (current) {
-          await selectEp(current, true);
-          if (current === file && _activeFile === current) {
+          const nav = navBegin();
+          await selectEp(current, true, nav);
+          if (current === file && navCurrent(nav)) {
             const fold = target.querySelector('details');
             if (fold) fold.open = true;
           }
@@ -2916,9 +2950,10 @@ function dictionaryRows(data, endpoint) {
     });
   }
 }
-let _dictionaryLoadToken = 0;
 async function loadDictionary(d, file) {
-  const token = ++_dictionaryLoadToken;
+  // part of the navigation and of the render (renderEp's _epAbort) that drew this episode: a later draw of it, in the
+  // same navigation or another, fills the rows instead
+  const nav = _nav, render = window._epAbort;
   const base = window.__DICTIONARY_URL || BOARD.dictionary_url;
   const endpoint = base && (base + '?' + (STATIC ? 'episode=' + encodeURIComponent((d.data_dictionary || {}).episode_id || (d._meta || {}).episode_id || '') : 'file=' + encodeURIComponent(file)));
   dictionaryRows(d.data_dictionary, null);
@@ -2926,7 +2961,7 @@ async function loadDictionary(d, file) {
   try {
     const response = await fetch(endpoint, {cache: 'no-store'});
     if (!response.ok) return;
-    const data = await response.json(); if (token === _dictionaryLoadToken && _activeFile === file) dictionaryRows(data, endpoint);
+    const data = await response.json(); if (navCurrent(nav) && render === window._epAbort && _activeFile === file) dictionaryRows(data, endpoint);
   } catch (_) {}
 }
 
@@ -2957,16 +2992,15 @@ function presentDatasets(eps) {
   return [...known, ...extra];
 }
 let currentDataset = null;
-let _dsToken = 0;
-async function setDataset(ds, keepFile) {
-  // a static build fetches the dataset's list first; a later tab click wins over a slower earlier one
-  const token = ++_dsToken;
+async function setDataset(ds, keepFile, nav) {
+  // a static build fetches the dataset's list first; anything the reader chose meanwhile wins over it
+  nav = nav || navBegin();
   await ensureDataset(ds);
-  if (token !== _dsToken) return;
+  if (!navCurrent(nav)) return;
   currentDataset = ds;
   ISSUE_FILTER = null;             // a fresh dataset starts unfiltered
   buildIssueFilter(ds);
-  return renderRail(ds, keepFile);
+  return renderRail(ds, keepFile, false, nav);
 }
 
 // the labels' license, when the board's owner gives one (its manifest), under the list's downloads
@@ -3390,6 +3424,9 @@ async function loadEpisodes() {
   CMP = cmp && (cmp.models || []).length ? cmp : null;
   KP_INDEX = kp && kp.files ? kp.files : null;
   SN_INDEX = sn && sn.files ? sn.files : null;
+  // the first navigation starts once the board is known, from the URL as it is then (a Back made while it loaded
+  // included)
+  const nav = navBegin();
   const q = new URLSearchParams(location.search);
   // ?ep=<file> reopens that episode, so a reload or a shared link keeps its place; it takes the file name or the
   // episode id (episode_habit_005733 or episode_habit_005733.json). ?by=<key> keeps a comparison's labels chosen
@@ -3399,13 +3436,14 @@ async function loadEpisodes() {
   const wantEp = wantFile && ALL_EPS.find(e => e.file === wantFile || e.file === wantFile + '.json');
   let by = urlLabeller(q);
   if (by && wantEp && !cmpHas(by, wantEp.file)) by = null;
-  if (by) await applyLabeller(by);
+  if (by) await applyLabeller(by, nav);
+  if (!navCurrent(nav)) return;
   renderLabelsBy();
-  if (CMP && q.get('view') === 'compare') { showCompare(true); return; }
+  if (CMP && q.get('view') === 'compare') { showCompare(true, nav); return; }
   const ds = wantEp ? null : firstDataset(q.get('ds'));
-  if (wantEp) await setDataset(datasetOf(wantEp), wantEp.file);
-  else if (ds) await setDataset(ds);
-  else renderRail(null);
+  if (wantEp) await setDataset(datasetOf(wantEp), wantEp.file, nav);
+  else if (ds) await setDataset(ds, undefined, nav);
+  else renderRail(null, undefined, false, nav);
   prefetchWhenIdle();
 }
 
@@ -3450,23 +3488,27 @@ function prefetchWhenIdle() {
   idle(step, {timeout: 2000});
 }
 
-// Back and forward between episodes (and labellers) update the view.
+// Back and forward between episodes (and labellers) update the view. Each is a navigation of its own, so whatever an
+// earlier one still waits for (the comparison's metrics, an episode, a labeller's list) gives way to it.
 window.addEventListener('popstate', async () => {
+  const nav = navBegin();
   const q = new URLSearchParams(location.search);
-  if (CMP && q.get('view') === 'compare') { showCompare(true); return; }
+  if (CMP && q.get('view') === 'compare') { showCompare(true, nav); return; }
   const by = urlLabeller(q);
   if (document.body.classList.contains('view-cmp')) {
     const f = q.get('ep');
     const ep = f && ALL_EPS.find(e => e.file === f || e.file === f + '.json');
-    leaveCompare(null, ep ? ep.file : null, by, true);
+    leaveCompare(null, ep ? ep.file : null, by, true, nav);
     return;
   }
-  if (by !== BY) await setLabeller(by, {fromPop: true});
+  if (by !== BY) await setLabeller(by, {fromPop: true, nav});
+  if (!navCurrent(nav)) return;
   const f = q.get('ep');
   const ep = f && railEps().find(e => e.file === f || e.file === f + '.json');
   if (ep) {
-    if (currentDataset !== datasetOf(ep)) setDataset(datasetOf(ep), ep.file);
-    else if (ep.file !== _activeFile) selectEp(ep.file, true);
+    if (currentDataset !== datasetOf(ep)) setDataset(datasetOf(ep), ep.file, nav);
+    // the episode is drawn again unless it is the one on screen (an earlier choice of it may still be on its way)
+    else if (ep.file !== _activeFile || !isDrawn(ep.file)) selectEp(ep.file, true, nav);
   }
 });
 
@@ -3539,7 +3581,7 @@ function renderRailHead(ds, eps) {
     : `Download the ${eps.length.toLocaleString()} episodes shown`;
 }
 
-function renderRail(ds, keepFile, fromSearch) {
+function renderRail(ds, keepFile, fromSearch, nav) {
   const terms = searchTerms();
   const eps = railEps().filter(e => datasetOf(e) === ds && matchesSearch(e, terms) && matchesIssueFilter(e));
   renderCoverage(ds, eps);
@@ -3565,7 +3607,7 @@ function renderRail(ds, keepFile, fromSearch) {
   if (!eps.length) {
     epListEl.innerHTML = '<div class="rail-empty">' +
       (ISSUE_FILTER ? 'No episodes with this issue.' : 'No episodes here yet.') + '</div>';
-    leftCol.innerHTML = '';
+    leftCol.innerHTML = ''; _drawnFile = null;
     rightCol.innerHTML = '<div class="rail-empty" style="padding:48px 28px">No episodes in this dataset yet.</div>';
     currentEp.textContent = '';
     document.getElementById('current-ep-raw').textContent = '';
@@ -3641,18 +3683,19 @@ function renderRail(ds, keepFile, fromSearch) {
   }
   // otherwise the screen must never show an episode the list does not: open the first match
   const target = (keepFile && eps.some(e => e.file === keepFile)) ? keepFile : eps[0].file;
-  return selectEp(target);
+  return selectEp(target, false, nav);
 }
 
 // the open episode, under whichever labels the board shows. When the labeller changes on the same episode
 // (_lbSwapFile), the footage keeps playing: the same video elements move into the new layout while the panels ease
 // out and in.
 let _lbSwapFile = null;
-function selectEp(file, fromPop) {
+function selectEp(file, fromPop, nav) {
+  nav = nav || navBegin();
   const swap = _lbSwapFile === file && file === _activeFile && !!document.getElementById('video');
   _lbSwapFile = null;
   _activeFile = file;
-  ++_msToken; _msView = null; _msPending = null; msBtn.hidden = true;
+  _msView = null; _msPending = null; msBtn.hidden = true;
   if (msDialog.open) msDialog.close();
   // Give every episode its own URL so it is shareable and reload-stable; the labeller rides along.
   if (!fromPop) {
@@ -3674,12 +3717,13 @@ function selectEp(file, fromPop) {
       epListEl.scrollTop = Math.max(0, top - 8);
     }
   }
-  const tok = ++_epToken;
   const by = BY && cmpHas(BY, file) ? BY : null;
   return (by ? cmpEpisode(by, file) : fetchEpisode(file))
+    .then(d => d || Promise.reject(new Error(file + ': no labels could be read')))
     .then(d => {
-      if (tok !== _epToken || !d) return;
-      SHOWN = by;
+      // a later navigation, or a later episode in this one, draws instead
+      if (!navCurrent(nav) || file !== _activeFile) return;
+      SHOWN = by; _drawnFile = file;
       if (swap) {
         const lp = document.getElementById('left-pane'), sl = lp.scrollTop, sr = rightCol.scrollTop;
         renderEp(d, {keepVideo: true});
@@ -3689,8 +3733,29 @@ function selectEp(file, fromPop) {
         rightCol.scrollTop = 0; document.getElementById('left-pane').scrollTop = 0;
       }
       renderSourceBar();
-      loadModelGrids(file, d);
-    });
+      loadModelGrids(file, d, nav);
+    }, err => { if (navCurrent(nav) && file === _activeFile) showEpisodeError(file, err); });
+}
+// the episode the pane has drawn, under the labels SHOWN: _activeFile is the one asked for, which may still be on its
+// way, so a navigation that would change nothing checks this before it skips drawing
+let _drawnFile = null;
+const isDrawn = file => _drawnFile === file && SHOWN === (BY && cmpHas(BY, file) ? BY : null);
+// an episode whose labels could not be read: the pane says so in its place, and opening the episode again fetches it
+// again (a failed read is never kept, fetchEpisode)
+function showEpisodeError(file, err) {
+  if (window._epAbort) window._epAbort.abort();
+  for (const v of leftCol.querySelectorAll('video')) {
+    try { v.pause(); v.removeAttribute('src'); v.load(); } catch (_) {}
+  }
+  _drawnFile = null;
+  const rec = ALL_EPS.find(e => e.file === file);
+  currentEp.textContent = epName(rec ? rec.episode_id : file.replace(/\.json$/, ''));
+  document.getElementById('current-ep-raw').textContent = '';
+  document.getElementById('current-ep-src').innerHTML = '';
+  document.getElementById('current-ep-reader').innerHTML = '';
+  leftCol.innerHTML = '';
+  rightCol.innerHTML = `<div class="rail-empty" style="padding:48px 28px">This episode could not be loaded `
+    + `(${esc(err && err.message || 'no response')}). Open it again to retry.</div>`;
 }
 
 function buildPhrase(e) {
@@ -3731,7 +3796,7 @@ const HP_B64 = new Int8Array(128).fill(-1);
 const HP_COLOR = {left: '#4f6d8f', right: '#8a5a9a'};    // the board's left and right (--arm-left, --arm-right)
 const HP_FADE = 4;                  // frames over which a hand fades in where it appears and out where it goes
 function handsUrl(file) {
-  return STATIC ? BOARD.data + 'hands/' + encodeURIComponent(file) : 'api/hands?file=' + encodeURIComponent(file);
+  return STATIC ? BOARD.data + 'hands/' + encodeURIComponent(siteFile(file)) : 'api/hands?file=' + encodeURIComponent(file);
 }
 // Base64 VLQ integers (board/hands.py documents the format)
 function hpReader(s) {
@@ -3796,12 +3861,9 @@ function hpAlignedText(a) {
       : `, and the last keypoint ${d === 1 ? 'frame is' : `${d} frames are`} left out.`);
 }
 function loadHands(file) {
-  if (!_hpCache.has(file)) {
-    _hpCache.set(file, fetch(handsUrl(file), STATIC ? {} : {cache: 'no-store'})
-      .then(r => r.ok ? r.json() : null).then(doc => doc ? hpDecode(doc) : null)
-      .then(d => { if (d) _hpData.set(file, d); return d; }).catch(() => null));
-  }
-  return _hpCache.get(file);
+  return _hpCache.get(file) || remember(_hpCache, file, fetchJson(handsUrl(file))
+    .then(doc => doc ? hpDecode(doc) : null)
+    .then(d => { if (d) _hpData.set(file, d); return d; }).catch(() => null));
 }
 // the frame on screen: rVFC's mediaTime is a frame's own timestamp (nearest); currentTime falls within one (the last
 // frame at or before it, allowing the browser's microsecond rounding)
@@ -3997,7 +4059,7 @@ const SN_FIRST = 4;                  // lanes shown before "Show all"
 const SN_REST = 0.1;                 // label/signals.py REST_FRACTION: a cell this far from rest (of its swing) is active
 const snIndexUrl = () => STATIC ? BOARD.data + 'sensors/index.json' : 'api/sensors?file=index.json';
 function sensorsUrl(file) {
-  return STATIC ? BOARD.data + 'sensors/' + encodeURIComponent(file) : 'api/sensors?file=' + encodeURIComponent(file);
+  return STATIC ? BOARD.data + 'sensors/' + encodeURIComponent(siteFile(file)) : 'api/sensors?file=' + encodeURIComponent(file);
 }
 // one block of samples (board/sensors.py quantize): rows x values floats, NaN where there is no reading
 function snBlock(blk, rows, bits) {
@@ -4056,12 +4118,11 @@ function loadSensors(file) {
   if (!BOARD.sensors || !SN_INDEX || !SN_INDEX[file]) return Promise.resolve(null);
   let p = _snCache.get(file);
   if (p) { _snCache.delete(file); _snCache.set(file, p); return p; }
-  p = fetchJson(sensorsUrl(file)).then(doc => {
+  p = remember(_snCache, file, fetchJson(sensorsUrl(file)).then(doc => {
     const d = doc && doc.format === 'board-sensors/1' ? snDecode(doc) : null;
     if (d) _snData.set(file, d);
     return d;
-  }).catch(() => null);
-  _snCache.set(file, p);
+  }).catch(() => null));
   while (_snCache.size > EP_CACHE_MAX) { const k = _snCache.keys().next().value; _snCache.delete(k); _snData.delete(k); }
   return p;
 }
@@ -7222,7 +7283,6 @@ function renderEp(d, opts) {
 // which read the board's label files only. The comparison view charts compare/metrics.json.
 let CMP = null;          // {reference: {...}, models: [...], episodes: {file: {key: status}}}
 let SHOWN = null;        // whose labels the open episode shows: null is the board's own
-let _epToken = 0;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const cmpModel = k => ((CMP && CMP.models) || []).find(m => m.key === k) || null;
 const cmpHas = (k, file) => !!(CMP && k && (CMP.episodes[file] || {})[k]);
@@ -7258,8 +7318,7 @@ async function cmpEpisode(key, file) {
   const rec = ALL_EPS.find(e => e.file === file);
   if (rec) await ensureDataset(datasetOf(rec));
   const k = key + '|' + file;
-  if (!_cmpGot.has(k)) _cmpGot.set(k, fetchJson(compareEpUrl(key, file)).then(d => { if (!d) _cmpGot.delete(k); return d; }));
-  return _cmpGot.get(k);
+  return _cmpGot.get(k) || remember(_cmpGot, k, fetchJson(compareEpUrl(key, file)));
 }
 // A response that gave no labels: another model's under Labels by (the comparison's wording), or with own the board's
 // own label of the episode (d._label_failed, board/to_board.py label_failed), which keeps the episode's footage,
@@ -7430,32 +7489,38 @@ document.addEventListener('keydown', (e) => {
 addEventListener('resize', () => { if (lbEl.classList.contains('open')) placeLabelsMenu(); });
 addEventListener('scroll', () => { if (lbEl.classList.contains('open')) placeLabelsMenu(); }, {passive: true});
 // load a labeller's records and make it the board's, without drawing anything (the caller redraws)
-async function applyLabeller(key) {
+async function applyLabeller(key, nav) {
   key = key && cmpModel(key) ? key : null;
   const list = key ? await loadCmpList(key) : null;
-  if (key && !list) return false;
+  if (!navCurrent(nav) || (key && !list)) return false;
   BY = key; BY_EPS = list;
   return true;
 }
 // switch the whole board to another labeller: the list, the filter, the strip and the open episode ease out and back
 // in; the open episode stays open (its footage playing) when the new labeller labelled it
-let _lbToken = 0;
+let _lbFade = 0;              // the navigation whose labeller change faded the board out, which fades it back in
 async function setLabeller(key, opts) {
   opts = opts || {};
   key = key && cmpModel(key) ? key : null;
   lbOpen(false);
-  const tok = ++_lbToken, main = document.querySelector('main');
-  if (key === BY) {
+  const main = document.querySelector('main');
+  // the board's own labeller asked for again changes nothing, unless another one is on its way (then it goes through
+  // in full, so the board ends on this one whatever the other had changed)
+  if (key === BY && !_lbFade) {
     document.body.classList.remove('lb-swap');
     main.classList.remove('src-fade', 'ep-fade');
     return;
   }
+  const tok = opts.nav || navBegin();
   const stays = !key || cmpHas(key, _activeFile);
+  _lbFade = tok;
   document.body.classList.add('lb-swap'); main.classList.add('src-fade'); main.classList.toggle('ep-fade', !stays);
   const [list] = await Promise.all([key ? loadCmpList(key) : null, sleep(170)]);
-  const done = () => { document.body.classList.remove('lb-swap'); void main.offsetHeight;
-    requestAnimationFrame(() => main.classList.remove('src-fade', 'ep-fade')); };
-  if (tok !== _lbToken) return;              // a later choice wins; only the latest one ever becomes the board's
+  const done = () => { if (_lbFade !== tok) return; _lbFade = 0; document.body.classList.remove('lb-swap');
+    void main.offsetHeight; requestAnimationFrame(() => main.classList.remove('src-fade', 'ep-fade')); };
+  // a later choice wins, and only the latest one ever becomes the board's; the board fades back in unless a later
+  // labeller change has taken the fade over
+  if (!navCurrent(tok)) { done(); return; }
   if (key && !list) { done(); return; }
   BY = key; BY_EPS = list;
   ISSUE_FILTER = null;
@@ -7469,8 +7534,8 @@ async function setLabeller(key, opts) {
     try { const u = new URL(location.href); if (BY) u.searchParams.set('by', BY); else u.searchParams.delete('by');
       history.replaceState(null, '', u); } catch (_) {}
   }
-  await setDataset(ds, keep);
-  if (tok === _lbToken) done();
+  await setDataset(ds, keep, tok);
+  done();
 }
 
 // ---- the band over the open episode while it shows a comparison ----
@@ -7503,30 +7568,40 @@ sbBack.addEventListener('click', () => setLabeller(null));
 const cmpView = document.getElementById('cmp-view');
 const cmpTip = document.getElementById('cmp-tip');
 let CMP_METRICS = null, CMP_RIG = 'all', _cmpBuilt = false;
-async function setView(toCmp) {
+async function setView(toCmp, nav) {
   if (document.body.classList.contains('view-cmp') === toCmp) return;
   document.body.classList.add('view-fade');
   await sleep(180);
+  // a later navigation decides the view; this one only ends its fade
+  if (!navCurrent(nav)) { document.body.classList.remove('view-fade'); return; }
   document.body.classList.toggle('view-cmp', toCmp);
   renderCoverage(currentDataset, currentDataset ? railEps().filter(e => datasetOf(e) === currentDataset) : []);
   void document.body.offsetHeight;
   requestAnimationFrame(() => document.body.classList.remove('view-fade'));
 }
-async function showCompare(fromPop) {
+async function showCompare(fromPop, nav) {
   if (!CMP) return;
+  nav = nav || navBegin();
   if (!fromPop) {
     try { history.pushState(null, '', '?view=compare' + (BY ? '&by=' + encodeURIComponent(BY) : '')); } catch (_) {}
   }
-  if (!CMP_METRICS) CMP_METRICS = await fetchJson(compareUrl('metrics'));
+  if (!CMP_METRICS) {
+    const metrics = await fetchJson(compareUrl('metrics'));
+    CMP_METRICS = CMP_METRICS || metrics;
+    // Back (or any other choice) made while the metrics loaded has already set the view and the URL; it stays
+    if (!navCurrent(nav)) return;
+  }
   if (!_cmpBuilt) buildCompare();
-  await setView(true);
-  cmpView.scrollTop = 0;
+  await setView(true, nav);
+  if (navCurrent(nav)) cmpView.scrollTop = 0;
 }
 // back to the episodes: a dataset tab (ds), an episode link (file, with the labeller it asks for: by, null for the
 // board's own), the view's own back button (nothing), or the browser's back button (fromPop: the URL already says
 // where)
-async function leaveCompare(ds, file, by, fromPop) {
-  if (by !== undefined) await applyLabeller(by);
+async function leaveCompare(ds, file, by, fromPop, nav) {
+  nav = nav || navBegin();
+  if (by !== undefined) await applyLabeller(by, nav);
+  if (!navCurrent(nav)) return;
   renderLabelsBy();
   const target = file || (ds ? null : _activeFile);
   if (!fromPop) {
@@ -7535,15 +7610,16 @@ async function leaveCompare(ds, file, by, fromPop) {
     if (BY) u.set('by', BY);
     try { history.pushState(null, '', '?' + u.toString()); } catch (_) {}
   }
-  await setView(false);
+  await setView(false, nav);
+  if (!navCurrent(nav)) return;
   const ep = target && railEps().find(e => e.file === target);
   if (ep) {
     if (file) { searchEl.value = ''; SEARCH = ''; searchWrap.classList.remove('has-q'); }
-    if (currentDataset === datasetOf(ep) && !ISSUE_FILTER) renderRail(currentDataset, ep.file);
-    else setDataset(datasetOf(ep), ep.file);
+    if (currentDataset === datasetOf(ep) && !ISSUE_FILTER) renderRail(currentDataset, ep.file, false, nav);
+    else setDataset(datasetOf(ep), ep.file, nav);
   } else {
     const first = firstDataset(ds || currentDataset);
-    if (first) setDataset(first);
+    if (first) setDataset(first, undefined, nav);
   }
 }
 
@@ -7648,10 +7724,10 @@ const PAIR_CHARTS = [
   {id: 'latency', title: 'Time to annotate each episode', fmt: fSec},
 ];
 function buildCompare() {
-  _cmpBuilt = true;
   const M = CMP_METRICS;
-  if (!M || !M.summary) { cmpView.innerHTML = '<div class="cmpv"><p class="cmpv-sub">The comparison has no results yet.'
-    + '</p></div>'; return; }
+  _cmpBuilt = !!M;            // metrics that could not be read are fetched again the next time the view opens
+  if (!M || !M.summary) { cmpView.innerHTML = '<div class="cmpv"><p class="cmpv-sub">' + (M ? 'The comparison has no '
+    + 'results yet.' : 'The comparison could not be loaded. Open it again to retry.') + '</p></div>'; return; }
   const order = cmpOrder();
   const main = order.filter(m => M.main.includes(m.key));
   const others = M.models.filter(m => !m.reference && !m.example);

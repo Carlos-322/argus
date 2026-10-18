@@ -28,6 +28,9 @@ page loads is a plain file:
                                          re-timing), named by their content like the other media, so a new build
                                          does not upload them again
 
+Every <ds>, <file>, <key>, <cam> and <eid> above is that identifier's site_name, which is both its file name and its
+URL path segment; data/index.json and data/compare/index.json give the page the names it fetches by.
+
 Media names carry a hash of the source clip's content and of the encode settings, so a media file
 never changes under its name (cache it forever), a re-cut clip gets a new name, and builds share media.
 The site step writes these names whether or not the media exists yet, so a build made before the
@@ -69,7 +72,7 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.parse
+import unicodedata
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -245,16 +248,36 @@ def _h(s: str, n: int) -> str:
     return hashlib.sha1(s.encode()).hexdigest()[:n]
 
 
-def q(s: str) -> str:
-    return urllib.parse.quote(s, safe="")
+# A static build names its files after identifiers it does not choose: episode ids and files, dataset names, camera
+# keys and other models' keys. Each identifier's file name comes from site_name alone, and that name is also its URL
+# path segment unchanged: it holds only lowercase ASCII letters, digits and "._-~", which URL encoding leaves alone, no
+# path splits, and no case-insensitive or Unicode-normalising file system merges, so a file is served at exactly the
+# path the manifest gives. A name already in that alphabet is kept, so the media of such episodes keep their published
+# names; any other gets a readable ASCII form and a digest of the exact identifier after "~", which a kept name never
+# contains, so two identifiers never share a name.
+_KEPT_NAME = re.compile(r"[a-z0-9_-][a-z0-9._-]{0,99}")
+
+
+def site_name(ident: str) -> str:
+    s = str(ident)
+    if _KEPT_NAME.fullmatch(s):
+        return s
+    readable = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode().lower()
+    readable = re.sub(r"[^a-z0-9._-]+", "_", readable).lstrip(".")[:48]
+    return f"{readable}~{hashlib.sha256(s.encode('utf-8', 'surrogatepass')).hexdigest()[:16]}"
+
+
+def site_file(file: str) -> str:
+    """An episode file's name in the build's data folders: its stem's site name, keeping .json."""
+    return site_name(file[:-5]) + ".json" if file.endswith(".json") else site_name(file)
 
 
 def video_rel(eid: str, key: str, sig: str) -> str:
-    return f"v/{key}/{q(eid)}.{_h(MEDIA_TAG + '|' + sig, 10)}.mp4"
+    return f"v/{site_name(key)}/{site_name(eid)}.{_h(MEDIA_TAG + '|' + sig, 10)}.mp4"
 
 
 def frame_rel(eid: str, key: str, ms: int, sig: str) -> str:
-    return f"f/{key}/{q(eid)}/{ms}.{_h(FRAME_TAG + '|' + sig, 8)}.jpg"
+    return f"f/{site_name(key)}/{site_name(eid)}/{ms}.{_h(FRAME_TAG + '|' + sig, 8)}.jpg"
 
 
 def compare_dir(qa: Path, given: Path | None = None) -> Path | None:
@@ -460,7 +483,8 @@ def cmd_measure(a):
           flush=True)
     res = defaultdict(list)
     with cf.ThreadPoolExecutor(a.jobs) as ex:
-        futs = {ex.submit(transcode, p[3], mdir / g[0] / g[1] / p[3].name, a.threads, p[4]): (g, p[3])
+        futs = {ex.submit(transcode, p[3], mdir / site_name(g[0]) / site_name(g[1]) / site_name(p[3].name), a.threads,
+                          p[4]): (g, p[3])
                 for g, p in samples}
         for f in cf.as_completed(futs):
             g, src = futs[f]
@@ -732,7 +756,7 @@ def cmd_site(a):
         current = sa.current_label(json.loads((a.qa / rec["file"]).read_text()),
                                    getattr(a, "dictionary_job", None), rec["file"])
         view = sa.episode_view(current)
-        (stage / "data/ep" / rec["file"]).write_text(dumps(view))
+        (stage / "data/ep" / site_file(rec["file"])).write_text(dumps(view))
         from board import grids as bg
         grid_root = a.qa.parent / 'grids'
         gidx = bg.read(grid_root, rec['file'], current)
@@ -751,32 +775,40 @@ def cmd_site(a):
                     tmp.write_bytes(raw)
                     tmp.replace(dest)
                 rels.append(rel)
-            (stage / 'data/grids' / rec['file']).write_text(dumps(bg.view(gidx, lambda i, g: rels[i])))
+            (stage / 'data/grids' / site_file(rec['file'])).write_text(dumps(bg.view(gidx, lambda i, g: rels[i])))
             rec['_grids'] = len(rels)
             grid_count += 1
     for ds, recs in by_ds.items():
-        (stage / "data/lists" / f"{ds}.json").write_text(dumps(public_json(recs), separators=(",", ":")))
-    (stage / "data/index.json").write_text(dumps(public_json({"build": bid, "datasets": datasets, "eps": idx_eps}),
-                                                      separators=(",", ":")))
+        (stage / "data/lists" / f"{site_name(ds)}.json").write_text(dumps(public_json(recs), separators=(",", ":")))
+    # the page fetches each dataset's list and each episode's files by these names, never by a name of its own making
+    site_names = {f: site_file(f) for f in files if site_file(f) != f}
+    (stage / "data/index.json").write_text(dumps(public_json(
+        {"build": bid, "datasets": datasets, "lists": [f"{site_name(ds)}.json" for ds in datasets], "eps": idx_eps,
+         "site_names": site_names}), separators=(",", ":")))
     n_cmp = 0
     if compare is not None:
         # other models' labels: the same files the live board's /api/compare serves, each episode as the page shows it
         (stage / "data/compare").mkdir()
+        keys = sorted(p for p in compare.iterdir() if p.is_dir())
         for name in ("index.json", "metrics.json"):
-            (stage / "data/compare" / name).write_text(dumps(public_json(json.loads((compare / name).read_text()))))
+            doc = public_json(json.loads((compare / name).read_text()))
+            if name == "index.json" and isinstance(doc, dict):
+                doc["site_names"] = {kd.name: site_name(kd.name) for kd in keys}   # each model's folder and list
+            (stage / "data/compare" / name).write_text(dumps(doc))
         listed = set(files)
         (stage / "data/compare/lists").mkdir()
-        for kd in sorted(p for p in compare.iterdir() if p.is_dir()):
-            (stage / "data/compare" / kd.name).mkdir()
+        for kd in keys:
+            (stage / "data/compare" / site_name(kd.name)).mkdir()
             for f in kd.glob("*.json"):
                 if f.name in listed:
                     view = sa.episode_view(sa.current_label(json.loads(f.read_text()),
                                                           getattr(a, "dictionary_job", None), f.name))
-                    (stage / "data/compare" / kd.name / f.name).write_text(dumps(view))
+                    (stage / "data/compare" / site_name(kd.name) / site_file(f.name)).write_text(dumps(view))
                     n_cmp += 1
             # the model's rail records, the same the live board serves at /api/compare/list
             recs = [r for r in sa.rail_records(kd) if r["file"] in listed]
-            (stage / "data/compare/lists" / f"{kd.name}.json").write_text(dumps(public_json(recs), separators=(",", ":")))
+            (stage / "data/compare/lists" / f"{site_name(kd.name)}.json").write_text(
+                dumps(public_json(recs), separators=(",", ":")))
     hands_res = None
     if hands is not None:
         # the hand pose files, each re-timed against the web copy the static page plays (the copy keeps the clip's
@@ -795,7 +827,7 @@ def cmd_site(a):
                 doc = hands_overlay.retime(json.loads((hands / f).read_text()), mp4)
             except (ValueError, RuntimeError) as err:
                 return f, str(err)[:200]
-            (stage / "data/hands" / f).write_text(dumps(public_json(doc), separators=(",", ":")))
+            (stage / "data/hands" / site_file(f)).write_text(dumps(public_json(doc), separators=(",", ":")))
             return f, None
         with cf.ThreadPoolExecutor(8) as ex:
             res = list(ex.map(one, todo))
@@ -813,7 +845,7 @@ def cmd_site(a):
         (a.out / "media" / "k").mkdir(parents=True, exist_ok=True)
         for f, v in kidx["files"].items():
             body = dumps(public_json(json.loads((keypoints / f).read_text())), separators=(",", ":")).encode()
-            rel = f"k/{q(f[:-5])}.{hashlib.sha1(body).hexdigest()[:10]}.json"
+            rel = f"k/{site_name(f[:-5])}.{hashlib.sha1(body).hexdigest()[:10]}.json"
             dst = a.out / "media" / rel
             if not dst.exists():
                 part = dst.with_name(dst.name + ".part")
@@ -832,7 +864,8 @@ def cmd_site(a):
         listed = set(files)
         sidx["files"] = {f: v for f, v in sidx["files"].items() if f in listed and (sensors / f).exists()}
         for f in sidx["files"]:
-            (stage / "data/sensors" / f).write_text(dumps(public_json(json.loads((sensors / f).read_text()))))
+            (stage / "data/sensors" / site_file(f)).write_text(
+                dumps(public_json(json.loads((sensors / f).read_text()))))
         (stage / "data/sensors/index.json").write_text(dumps(public_json(sidx), separators=(",", ":")))
         sn_res = {"dir": str(sensors), "files": len(sidx["files"])}
     # the page asks for other models' labels, hand pose files, sensors files and keypoint downloads only when the build
