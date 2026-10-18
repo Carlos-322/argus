@@ -151,10 +151,10 @@ _JWT_VALUE = re.compile(r'(?<![\w-])([A-Za-z0-9_-]{8,})\.([A-Za-z0-9_-]{2,})\.[A
 
 
 def _key_material(text: str) -> bool:
-    """Whether text holds generated key material: a run of 16 or more letters and digits, with a digit in it, that
-    separators do not split into words. Provider keys are drawn at random, so one without a digit in 16 characters is
-    rare, while names built from words (sk-learn_preprocessing_pipeline_v2, see-the-tokenizer-config) split apart."""
-    return any(len(run) >= 16 and re.search(r'\d', run) and re.search(r'[A-Za-z]', run)
+    """Whether text holds generated key material: a run of letters and digits that separators do not split, 20 or
+    more long, or 16 or more with a digit in it. Provider keys are long unbroken runs drawn at random, while names
+    built from words (sk-learn_preprocessing_pipeline_v2, see-the-tokenizer-config) split into short pieces."""
+    return any(len(run) >= 20 or (len(run) >= 16 and re.search(r'\d', run))
                for run in re.split(r'[-_.:/=+,;%\s"\']', text))
 
 
