@@ -11,7 +11,7 @@ import urllib.request
 import pytest
 
 from board import serve, static
-from test_prepared_footage import media, serving, get
+from test_prepared_footage import count_media_reads, media, serving, get
 
 
 def test_get_with_body_closes_connection_without_parsing_body_as_request(tmp_path, monkeypatch):
@@ -93,17 +93,15 @@ def test_parallel_ticket_range_downloads_do_not_consume_probe_admission(tmp_path
             serve._FOOTAGE_PROBE_SEM.release()
 
 
-def test_repeat_untrusted_prepare_hashes_without_copy_and_large_source_can_make_short_span(tmp_path, monkeypatch):
+def test_repeat_untrusted_prepare_reads_no_source_and_large_source_can_make_short_span(tmp_path, monkeypatch):
     source = media(tmp_path, monkeypatch)
     monkeypatch.setattr(serve, '_FOOTAGE_DISK_BYTES', 3000)
     assert source.stat().st_size > 3000
-    copies = []
-    original = serve._copy_source_snapshot
-    monkeypatch.setattr(serve, '_copy_source_snapshot', lambda *args: (copies.append(args), original(*args))[1])
     first = serve.footage('episode_x', 0, .1)
     assert first and first[0].stat().st_size < 3000
+    reads = count_media_reads(monkeypatch)
     assert serve.footage('episode_x', 0, .1) == first
-    assert copies == []
+    assert reads == []
 
 
 def test_prepared_span_bypasses_another_untrusted_encode_and_sources_are_descriptor_bound(tmp_path, monkeypatch):
@@ -222,25 +220,19 @@ def test_output_receipt_transaction_keeps_same_span_requests_and_tickets_valid(t
         assert serve._footage_version(next(serve.FOOTAGE_DIR.glob('*.mp4'))) == version
 
 
-def test_source_reads_are_bounded_to_two_on_miss_and_one_on_ready_hit(tmp_path, monkeypatch):
-    source = media(tmp_path, monkeypatch)
-    monkeypatch.setattr(serve, '_CONTENT_PROBES', serve.OrderedDict())
-    reads, probes = [], []
-    digest, probe = serve._stream_digest, serve._probe_uncached
-    def count(reader, size, *args):
-        if str(reader.name) == str(source):
-            reads.append(size)
-        return digest(reader, size, *args)
+def test_untrusted_sources_are_never_read_by_the_server_on_miss_or_ready_hit(tmp_path, monkeypatch):
+    # Only the probe and the encoder read a source (through its descriptor); identity comes from its stat.
+    media(tmp_path, monkeypatch)
+    probes, probe = [], serve._probe_uncached
     def inspect(path):
         probes.append(path)
         return probe(path)
-    monkeypatch.setattr(serve, '_stream_digest', count)
     monkeypatch.setattr(serve, '_probe_uncached', inspect)
+    reads = count_media_reads(monkeypatch)
     first = serve.footage('episode_x', 0, .1)
-    assert reads == [source.stat().st_size] * 2 and len(probes) == 1
+    assert reads == [] and len(probes) == 1
     assert serve.footage('episode_x', 0, .1) == first
-    assert reads == [source.stat().st_size] * 3 and len(probes) == 1
-    assert not (serve.FOOTAGE_DIR / '.sources').exists()
+    assert reads == [] and len(probes) == 1
 
 
 def test_ticket_range_sends_validated_descriptor_after_path_is_replaced(tmp_path, monkeypatch):
