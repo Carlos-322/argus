@@ -98,6 +98,7 @@
     "camera_not_decodable",
     "camera_decode_failed",
     "frames_not_decodable",
+    "frames_damaged",
     "unshown_camera_not_decodable"
    ]
   },

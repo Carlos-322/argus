@@ -3354,6 +3354,15 @@ def video_views_episode(ep: Path, files: dict, rig: str, dataset: str, extra: di
             cams[v]["desc"] = descs[v]
             cams[v]['role_provenance'] = 'adapter'
             cams[v].pop('mounting', None)
+    checked: list = []
+    for v in order:
+        name, path = files[v]
+        if Path(ep).resolve() in Path(path).resolve().parents:
+            continue                     # written here by a FrameWriter, which flags what it could not decode
+        with part(checked, f"the decoding check of the camera {name}"):
+            skip_when_cameras_only()
+            damaged_frames_issues(extra, name, decoded_damage(Path(path)), prs[v]["pts"], times[v])
+    add_part_issues(extra, checked)
     placed = {v: presentation_clock(times[v], nominal_fps)[0] for v in order}
     if not unverified_axis:
         camera_span_issues(extra, placed, anchor, {v: files[v][0] for v in order},
@@ -10379,6 +10388,19 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
                                 raw_image(dec) if ch.topic in raw_topics and ch.topic not in depth_of else None)
                     try:
                         camera_payload, decoded_depth, decoded_image = pictures(dec)
+                        if (ch.topic not in raw_topics and ch.topic not in depth_of and ch.topic not in pictured
+                                and not encoded_picture(camera_payload)):
+                            # a schema that decodes into the wrong fields yields bytes that are no picture: the
+                            # standard compressed image's typed lengths are tried, and kept only when they hold one
+                            from prepare.ros2_recovery import compressed_image, CanonicalCDRError
+                            try:
+                                standard = compressed_image(schema, ch.message_encoding, msg.data)
+                                payload = pictures(standard)
+                            except (CanonicalCDRError, McapPayloadError):
+                                payload = None
+                            if payload is not None and encoded_picture(payload[0]):
+                                dec, (camera_payload, decoded_depth, decoded_image) = standard, payload
+                                recovered_schemas[ch.topic] = schema
                     except McapPayloadError:
                         # A damaged schema can still decode, into fields that hold no picture. The standard compressed
                         # image is then read by its typed lengths, as when the schema fails to decode at all.
@@ -10980,6 +11002,13 @@ def nal_units(b: bytes):
         i = j + 3
 
 
+def encoded_picture(data) -> bool:
+    """Whether bytes begin as an encoded picture: a JPEG or PNG image, or H.264/H.265 in Annex B."""
+    head = bytes(data[:8]) if data is not None else b""
+    return (head[:3] == b"\xff\xd8\xff" or head == b"\x89PNG\r\n\x1a\n" or head[:4] == b"\x00\x00\x00\x01"
+            or head[:3] == b"\x00\x00\x01")
+
+
 def codec_of(frame: bytes, fmt: str) -> str:
     """hevc or h264: the format field when it says, else the NAL header (HEVC parameter sets are types
     32-34, whose header byte is 0x40-0x44; an H.264 SPS is 0x67)."""
@@ -11021,6 +11050,51 @@ def bad_frames_issues(extra: dict, name: str, w, zero_s: float = 0.0, *, source_
                   + (f"a black frame stands in for {'each' if k != 1 else 'it'}, so every other frame keeps its "
                      "place." if w.blank else
                      "the episode goes on without them there."), camera=name, t0_s=t0, t1_s=t1)
+
+
+def decoded_damage(path: Path) -> set[int]:
+    """The pts of the pictures of a video file used as it was uploaded that do not decode as recorded: a packet the
+    decoder refuses, a picture it marks corrupt, and every later picture until the next clean key frame, since those
+    are predicted from a damaged reference. The decoder conceals such damage by showing another picture, so without
+    this the file plays with no sign of it. Each file is decoded once, on all of the decoder's threads."""
+    import av
+    damaged: set[int] = set()
+    with av.open(str(path)) as container:
+        stream = container.streams.video[0]
+        stream.thread_type = "AUTO"
+        broken = False
+        for packet in container.demux(stream):
+            if packet.pts is None and packet.dts is None:
+                continue
+            try:
+                pictures = packet.decode()
+            except av.error.FFmpegError:
+                if packet.pts is not None:
+                    damaged.add(int(packet.pts))
+                broken = True
+                continue
+            for picture in pictures:
+                if picture.key_frame and not picture.is_corrupt:
+                    broken = False
+                if (picture.is_corrupt or broken) and picture.pts is not None:
+                    damaged.add(int(picture.pts))
+                broken |= picture.is_corrupt
+    return damaged
+
+
+def damaged_frames_issues(extra: dict, name: str, damaged: set, pts, times) -> None:
+    """decoded_damage of a camera as frames_damaged issues on extra, one per run, with its span in the episode."""
+    pts = np.asarray(pts)
+    hit = np.flatnonzero(np.isin(pts, np.fromiter(damaged, dtype=np.int64, count=len(damaged))))
+    if not len(hit):
+        return
+    for run in np.split(hit, np.flatnonzero(np.diff(hit) > 1) + 1):
+        k, t0, t1 = len(run), float(times[run[0]]), float(times[run[-1]])
+        when = f"at {t0:.2f} s" if k == 1 else f"from {t0:.2f} s to {t1:.2f} s"
+        add_issue(extra, "frames_damaged",
+                  f"{k} frame{'s' if k != 1 else ''} of the camera {name} {'are' if k != 1 else 'is'} damaged in the file, {when}; the "
+                  "decoder shows another picture in their place, so they may not show that moment.",
+                  camera=name, t0_s=t0, t1_s=t1)
 
 
 def placeholder_frames(own: dict, kmaps: dict) -> dict:
