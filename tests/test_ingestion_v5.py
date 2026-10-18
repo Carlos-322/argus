@@ -1038,14 +1038,28 @@ def test_high_rate_partial_packets_do_not_claim_ambiguous_publisher_rows(tmp_pat
     assert context['recorded_state_archive']['row_count'] == 6
 
 
-def test_jointly_biased_capture_and_publication_times_expose_the_declared_domain_assumption(tmp_path):
+def test_a_joint_bias_the_delivery_delays_reveal_is_placed_by_arrival(tmp_path):
+    # stamps 1.5 s early on both capture and publication: the text then arrives 1.5 s later after its stamps than
+    # the camera's frames do, which a shared clock does not explain, so it is placed on the recorder's arrival clock
     source = tmp_path / 'source.mcap'
     text_recording(source, early=1., late=3.5, text_offset=-1.5, publish_offset=-1.5, publish_clock=True)
+    report = formats.convert(source, 'ego_head', tmp_path / 'out', 'declared publication domain', 900)
+    assert not report['failed'], report
+    context = json.loads((tmp_path / 'out' / report['episodes'][0]['episode_id'] / 'context.json').read_text())
+    assert context['source']['presentation_clock']['basis'] == 'mcap_log_time'
+    assert any(i['kind'] == 'recorder_arrival_timing' for i in context['reader_issues'])
+
+
+def test_jointly_biased_capture_and_publication_times_expose_the_declared_domain_assumption(tmp_path):
+    # a bias small enough to be a later delivery is kept on the declared domain, with the assumption and its size
+    source = tmp_path / 'source.mcap'
+    text_recording(source, early=1., late=3.5, text_offset=-.1, publish_offset=-.1, publish_clock=True)
     report = formats.convert(source, 'ego_head', tmp_path / 'out', 'declared publication domain', 900)
     assert not report['failed'], report
     directory = tmp_path / 'out' / report['episodes'][0]['episode_id']
     context = json.loads((directory / 'context.json').read_text())
     assert context['annotation_subtasks']
+    assert any(i['kind'] == 'capture_clock_offset_possible' for i in context['reader_issues'])
     proof = context['uploader_notes']['publisher_text_timing']['/task/subtask']
     assert proof['physical_synchronization_verified'] is False
     assert 'publish_time' in proof['basis']

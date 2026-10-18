@@ -10185,7 +10185,7 @@ def mcap_clock_record(decoded, channel, message, capture):
             'log_clock_id': channel.metadata.get('log_clock_id')}
 
 
-def mcap_text_clock_proof(camera_kind, text_kind, camera, text):
+def mcap_text_clock_proof(camera_kind, text_kind, camera, text, same_recorder=True):
     """Require recorded domain evidence and per-channel chronology before timed text placement."""
     if not camera or not text or text_kind != {camera_kind}:
         return None
@@ -10209,8 +10209,10 @@ def mcap_text_clock_proof(camera_kind, text_kind, camera, text):
     # the other holds. Through one recorder, delays past CLOCK_OFFSET_IMPLAUSIBLE_MS are rare while unsynchronised
     # clocks are not, so such a text stream is not on the camera's clock and is placed by arrival; a smaller difference
     # is the most its stamps can be off (offset_ms, flagged on the stream when it exceeds CLOCK_OFFSET_FLAG_MS).
+    # Delays measured by two recorders (a sidecar file beside the camera's) are not comparable, so only streams the
+    # camera's own recorder logged are held to it.
     delay = lambda records: float(np.median([r['log_ns'] - r['capture_ns'] for r in records])) / 1e6
-    offset_ms = round(abs(delay(text) - delay(camera)), 1)
+    offset_ms = round(abs(delay(text) - delay(camera)), 1) if same_recorder else 0.0
     if offset_ms > CLOCK_OFFSET_IMPLAUSIBLE_MS:
         return None
     ids = {row['capture_clock_id'] for row in rows}
@@ -12272,7 +12274,8 @@ def sensor_clock_namespace(path: Path, basis: str, reference_records=()) -> tupl
         except (OSError, McapError):
             return None, 'sidecar clock domain could not be read', None
         if basis == 'capture' and any(mcap_text_clock_proof(
-                'capture', {'capture'}, list(reference_records), rows) is None for rows in records_by_topic.values()):
+                'capture', {'capture'}, list(reference_records), rows, same_recorder=False) is None
+                for rows in records_by_topic.values()):
             return None, 'sidecar capture domain lacks shared declared or causal publication proof', None
         if not count:
             return None, 'sidecar contains no readable timed numeric stream', None
