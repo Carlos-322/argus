@@ -1567,9 +1567,13 @@ def capture_catalog() -> dict:
     return {CAPTURE_PREFIX + k: {"name": name, "list": "data", "check": True} for k, (name, _group) in NAMES.items()}
 
 
-def public_label(d: dict) -> dict:
-    """Copy public JSON after source checks and current human interpretation."""
-    return public_json(d)
+EXPORT_UPLOADER_VALUES = False      # --publish-uploader-values: downloads and exports carry uploader metadata values
+
+
+def public_label(d: dict, *, export: bool = False) -> dict:
+    """Copy public JSON after source checks and current human interpretation. A download or export leaves the board,
+    so it carries uploader metadata values only when the operator published them (--publish-uploader-values)."""
+    return public_json(d, uploader_values=EXPORT_UPLOADER_VALUES) if export else public_json(d)
 
 
 def current_label(d: dict, job: Path | None, filename: str) -> dict:
@@ -2016,7 +2020,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             label = json.loads(raw)
                             if not isinstance(label, dict):
                                 raise ValueError('Invalid label')
-                            label = finite(public_label(current_label(label, DICTIONARY_JOB, path.name)))
+                            label = finite(public_label(current_label(label, DICTIONARY_JOB, path.name), export=True))
                             for text in json.JSONEncoder(ensure_ascii=False, separators=(',', ':'), allow_nan=False).iterencode(label):
                                 chunk = text.encode()
                                 total += len(chunk)
@@ -2086,7 +2090,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send(404, {"error": "no such file"})
                 return
             if (q.get("download") or [""])[0] == "1":
-                body = dumps(public_label(current_label(_read_label(p), DICTIONARY_JOB, p.name)), separators=(",", ":")).encode()
+                body = dumps(public_label(current_label(_read_label(p), DICTIONARY_JOB, p.name), export=True),
+                             separators=(",", ":")).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Disposition", f'attachment; filename="{p.name}"')
@@ -2333,7 +2338,7 @@ class BoardHTTPServer(socketserver.ThreadingTCPServer):
 
 
 def main(argv=None) -> int:
-    global HERE, MP4_DIR, COMPARE_DIR, HANDS_DIR, KEYPOINTS_DIR, SENSORS_DIR, FOOTAGE_DIR, PORT, PAGE_TITLE, BOARD_NAME
+    global HERE, MP4_DIR, COMPARE_DIR, HANDS_DIR, KEYPOINTS_DIR, SENSORS_DIR, FOOTAGE_DIR, PORT, PAGE_TITLE, BOARD_NAME, EXPORT_UPLOADER_VALUES
     global HEADER, DICTIONARY_JOB
     ap = argparse.ArgumentParser(prog="python -m board serve", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -2346,6 +2351,10 @@ def main(argv=None) -> int:
     ap.add_argument("--header", type=Path, help="an HTML file with a site's own header, shown in place of the page's "
                                                 "title bar (its <style> blocks go into the page's head)")
     ap.add_argument('--allow-host', action='append', default=[], help='additional hostname accepted on a loopback listener')
+    ap.add_argument('--publish-uploader-values', action='store_true',
+                    help="show and export the uploader's own metadata values (file attributes, sidecar fields) to "
+                         "everyone who can reach the board; by default only a loopback board with no --allow-host "
+                         "shows them, and downloads and exports never carry them")
     ap.add_argument("--dictionary-job", type=Path, help="enable local dictionary editing for this upload")
     a = ap.parse_args(argv)
     DICTIONARY_JOB = a.dictionary_job.resolve() if a.dictionary_job else None
@@ -2367,7 +2376,12 @@ def main(argv=None) -> int:
     # overflows it and those connections wait on SYN retries for up to a minute
     socketserver.ThreadingTCPServer.request_queue_size = 128
     socketserver.ThreadingTCPServer.daemon_threads = True
-    with BoardHTTPServer(("127.0.0.1" if DICTIONARY_JOB else a.host, PORT), Handler) as httpd:
+    bind = "127.0.0.1" if DICTIONARY_JOB else a.host
+    EXPORT_UPLOADER_VALUES = a.publish_uploader_values
+    from board.public_export import publish_uploader_values
+    # a loopback board nobody else is let in to (no --allow-host for a proxy) is the uploader's own view
+    publish_uploader_values(a.publish_uploader_values or (bind in ('127.0.0.1', 'localhost', '::1') and not a.allow_host))
+    with BoardHTTPServer((bind, PORT), Handler) as httpd:
         httpd.allowed_hosts = a.allow_host
         if not list_episodes():
             print('No episodes are available. A free review stops before board generation; build a board with labels.', file=sys.stderr, flush=True)

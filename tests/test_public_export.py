@@ -236,7 +236,38 @@ def test_public_build_manifest_contains_counts_and_no_operational_locations():
     assert build == before
 
 
-def test_flattened_source_note_owners_are_private_but_native_fields_and_prose_survive(tmp_path):
+def test_uploader_metadata_values_are_not_published_by_default():
+    # A pattern filter cannot recognise every secret an uploader writes, so public outputs name the uploader's own
+    # metadata without its values unless the operator publishes them.
+    leaks = ['{"token": "PLANTEDWANDB' + 'TOK0007"}', '/Users/someone/Desktop/raw', 'password is hunter2-like',
+             'f3a9c1d2e4b5a6978877665544332211']
+    groups = [{'title': 'Notes in the files', 'kind': 'notes', 'items': [
+        {'name': 'file attribute wandb', 'value': leaks[0]}, {'name': 'raw_dir', 'value': leaks[1]},
+        {'name': 'notes', 'value': leaks[2]}, {'name': 'fields / secret', 'value': leaks[3],
+                                                 '_uploader_field_path': ['info.json', 'fields', 'secret']}]}]
+    shown = project({'uploader_notes': groups, 'recorded_metadata': {'/srv/x/info.json': {'secret': leaks[3]}},
+                     'evidence_inspection': {'inspections': [
+                         {'id': 'inspection:1', 'mode': 'metadata', 'value': leaks[2], 'preview': leaks[1],
+                          'descriptor': {'kind': 'metadata', 'name': 'uploader_notes'}}]}})
+    text = json.dumps(shown)
+    assert not any(leak in text for leak in leaks)
+    assert [item['name'] for item in shown['uploader_notes'][0]['items']][:3] == ['file attribute wandb', 'raw_dir', 'notes']
+    assert '/srv/x' not in text
+    published = [item.get('value') for group in project({'uploader_notes': groups}, uploader_values=True)['uploader_notes']
+                 for item in group['items']]
+    assert leaks[0] in published and leaks[2] in published
+
+
+def test_request_shaping_keeps_uploader_values():
+    from board.public_export import reader_context_field
+    groups = [{'title': 'Notes in the files', 'kind': 'notes', 'items': [{'name': 'operator', 'value': 'Ada'}]}]
+    assert reader_context_field('uploader_notes', groups)[0]['items'][0]['value'] == 'Ada'
+
+
+def test_flattened_source_note_owners_are_private_but_native_fields_and_prose_survive(tmp_path, monkeypatch):
+    # what an operator who publishes uploader metadata still gets scrubbed
+    from board import public_export
+    monkeypatch.setattr(public_export, '_PUBLISH_DEFAULT', True)
     from board.build import uploader_groups
     from prepare.formats import h5_text
     import h5py

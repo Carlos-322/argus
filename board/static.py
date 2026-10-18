@@ -920,6 +920,9 @@ def main():
     ap.add_argument("--samples", type=int, default=3, help="measure: sample encodes per dataset and camera")
     ap.add_argument("--first", type=int, default=50, help="measure: also project each dataset's first N episodes")
     ap.add_argument("--public-base", help="site: absolute URL of the bucket root, for index.public.html")
+    ap.add_argument("--publish-uploader-values", action="store_true",
+                    help="site: publish the uploader's own metadata values (file attributes, sidecar fields); by "
+                         "default the site names that metadata without its values")
     ap.add_argument("--dictionary-job", type=Path, help="project current human interpretation from this source job")
     ap.add_argument("--build-id", help="site: override the content-derived build id")
     ap.add_argument("--force", action="store_true", help="site: rewrite an existing build id")
@@ -934,6 +937,8 @@ def main():
     a.out = a.out or a.board / "static"
     if not FFMPEG or not FFPROBE:
         sys.exit("ffmpeg/ffprobe not found")
+    from board.public_export import publish_uploader_values
+    publish_uploader_values(getattr(a, "publish_uploader_values", False))
     return {"measure": cmd_measure, "media": cmd_media, "site": cmd_site, "status": cmd_status}[a.cmd](a) or 0
 
 
