@@ -12,11 +12,18 @@ def test_issue_requires_severity_only_when_case_states_threshold():
     assert not score.judge({'issue': ['camera_fault'], 'sev': 'low'}, labels)[0]
 
 
-def test_named_matches_literal_words_and_phrases_even_when_negated():
+def test_named_matches_literal_words_and_phrases_only_where_asserted():
     assert not score.judge({'named': ['card']}, {'task_summary': 'cardboard'})[0]
-    assert score.judge({'named': ['card']}, {'task_summary': 'does not handle a card'})[0]
+    assert not score.judge({'named': ['card']}, {'task_summary': 'does not handle a card'})[0]
     assert not score.judge({'named': ['sew']}, {'task_summary': 'sewing fabric'})[0]
     assert score.judge({'named': ['lotus root']}, {'task_summary': 'Peels LOTUS ROOT.'})[0]
+    # a denial in one field does not hide the word asserted in another, and an unrelated denial does not cancel it
+    assert score.judge({'named': ['sew']}, {'task_summary': 'The operator does not sew.',
+                                            'timeline': [{'action': 'sew', 'object': 'cloth'}]})[0]
+    assert score.judge({'named': ['card']}, {'task_summary': 'Picks up the card but does not drop it.'})[0]
+    for denial in ('does not sew', 'The operator never sews the cloth', 'no sewing happens'):
+        word = 'sews' if 'sews' in denial else 'sewing' if 'sewing' in denial else 'sew'
+        assert not score.judge({'named': [word]}, {'timeline': [{'action': denial, 'object': 'cloth'}]})[0]
 
 
 @pytest.mark.parametrize('action', [

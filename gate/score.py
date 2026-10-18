@@ -28,13 +28,14 @@ from pathlib import Path
 
 import numpy as np
 
+from board.label_projection import SEVERITY_RANK
 from checks import label_consistency
 from label.harness import PRICE_IN, DEFAULT_MODEL, annotation_record, billing_view
 from label.receipts import billing_summary
 
 HERE = Path(__file__).resolve().parent
 RIGS = ("teleop", "handheld", "ego")
-SEV = {"low": 1, "medium": 2, "high": 3}
+SEV = SEVERITY_RANK
 # the provider's prompt cache: a read costs a tenth of the input price, a write 1.25 times it
 CACHE_READ, CACHE_WRITE = 0.1 * PRICE_IN, 1.25 * PRICE_IN
 def literal_pattern(term: str, *, plural=False):
@@ -98,8 +99,11 @@ FACTS = {"outcome", "not_outcome", "align", "issue", "sev", "mistake", "named", 
 
 
 def judge(case: dict, labels: dict) -> tuple[bool, list[str]]:
-    """(the label meets every fact of the case, why not)."""
-    from board.label_projection import effective_outcome, project
+    """(the label meets every fact of the case, why not). Every fact is read from the label's projection
+    (board/label_projection.py), the same values the board shows: its effective outcome, its issues and their
+    severity tiers. A reason starting "needs review:" can come with a met case; it marks what the label leaves open."""
+    from board.label_projection import effective_outcome, issues, max_severity, project, severity
+    from board.polarity import asserted
     labels, _ = project(labels)
     unknown = set(case) - FACTS
     if unknown:
@@ -120,33 +124,39 @@ def judge(case: dict, labels: dict) -> tuple[bool, list[str]]:
         ok.append(rel in case["align"])
         ok[-1] or why.append(f"alignment {rel}")
     if "issue" in case:
-        matches = _matches([item for item in labels.get('data_issues') or [] if item.get('issue')], case['issue'])
-        sevs = [i.get('severity') for i in matches]
+        matches = _matches(issues(labels, 'data_issues'), case['issue'])
+        sevs = [severity(i) for i in matches]
         meets = bool(matches)
         if 'sev' in case:
-            meets = any(SEV.get(severity, 0) >= SEV[case['sev']] for severity in sevs)
+            meets = any(SEV.get(tier, 0) >= SEV[case['sev']] for tier in sevs)
         ok.append(meets)
         meets or why.append('issue missing' if not matches else f'issue at {sevs}')
     if "mistake" in case:
-        ok.append(bool(_matches([item for item in labels.get('operator_mistakes') or [] if item.get('issue')], case["mistake"])))
+        ok.append(bool(_matches(issues(labels, 'operator_mistakes'), case["mistake"])))
         ok[-1] or why.append("mistake missing")
     if "named" in case:
-        text = " ".join(texts_handled(labels)).lower()
+        # a word names what was handled only where its own text asserts it: "does not sew" and "never sews the
+        # cloth" name no sewing (board/polarity.py, the reading the problem families use)
+        texts = texts_handled(labels)
         groups = [[term] if isinstance(term, str) else term for term in case["named"]]
         if not all(isinstance(group, list) and group and all(isinstance(w, str) and w for w in group)
                    for group in groups):
             raise ValueError('named facts require words, phrases or explicit alternatives')
-        miss = [' / '.join(group) for group in groups if not any(literal_pattern(w).search(text) for w in group)]
+        miss = [' / '.join(group) for group in groups
+                if not any(asserted(literal_pattern(w), text) for w in group for text in texts)]
         ok.append(not miss)
         miss and why.append(f"never names {miss}")
     if "max_issue_sev" in case:
-        issues = [item for item in labels.get('data_issues') or [] if isinstance(item, dict) and item.get('issue')]
-        unrated = [(item.get('category'), item.get('severity')) for item in issues if item.get('severity') not in SEV]
-        over = [(item.get('category'), item.get('severity')) for item in issues
-                if item.get('severity') in SEV and SEV[item['severity']] > SEV[case['max_issue_sev']]]
-        ok.append(not unrated and not over)
-        unrated and why.append(f'unrated issues prevent verifying severity bound: {unrated}')
+        # the bound is on the highest rated severity, as the board counts it; an unrated issue has no tier, so it
+        # cannot break the bound and is reported for review instead
+        shown = issues(labels, 'data_issues')
+        top = max_severity(shown)
+        over = [(item.get('category'), severity(item)) for item in shown
+                if severity(item) and SEV[severity(item)] > SEV[case['max_issue_sev']]]
+        ok.append(top is None or SEV[top] <= SEV[case['max_issue_sev']])
         over and why.append(f"issues above {case['max_issue_sev']}: {over}")
+        unrated = [item.get('category') for item in shown if severity(item) is None]
+        unrated and why.append(f'needs review: {len(unrated)} unrated issues have no severity to bound: {unrated}')
     if "held" in case:
         texts = texts_handled(labels)
         wrong, right = case['held']['not_named'], case['held']['named']

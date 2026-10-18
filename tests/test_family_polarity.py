@@ -1,0 +1,328 @@
+"""Problem families decided by clause polarity (board/polarity.py), measured over corpora rather than one wording at a
+time, and the consumers of a label agreeing on every value they derive from it (board/label_projection.py)."""
+from __future__ import annotations
+
+import collections
+import copy
+import importlib.util
+import json
+import math
+import random
+from pathlib import Path
+
+import pytest
+
+from board import to_board
+from board.families import Families
+from board.label_projection import max_severity, severity
+from checks import label_consistency
+from compare import metrics
+from gate.score import judge
+from label.harness import parse_response
+
+_spec = importlib.util.spec_from_file_location('family_wordings',
+                                               Path(__file__).parent / 'fixtures' / 'family_wordings.py')
+wordings = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(wordings)
+
+FAMILIES = Families()
+BROAD = 'd:Camera fault'
+CODE = {'P': 'privacy-blur', 'L': 'low-light', 'F': 'camera-fault', 'I': 'camera-image', 'D': BROAD}
+
+
+def family(issue, evidence=''):
+    return FAMILIES.family_of('data_issues', {'category': 'camera_fault', 'severity': 'high', 'issue': issue,
+                                              'evidence': evidence})
+
+
+def worst_precision_recall(items):
+    """The lowest per-family precision or recall over (issue, evidence, expected family) items."""
+    pred = [family(issue, evidence) for issue, evidence, _ in items]
+    worst = 1.0
+    for fam in CODE.values():
+        tp = sum(1 for (_, _, want), got in zip(items, pred) if want == fam and got == fam)
+        npred, nwant = pred.count(fam), sum(1 for _, _, want in items if want == fam)
+        worst = min(worst, tp / npred if npred else 1.0, tp / nwant if nwant else 1.0)
+    wrong = [(issue, evidence, got, want) for (issue, evidence, want), got in zip(items, pred) if got != want]
+    return worst, wrong
+
+
+# ---------------------------------------------------------------- the wordings of the reviews
+
+@pytest.mark.parametrize('text,wanted', [
+    # bug 21: wordings the previous fix broke
+    ('Glare never appears in any frame', BROAD),
+    ('Dropout is never an issue here', BROAD),
+    ('Occlusion never happens', BROAD),
+    ('It looks like the view is frozen but it is just a static scene', BROAD),
+    ('At first it seems frozen, but the arm is just still', BROAD),
+    ('Looks like glare, actually a white tablecloth', BROAD),
+    ('Glare? No question, it hides the cup', 'low-light'),
+    ('Free of glare until 5 s, then a finger covers the lens', 'camera-fault'),
+    ('The view is free of glare except near the window where the plate is clipped', 'low-light'),
+    ('The footage is free of noise and a finger covers the lens', 'camera-fault'),
+    # bug 22: negated remedies, multiword answers, lists
+    ('The occlusion is not removed until 9 s', 'camera-fault'),
+    ('Overexposure is not corrected by auto exposure', 'low-light'),
+    ('The dropout has not ended by the last frame', 'camera-image'),
+    ('A rectangular blur is not lifted at any point', 'privacy-blur'),
+    ('Clipping is not limited to the plate', 'low-light'),
+    ('Glare never clears from the table', 'low-light'),
+    ('Frozen frames never recover after 4 s', 'camera-image'),
+    ('Washed-out highlights? No.', BROAD),
+    ('Finger over the lens? No.', BROAD),
+    ('Frame freeze? No.', BROAD),
+    ('No occlusion, camera rotation or glare', BROAD),
+    ('No dropout, video corruption or streaking', BROAD),
+    ('No glare, image corruption or occlusion', BROAD),
+    ('No glare, the image is clean', BROAD),
+    ('Occlusion: none', BROAD),
+    ('Glare: none', BROAD),
+    ('Glare? None.', BROAD),
+    ('Checked 0 to 30 s and ruled out occlusion', BROAD),
+    ('The exo view is frozen, and the wrist looks like glare but it is not', 'camera-image'),
+    ('Is the exo view frozen? Yes, from 4 s to 9 s', 'camera-image'),
+    ('No glare. The exo view is frozen from 4 s', 'camera-image'),
+    ('nto glare anywhere', BROAD),
+    ('A rcetangular blur covers the cutting board', 'privacy-blur'),
+])
+def test_reported_wordings(text, wanted):
+    assert family(text) == wanted
+
+
+def test_text_refines_only_a_tag_that_names_no_one_problem():
+    # a known tag that names a problem of its own keeps it, whatever its prose mentions
+    known = {'category': 'missing_instruction', 'severity': 'high', 'issue': 'A blur patch hides the instruction card'}
+    assert FAMILIES.family_of('data_issues', known) == 'd:Instruction missing'
+    # a tag the model coined names nothing, so a privacy blur's own words still claim it
+    coined = dict(known, category='lighting')
+    assert FAMILIES.family_of('data_issues', coined) == 'privacy-blur'
+    # the issue says what the problem is; evidence is read only when the issue asserts no family
+    assert family('The exo view is frozen', 'glare on the plate at 2 s') == 'camera-image'
+    assert family('No glare', 'the exo view is frozen from 4 s to 9 s') == 'camera-image'
+
+
+# ---------------------------------------------------------------- corpora
+
+def reviewer_corpus():
+    """The ninth review's family corpus (744 texts): each family's problems wrapped in unrelated negations, and
+    denials of each family in fifteen grammatical forms."""
+    pos = {
+        'privacy-blur': ["A rectangular blur covers the cutting board", "A blur patch hides the cup during the grasp",
+                         "Anonymization blurs the mug and the operator's hands", "A blur mask sits over the drawer front",
+                         "A bounded blur region hides the screen", "The anonymized region hides the label on the bottle",
+                         "A blurred patch hides the faucet", "Anonymisation hides the oven display",
+                         "A rectangular blur sits over the sink", "The blur mask hides the knife"],
+        'low-light': ["Glare from the window hides the table", "The image is washed out by the overhead light",
+                      "Highlights are clipped on the white plate", "Strong overexposure on the exo camera",
+                      "Sun glare hides the cup", "The exo view is overexposed near the sink",
+                      "Glare on the countertop hides the spoon", "The white bowl is clipped to pure white",
+                      "The wrist view is washed-out near the lamp", "The exo frame is overexposed for 4 s"],
+        'camera-fault': ["The wrist camera is rotated sideways", "The head camera is covered by the operator's sleeve",
+                         "A finger blocks part of the lens", "The exo camera points down at the floor",
+                         "The exo camera is displaced mid-episode", "The operator adjusts the head camera",
+                         "The head camera is obstructed by a cabinet door", "The camera turns away from the table",
+                         "A towel occludes the wrist camera", "The operator removes the head camera"],
+        'camera-image': ["The exo view is frozen", "The wrist feed goes black", "Frames are corrupted with green streaks",
+                         "The head camera loses its signal", "Video dropout on the wrist camera",
+                         "The image freezes on one frame", "The exo frames are corrupt for 2 s",
+                         "The wrist stream shows a black screen", "The head view is stale for 3 s",
+                         "A dropout blanks the exo view"],
+    }
+    terms = {
+        'privacy-blur': ["blur patch", "rectangular blur", "anonymization", "blur mask", "bounded blur",
+                         "anonymised region"],
+        'low-light': ["glare", "clipping", "overexposure", "washed-out highlights", "clipped highlights", "glare"],
+        'camera-fault': ["occlusion", "obstruction", "rotated camera", "finger over the lens", "cover on the lens",
+                         "lens covering"],
+        'camera-image': ["frozen frame", "dropout", "corruption", "black frame", "streaking", "frame freeze"],
+    }
+    other = {'privacy-blur': ('camera-image', "the exo view is frozen"),
+             'low-light': ('camera-fault', "a finger blocks the lens"),
+             'camera-fault': ('low-light', "glare hides the cup"),
+             'camera-image': ('camera-fault', "the head camera is rotated sideways")}
+    neutral = ["The wrist camera is slightly out of focus", "Motion blur on the fast reach",
+               "Auto white balance shifts the colours", "Compression artifacts around the gripper",
+               "A lens smudge softens the image", "The exo view is slightly tilted"]
+    ev = 'exo 4.0 s to 9.5 s'
+
+    def lc(s):
+        return s[0].lower() + s[1:]
+
+    def typo(s):
+        w = s.split()
+        i = 1 if len(w) > 2 else 0
+        x = w[i]
+        w[i] = x[:1] + x[2:3] + x[1:2] + x[3:] if len(x) > 3 else x
+        return ' '.join(w)
+
+    items = []
+    for fam, sentences in pos.items():
+        for s in sentences:
+            items += [(f"The grasp is not visible because {lc(s)}", ev, fam), (f"{s} so the grasp is not visible", ev, fam),
+                      (f"{s}, and the grasp is not visible", ev, fam), (f"{s}. The grasp is not visible.", ev, fam),
+                      (s, "the cup is not visible from 4.0 s to 9.5 s", fam),
+                      (f"No task progress for 3 s while {lc(s)}", ev, fam),
+                      (f"{s}, which does not affect the outcome", ev, fam), (typo(s), ev, fam),
+                      (f"Not motion blur but {lc(s)}", ev, fam)]
+        for k in range(6):
+            t = terms[fam]
+            a, b, c = t[k % 6], t[(k + 1) % 6], t[(k + 2) % 6]
+            n = neutral[k]
+            ofam, oth = other[fam]
+            items += [(f"{n}; no {a} is present", ev, BROAD), (n, f"No {a} in any frame", BROAD),
+                      (n, f"{a[0].upper() + a[1:]} is not present in any frame", BROAD),
+                      (n, f"checked 0 to 30 s: there is no {a}", BROAD), (f"{n}, without any {a}", ev, BROAD),
+                      (f"{n}; the footage is free of {a}", ev, BROAD), (n, f"{a[0].upper() + a[1:]}? No.", BROAD),
+                      (n, f"No {a}, {b} or {c}", BROAD), (n, f"Initially looks like {a} but it is not", BROAD),
+                      (n, f"{a[0].upper() + a[1:]} was not observed", BROAD),
+                      (f"{n}. There is no sign of {a}.", ev, BROAD), (f"Not {a} but {oth}", ev, ofam),
+                      (n, f"{a[0].upper() + a[1:]} absent throughout", BROAD),
+                      (n, f"Neither {a} nor {b} appears", BROAD), (n, f"nto {a} anywhere", BROAD),
+                      (f"The exo view is not without {a}", ev, fam)]
+    return items
+
+
+@pytest.mark.parametrize('name,items,bound', [
+    ('reviewer corpus', reviewer_corpus(), 0.97),
+    ('written before the matcher', [(i, e, CODE[x]) for _, i, e, x in wordings.WRITTEN], 0.97),
+    ('written independently', [(i, e, CODE[x]) for _, i, e, x in wordings.INDEPENDENT], 0.95),
+])
+def test_family_precision_and_recall_over_corpora(name, items, bound):
+    worst, wrong = worst_precision_recall(items)
+    assert worst >= bound, (name, worst, wrong[:10])
+
+
+def test_corpus_has_the_reviewed_size():
+    assert len(reviewer_corpus()) == 744
+    assert len(wordings.WRITTEN) >= 150 and len(wordings.INDEPENDENT) >= 150
+
+
+# ---------------------------------------------------------------- gate
+
+def test_gate_severity_bound_is_the_boards_rated_maximum():
+    labels = {'data_issues': [{'issue': 'camera blur', 'category': 'camera_fault', 'severity': None},
+                              {'issue': 'glare', 'category': 'lighting', 'severity': 'low'}]}
+    for bound in ('low', 'medium', 'high'):
+        met, why = judge({'max_issue_sev': bound}, labels)
+        assert met and why[0].startswith('needs review:')
+    labels['data_issues'][1]['severity'] = 'High'
+    assert not judge({'max_issue_sev': 'medium'}, labels)[0]
+    assert max_severity(labels['data_issues']) == 'high' and severity({'severity': 'unknown'}) is None
+
+
+def test_gate_named_reads_the_same_polarity_as_the_families():
+    labels = {'task_summary': 'The operator never sews the cloth',
+              'timeline': [{'action': 'does not sew', 'object': 'cloth'}], 'completion': {'task_completed': 'failure'}}
+    assert not judge({'named': ['sew']}, labels)[0]
+    assert not judge({'named': ['sews']}, labels)[0]
+    labels['timeline'].append({'action': 'sew', 'object': 'cloth'})
+    assert judge({'named': ['sew']}, labels)[0]
+
+
+# ---------------------------------------------------------------- every consumer of one label agrees
+
+SEVS = ['low', 'medium', 'high']
+WEIRD = [None, True, False, 0, -1, 1.5, 'NaN', '', ' ', [], {}, [1], {'a': 1}, 'SUCCESS', ' Success ', 'High',
+         'partial', 'Partial ', 'success_then_undone', 'failure', 'unclear', 'medium', 'low', 'Aligned', 2, 0.5,
+         '0.5', 'aligned ', 'broader', 'Different', 'high', ['high'], 7, 61.0, -0.2]
+
+
+def _reply(rng):
+    r = {
+        'scene': {'objects': [{'attributes': ['red'], 'name': 'red cup', 'location': 'left'}], 'setting': 'a table'},
+        'timeline_columns': ['start_s', 'end_s', 'arm', 'action', 'object', 'destination', 'spatial_relation',
+                             'contribution', 'progress', 'notes'],
+        'timeline': [[0.0, 5.0, 'left', 'reach', 'red cup', None, None, 'advancing', 0.1, None],
+                     [5.0, 12.0, 'left', 'grasp', 'red cup', None, None, 'advancing', 0.4, 'ok'],
+                     [12.0, 30.0, 'both', 'place', 'red cup', 'plate', 'onto the plate', 'advancing', 1.0, None]],
+        'task_summary': 'Place the red cup on the plate.',
+        'key_events': [{'t_s': 12.0, 'label': 'cup grasped', 'kind': 'contact', 'outcome': 'success', 'note': ''}],
+        'state_changes': [{'t_s': 30.0, 'object': 'red cup', 'from': 'table', 'to': 'plate', 'seen_in': 'exo'}],
+        'completion': {'task_completed': rng.choice(['success', 'failure', 'partial', 'unclear',
+                                                     'success_then_undone']),
+                       'success_predicate': 'cup on plate', 'completed_at_s': 30.0, 'goal_reached_at_s': 30.0,
+                       'undone_at_s': None, 'undone_by': None, 'reason': ''},
+        'goal_alignment': {'matches_given': True, 'relation': rng.choice(['aligned', 'narrower', 'broader',
+                                                                          'different']), 'reason': 'same'},
+        'scene_graph': [], 'instruction_variants': ['cup to plate'], 'performance_review': 'Clean.', 'recovery': [],
+        'data_issues': [{'issue': 'camera blur', 'category': rng.choice(['camera_fault', 'instruction_mismatch',
+                                                                         'lighting']),
+                         'severity': rng.choice(SEVS), 't_s': 3.0, 'end_s': 4.0, 'evidence': 'exo 3s'}
+                        for _ in range(rng.randint(0, 3))],
+        'operator_mistakes': [{'issue': 'regrasp', 'category': 'failed_grasp', 'severity': rng.choice(SEVS),
+                               't_s': 6.0, 'end_s': 7.0, 'recovered': True, 'deliberate': 'no', 'evidence': 'left 6s'}],
+    }
+    if rng.random() < 0.3:
+        r['tasks'] = [{'start_s': 0.0, 'end_s': 30.0, 'task': 'place cup', 'objects': ['red cup'],
+                       'outcome': rng.choice(['success', 'failure', 'partial', 'success_then_undone', 'unclear']),
+                       'completed_at_s': 30.0} for _ in range(rng.randint(1, 2))]
+        if rng.random() < 0.5:
+            r.pop('completion')
+    paths = []
+
+    def walk(x, pre=()):
+        if pre:
+            paths.append(pre)
+        if isinstance(x, dict):
+            for k, v in x.items():
+                walk(v, pre + (k,))
+        elif isinstance(x, list):
+            for i, v in enumerate(x):
+                walk(v, pre + (i,))
+    for _ in range(rng.randint(1, 4)):
+        paths.clear()
+        walk(r)
+        path = rng.choice(paths)
+        parent = r
+        for k in path[:-1]:
+            parent = parent[k]
+        k = path[-1]
+        op = rng.random()
+        if op < 0.4:
+            parent[k] = copy.deepcopy(rng.choice(WEIRD))
+        elif op < 0.6 and isinstance(parent[k], str):
+            parent[k] = rng.choice([parent[k].upper(), ' ' + parent[k] + ' ', parent[k].title()])
+        elif op < 0.75:
+            parent.pop(k)
+        else:
+            parent[k] = rng.choice([[parent[k]], str(parent[k])])
+    return r
+
+
+def test_board_compare_gate_and_checks_agree_on_every_derived_value():
+    rng = random.Random(20261018)
+    seen = collections.Counter()
+    for _ in range(400):
+        labels, ok = parse_response(json.dumps(_reply(rng)))
+        if not ok:
+            continue
+        seen['parsed'] += 1
+        d = to_board.convert({'episode_dir': '/x/ep', 'parse_ok': True, 'labels': labels, 'config': {}}, 'probe')
+        m = metrics.measure(labels, 'probe', {})
+        board_outcome = (d.get('completion') or {}).get('task_completed') or None
+        assert m['outcome'] == board_outcome
+        gate_outcome = judge({'outcome': ['\x00']}, labels)[1][0].split(' ', 1)[1]
+        if board_outcome:
+            assert gate_outcome == board_outcome
+        elif d.get('tasks'):
+            assert gate_outcome == 'tasks:' + ','.join(sorted({str(t.get('outcome') or None) for t in d['tasks']}))
+        relation = (d.get('goal_alignment') or {}).get('relation')
+        assert judge({'align': ['\x00']}, labels)[1][0] == f'alignment {relation}'
+        for key in ('data_issues', 'operator_mistakes'):
+            shown = [i for i in d.get(key) or [] if i and i.get('issue')]
+            assert m[key] == sum(1 for i in shown if FAMILIES.counts(key, i))
+            assert m[key + '_unrated'] == sum(1 for i in shown if not FAMILIES.rated(i))
+        shown = [i for i in d.get('data_issues') or [] if i and i.get('issue')]
+        top = max_severity(shown)
+        for bound in SEVS:
+            board_view = top is None or SEVS.index(top) <= SEVS.index(bound)
+            assert judge({'max_issue_sev': bound}, labels)[0] == board_view
+        assert sorted(d.get('_schema_violations') or []) == sorted(m['violations'])
+        assert sorted(metrics.schema_violations(labels, {})) == sorted(m['violations'])
+        assert (sorted(f['rule'] for f in label_consistency.check(labels, 60.0))
+                == sorted(f['rule'] for f in label_consistency.check(d, 60.0)))
+        for e in d.get('event_labels') or []:
+            p = e.get('progress')
+            assert p is None or (type(p) in (int, float) and math.isfinite(p) and 0 <= p <= 1)
+    assert seen['parsed'] > 300
