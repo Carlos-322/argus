@@ -81,8 +81,20 @@ def corrupt_directory(raw, what):
 def test_damaged_directory_entry_is_replaced_by_the_members_own_header(tmp_path, what, streaming):
     raw = corrupt_directory(build(zipfile.ZIP_DEFLATED, streaming=streaming), what)
     got, bad = unpacked(tmp_path, raw)
-    assert got == PAYLOADS
+    if what == 'name':
+        unverified_name_kept_apart(got, bad)
+    else:
+        assert got == PAYLOADS
     assert any('own headers' in note for note in bad)
+
+
+def unverified_name_kept_apart(got, bad):
+    # no checksum covers a name, so a member the two indexes name differently keeps its bytes under a name that
+    # places it in no recording, never under the name its siblings suggest
+    assert sorted(got.values()) == sorted(PAYLOADS.values())
+    apart = [name for name in got if name not in PAYLOADS]
+    assert len(apart) == 1 and apart[0].startswith('name_unverified/'), list(got)
+    assert any('neither name can be verified' in note for note in bad)
 
 
 def test_intact_archive_reads_through_its_directory_without_notes(tmp_path):
@@ -118,7 +130,7 @@ def test_a_wrong_size_in_the_directory_never_refuses_the_archive(tmp_path):
 def test_a_member_the_damaged_directory_lost_is_found_by_its_own_header(tmp_path):
     raw = bytearray(build(zipfile.ZIP_DEFLATED))
     first = raw.find(b'PK\x01\x02')
-    raw[first + 46] ^= 0x20                                    # one entry disagrees with its member
+    struct.pack_into('<I', raw, first + 42, 7)                 # one entry points at the wrong offset
     end = raw.rfind(b'PK\x05\x06')
     count = struct.unpack_from('<H', raw, end + 10)[0]
     last = raw.rfind(b'PK\x01\x02', 0, end)
@@ -130,9 +142,11 @@ def test_a_member_the_damaged_directory_lost_is_found_by_its_own_header(tmp_path
     assert got == PAYLOADS
 
 
-def test_a_name_damaged_in_the_member_header_keeps_the_directory_name(tmp_path):
-    # the indexes name the member differently; the name its siblings bear out is kept
+@pytest.mark.parametrize('flip', [0, 4])
+def test_a_name_damaged_in_the_member_header_is_never_given_to_another_recording(tmp_path, flip):
+    # 'rec/file2.bin' becomes 'sec/file2.bin' (another folder) or 'rec/gile2.bin' in the member header: either name
+    # could be the damaged one, and choosing by the siblings could hand the data to another recording
     raw = bytearray(build(zipfile.ZIP_DEFLATED))
-    raw[local_header(raw, 2) + 30] ^= 0x01                    # 'rec/...' becomes 'sec/...' in the member header
+    raw[local_header(raw, 2) + 30 + flip] ^= 0x01
     got, bad = unpacked(tmp_path, bytes(raw))
-    assert got == PAYLOADS
+    unverified_name_kept_apart(got, bad)

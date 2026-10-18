@@ -374,6 +374,11 @@ def _archive_members(path: Path):
             if reason:
                 bad.append(f"{entry['name']} ({reason}; member was skipped)")
                 continue
+            if entry.get('conflicting_names'):
+                first, second = entry['conflicting_names']
+                bad.append(f"the member at byte {entry['offset']:,} is named {first} by the ZIP directory and {second} by "
+                           f"its own header; neither name can be verified, so it was read as a recording of its own, "
+                           f"{entry['name']}, which no other recording's files describe")
             name = entry['name']
             if not entry['flags'] & 0x800:
                 try:
@@ -6306,6 +6311,12 @@ def measured_rate(extra: dict, camera: str, times: np.ndarray, declared: float, 
     times measure, with a data issue. A declared 15 on a 30 fps video had shown every frame at twice its time."""
     if on_grid or declared is None or len(times) < 3:
         return declared
+    # Frames whose times sit on the declared grid agree with it even when some are missing: a gap is a lost frame,
+    # not another rate, and the declared rate is what pairs frames with the table's rows. Only times off the grid
+    # show that the declared rate is wrong.
+    slots = (np.asarray(times, dtype=np.float64) - float(times[0])) * float(declared)
+    if np.mean(np.abs(slots - np.round(slots)) <= .1) >= .9:
+        return declared
     measured = measured_fps(np.asarray(times, dtype=np.float64))
     if not measured or abs(measured - declared) <= .02 * declared:
         return declared
@@ -10204,17 +10215,16 @@ def mcap_text_clock_proof(camera_kind, text_kind, camera, text, same_recorder=Tr
     rows = camera + text
     if any(row['capture_ns'] > row['log_ns'] for row in rows):
         return None
-    # A shared clock is a declaration; the delivery delay (arrival minus stamp) is the one measurement of it. A later
-    # delivery and an offset clock look the same in the recording, and either reading is wrong by the difference when
-    # the other holds. Through one recorder, delays past CLOCK_OFFSET_IMPLAUSIBLE_MS are rare while unsynchronised
-    # clocks are not, so such a text stream is not on the camera's clock and is placed by arrival; a smaller difference
-    # is the most its stamps can be off (offset_ms, flagged on the stream when it exceeds CLOCK_OFFSET_FLAG_MS).
+    # The delivery delay (arrival minus stamp) is the one measurement of a shared clock, and it cannot tell a later
+    # delivery from an offset clock: either reading is wrong by the difference when the other holds. So it weighs
+    # against evidence of the same strength only. Matching clock IDs the publisher declared are stronger than a delay
+    # that a late delivery explains as well, so they place the text and the difference is flagged with its size
+    # (offset_ms, past CLOCK_OFFSET_FLAG_MS). A shared clock only inferred from the stamps' agreement with publication
+    # times is set aside when the delays differ past CLOCK_OFFSET_IMPLAUSIBLE_MS, and the text is placed by arrival.
     # Delays measured by two recorders (a sidecar file beside the camera's) are not comparable, so only streams the
     # camera's own recorder logged are held to it.
     delay = lambda records: float(np.median([r['log_ns'] - r['capture_ns'] for r in records])) / 1e6
     offset_ms = round(abs(delay(text) - delay(camera)), 1) if same_recorder else 0.0
-    if offset_ms > CLOCK_OFFSET_IMPLAUSIBLE_MS:
-        return None
     ids = {row['capture_clock_id'] for row in rows}
     if len(ids) == 1 and None not in ids:
         return {'basis': 'matching publisher-declared capture clock IDs', 'capture_clock_id': next(iter(ids)),
@@ -10222,6 +10232,8 @@ def mcap_text_clock_proof(camera_kind, text_kind, camera, text, same_recorder=Tr
                 'delivery_delay_difference_ms': offset_ms}
     if any(row['clock_declarations'] for row in rows):
         return None  # Conflicting or incomplete explicit domains cannot be repaired by numeric coincidence.
+    if offset_ms > CLOCK_OFFSET_IMPLAUSIBLE_MS:
+        return None
     if (all(ordered(records, 'publish_ns') for records in (camera, text)) and
             all(row['capture_ns'] == row['publish_ns'] > 0 and row['publish_ns'] <= row['log_ns'] for row in rows)):
         return {'basis': 'capture stamps equal recorded MCAP publish_time, with causal publication/log chronology',
@@ -11071,8 +11083,8 @@ def decoded_damage(path: Path) -> set[int]:
         stream.thread_type = "AUTO"
         broken = False
         for packet in container.demux(stream):
-            if packet.pts is None and packet.dts is None:
-                continue
+            # the last packet demux yields carries no data and drains the decoder, whose threads still hold the last
+            # pictures; it is decoded like any other, so those pictures are checked too
             try:
                 pictures = packet.decode()
             except av.error.FFmpegError:

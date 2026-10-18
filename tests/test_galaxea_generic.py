@@ -176,18 +176,19 @@ def test_explicit_episode_goal_keeps_priority_over_coarse_and_quality_codes(tmp_
 
 
 def test_declared_rate_disagreement_retains_native_stamps_and_qualifies_mapping(tmp_path, monkeypatch):
+    # stamps at 1/15 s sit on a declared 30 Hz grid, every other slot empty: missing frames, not another rate, so the
+    # declared rate pairs the frames with the table's rows and the stamps place them
     root = tmp_path / 'rate'
     native(root)
     info = json.loads((root / 'meta/info.json').read_text())
     info['fps'] = 30
     (root / 'meta/info.json').write_text(json.dumps(info))
     ep, ctx = convert(root, tmp_path / 'output', monkeypatch)
-    # the video's own frame times measure 15 per second, so they place the frames, not the declared 30
-    assert ctx['fps'] == 15
-    assert any(issue['kind'] == 'declared_rate_wrong' for issue in ctx['reader_issues'])
-    from label import episode
-    times = episode.load(ep)['times']       # None when the frames are evenly spaced at the context's rate
-    assert times is None or np.allclose(times['exo'], np.arange(4) / 15)
+    assert ctx['fps'] == 30
+    assert any(issue['kind'] == 'recorded_rate_mismatch' for issue in ctx['reader_issues'])
+    assert not any(issue['kind'] == 'declared_rate_wrong' for issue in ctx['reader_issues'])
+    with np.load(ep / 'times.npz') as clocks:
+        assert clocks['exo_pts'].tolist() == [0, 1024, 2048, 3072]
 
 
 def test_competing_coarse_table_claims_never_supply_an_episode_goal(tmp_path, monkeypatch):

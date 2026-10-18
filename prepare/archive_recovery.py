@@ -422,11 +422,10 @@ def checked_directory(path, infos, max_files, max_bytes):
             if entry is not None:
                 replaced[info] = entry
                 disagree.remove(info)
-    others = [info.filename for info in agree] + [entry['name'] for entry in replaced.values()]
     for entry in replaced.values():
         local = entry.pop('local', None)
-        if local is not None and _likelier_name(local['name'], entry['name'], others) == local['name']:
-            entry.update(local)
+        if local is not None:
+            entry.update(unverified_name(entry, local['name']))
     # a directory with one damaged entry may have lost others too: its members' own headers say which are missing
     entries, _ = scan_local(path, max_files, max_bytes)
     by_offset = {entry['offset']: entry for entry in entries}
@@ -478,16 +477,17 @@ def _directory_entry(source, info, length):
     return None
 
 
-def _likelier_name(first: str, second: str, others: list) -> str:
-    """Of two names the two indexes give one member, the one the archive's other members bear out: a flipped byte
-    breaks a name's agreement with its siblings' folders, stems and extensions. With nothing to compare, second."""
-    def agreement(name):
-        best = 0
-        for other in others:
-            if other == name:
-                continue
-            prefix = len(os.path.commonprefix([name, other]))
-            suffix = len(os.path.commonprefix([name[::-1], other[::-1]]))
-            best = max(best, min(prefix + suffix, len(name)))
-        return best
-    return first if agreement(first) > agreement(second) else second
+UNVERIFIED_FOLDER = 'name_unverified'
+
+
+def unverified_name(entry: dict, other: str) -> dict:
+    """The name a member is unpacked under when the archive's two indexes name it differently. No checksum covers a
+    name, so neither can be shown to be the one written with the data, and a name decides which recording, camera
+    and task the data belongs to. The member is kept, readable, in a folder of its own named after where it sits in
+    the archive, so it is a recording of its own that no sidecar or sibling claims; its extension is kept when both
+    names agree on it."""
+    first, second = entry['name'], other
+    ext = os.path.splitext(first)[1] if os.path.splitext(first)[1] == os.path.splitext(second)[1] else ''
+    name = f"{UNVERIFIED_FOLDER}/byte_{entry['offset']}/member{ext}"
+    return {'name': name, 'raw_name': name.encode(), 'flags': entry['flags'] | 0x800,
+            'conflicting_names': [first, second]}

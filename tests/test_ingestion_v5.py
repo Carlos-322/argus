@@ -225,17 +225,20 @@ def test_mcap_text_uses_its_verified_camera_clock(tmp_path, text_clock):
             data = {'data': text}
             if text_clock != 'arrival_only':
                 data['header'] = header((camera_base if text_clock.startswith('capture') else wall) + when)
-            # text on the camera's clock arrives about as fast as its frames; text on another clock a second late
-            late = .02 if text_clock == 'capture' else 1
+            # text arrives about as fast as the frames, or a second late; on the camera's declared clock a late
+            # delivery cannot disprove the declaration, so it keeps its stamps and the difference is flagged
+            late = .005 if text_clock == 'capture' else 1
             writer.add_message(channel, round((wall + when + late) * 1e9), json.dumps(data).encode(), 0)
         writer.finish()
     out = tmp_path / 'out'
     report = formats.convert(source, 'ego_head', out, 'clock fixture', 900)
     assert not report['failed'], report
     ctx = json.loads((out / report['episodes'][0]['episode_id'] / 'context.json').read_text())
-    if text_clock == 'capture':
+    if text_clock.startswith('capture'):
         assert [row['t0'] for row in ctx['annotation_subtasks']] == [1., 2.5]
         assert ctx['instruction'] == 'fold the cloth'
+        flagged = any(i['kind'] == 'capture_clock_offset_possible' for i in ctx.get('reader_issues') or [])
+        assert flagged is (text_clock == 'capture_late')
     else:
         assert [row['t0'] for row in ctx['annotation_subtasks']] == [2., 3.5]
         assert ctx['source']['presentation_clock']['basis'] == 'mcap_log_time'
