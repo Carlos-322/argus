@@ -1,4 +1,11 @@
-"""Project partial labels into consumer-safe values without changing the saved reply."""
+"""Project partial labels into consumer-safe values without changing the saved reply.
+
+This module is the one reader of a raw model reply for every consumer: the board (board/to_board.py), compare
+(compare/metrics.py), the gate (gate/score.py) and the consistency checks (checks/label_consistency.py). project()
+keeps the valid fields and lists every departure from the output format in _schema_violations, one per source
+field. The values those consumers derive from a label are defined here once: the effective outcome, an issue's
+severity tier (unrated when it has none of SEVERITIES) and the highest rated severity of a list.
+"""
 from __future__ import annotations
 
 import copy
@@ -11,8 +18,34 @@ TASK_OUTCOMES = OUTCOMES + ('continues_past_cut',)
 EVENT_OUTCOMES = ('success', 'failure', 'unclear')
 
 
+SEVERITIES = ('low', 'medium', 'high')
+SEVERITY_RANK = {name: rank for rank, name in enumerate(SEVERITIES, start=1)}
+ISSUE_LISTS = ('data_issues', 'operator_mistakes')
+
+
 def effective_outcome(value):
     return 'failure' if value == 'partial' else value
+
+
+def severity(item) -> str | None:
+    """An issue's severity tier, or None when the issue is unrated (no severity, or one outside SEVERITIES)."""
+    value = item.get('severity') if isinstance(item, dict) else None
+    value = value.strip().lower() if isinstance(value, str) else None
+    return value if value in SEVERITY_RANK else None
+
+
+def issues(labels: dict, key: str) -> list[dict]:
+    """The issues of a list ("data_issues" or "operator_mistakes") that say something: rows with issue text."""
+    rows = labels.get(key) if isinstance(labels, dict) else None
+    return [item for item in rows if isinstance(item, dict) and isinstance(item.get('issue'), str)
+            and item['issue'].strip()] if isinstance(rows, list) else []
+
+
+def max_severity(items) -> str | None:
+    """The highest severity among the rated issues, None when none is rated. An unrated issue is shown and counted as
+    unrated; it has no tier, so it neither raises nor lowers this."""
+    rated = [severity(item) for item in items if severity(item)]
+    return max(rated, key=SEVERITY_RANK.get) if rated else None
 
 
 def _arm_names(config=None):
@@ -108,8 +141,100 @@ def diagnostics(labels: dict, dropped: list[dict]) -> dict[str, str]:
     return entries
 
 
-def project(labels: dict, config: dict | None = None) -> tuple[dict, list[dict]]:
-    """Keep valid fields, omit unsafe nested values, and report every omission with its source value."""
+def _number(x) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+
+# the fields every rig's output format asks for, and their types
+REQUIRED = {"scene": dict, "timeline": list, "task_summary": str, "key_events": list, "state_changes": list,
+            "scene_graph": list, "recovery": list, "instruction_variants": list, "performance_review": str,
+            "data_issues": list}
+TYPE_WORDS = {dict: 'an object', list: 'a list', str: 'text'}
+
+
+def schema_rules(labels: dict, config: dict | None, dropped: list[dict]) -> dict[str, str]:
+    """Where a projected reply departs from the schema every model was given, beyond the fields project() leaves
+    out: a required field missing, a value missing where the schema asks for one (a step's time, arm or contribution,
+    an issue's severity, an outcome). Head-camera replies carry tasks instead of one completion. An episode with a
+    single camera, named for its actor (FastUMI's one-gripper tasks: the prompt names the camera "gripper" and still
+    lists left, right or both), may name that actor: the ambiguity is the prompt's, and counting it would score our
+    wording as the model's failure to follow it. One message per source field, keyed as diagnostics() keys them."""
+    found = {}
+    mappings = {}
+
+    def add(scope, key, row, why):
+        if row is not None:
+            if scope not in mappings:
+                mappings[scope] = source_row_indices(labels, scope, dropped)
+            if row < len(mappings[scope]):
+                row = mappings[scope][row]
+        identity = field_identity(scope + ('.' + key if key else ''), row)
+        found.setdefault(identity, f'{identity}: {why}')
+
+    for key, kind in REQUIRED.items():
+        if key not in labels:
+            add(key, '', None, 'missing')
+        elif not isinstance(labels[key], kind):
+            add(key, '', None, f'not {TYPE_WORDS[kind]}')
+    if 'tasks' in labels:
+        if isinstance(labels['tasks'], list):
+            for i, task in enumerate(labels['tasks']):
+                if not isinstance(task, dict):
+                    add('tasks', '', i, 'not an object')
+                elif str(task.get('outcome') or '').lower() not in TASK_OUTCOMES:
+                    add('tasks', 'outcome', i, f"{task.get('outcome')!r} is not an outcome")
+    else:
+        c = labels.get('completion')
+        if not isinstance(c, dict):
+            add('completion', '', None, 'missing')
+        elif str(c.get('task_completed') or '').lower() not in OUTCOMES:
+            add('completion', 'task_completed', None, f"{c.get('task_completed')!r} is not an outcome")
+    arms = allowed_arms(config)
+    timeline = labels.get('timeline') if isinstance(labels.get('timeline'), list) else []
+    for i, segment in enumerate(timeline):
+        if not isinstance(segment, dict):
+            add('timeline', '', i, 'not a segment')
+            continue
+        for key in ('start_s', 'end_s'):
+            if not _number(segment.get(key)):
+                add('timeline', key, i, 'not a time')
+        if _number(segment.get('start_s')) and _number(segment.get('end_s')) and segment['end_s'] < segment['start_s']:
+            add('timeline', 'end_s', i, 'ends before it starts')
+        if not isinstance(segment.get('arm'), str) or segment['arm'] not in arms:
+            add('timeline', 'arm', i, f"{segment.get('arm')!r} is not one of {', '.join(sorted(arms))}")
+        if segment.get('contribution') not in ENUMS['contribution']:
+            add('timeline', 'contribution', i, f"{segment.get('contribution')!r} is not a contribution")
+        if segment.get('progress') is not None and not (_number(segment['progress'])
+                                                        and 0 <= segment['progress'] <= 1):
+            add('timeline', 'progress', i, f"{segment.get('progress')!r} is not a number from 0 to 1")
+    events = labels.get('key_events') if isinstance(labels.get('key_events'), list) else []
+    for i, event in enumerate(events):
+        if not isinstance(event, dict):
+            add('key_events', '', i, 'not an object')
+        elif not _number(event.get('t_s')):
+            add('key_events', 't_s', i, 'not a time')
+        elif str(event.get('outcome') or '').lower() not in EVENT_OUTCOMES:
+            add('key_events', 'outcome', i, f"{event.get('outcome')!r} is not an outcome")
+    for key in ISSUE_LISTS:
+        rows = labels.get(key)
+        if rows is None:
+            continue
+        if not isinstance(rows, list):
+            add(key, '', None, 'not a list')
+            continue
+        for i, item in enumerate(rows):
+            if not isinstance(item, dict):
+                add(key, '', i, 'not an object')
+            elif not str(item.get('issue') or '').strip():
+                add(key, 'issue', i, 'no description')
+            elif severity(item) is None:
+                add(key, 'severity', i, f"{item.get('severity')!r} is not one of {', '.join(SEVERITIES)}")
+    return found
+
+
+def project(labels: dict, config: dict | None = None, *, _part: bool = False) -> tuple[dict, list[dict]]:
+    """Keep valid fields, omit unsafe nested values, and report every omission with its source value. A whole reply
+    is also checked against the schema (schema_rules); a part's local assessment carries only part of it."""
     labels = copy.deepcopy(labels)
     dropped = []
     # Replies can supply these internal keys too. Validate their shapes before the
@@ -211,7 +336,7 @@ def project(labels: dict, config: dict | None = None) -> tuple[dict, list[dict]]
                 dropped.append({'field': 'part_assessments', 'row': index, 'why': 'not an object',
                                 'value': assessment})
                 continue
-            local, omitted = project(assessment, config)
+            local, omitted = project(assessment, config, _part=True)
             kept.append(local)
             dropped.extend({**item, 'field': f'part_assessments[{index}].' + item['field']} for item in omitted)
         labels['part_assessments'] = kept
@@ -221,9 +346,12 @@ def project(labels: dict, config: dict | None = None) -> tuple[dict, list[dict]]
     for item in dropped:
         unique.setdefault(json.dumps(item, sort_keys=True, ensure_ascii=True), item)
     dropped = list(unique.values())
-    issues = diagnostics(labels, dropped)
-    if issues:
-        labels['_schema_violations'] = list(issues.values())
+    found = diagnostics(labels, dropped)
+    if not _part:
+        for identity, message in schema_rules(labels, config, dropped).items():
+            found.setdefault(identity, message)
+    if found:
+        labels['_schema_violations'] = list(found.values())
     if dropped:
         labels['_dropped'] = dropped
     return labels, dropped
