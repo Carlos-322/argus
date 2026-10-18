@@ -336,14 +336,14 @@ class UnpackLimit(UploadInputError):
 
 def _archive_members(path: Path):
     """([(parts, size, open)] for every regular file in the archive, how many members were left out, the open archive,
-    the members that cannot be read, each named with why). Links, devices, folders, hidden files and __MACOSX are
-    never unpacked. A password-protected member or one in a compression Python does not open is left out by itself,
+    the members that cannot be read, each named with why, and the members whose owner the archive does not prove,
+    [(label, size, open)]). Links, devices, folders, hidden files and __MACOSX are never unpacked. A password-protected member or one in a compression Python does not open is left out by itself,
     and a tar cut short keeps every member whose header comes before the cut, as the upload page does: one bad member
     had cost the whole archive."""
     import stat
     import tarfile
     import zipfile
-    out, skipped, bad = [], 0, []
+    out, skipped, bad, unverified = [], 0, [], []
     from contextlib import nullcontext
     from prepare.archive_recovery import (checked_directory, local_members, local_stored_members, member_opener,
                                           usable, zip_member)
@@ -352,7 +352,7 @@ def _archive_members(path: Path):
             local_zip = source.read(4) == b'PK\x03\x04'
         if local_zip:
             out, skipped, bad = local_stored_members(path, _member_parts, UNPACK_MAX_FILES, UNPACK_MAX_BYTES)
-            return out, skipped, nullcontext(), bad
+            return out, skipped, nullcontext(), bad, unverified
     if zipfile.is_zipfile(path):              # by its bytes, not its name: a tar named .zip is opened as a tar
         try:
             zf = zipfile.ZipFile(path)
@@ -362,7 +362,7 @@ def _archive_members(path: Path):
             out, skipped, bad = local_members(path, _member_parts, UNPACK_MAX_FILES, UNPACK_MAX_BYTES,
                                               f"archive: {path.name} has a ZIP directory that could not be read "
                                               f"({type(error).__name__}); its members were read from their own headers")
-            return out, skipped, nullcontext(), bad
+            return out, skipped, nullcontext(), bad, unverified
         infos, replaced, unlisted, lost = checked_directory(path, infos, UNPACK_MAX_FILES, UNPACK_MAX_BYTES)
         if replaced or unlisted or lost:
             bad.append(f"archive: {path.name} has a damaged ZIP directory; {len(replaced) + len(unlisted)} member"
@@ -375,11 +375,17 @@ def _archive_members(path: Path):
                 bad.append(f"{entry['name']} ({reason}; member was skipped)")
                 continue
             if entry.get('conflicting_names'):
+                # A name decides which recording, camera and task a member joins, and no checksum covers one. When the
+                # two indexes disagree the member is returned apart from the archive's tree, to be read as an upload
+                # of its own (open_archives), so no file of the upload can describe it, whatever it is named.
                 first, second = entry['conflicting_names']
+                ext = Path(first).suffix if Path(first).suffix == Path(second).suffix else ''
+                label = f"{path.stem}-byte_{entry['offset']}"
+                unverified.append((label, f"member{ext}", entry['size'], member_opener(path, entry, bad)))
                 bad.append(f"archive: the member at byte {entry['offset']:,} is named {first} by the ZIP directory and "
-                           f"{second} by "
-                           f"its own header; neither name can be verified, so it was read as a recording of its own, "
-                           f"{entry['name']}, which no other recording's files describe")
+                           f"{second} by its own header; neither name can be verified, so it was read as an upload of "
+                           f"its own, {label}, which no other file describes")
+                continue
             name = entry['name']
             if not entry['flags'] & 0x800:
                 try:
@@ -428,7 +434,7 @@ def _archive_members(path: Path):
                 skipped += 1
                 continue
             out.append((parts, info.file_size, lambda i=info: zip_member(zf, i, bad)))
-        return out, skipped, zf, bad
+        return out, skipped, zf, bad, unverified
     tf = tarfile.open(path, "r:*")
     members = []
     try:
@@ -465,11 +471,13 @@ def _archive_members(path: Path):
             skipped += 1
             continue
         out.append((parts, m.size, lambda mm=m: tf.extractfile(mm)))
-    return out, skipped, tf, bad
+    return out, skipped, tf, bad, unverified
 
 
-def open_archives(root: Path, dest: Path) -> tuple[Path, list[str]]:
-    """Direct archives get an owned immutable input and a fresh extraction tree per conversion."""
+def open_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path]]:
+    """Direct archives get an owned immutable input and a fresh extraction tree per conversion. Returns the upload's
+    root, what was done, and the folders of members whose owner the archive does not prove, each outside the root
+    and read as an upload of its own (_unpack_archives)."""
     root, dest = Path(root), Path(dest)
     if not root.is_file() or not ARCHIVE_RE.search(root.name):
         return _unpack_archives(root, dest)
@@ -498,9 +506,9 @@ def open_archives(root: Path, dest: Path) -> tuple[Path, list[str]]:
         identity = lambda stat: (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
         if identity(before) != identity(after):
             raise ValueError('Archive changed while its input snapshot was being read')
-        expanded, notes = _unpack_archives(incoming, workspace / 'files')
+        expanded, notes, apart = _unpack_archives(incoming, workspace / 'files')
         write_atomic(workspace / '.archive-source.json', {'name': root.name, 'sha256': digest.hexdigest()})
-        return expanded, notes
+        return expanded, notes, apart
     except BaseException:
         def cleanup_error(function, name, error):
             # macOS can remove a payload's AppleDouble companion before rmtree reaches its directory entry.
@@ -510,7 +518,7 @@ def open_archives(root: Path, dest: Path) -> tuple[Path, list[str]]:
         raise
 
 
-def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str]]:
+def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path]]:
     """Unpack the upload's archives the way Data Review's upload page opens them (its read.js openArchives): an
     archive whose files sit in one folder unpacks to that folder, one of loose files to a folder named after it.
     An upload that is itself an archive unpacks into dest, which becomes the upload; archives inside a folder
@@ -520,12 +528,17 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str]]:
     Every member is checked before a byte is written: paths that could leave the folder, links and devices are
     skipped, as are hidden files and __MACOSX; an upload holds at most UNPACK_MAX_FILES files and
     UNPACK_MAX_BYTES unpacked, counted from what each member really yields, so an archive whose members hold
-    more than they declare stops at the limit."""
+    more than they declare stops at the limit.
+
+    A member whose owner the archive does not prove (_archive_members) is written outside the upload's tree, beside
+    dest, one folder each, and returned apart, so the upload's own files and names can never reach it."""
     import tempfile
     root = Path(root)
+    apart_root = Path(dest).parent / (Path(dest).name + '-apart')
+    apart = []
     if root.is_file():
         if not ARCHIVE_RE.search(root.name):
-            return root, []
+            return root, [], apart
         archives, base_of = [root], {root: Path(dest)}
     else:
         archives = [p for p in files_under(root) if ARCHIVE_RE.search(p.name)]
@@ -534,9 +547,11 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str]]:
     for a in archives:                          # grows as archives inside archives are unpacked
         done = base_of[a] / f".{a.name}.unpacked"
         if done.exists():
+            # unpacked by an earlier run: its members kept apart are still read apart
+            apart += sorted(p for p in apart_root.glob(f"*-{a.stem}-byte_*") if p.is_dir())
             continue
         try:
-            members, skipped, handle, bad = _archive_members(a)
+            members, skipped, handle, bad, unverified = _archive_members(a)
         except ValueError as e:
             notes.append(f"{e}, so it was not opened.")
             continue
@@ -554,6 +569,28 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str]]:
             base.mkdir(parents=True, exist_ok=True)
             broot = base.resolve()
             wrote = 0
+            for label, filename, size, opener in unverified:
+                if count >= UNPACK_MAX_FILES or total + size > UNPACK_MAX_BYTES:
+                    raise UnpackLimit(f"{a.name} holds more than one upload can: at most {UNPACK_MAX_FILES:,} files "
+                                     f"and {UNPACK_MAX_BYTES / 1e9:.0f} GB unpacked")
+                folder = apart_root / f"{len(apart):03d}-{label}"
+                folder.mkdir(parents=True, exist_ok=True)
+                try:
+                    with opener() as src, (folder / filename).open('wb') as dst:
+                        got = 0
+                        while buf := src.read(1 << 20):
+                            got += len(buf)
+                            if total + got > UNPACK_MAX_BYTES:
+                                raise UnpackLimit(f"{a.name} unpacks to more than {UNPACK_MAX_BYTES / 1e9:.0f} GB")
+                            dst.write(buf)
+                except UnpackLimit:
+                    raise
+                except Exception:
+                    bad.append(f"{label} (cut short or damaged)")
+                    continue
+                total += got
+                count += 1
+                apart.append(folder)
             for parts, size, opener in members:
                 if count >= UNPACK_MAX_FILES or total + size > UNPACK_MAX_BYTES:
                     raise UnpackLimit(f"{a.name} holds more than one upload can: at most {UNPACK_MAX_FILES:,} files "
@@ -616,8 +653,8 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str]]:
                         + (f" and {len(members_bad) - 12} more" if len(members_bad) > 12 else "")
                         if members_bad else "") + "." + "".join(f" {c}." for c in cut))
     if root.is_file():
-        return Path(dest), notes
-    return root, notes
+        return Path(dest), notes, apart
+    return root, notes, apart
 
 
 # ---------------------------------------------------------------- detection
@@ -12663,26 +12700,44 @@ def convert(root: Path, rig: str, out: Path, dataset: str, max_seconds: float, g
     root, out = Path(root), Path(out)
     selected_file = root if root.is_file() and not ARCHIVE_RE.search(root.name) else None
     root = archive_read_root(root, out)
-    root, opened = open_archives(root, out.parent / "upload_unpacked")
+    root, opened, apart = open_archives(root, out.parent / "upload_unpacked")
     from prepare.hdf_metadata import authorized_sources
-    with authorized_sources(files_under(root)):
+    with authorized_sources([*files_under(root), *(p for folder in apart for p in files_under(folder))]):
         return _convert_upload(root, rig, out, dataset, max_seconds, grouping, ownership_context,
-                               selected_file, opened)
+                               selected_file, opened, apart)
 
 
-def _convert_upload(root, rig, out, dataset, max_seconds, grouping, ownership_context, selected_file, opened):
-    """Plan and read only the files belonging to the staged upload."""
+def _convert_upload(root, rig, out, dataset, max_seconds, grouping, ownership_context, selected_file, opened,
+                    apart=()):
+    """Plan and read only the files belonging to the staged upload, and each member whose owner the archive does not
+    prove (apart) as an upload of its own: planned alone, so no file, folder or table of the upload describes it."""
     from prepare.annotations import source_context, merge_source_contexts
     declared_context = source_context(selected_file or root, rig)
+    alone, alone_notes = [], []
+    for folder in apart:
+        try:
+            _, folder_items = plan(folder)
+        except UploadInputError as error:
+            alone_notes.append(f"{folder.name}, read on its own, holds no recording: {error}.")
+            continue
+        for it in folder_items:
+            it["name"] = f"name_unverified/{folder.name}/{it['name']}"
+            it.pop("output_name", None)
+        alone += folder_items
     try:
         det, items = plan(root, grouping, ownership_context)
     except UploadInputError as e:
-        if not opened:
+        if alone:
+            det, items = {"format": "archive members", "used": [], "missing": [str(e)]}, []
+        elif not opened:
             raise
         # what the archives said (a member left out, an archive cut short) is why the upload holds nothing readable
-        if not files_under(root):
+        elif not files_under(root):
             raise UploadInputError("nothing in the upload could be unpacked: " + " ".join(opened)) from e
-        raise UploadInputError(f"{e}. {' '.join(opened)}") from e
+        else:
+            raise UploadInputError(f"{e}. {' '.join(opened)}") from e
+    items = items + alone
+    det.setdefault("missing", []).extend(alone_notes)
     out.mkdir(parents=True, exist_ok=True)
     total = 0.0
     report = {"format": det["format"], "version": det.get("version"), "rig": rig,

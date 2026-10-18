@@ -38,12 +38,15 @@ def build(method, *, streaming=False, zip64=False):
 def unpacked(tmp_path, raw):
     path = tmp_path / 'up.zip'
     path.write_bytes(raw)
-    members, skipped, handle, bad = formats._archive_members(path)
+    members, skipped, handle, bad, unverified = formats._archive_members(path)
     got = {}
     with handle:
         for parts, size, opener in members:
             with opener() as reader:
                 got['/'.join(parts)] = reader.read()
+        for label, filename, size, opener in unverified:
+            with opener() as reader:
+                got[f'apart:{label}/{filename}'] = reader.read()
     return got, bad
 
 
@@ -89,11 +92,11 @@ def test_damaged_directory_entry_is_replaced_by_the_members_own_header(tmp_path,
 
 
 def unverified_name_kept_apart(got, bad):
-    # no checksum covers a name, so a member the two indexes name differently keeps its bytes under a name that
-    # places it in no recording, never under the name its siblings suggest
+    # no checksum covers a name, so a member the two indexes name differently keeps its bytes but is returned apart
+    # from the archive's tree, never under either name
     assert sorted(got.values()) == sorted(PAYLOADS.values())
     apart = [name for name in got if name not in PAYLOADS]
-    assert len(apart) == 1 and apart[0].startswith('name_unverified/'), list(got)
+    assert len(apart) == 1 and apart[0].startswith('apart:'), list(got)
     assert any('neither name can be verified' in note for note in bad)
 
 
@@ -157,7 +160,68 @@ def test_a_note_about_the_archive_is_never_counted_as_a_member_left_out(tmp_path
     # a damaged directory whose members are all recovered leaves nothing out, whatever the notes say about it
     path = tmp_path / 'up.zip'
     path.write_bytes(corrupt_directory(build(zipfile.ZIP_DEFLATED), what))
-    _, notes = formats.open_archives(path, tmp_path / 'unpacked')
+    _, notes, _ = formats.open_archives(path, tmp_path / 'unpacked')
     opened = next(note for note in notes if note.startswith('Opened up.zip'))
     assert 'left out' not in opened, opened
     assert any(note.startswith('Archive damage: ') and 'ZIP directory' in note for note in notes)
+
+
+def movie(level):
+    import av
+    import numpy as np
+    out = io.BytesIO()
+    with av.open(out, 'w', format='mp4') as container:
+        stream = container.add_stream('mpeg4', rate=30)
+        stream.width, stream.height, stream.pix_fmt = 64, 48, 'yuv420p'
+        for _ in range(8):
+            frame = av.VideoFrame.from_ndarray(np.full((48, 64, 3), level, np.uint8), format='rgb24')
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+    return out.getvalue()
+
+
+RECORDINGS = {'episode1/front.mp4': movie(40), 'episode2/wrist.mp4': movie(120), 'episode3/top.mp4': movie(200)}
+TASKS = {'episode1/task.txt': 'task of episode one', 'episode2/task.txt': 'task of episode two',
+         'episode3/task.txt': 'task of episode three'}
+
+
+def name_damage(raw, how):
+    raw = bytearray(raw)
+    local = raw.find(b'PK\x03\x04')                     # the first member, episode1/front.mp4
+    central = raw.find(b'PK\x01\x02')
+    if how in ('local_name', 'local_name_and_extra'):
+        raw[local + 30 + len('episode')] = ord('2')     # its own header says episode2/front.mp4
+    if how in ('directory_name', 'directory_name_and_extra'):
+        raw[central + 46 + len('episode')] = ord('2')   # its directory entry says episode2/front.mp4
+    if how.endswith('_and_extra'):
+        struct.pack_into('<H', raw, local + 28, 7)      # and its header's extra-field length is damaged too
+    return bytes(raw)
+
+
+@pytest.mark.parametrize('how', ['local_name', 'directory_name', 'local_name_and_extra', 'directory_name_and_extra'])
+@pytest.mark.parametrize('planted', [None, 'name_unverified/byte_0/task.txt', 'up-byte_0/task.txt',
+                                     '000-up-byte_0/task.txt'])
+def test_a_member_of_unproven_name_is_its_own_upload_and_no_file_describes_it(tmp_path, how, planted):
+    import json
+    sink = io.BytesIO()
+    with zipfile.ZipFile(sink, 'w', zipfile.ZIP_STORED) as z:
+        for name, data in {**RECORDINGS, **TASKS}.items():
+            z.writestr(name, data)
+        if planted:
+            # a file of the upload at a path a recovery folder could take, describing nothing of the damaged member
+            z.writestr(planted, 'a task no recording of this archive owns')
+    path = tmp_path / 'up.zip'
+    path.write_bytes(name_damage(sink.getvalue(), how))
+    out = tmp_path / 'out'
+    report = formats.convert(path, 'teleop_arms', out, 'ownership', 900)
+    contexts = {e['episode_id']: json.loads((out / e['episode_id'] / 'context.json').read_text())
+                for e in report['episodes']}
+    tasks = {eid: str(ctx.get('instruction') or '') for eid, ctx in contexts.items()}
+    # every recording is read: the two intact ones with their own tasks, the damaged one apart with none
+    assert len(contexts) == 3, report
+    apart = [eid for eid in contexts if 'name_unverified' in eid]
+    assert len(apart) == 1 and tasks[apart[0]] == '', tasks
+    assert sorted(t for eid, t in tasks.items() if eid not in apart) == ['task of episode three', 'task of episode two']
+    assert not any('no recording of this archive owns' in t for t in tasks.values())

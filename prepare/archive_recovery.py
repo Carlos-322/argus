@@ -422,10 +422,6 @@ def checked_directory(path, infos, max_files, max_bytes):
             if entry is not None:
                 replaced[info] = entry
                 disagree.remove(info)
-    for entry in replaced.values():
-        local = entry.pop('local', None)
-        if local is not None:
-            entry.update(unverified_name(entry, local['name']))
     # a directory with one damaged entry may have lost others too: its members' own headers say which are missing
     entries, _ = scan_local(path, max_files, max_bytes)
     by_offset = {entry['offset']: entry for entry in entries}
@@ -442,6 +438,8 @@ def checked_directory(path, infos, max_files, max_bytes):
             lost.append(info.filename)
             continue
         claimed.add(entry['offset'])
+        if entry['raw_name'] != info.orig_filename.encode('utf-8' if info.flag_bits & 0x800 else 'cp437', 'replace'):
+            entry = {**entry, 'conflicting_names': [info.filename, entry['name']]}
         replaced[info] = entry
     extra = [entry for entry in entries if entry['offset'] not in claimed]
     return agree, replaced, extra, lost
@@ -470,24 +468,11 @@ def _directory_entry(source, info, length):
                      'raw_name': info.orig_filename.encode('utf-8' if info.flag_bits & 0x800 else 'cp437', 'replace'),
                      'name': info.filename, 'start': start, 'crc': info.CRC, 'compressed': info.compress_size,
                      'size': info.file_size}
-            if header is not None and start == header['start'] and header['raw_name'] != entry['raw_name']:
-                # the two indexes name the member differently and no checksum covers a name (checked_directory)
-                entry['local'] = {'flags': header['flags'], 'raw_name': header['raw_name'], 'name': header['name']}
+            if header is not None and header['raw_name'] != entry['raw_name']:
+                # the two indexes name the member differently, wherever its data was found, and no checksum covers
+                # a name (conflicting_names)
+                entry['conflicting_names'] = [info.filename, header['name']]
             return entry
     return None
 
 
-UNVERIFIED_FOLDER = 'name_unverified'
-
-
-def unverified_name(entry: dict, other: str) -> dict:
-    """The name a member is unpacked under when the archive's two indexes name it differently. No checksum covers a
-    name, so neither can be shown to be the one written with the data, and a name decides which recording, camera
-    and task the data belongs to. The member is kept, readable, in a folder of its own named after where it sits in
-    the archive, so it is a recording of its own that no sidecar or sibling claims; its extension is kept when both
-    names agree on it."""
-    first, second = entry['name'], other
-    ext = os.path.splitext(first)[1] if os.path.splitext(first)[1] == os.path.splitext(second)[1] else ''
-    name = f"{UNVERIFIED_FOLDER}/byte_{entry['offset']}/member{ext}"
-    return {'name': name, 'raw_name': name.encode(), 'flags': entry['flags'] | 0x800,
-            'conflicting_names': [first, second]}
