@@ -244,3 +244,30 @@ def test_a_member_named_like_a_note_is_still_a_member(tmp_path, what):
         names = {'/'.join(parts) for parts, _, _ in members} | {f'apart:{label}' for label, *_ in unverified}
     assert len(names) == 2, names
     assert all(getattr(note, 'kind', None) in ('archive', 'retained', 'cut', None) for note in bad)
+
+
+def nested(levels, payload_name, payload):
+    data, name = payload, payload_name
+    for level in range(levels):
+        sink = io.BytesIO()
+        with zipfile.ZipFile(sink, 'w', zipfile.ZIP_STORED) as z:
+            z.writestr(name, data)
+        data, name = sink.getvalue(), f'level{level}.zip'
+    return data
+
+
+@pytest.mark.parametrize('levels', [1, 3, 5, 8])
+def test_a_recording_nested_at_any_depth_is_read(tmp_path, levels):
+    path = tmp_path / 'up.zip'
+    path.write_bytes(nested(levels, 'take/front.mp4', movie(90)))
+    report = formats.convert(path, 'ego_head', tmp_path / 'out', 'nested', 900)
+    assert len(report['episodes']) == 1 and not report['failed'], report
+
+
+def test_an_archive_nested_without_end_stops_at_the_budget(tmp_path, monkeypatch):
+    # what bounds an archive built to unpack forever is the file and byte budget every level spends, not a depth
+    monkeypatch.setattr(formats, 'UNPACK_MAX_FILES', 12)
+    path = tmp_path / 'up.zip'
+    path.write_bytes(nested(40, 'note.txt', b'x'))
+    with pytest.raises(formats.UnpackLimit):
+        formats.open_archives(path, tmp_path / 'unpacked')

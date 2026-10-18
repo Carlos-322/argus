@@ -524,8 +524,8 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
     """Unpack the upload's archives the way Data Review's upload page opens them (its read.js openArchives): an
     archive whose files sit in one folder unpacks to that folder, one of loose files to a folder named after it.
     An upload that is itself an archive unpacks into dest, which becomes the upload; archives inside a folder
-    unpack beside themselves. Archives inside archives are opened in turn, three levels deep (a zip of episode
-    zips). Returns the upload's root and what was done, in words.
+    unpack beside themselves. Archives inside archives are opened in turn, at any depth, within the
+    upload's file and byte budget (a zip of episode zips). Returns the upload's root and what was done, in words.
 
     Every member is checked before a byte is written: paths that could leave the folder, links and devices are
     skipped, as are hidden files and __MACOSX; an upload holds at most UNPACK_MAX_FILES files and
@@ -601,9 +601,10 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
                 if broot not in target.resolve().parents:
                     skipped += 1
                     continue
-                inner = ARCHIVE_RE.search(target.name) and depth[a] < 3
-                if ARCHIVE_RE.search(target.name) and depth[a] >= 3:
-                    bad.append(f'{target.name} (nested archive limit: at most three nested levels are opened)')
+                # an archive inside an archive is opened at any depth: every level it unpacks spends the same file
+                # and byte budget (UNPACK_MAX_FILES, UNPACK_MAX_BYTES), which is what bounds an archive built to
+                # unpack forever, so a fixed depth would only drop readable recordings
+                inner = ARCHIVE_RE.search(target.name)
                 if inner and target not in depth:
                     archives.append(target)
                     base_of[target], depth[target] = target.parent, depth[a] + 1
