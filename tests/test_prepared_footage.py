@@ -120,12 +120,12 @@ def test_source_persistent_edit_during_probe_rejects_publication(tmp_path, monke
     assert not list(serve.FOOTAGE_DIR.glob('*.mp4'))
 
 
-def test_ticket_survives_process_restart_and_receipts_have_a_count_bound(tmp_path, monkeypatch):
+def test_ticket_survives_process_restart_and_receipts_have_a_per_client_count_bound(tmp_path, monkeypatch):
     import hashlib
     import sys
     media(tmp_path, monkeypatch)
     result = serve.footage('episode_x')
-    monkeypatch.setattr(serve, '_FOOTAGE_DISK_FILES', 2)
+    monkeypatch.setattr(serve, '_TICKET_CLIENT_MAX', 2)
     tokens = [serve.prepare_footage_ticket(result) for _ in range(3)]
     assert len(list((serve.FOOTAGE_DIR / '.tickets').glob('*.json'))) == 2
     assert serve.ticket_footage(tokens[0]) is None

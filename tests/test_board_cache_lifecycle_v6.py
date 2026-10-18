@@ -299,9 +299,9 @@ def test_new_untrusted_span_during_another_encode_is_refused_retryably_and_ready
 def test_prepare_ticket_eviction_is_retryable_media_loss(tmp_path, monkeypatch):
     media(tmp_path, monkeypatch)
     prepare = serve.prepare_footage_ticket
-    def evict(result):
+    def evict(result, *args, **kwargs):
         result[0].unlink()
-        return prepare(result)
+        return prepare(result, *args, **kwargs)
     monkeypatch.setattr(serve, 'prepare_footage_ticket', evict)
     with serving() as base:
         with pytest.raises(urllib.error.HTTPError) as error:

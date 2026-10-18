@@ -200,7 +200,11 @@ _FOOTAGE_DISK_BYTES = int(os.environ.get('BOARD_FOOTAGE_DISK_BYTES', 2 * 1024**3
 _FOOTAGE_DISK_FILES = int(os.environ.get('BOARD_FOOTAGE_DISK_FILES', 128))
 
 
-def _trim_disk_cache(folder: Path, suffix: str, *, max_bytes: int, max_files: int, protect=None):
+def _trim_disk_cache(folder: Path, suffix: str, *, max_bytes: int, max_files: int, protect=None, last=()):
+    """Remove the least recently used cache files until the folder is within its budgets. Files in `protect` (a path or
+    a collection of them) are never removed, and files in `last` only once nothing else is left to remove."""
+    protect = {protect} if isinstance(protect, Path) else set(protect or ())
+    last = set(last)
     with _DISK_CACHE_LOCK:
         entries = []
         temporary = re.compile(r'(?:[a-f0-9]{40}\.[0-9]+\.[0-9]+\.part|'
@@ -252,10 +256,10 @@ def _trim_disk_cache(folder: Path, suffix: str, *, max_bytes: int, max_files: in
             except OSError:
                 continue
         total, count = sum(x[2] for x in entries), len(entries)
-        for _, path, size in sorted(entries):
+        for _, path, size in sorted(entries, key=lambda entry: (entry[1] in last, entry[0])):
             if total <= max_bytes and count <= max_files:
                 break
-            if path == protect:
+            if path in protect:
                 continue
             try:
                 path.unlink(missing_ok=True)
@@ -783,13 +787,38 @@ def _retain_footage_record(out, record):
             _FOOTAGE_RECORDS.popitem(last=False)
 
 
-def _trim_footage_cache(protect=None):
+def _trim_footage_cache(protect=None, owner=None):
     try:
         with _file_lock(FOOTAGE_DIR / '.locks' / 'cache'):
-            _trim_disk_cache(FOOTAGE_DIR, '.mp4', max_bytes=_FOOTAGE_DISK_BYTES,
-                             max_files=_FOOTAGE_DISK_FILES if _FOOTAGE_DISK_FILES > 0 else 2**63, protect=protect)
+            _trim_footage_files(protect, owner)
     except OSError as error:
         _maintenance_error(error)
+
+
+def _trim_footage_files(protect, owner):
+    """Trim prepared videos (with the cache lock held). A video a live download ticket names is kept, except that the
+    client asking may lose its own oldest ones once nothing else is left: other clients' load never cancels a ticket."""
+    held = _ticketed_footage()
+    mine = {FOOTAGE_DIR / name for name, owners in held.items() if owners == {_ticket_owner(owner)}}
+    others = {FOOTAGE_DIR / name for name in held} - mine
+    _trim_disk_cache(FOOTAGE_DIR, '.mp4', max_bytes=_FOOTAGE_DISK_BYTES,
+                     max_files=_FOOTAGE_DISK_FILES if _FOOTAGE_DISK_FILES > 0 else 2**63,
+                     protect=others | ({protect} if protect is not None else set()), last=mine)
+
+
+def _footage_room(owner):
+    """Refuse to make another video while videos other clients' live tickets name fill the cache budget, instead of
+    evicting them."""
+    held = _ticketed_footage()
+    sizes = []
+    for name, owners in held.items():
+        if owners != {_ticket_owner(owner)}:
+            try:
+                sizes.append((FOOTAGE_DIR / name).stat().st_size)
+            except OSError:
+                continue
+    if sum(sizes) >= _FOOTAGE_DISK_BYTES or (_FOOTAGE_DISK_FILES > 0 and len(sizes) >= _FOOTAGE_DISK_FILES):
+        raise CacheBusy('Prepared video storage is full of downloads in progress; try again later.')
 
 
 def _receipt_guard(path):
@@ -886,11 +915,11 @@ def _cached_footage_record(key):
             pass
     # A surviving ticket is also a durable receipt for this exact output,
     # including when a canonical record is malformed or no longer validates.
-    for path in (FOOTAGE_DIR / '.tickets').glob('*.json'):
-        if not re.fullmatch(r'[a-f0-9]{32}\.json', path.name):
-            continue
+    with _FOOTAGE_READY_LOCK:
+        tokens = [token for token, entry in _ticket_index().items() if entry[1] == key + '.mp4']
+    for token in tokens:
         try:
-            record = _ticket_record(path.stem)
+            record = _ticket_record(token)
             if record and record.get('file') == key + '.mp4':
                 result = _receipt_footage(record)
                 if result is not None:
@@ -933,7 +962,7 @@ def _trim_footage_receipts(folder: Path, pattern: str, *, expire=False):
                 valid = valid and type(expiry) in (int, float) and math.isfinite(expiry) and expiry >= time.time()
             if not valid:
                 path.unlink(missing_ok=True)
-            elif expire or len(path.stem) == 40:
+            elif not expire and len(path.stem) == 40:
                 retained.append((path.stat().st_mtime_ns, path))
         except FileNotFoundError:
             pass
@@ -941,11 +970,9 @@ def _trim_footage_receipts(folder: Path, pattern: str, *, expire=False):
             _maintenance_error(error)
         except (ValueError, TypeError, KeyError):
             path.unlink(missing_ok=True)
-    # Canonical records follow movie lifetime. Request aliases and expiring
-    # tickets have independent finite bounds, including when media count is zero.
-    limit = ((_FOOTAGE_DISK_FILES if _FOOTAGE_DISK_FILES > 0 else 128) if expire
-             else max(128, 2 * _FOOTAGE_DISK_FILES))
-    for _, path in sorted(retained, reverse=True)[limit:]:
+    # Canonical records follow movie lifetime and request aliases have a finite bound. Tickets are bounded when they
+    # are issued, per client (prepare_footage_ticket), so no other client's load trims a live one here.
+    for _, path in sorted(retained, reverse=True)[max(128, 2 * _FOOTAGE_DISK_FILES):]:
         path.unlink(missing_ok=True)
 
 
@@ -966,21 +993,68 @@ def _remember_ready_footage(request: str, result: tuple, record=None) -> None:
         _maintenance_error(error)
 
 
-def _existing_footage_ticket(result):
-    """Cheap repeated prepares share a live ticket without consuming its peers."""
-    version = list(_footage_version(result[0]))
-    for path in (FOOTAGE_DIR / '.tickets').glob('*.json'):
+_TICKET_CLIENT_MAX = 8      # live download tickets one client holds; another withdraws that client's oldest
+_TICKET_MAX = 4096          # live tickets of all clients; past this a prepare is refused, never another's withdrawn
+_TICKETS = {}               # FOOTAGE_DIR -> {token: (owner, file, version, expires_at, issued_at)}, each file read once
+
+
+def _ticket_owner(client) -> str:
+    """The name a ticket records for the client that asked for it (client_key), not the address itself."""
+    return hashlib.sha256(str(client).encode()).hexdigest()[:16] if client else ''
+
+
+def _ticket_index() -> dict:
+    """The live tickets in FOOTAGE_DIR/.tickets (with _FOOTAGE_READY_LOCK held). Each ticket file is read once, when it
+    first appears; a listing of names finds the ones other server processes wrote or removed, and expired ones are
+    removed here."""
+    folder = FOOTAGE_DIR / '.tickets'
+    index = _TICKETS.setdefault(str(FOOTAGE_DIR), {})
+    try:
+        names = {entry.name[:-5] for entry in os.scandir(folder)
+                 if re.fullmatch(r'[a-f0-9]{32}\.json', entry.name)}
+    except OSError:
+        names = set()
+    for token in set(index) - names:
+        del index[token]
+    for token in names - set(index):
         try:
-            record = _ticket_record(path.stem)
-            if (record and record.get('file') == result[0].name and record.get('version') == version
-                    and record['expires_at'] - time.time() >= 30):
-                return path.stem
-        except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
+            record = _read_footage_receipt(folder / f'{token}.json')
+            expiry = record.get('expires_at') if record else None
+            if type(expiry) not in (int, float) or not math.isfinite(expiry) or not isinstance(record.get('file'), str):
+                raise ValueError('Invalid ticket')
+            issued = record.get('issued_at')
+            index[token] = (str(record.get('owner') or ''), record['file'], record.get('version'), float(expiry),
+                            float(issued) if type(issued) in (int, float) else float(expiry) - _FOOTAGE_TICKET_SECONDS)
+        except FileNotFoundError:
             continue
-    return None
+        except (OSError, ValueError, TypeError, AttributeError):
+            index[token] = ('', '', None, 0.0, 0.0)    # unreadable: removed below like an expired ticket
+    now = time.time()
+    for token, entry in list(index.items()):
+        if entry[3] < now:
+            try:
+                (folder / f'{token}.json').unlink(missing_ok=True)
+            except OSError as error:
+                _maintenance_error(error)
+                continue
+            del index[token]
+    return index
 
 
-def prepare_footage_ticket(result: tuple) -> str:
+def _ticketed_footage() -> dict:
+    """{video file name: owners of the live tickets that name it}."""
+    held = {}
+    with _FOOTAGE_READY_LOCK:
+        for owner, name, _, _, _ in _ticket_index().values():
+            held.setdefault(name, set()).add(owner)
+    return held
+
+
+def prepare_footage_ticket(result: tuple, client=None, *, reuse: bool = False) -> str:
+    """A download ticket for a prepared video, owned by `client` (client_key). With `reuse`, the client's own live
+    ticket for the same video is renewed for a full lifetime and returned instead. A client holds at most
+    _TICKET_CLIENT_MAX tickets, and its own oldest is withdrawn past that; other clients' load never withdraws one.
+    Past _TICKET_MAX live tickets in all, a new ticket is refused."""
     record = getattr(result, 'receipt', None)
     if record is None:
         record, _ = _cached_footage_record(result[0].stem)
@@ -991,15 +1065,24 @@ def prepare_footage_ticket(result: tuple) -> str:
         raise CacheBusy('Prepared video was evicted; prepare it again.') from error
     if record is None or list(version) != list(record.get('version') or []):
         raise ValueError('Prepared footage changed before ticket publication')
-    record['expires_at'] = time.time() + _FOOTAGE_TICKET_SECONDS
-    token = uuid.uuid4().hex
+    owner, now = _ticket_owner(client), time.time()
+    record.update(owner=owner, issued_at=now, expires_at=now + _FOOTAGE_TICKET_SECONDS)
     with _FOOTAGE_READY_LOCK:
         folder = FOOTAGE_DIR / '.tickets'
+        index = _ticket_index()
+        token = next((token for token, entry in index.items() if reuse and entry[0] == owner
+                      and entry[1] == result[0].name and entry[2] == list(version)), None)
+        if token is None:
+            mine = sorted((entry[4], token) for token, entry in index.items() if entry[0] == owner)
+            for _, old in mine[:max(0, len(mine) - _TICKET_CLIENT_MAX + 1)]:
+                (folder / f'{old}.json').unlink(missing_ok=True)
+                del index[old]
+            if len(index) >= _TICKET_MAX:
+                raise CacheBusy('Too many downloads are prepared at once; try again later.')
+            token = uuid.uuid4().hex
         _write_footage_record(folder / f'{token}.json', record)
-        try:
-            _trim_footage_receipts(folder, r'[a-f0-9]{32}\.json', expire=True)
-        except (OSError, ValueError) as error:
-            _maintenance_error(error)
+        index[token] = (owner, result[0].name, list(version), record['expires_at'], now)
+        _trim_receipt_temps(folder)
     return token
 
 
@@ -1044,7 +1127,7 @@ def _ticket_reader(token):
             reader.close()
 
 
-def footage(eid: str, t0: float = 0.0, t1: float | None = None) -> tuple | None:
+def footage(eid: str, t0: float = 0.0, t1: float | None = None, client=None) -> tuple | None:
     """Prepare the current sources; tickets separately serve the exact prepared output."""
     if not math.isfinite(t0) or (t1 is not None and not math.isfinite(t1)):
         raise ValueError('Footage times must be finite')
@@ -1055,16 +1138,16 @@ def footage(eid: str, t0: float = 0.0, t1: float | None = None) -> tuple | None:
     if _FOOTAGE_DISK_BYTES <= 0:
         raise FootageCapacityError('Prepared footage disk cache has no capacity')
     with _footage_sources(cams) as (working, identities):
-        return _footage_from_sources(eid, t0, t1, label, working, identities)
+        return _footage_from_sources(eid, t0, t1, label, working, identities, client)
 
 
-def _footage_from_sources(eid, t0, t1, label, cams, identities):
+def _footage_from_sources(eid, t0, t1, label, cams, identities, client=None):
     request_parts = [eid, float(t0), None if t1 is None else float(t1), FOOTAGE_TAG,
                      label.get('duration_s'), label.get('camera_views'), identities]
     request = hashlib.sha1(json.dumps(request_parts).encode()).hexdigest()
     ready = _ready_footage(request)
     if ready is not None:
-        _trim_footage_cache(ready[0])
+        _trim_footage_cache(ready[0], client)
         return ready
     probes = [_probe(path) for _, path in cams]
     clocks = label.get('camera_views') or ['exo', 'left', 'right']
@@ -1087,7 +1170,8 @@ def _footage_from_sources(eid, t0, t1, label, cams, identities):
         if ready is not None:
             _remember_ready_footage(request, ready)
             return ready
-        result = _uncached_footage(key, out, name, cams, probes, t0, t1)
+        _footage_room(client)
+        result = _uncached_footage(key, out, name, cams, probes, t0, t1, client)
         _remember_ready_footage(request, result)
         return result
 
@@ -1123,18 +1207,18 @@ def _run_footage(cmd: list) -> subprocess.CompletedProcess:
             raise
 
 
-def _uncached_footage(key, out, name, cams, probes, t0, t1):
+def _uncached_footage(key, out, name, cams, probes, t0, t1, client=None):
     # An encode never waits for another: a request that finds every encoder busy is answered 503 and retries.
     if not _FOOTAGE_SEM.acquire(blocking=False):
         raise CacheBusy('Media preparation is busy; try again shortly')
     try:
         working = [(cam, _source_path(path)) for cam, path in cams]
-        return _encode_and_publish(key, out, name, working, probes, t0, t1)
+        return _encode_and_publish(key, out, name, working, probes, t0, t1, client)
     finally:
         _FOOTAGE_SEM.release()
 
 
-def _encode_and_publish(key, out, name, cams, probes, t0, t1):
+def _encode_and_publish(key, out, name, cams, probes, t0, t1, client=None):
     # A competing process may publish while this encoder runs. Publication adopts
     # its verified result instead of replacing a file held by a live ticket.
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -1169,8 +1253,7 @@ def _encode_and_publish(key, out, name, cams, probes, t0, t1):
                 os.replace(tmp, out)
                 record.update(file=out.name, version=_footage_version(out))
                 _remember_ready_footage(key, (out, name), record)
-                _trim_disk_cache(FOOTAGE_DIR, '.mp4', max_bytes=_FOOTAGE_DISK_BYTES,
-                                 max_files=_FOOTAGE_DISK_FILES if _FOOTAGE_DISK_FILES > 0 else 2**63, protect=out)
+                _trim_footage_files(out, client)
         return _VerifiedFootage(out, name, record)
     finally:
         try:
@@ -2092,9 +2175,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send(404, {"error": "no such episode"})
                 return
             try:
-                got = footage(eid, t0, t1)
+                got = footage(eid, t0, t1, self.client())
             except CacheBusy as error:
-                return self._send(503, {'error': str(error)})
+                return self._send(503, {'error': str(error), 'retryable': True})
             except FootageCapacityError as error:
                 return self._send(507, {'error': str(error)})
             except ValueError as error:
@@ -2113,7 +2196,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             out, name = got
             if (q.get("prepare") or [""])[0] == "1":
                 try:
-                    ticket = _existing_footage_ticket(got) or prepare_footage_ticket(got)
+                    ticket = prepare_footage_ticket(got, self.client(), reuse=True)
                     try:
                         size = out.stat().st_size
                     except FileNotFoundError as error:
