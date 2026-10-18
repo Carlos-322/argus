@@ -5,7 +5,7 @@ import base64
 
 import pytest
 
-from board.public_export import project, public_build_manifest
+from board.public_export import UPLOADER_VALUE_WITHHELD, project, public_build_manifest
 
 
 def test_credential_values_and_access_attributes_do_not_escape_under_native_names():
@@ -256,6 +256,22 @@ def test_uploader_metadata_values_are_not_published_by_default():
     published = [item.get('value') for group in project({'uploader_notes': groups}, uploader_values=True)['uploader_notes']
                  for item in group['items']]
     assert leaks[0] in published and leaks[2] in published
+
+
+def test_a_withheld_metadata_receipt_keeps_no_copy_of_its_value():
+    # exact_metadata_values keeps an integer above 2**53 digit for digit beside the value; any key that is not a
+    # description of the request is a possible copy and is left out
+    secret = 987654321098765432109876543210
+    receipt = {'field_id': 'asset.json', 'mode': 'metadata', 'reason': 'customer reference', 'pointer': '/fields/ref',
+               'value': secret, 'preview': str(secret), 'id': 'inspection:abc',
+               'exact_metadata_values': [{'pointer': '/fields/ref', 'decimal': str(secret)}],
+               'some_future_copy': {'digits': str(secret)}}
+    shown = project({'evidence_inspection': {'rounds': [{'receipts': [receipt]}]}})
+    assert str(secret) not in json.dumps(shown)
+    kept = shown['evidence_inspection']['rounds'][0]['receipts'][0]
+    assert kept['value'] == kept['preview'] == UPLOADER_VALUE_WITHHELD and kept['reason'] == 'customer reference'
+    published = project({'evidence_inspection': {'rounds': [{'receipts': [receipt]}]}}, uploader_values=True)
+    assert str(secret) in json.dumps(published)
 
 
 def test_request_shaping_keeps_uploader_values():

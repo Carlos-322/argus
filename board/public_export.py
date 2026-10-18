@@ -59,6 +59,9 @@ _URL_QUERY_SECRETS = _SECRETS | {'key', 'signature', 'sig', 'session', 'sessioni
 _ACCESS_URI_PREFIXES = ('file:', 's3:', 'gs:', 'az:', 'abfs:', 'ssh:', 'sftp:', 'ftp:')
 _DROP = object()
 UPLOADER_VALUE_WITHHELD = 'not published (uploader metadata)'
+# The keys of a metadata inspection receipt (label/evidence_access.py) that describe the request, not the value read
+_WITHHELD_RECEIPT_KEYS = frozenset({'field_id', 'mode', 'reason', 'descriptor', 'limitations', 'pointer', 'operation', 'id',
+                                    'presentation_clock'})
 _PUBLISH_DEFAULT = False
 _PUBLISH = ContextVar('publish_uploader_values', default=None)
 
@@ -859,9 +862,15 @@ def _project(value, field: str = '', attribute_owner: str = '', native_fields: b
                     or (field == 'compare' and name in ('runid', 'code'))):
                 continue
             item_native, item_notes = native_fields, note_owner
-            if key in ('value', 'preview') and value.get('mode') == 'metadata' and not native_fields and not _publishing():
-                result[key] = UPLOADER_VALUE_WITHHELD
-                continue
+            if value.get('mode') == 'metadata' and not native_fields and not _publishing():
+                # A withheld metadata receipt keeps only what describes the request; every other key may hold the
+                # value or a copy of it (exact_metadata_values keeps large integers digit for digit), so it is left
+                # out rather than named one copy at a time.
+                if key in ('value', 'preview'):
+                    result[key] = UPLOADER_VALUE_WITHHELD
+                    continue
+                if key not in _WITHHELD_RECEIPT_KEYS:
+                    continue
             if key == 'value' and (source_name := _inspection_source_name(value)):
                 item_notes = _name(source_name)
                 # A selected metadata subtree retains its original native-field scope.
