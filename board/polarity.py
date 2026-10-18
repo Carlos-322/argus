@@ -23,7 +23,8 @@ grammar English uses to deny something, so a new wording of an old form needs no
     denial that points back denies the sentence before it ("Earlier I wrote the lens was covered. It never was.");
   - an impression that is then corrected is retracted ("looks like glare, actually a white tablecloth", "seems frozen
     but it isn't", "what looks like glare is a white plate", "resembles a black frame, but it is a shadow", "I took
-    it for glare; on a closer look it is paper"); a hedge on its own still asserts ("appears to be frozen");
+    it for glare; on a closer look it is paper"); a hedge on its own still asserts ("appears to be frozen"), and so
+    does one that a second look only confirms ("looks frozen. On closer inspection, the same frame repeats");
   - a condition ("if glare hits the plate") asserts nothing.
 
 Scope never crosses a clause: a sentence boundary, a subordinating or contrasting conjunction ("because", "while",
@@ -32,8 +33,8 @@ visible because the view is frozen") never reaches the problem.
 
 The word lists below are closed grammatical classes (negators, auxiliaries, determiners, prepositions,
 conjunctions) and a few small semantic classes: predicates that only state existence, predicates that end or undo a
-state, verbs of withdrawing, searching and naming, hedges, and words that introduce a correction. None is a wording of
-any one problem. tests/test_family_polarity.py measures the module on corpora.
+state, verbs of withdrawing, searching and naming, hedges, words that introduce a correction, and words that say all
+works as it should. None is a wording of any one problem. tests/test_family_polarity.py measures the module on corpora.
 
     denied_spans(text)            -> [(start, end)] character spans the text does not assert
     hedged_spans(text)            -> [(start, end)] spans of the clauses that state only an impression
@@ -41,6 +42,7 @@ any one problem. tests/test_family_polarity.py measures the module on corpora.
 """
 from __future__ import annotations
 
+import os
 import re
 
 _TOKEN = re.compile(r"\d+(?:\.\d+)?|[^\W\d_]+(?:[-'][^\W\d_]+)*|\n|[^\w\s]")
@@ -122,8 +124,6 @@ HEDGES = {'looks', 'look', 'looked', 'looking', 'seems', 'seem', 'seemed', 'appe
           'believed', 'mistook'}
 # words that introduce what something really is
 CORRECTIONS = {'actually', 'just', 'merely', 'simply', 'really', 'reality', 'fact', 'only', 'instead'}
-# labels that announce a correction of the sentence before
-_CORRECTION_LABELS = {'correction', 'update', 'updated', 'revised', 'revision', 'erratum', 'edit'}
 # words that withdraw an impression outright
 VERDICTS = {'retracted', 'dismissed', 'disproved', 'disproven', 'unfounded'}
 # verbs that withdraw what their object names ("retracting the occlusion flag", "ignore the note about a black
@@ -135,9 +135,11 @@ WITHDRAW = {'retract', 'retracts', 'retracting', 'withdraw', 'withdraws', 'withd
 SEARCH = {'check', 'checks', 'checked', 'checking', 'look', 'looks', 'looked', 'looking', 'search', 'searched',
           'searching', 'scan', 'scanned', 'scanning', 'inspect', 'inspected', 'inspecting', 'test', 'tested',
           'screen', 'screened', 'examine', 'examined', 'watch', 'watched'}
-# words that open a second look at the footage, which can correct the first
-RE_EXAMINE = {'closer', 'review', 'reviewing', 'inspection', 'rewatch', 'rewatching', 'recheck', 'rechecked',
-              'reexamination', 're-examination', 'second'}
+# words that say something works as it should, so a later look that finds them contradicts an impression of a fault
+# ("on rewatch the video plays normally")
+IN_ORDER = {'normal', 'normally', 'fine', 'smoothly', 'properly', 'correctly', 'intact', 'unaffected', 'ok', 'okay'}
+# labels that call the sentence they open a correction of the one before
+_CORRECTION_LABELS = {'correction', 'erratum'}
 # a naming verb with a negative judgement denies the name ("it would be wrong to call this overexposed")
 NAMING = {'call', 'calls', 'calling', 'called', 'describe', 'describes', 'describing', 'described', 'label',
           'labelling', 'labeling', 'labelled', 'labeled', 'classify', 'classifying', 'classified', 'term'}
@@ -168,6 +170,11 @@ _ANSWER_FILLER = EXISTENCE | EXISTENCE_NOUNS | AUX | {'at', 'all', 'really', 'he
                                                       'i', 'we', 'can', 'see', 'tell', 'once', 'single', 'one',
                                                       'bit', 'trace', 'sign', 'point', 'time'}
 _BARE_NO = {'no', 'none', 'nope', 'nah', 'negative', 'n', 'false'}
+# words that start a new phrase, so a "second" before one ends its own phrase ("for a second the image")
+_ENDS_A_PHRASE = PREDICATE_END | PHRASE_END | BOUNDARY | AUX | DETERMINERS | {'and', 'or', 'later', 'earlier'}
+# the closed classes, which say nothing of what a clause is about (_said)
+_PLAIN = (AUX | COPULA | _ARTICLES | DETERMINERS | ANAPHORS | PREDICATE_END | PHRASE_END | HEDGES | CORRECTIONS
+          | CONTRAST | BOUNDARY | _ANSWER_FILLER | {'like', 'and', 'or', 'very', 'quite', 'somewhat', 'rather'})
 NEGATORS = PREDICATE_NEGATORS | DETERMINER_NEGATORS | POST_NEGATORS | _NT | {'nope', 'nah', 'negative', '0', 'n',
                                                                              'false', 'unchecked'}
 
@@ -472,14 +479,62 @@ def _identity(words, start):
 
 
 def _restricts(words):
-    return (any(w in _RESTRICTS for w in words) or any(w[:1].isdigit() for w in words)
+    """Whether words limit an impression in time or extent ("but only for 2 s", "for a second"). An ordinal "second"
+    before what it counts ("on a second look") limits nothing."""
+    ordinal = {x for x, w in enumerate(words[:-1]) if w == 'second' and words[x + 1][:1].isalpha()
+               and words[x + 1] not in _ENDS_A_PHRASE}
+    return (any(w in _RESTRICTS and x not in ordinal for x, w in enumerate(words))
+            or any(w[:1].isdigit() for w in words)
             or any(a in ('only', 'just') and b in _TIME_WORDS for a, b in zip(words, words[1:])))
 
 
-def _correction(clause, cross_sentence=False):
+def _said(words):
+    """The words of a clause that say what it is about, leaving out the closed classes."""
+    return [w for w in words if w[:1].isalpha() and len(w) > 2 and w not in _PLAIN and not _negator(w)]
+
+
+def _restates(words, impression):
+    """Whether words say again something the impression said ("frozen" and "frozen", "covered" and "covers")."""
+    said = _said(impression)
+    return any(a == b or len(os.path.commonprefix([a, b])) >= max(4, min(len(a), len(b)) - 3)
+               for a in _said(words) for b in said)
+
+
+def _denies(clauses, impression):
+    """Whether a later sentence denies the impression: a negation of the impression's own words or of a pronoun
+    standing for it ("it is not frozen", "nothing covers it", "beside the lens, not over it"), or a negated pronoun
+    with nothing else said ("it is not", "that is not the case"). A negation of something else ("the picture never
+    changes") says nothing against the impression and often confirms it, as a negated remedy does ("nobody
+    corrects it")."""
+    for clause in clauses:
+        words = [t.w for t in clause if _is_word(t)]
+        for i, w in enumerate(words):
+            if not _negator(w):
+                continue
+            after = [x for x in words[i + 1:] if x not in SKIP]
+            if after and after[0] in REMEDY:
+                continue
+            # a pointer is a pronoun when nothing follows it ("not over it"), not a determiner ("at this size")
+            pronoun = any(x in ANAPHORS and (j == len(after) - 1 or x in ('it', 'them', 'they'))
+                          for j, x in enumerate(after))
+            if pronoun or _restates(after, impression):
+                return True
+            if any(x in ANAPHORS for x in words[:i]) and all(x in _ANSWER_FILLER or _negator(x) for x in after):
+                return True
+    return False
+
+
+def _correction(clause, cross_sentence=False, impression=(), clauses=()):
     """Whether this clause says what an impression before it really was: a bare denial ("but it isn't"), a word that
     introduces what it is ("actually", "just"), a verdict ("retracted") or a link to what it is ("but it is a
-    shadow"). A clause that only limits the impression in time or extent ("but only for 2 s") does not."""
+    shadow"). A clause that only limits the impression in time or extent ("but only for 2 s") does not.
+
+    A later sentence (cross_sentence, its clauses in clauses) corrects only with content that goes against the
+    impression: a denial of it (_denies), a word that introduces what it really is, a pointer linked to what it is
+    ("it is a white sheet of paper"), a finding that all is in order ("the video plays normally") or a label that
+    calls it a correction ("Correction:"). Saying that the footage was looked at again ("on closer inspection", "on
+    review", "update:") is no correction by itself, since a second look confirms an impression as often as it
+    corrects one ("on closer inspection, the timestamps advance while the same frame is repeated")."""
     words = [t.w for t in clause if _is_word(t) or t.w[:1].isdigit()]
     lead = words[0] if words and words[0] in CONTRAST else ''
     body = words[1:] if lead else words
@@ -491,8 +546,8 @@ def _correction(clause, cross_sentence=False):
         return True
     if cross_sentence:
         anaphoric = _identity(body, 0) is not None and any(w in ANAPHORS for w in body[:_identity(body, 0)])
-        return (any((w in CORRECTIONS and w != 'only') or w in RE_EXAMINE or w in _CORRECTION_LABELS for w in body)
-                or anaphoric)
+        return (_denies(clauses, impression) or anaphoric
+                or any((w in CORRECTIONS and w != 'only') or w in IN_ORDER or w in _CORRECTION_LABELS for w in body))
     if not lead:
         return False
     content = [w for w in body if w not in ('it', 'this', 'that', 'is', 'was', "it's", "that's", 'really', 'the',
@@ -604,17 +659,19 @@ def denied_spans(text: str) -> list[tuple[int, int]]:
         if not k:
             continue
         same = flat[k - 1][0] == sk
+        clauses = [clause]
         if not same:
             # a later sentence corrects with any of its clauses ("Correction: it is aimed correctly, the operator
             # is just leaning back")
-            clause = [t for s2, c in flat if s2 == sk for t in c]
-        if not _correction(clause, cross_sentence=not same):
-            continue
+            clauses = [c for s2, c in flat if s2 == sk]
+            clause = [t for c in clauses for t in c]
         back = k - 1
         while back >= 0 and flat[back][0] == flat[k - 1][0]:
             words = [t.w for t in flat[back][1]]
-            if _hedge_at(words) is not None:
-                spans.append((flat[back][1][0].start, flat[k - 1][1][-1].end))
+            h = _hedge_at(words)
+            if h is not None:
+                if _correction(clause, cross_sentence=not same, impression=words[h + 1:], clauses=clauses):
+                    spans.append((flat[back][1][0].start, flat[k - 1][1][-1].end))
                 break
             if words and words[0] in CONTRAST or not same:
                 break

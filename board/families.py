@@ -35,6 +35,7 @@ from __future__ import annotations
 import collections
 import json
 import re
+from re import _constants as _C, _parser
 from pathlib import Path
 
 from board.label_projection import severity as _sev
@@ -43,6 +44,12 @@ from board.polarity import denied_spans, hedged_spans
 HERE = Path(__file__).resolve().parent
 LISTS = {"data_issues": "data", "operator_mistakes": "mistake"}
 COUNTED_LISTS = set(LISTS.values())
+# characters around a word that spell correction reads: far wider than the longest family wording
+# ("fills much of the kitchen camera"), so a family word overlapping the word always lies inside
+_SPELL_REACH = 64
+_WORD_CHAR = re.compile(r"\w")
+# a character that any word character fills, in the strings a family's pattern matches (_wordings)
+_WILD = "\x00"
 
 
 def union_seconds(spans) -> float:
@@ -64,6 +71,86 @@ def check_hit(d: dict, key: str) -> bool:
     return bool(((d.get("dataset_checks") or {}).get(name) or {}).get(field))
 
 
+def _wordings(items, limit=50000):
+    """Every string a parsed pattern matches, with _WILD for a character any word character fills; None when the
+    pattern uses a form this does not spell out or matches more than limit strings."""
+    out = ['']
+    for op, av in items:
+        if op is _C.LITERAL:
+            alts = [chr(av)]
+        elif op is _C.IN:
+            alts = [chr(v) for o, v in av] if all(o is _C.LITERAL for o, v in av) else [_WILD]
+        elif op is _C.ANY:
+            alts = [_WILD]
+        elif op is _C.AT:
+            alts = ['']
+        elif op is _C.SUBPATTERN:
+            alts = _wordings(av[-1], limit)
+        elif op is _C.BRANCH:
+            alts = [s for b in av[1] for s in (_wordings(b, limit) or [None])]
+        elif op in (_C.MAX_REPEAT, _C.MIN_REPEAT):
+            lo, hi, sub = av
+            inner = _wordings(sub, limit)
+            if inner is None:
+                return None
+            if hi <= 1:
+                alts = ([''] if lo == 0 else []) + inner
+            elif all(len(s) == 1 for s in inner):
+                alts = [_WILD]          # a run of any length of characters ("\w+") reads as one wild character
+            else:
+                return None
+        else:
+            return None
+        if alts is None or None in alts:
+            return None
+        out = [a + b for a in out for b in dict.fromkeys(alts)]
+        if len(out) > limit:
+            return None
+    return out
+
+
+def _vocabulary(patterns):
+    """The pieces of letters the patterns can match: (every three letters in a run of letters, every whole run of one
+    or two letters), or None when some pattern cannot be spelled out or puts a wild character beside a letter."""
+    tri, short = set(), set()
+    for r in patterns:
+        strings = _wordings(_parser.parse(r.pattern, r.flags))
+        if strings is None or any(re.search(r"[^\W\d_]" + _WILD + "|" + _WILD + r"[^\W\d_]", x) for x in strings):
+            return None
+        for x in strings:
+            for run in re.findall(r"[^\W\d_]+", x.lower()):
+                tri.update(run[i:i + 3] for i in range(len(run) - 2))
+                if len(run) <= 2:
+                    short.add(run)
+    return tri, short
+
+
+def _may_hold(vocab, word, i, j) -> bool:
+    """Whether a family's word can cover one of letters i to j of word, a run of letters at least three long. The
+    letters of word that a match covers are a run of letters the pattern matches, or part of one, so some three of
+    them around those letters are three letters of such a run, or they are a whole run of two letters, or of one at
+    an edge of word. Without a vocabulary (a pattern this cannot spell out) every word may."""
+    if vocab is None or not word.isascii():
+        return True
+    tri, short = vocab
+    low = word.lower()
+    return (any(low[x:x + 3] in tri for x in range(max(0, i - 2), min(j + 1, len(low) - 2)))
+            or any(low[x:x + 2] in short for x in range(max(0, i - 1), min(j + 1, len(low) - 1)))
+            or (i == 0 and low[0] in short) or (j == len(low) - 1 and low[-1] in short))
+
+
+def _overlaps(patterns, pre, word, post) -> bool:
+    """Whether a match of one of the patterns in pre + word + post overlaps word."""
+    text, a, b = pre + word + post, len(pre), len(pre) + len(word)
+    for r in patterns:
+        for x in r.finditer(text):
+            if x.start() >= b:
+                break
+            if x.end() > a:
+                return True
+    return False
+
+
 class Families:
     def __init__(self, path: Path | None = None, tag_names_path: Path | None = None):
         spec = json.loads(Path(path or HERE / "families.json").read_text())
@@ -74,6 +161,7 @@ class Families:
         self.defs = spec["families"]
         self._re = {f["slug"]: re.compile(f["text"], re.I) for f in self.defs if f.get("text")}
         self._spell_cache = {}
+        self._vocab = _vocabulary(self._re.values())
 
     def tag_name(self, key: str, tag: str | None) -> str:
         """The tag's plain name (tag_names.json), else its words with the first letter capitalised."""
@@ -168,19 +256,35 @@ class Families:
         swap keeps every character offset, so the clause reading is unchanged."""
         if text in self._spell_cache:
             return self._spell_cache[text]
-        out = text
+        out = list(text)
+        n = len(out)
+        patterns = list(self._re.values())
         for m in re.finditer(r"[^\W\d_]{4,}", text):
             a, b = m.span()
-            if any(x.start() < b and x.end() > a for r in self._re.values() for x in r.finditer(out)):
-                continue
             w = m.group()
+            # no family word is that long, and trying every swap in it would cost its length squared
+            if len(w) > _SPELL_REACH:
+                continue
+            # A family word that overlaps this word lies within _SPELL_REACH of it, so only that stretch of the text
+            # is read; reading the whole text for every word and every swap made a long note take minutes. The
+            # stretch ends at word edges, so a "\b" in a family's pattern reads as it would in the whole text.
+            lo, hi = max(0, a - _SPELL_REACH), min(n, b + _SPELL_REACH)
+            while lo < a and lo > 0 and _WORD_CHAR.match(out[lo - 1]):
+                lo += 1
+            while hi > b and hi < n and _WORD_CHAR.match(out[hi]):
+                hi -= 1
+            pre, post = ''.join(out[lo:a]), ''.join(out[b:hi])
+            if _may_hold(self._vocab, w, 0, len(w) - 1) and _overlaps(patterns, pre, w, post):
+                continue
             for k in range(len(w) - 1):
                 if w[k] == w[k + 1]:
                     continue
-                cand = out[:a] + w[:k] + w[k + 1] + w[k] + w[k + 2:] + out[b:]
-                if any(x.start() < b and x.end() > a for r in self._re.values() for x in r.finditer(cand)):
-                    out = cand
+                cand = w[:k] + w[k + 1] + w[k] + w[k + 2:]
+                # a family's word the swap brings in covers one of the two letters it moved
+                if _may_hold(self._vocab, cand, k, k + 1) and _overlaps(patterns, pre, cand, post):
+                    out[a:b] = cand
                     break
+        out = ''.join(out)
         if len(self._spell_cache) > 4096:
             self._spell_cache.clear()
         self._spell_cache[text] = out

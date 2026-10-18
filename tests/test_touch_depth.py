@@ -1127,6 +1127,51 @@ def test_an_upload_rest_reads_each_episodes_start_and_end():
     assert abs(sg.resting_level(arrs[2])[0] - 3072) < 10        # one episode alone, at rest at both ends
 
 
+@pytest.mark.parametrize("kind", ["force", "negative force", "flag", "whole pad"])
+def test_a_recording_loaded_at_both_ends_keeps_zero_as_rest(kind):
+    """A recording that starts and ends mid-grasp reads its loaded level at both ends. Those ends are not taken as
+    rest when the other end of the range reads zero: where the signal sits decides, so the contacts are the loaded
+    ends and never the unloaded middle. The reported recording (300 rows, 5 for the first and last 30) and its
+    siblings: loads of different lengths at each end, and a contact between them."""
+    rng = np.random.default_rng(3)
+    t = np.arange(300) / 30
+    reported = np.zeros((300, 1))
+    reported[:30] = reported[-30:] = 5
+    assert sg.resting_level(reported)[0] == 0
+    assert [(c["start_s"], c["end_s"]) for c in lc.find({"right_fingertip_force": reported}, {}, t)] \
+        == [(0.0, round(29 / 30, 3)), (9.0, round(299 / 30, 3))]
+    base, step, name, meta = {
+        "force": (rng.normal(0, 0.05, (300, 1)), 5.0, "right_fingertip_force", {}),
+        "negative force": (rng.normal(0, 0.05, (300, 1)), -5.0, "right_fingertip_force", {}),
+        "flag": (np.zeros((300, 1)), 1.0, "right_contact", {}),
+        "whole pad": (rng.normal(0, 2, (300, 16)), 400.0, "right_pressure", {"right_pressure": {"shape": [4, 4]}}),
+    }[kind]
+    for s, e, middle in [(30, 30, None), (10, 90, None), (60, 20, None), (50, 50, None), (30, 30, (140, 160)),
+                         (40, 70, (100, 130))]:
+        spans = [(0, s - 1)] + ([middle] if middle else []) + [(300 - e, 299)]
+        a = base.copy()
+        for k0, k1 in spans:
+            a[k0:k1 + 1] += step
+        got = [(c["start_s"], c["end_s"]) for c in lc.find({name: a}, meta, t)]
+        want = [(k0 / 30, k1 / 30) for k0, k1 in spans]
+        assert len(got) == len(want) and np.allclose(got, want, atol=1 / 30 + 1e-9), (kind, s, e, got, want)
+
+
+def test_ends_away_from_zero_stay_rest_where_the_signal_sits():
+    """The ends still name rest when the signal sits there: a value resting at 1 that dips to zero for a grasp rests
+    at 1, in one recording and across an upload's recordings joined, so the earlier rule (rest from the starts and
+    ends, not from how long it is loaded) is kept wherever zero does not contradict it."""
+    a = np.ones((300, 1))
+    a[120:180] = 0
+    assert sg.resting_level(a)[0] == 1
+    arrs = [a, a.copy(), a.copy()]
+    assert sg.resting_level(np.concatenate(arrs), ends=sg.recording_ends(arrs))[0] == 1
+    loaded = np.zeros((300, 1))
+    loaded[:30] = loaded[-30:] = 5
+    arrs = [loaded, loaded.copy()]
+    assert sg.resting_level(np.concatenate(arrs), ends=sg.recording_ends(arrs))[0] == 0
+
+
 def test_an_infinite_reading_is_no_reading():
     """An infinite value counts as no reading, as a NaN does: it is never the largest activity of the episode or the
     rest of a value, and reading it warns of nothing."""
