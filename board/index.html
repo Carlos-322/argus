@@ -2279,22 +2279,41 @@ const STATIC = BOARD.mode === 'static';
 
 // ---- navigation: what the reader asked to see last ----
 // Every view change (an episode, a dataset tab, a labeller, the comparison, the browser's Back and Forward) starts a
-// navigation with navBegin, or joins the one that called it by taking its token. Work that awaits anything goes on
-// only while navCurrent says its navigation is still the latest, so a slow response never draws over, or takes the
-// view away from, what the reader chose after asking for it.
+// navigation with navBegin, or joins the one that called it by taking its token. A step of a navigation that awaits
+// anything goes on only while navCurrent says its navigation is still the latest, so a slow response never draws
+// over, or takes the view away from, what the reader chose after asking for it. What fills in an episode already
+// drawn answers to that draw instead (renderCurrent, below).
 let _nav = 0;
 const navBegin = () => ++_nav;
 const navCurrent = tok => tok === _nav;
+
+// ---- the drawn episode: what fills it in afterwards ----
+// Each draw of an episode (renderEp) is a render, named by its AbortController (window._epAbort). What loads after
+// the draw to fill part of it in (its frame grids, its data dictionary) belongs to that render, not to the navigation
+// that asked for the episode: it lands while its render is the one on the pane (renderCurrent), so a navigation that
+// keeps the drawn episode (Back from a comparison that never appeared) keeps it too, and it is dropped once another
+// draw replaces the render or the pane is cleared (endRender).
+const renderCurrent = render => !!render && render === window._epAbort;
+function endRender() {
+  if (window._epAbort) window._epAbort.abort();
+  window._epAbort = null;
+  clearModelGrids();
+  document.getElementById('current-ep-dictionary').replaceChildren();
+}
 
 const msBtn = document.getElementById('ms-btn');
 const msDialog = document.getElementById('ms-dialog');
 let _msView = null, _msPending = null;
 const gridRequestUrl = () => location.protocol !== 'file:' && window.__GRID_REQUEST_URL;
-async function loadModelGrids(file, label, nav) {
+function clearModelGrids() {
   _msView = null; _msPending = null; msBtn.hidden = true;
   msBtn.disabled = false; msBtn.textContent = 'Frame grids shown to the model';
   if (msDialog.open) msDialog.close();
   document.getElementById('ms-body').replaceChildren();
+}
+// called right after renderEp, so the render on the pane is the one these grids belong to
+async function loadModelGrids(file, label) {
+  const render = window._epAbort;
   const receipt = label && label.request_images;
   const fingerprint = receipt && receipt.fingerprint;
   if (!file || !fingerprint || !receipt.grid_images || !receipt.grid_images.length || SHOWN) return;
@@ -2303,20 +2322,20 @@ async function loadModelGrids(file, label, nav) {
   if (!BOARD.grids || (STATIC && !(ALL_EPS.find(e => e.file === file) || {})._grids)) return;
   const url = STATIC ? BOARD.data + 'grids/' + encodeURIComponent(siteFile(file)) : 'api/grids?file=' + encodeURIComponent(file) + '&fingerprint=' + encodeURIComponent(fingerprint);
   const view = await fetchJson(url);
-  if (!navCurrent(nav) || file !== _activeFile || !view || view.fingerprint !== fingerprint || !Array.isArray(view.grids) || !view.grids.length) return;
+  if (!renderCurrent(render) || !view || view.fingerprint !== fingerprint || !Array.isArray(view.grids) || !view.grids.length) return;
   _msView = view; msBtn.hidden = false;
   msBtn.textContent = view.grids.every(g => g.dispatch_status === 'response_received') ? 'Frame grids shown to the model' : 'Request frame grids';
 }
 async function showModelGrids() {
   if (!_msView && _msPending && gridRequestUrl()) {
-    const pending = _msPending, nav = _nav;   // part of the navigation that opened the episode
+    const pending = _msPending, render = window._epAbort;   // the drawn episode's grids, asked for from its button
     msBtn.disabled = true; msBtn.textContent = 'Loading frame grids';
     let view = null;
     try {
       const response = await fetch(gridRequestUrl(), {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(pending)});
       if (response.ok) view = await response.json();
     } catch (_) { /* unavailable inputs remain unavailable */ }
-    if (!navCurrent(nav) || pending.file !== _activeFile) return;
+    if (!renderCurrent(render)) return;
     msBtn.disabled = false;
     if (!view || view.fingerprint !== pending.fingerprint || !Array.isArray(view.grids) || !view.grids.length) {
       msBtn.textContent = 'Request frame grids';
@@ -2941,9 +2960,9 @@ function dictionaryRows(data, endpoint) {
         _epCache.clear();
         const current = _activeFile;
         if (current) {
-          const nav = navBegin();
-          await selectEp(current, true, nav);
-          if (current === file && navCurrent(nav)) {
+          // the fold opens in the draw this save asked for, while that draw is on the pane
+          const render = await selectEp(current, true);
+          if (current === file && renderCurrent(render)) {
             const fold = target.querySelector('details');
             if (fold) fold.open = true;
           }
@@ -2953,9 +2972,8 @@ function dictionaryRows(data, endpoint) {
   }
 }
 async function loadDictionary(d, file) {
-  // part of the navigation and of the render (renderEp's _epAbort) that drew this episode: a later draw of it, in the
-  // same navigation or another, fills the rows instead
-  const nav = _nav, render = window._epAbort;
+  // part of the render (renderEp's _epAbort) that drew this episode: a later draw of it fills the rows instead
+  const render = window._epAbort;
   const base = window.__DICTIONARY_URL || BOARD.dictionary_url;
   const endpoint = base && (base + '?' + (STATIC ? 'episode=' + encodeURIComponent((d.data_dictionary || {}).episode_id || (d._meta || {}).episode_id || '') : 'file=' + encodeURIComponent(file)));
   dictionaryRows(d.data_dictionary, null);
@@ -2963,7 +2981,7 @@ async function loadDictionary(d, file) {
   try {
     const response = await fetch(endpoint, {cache: 'no-store'});
     if (!response.ok) return;
-    const data = await response.json(); if (navCurrent(nav) && render === window._epAbort && _activeFile === file) dictionaryRows(data, endpoint);
+    const data = await response.json(); if (renderCurrent(render)) dictionaryRows(data, endpoint);
   } catch (_) {}
 }
 
@@ -3609,7 +3627,7 @@ function renderRail(ds, keepFile, fromSearch, nav) {
   if (!eps.length) {
     epListEl.innerHTML = '<div class="rail-empty">' +
       (ISSUE_FILTER ? 'No episodes with this issue.' : 'No episodes here yet.') + '</div>';
-    leftCol.innerHTML = ''; _drawnFile = null;
+    endRender(); leftCol.innerHTML = ''; _drawnFile = null;
     rightCol.innerHTML = '<div class="rail-empty" style="padding:48px 28px">No episodes in this dataset yet.</div>';
     currentEp.textContent = '';
     document.getElementById('current-ep-raw').textContent = '';
@@ -3697,8 +3715,6 @@ function selectEp(file, fromPop, nav) {
   const swap = _lbSwapFile === file && file === _activeFile && !!document.getElementById('video');
   _lbSwapFile = null;
   _activeFile = file;
-  _msView = null; _msPending = null; msBtn.hidden = true;
-  if (msDialog.open) msDialog.close();
   // Give every episode its own URL so it is shareable and reload-stable; the labeller rides along.
   if (!fromPop) {
     try {
@@ -3735,7 +3751,8 @@ function selectEp(file, fromPop, nav) {
         rightCol.scrollTop = 0; document.getElementById('left-pane').scrollTop = 0;
       }
       renderSourceBar();
-      loadModelGrids(file, d, nav);
+      loadModelGrids(file, d);
+      return window._epAbort;
     }, err => { if (navCurrent(nav) && file === _activeFile) showEpisodeError(file, err); });
 }
 // the episode the pane has drawn, under the labels SHOWN: _activeFile is the one asked for, which may still be on its
@@ -3745,7 +3762,7 @@ const isDrawn = file => _drawnFile === file && SHOWN === (BY && cmpHas(BY, file)
 // an episode whose labels could not be read: the pane says so in its place, and opening the episode again fetches it
 // again (a failed read is never kept, fetchEpisode)
 function showEpisodeError(file, err) {
-  if (window._epAbort) window._epAbort.abort();
+  endRender();
   for (const v of leftCol.querySelectorAll('video')) {
     try { v.pause(); v.removeAttribute('src'); v.load(); } catch (_) {}
   }
@@ -5827,8 +5844,9 @@ function progressAt(pts, t) {
 function renderEp(d, opts) {
   opts = opts || {};
   const meta = d._meta || {};
-  // the video's listeners belong to this render: a re-render (another source, the same footage) drops them all
-  if (window._epAbort) window._epAbort.abort();
+  // the video's listeners, and what loads to fill this draw in, belong to this render: a re-render (another source,
+  // the same footage) drops them all
+  endRender();
   window._epAbort = new AbortController();
   const on = (el, ev, fn) => el.addEventListener(ev, fn, {signal: window._epAbort.signal});
   // another model's labels of this episode (compare/metrics.py), shown in place of the board's; never counted
