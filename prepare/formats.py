@@ -5039,7 +5039,7 @@ def _episodes_v3(root: dict, rdir: Path, data_files: list[Path], vids: list[Path
     vm, _ = assign_views(keys, "teleop_arms")
     lead = vm.get("exo") or keys[0]
     counts = {}
-    dropped = set()
+    dropped, joined = set(), set()
     for p in by_key[lead]:
         files, unaligned = {lead: p}, {}
         for k in keys:
@@ -5051,6 +5051,7 @@ def _episodes_v3(root: dict, rdir: Path, data_files: list[Path], vids: list[Path
                 b = counts.setdefault(q, _frame_count(q))
                 if abs(a - b) <= 2:
                     files[k] = q
+                    joined.add(q)
                     continue
                 unaligned[k] = f"its packed file has {b} frames and the {lead} file {a}, so the two cannot be lined up"
             else:
@@ -5060,10 +5061,19 @@ def _episodes_v3(root: dict, rdir: Path, data_files: list[Path], vids: list[Path
         dp = rdir / "data" / p.parent.name / (p.stem + ".parquet")
         root["recordings"].append({"name": p.relative_to(rdir).with_suffix("").as_posix(), "files": files,
                                    "unaligned": unaligned, "data": dp if dp.exists() else None})
+    # a camera's packed file that joins no scene recording is footage all the same: it is a recording of its own,
+    # never dropped because the episode list that would place it is missing or damaged
+    for k in keys:
+        if k == lead:
+            continue
+        for q in by_key[k]:
+            if q not in joined:
+                root["recordings"].append({"name": q.relative_to(rdir).with_suffix("").as_posix(), "files": {k: q},
+                                           "unaligned": {}, "data": None})
     if dropped:
         root["missing"].append(f"The {', '.join(sorted(dropped))} videos{where} are packed differently from the {lead} "
-                               "videos and, without the episode list, cannot be lined up with them in time, so they were "
-                               "not used.")
+                               "videos and, without the episode list, cannot be lined up with them in time, so each "
+                               "of their packed files was labelled as a recording of its own.")
 
 
 def _place_episodes(files: list[Path], lengths: list[tuple[int, int]]) -> dict:
