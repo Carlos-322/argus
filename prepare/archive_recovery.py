@@ -282,9 +282,9 @@ def scan_local(path, max_files: int, max_bytes: int) -> tuple[list[dict], list[s
                 nxt = _next_header(source, position + 1, length)
                 if nxt is None:
                     if position:
-                        damage.append(f'{length - position:,} bytes after the last readable member could not be read')
+                        damage.append(f'archive: {length - position:,} bytes after the last readable member could not be read')
                     break
-                damage.append(f'{nxt - position:,} damaged bytes at byte {position:,} were skipped to the next member')
+                damage.append(f'archive: {nxt - position:,} damaged bytes at byte {position:,} were skipped to the next member')
                 position = nxt
                 continue
             measured = _measure(source, entry, length, max_bytes - total) if entry['method'] in (0, 8) else (

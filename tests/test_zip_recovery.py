@@ -150,3 +150,14 @@ def test_a_name_damaged_in_the_member_header_is_never_given_to_another_recording
     raw[local_header(raw, 2) + 30 + flip] ^= 0x01
     got, bad = unpacked(tmp_path, bytes(raw))
     unverified_name_kept_apart(got, bad)
+
+
+@pytest.mark.parametrize('what', ['name', 'offset', 'size', 'signature'])
+def test_a_note_about_the_archive_is_never_counted_as_a_member_left_out(tmp_path, what):
+    # a damaged directory whose members are all recovered leaves nothing out, whatever the notes say about it
+    path = tmp_path / 'up.zip'
+    path.write_bytes(corrupt_directory(build(zipfile.ZIP_DEFLATED), what))
+    _, notes = formats.open_archives(path, tmp_path / 'unpacked')
+    opened = next(note for note in notes if note.startswith('Opened up.zip'))
+    assert 'left out' not in opened, opened
+    assert any(note.startswith('Archive damage: ') and 'ZIP directory' in note for note in notes)

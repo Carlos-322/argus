@@ -360,12 +360,12 @@ def _archive_members(path: Path):
         except Exception as error:
             # the directory is one of a ZIP's two indexes; the members' own headers are the other
             out, skipped, bad = local_members(path, _member_parts, UNPACK_MAX_FILES, UNPACK_MAX_BYTES,
-                                              f"{path.name} has a ZIP directory that could not be read "
+                                              f"archive: {path.name} has a ZIP directory that could not be read "
                                               f"({type(error).__name__}); its members were read from their own headers")
             return out, skipped, nullcontext(), bad
         infos, replaced, unlisted, lost = checked_directory(path, infos, UNPACK_MAX_FILES, UNPACK_MAX_BYTES)
         if replaced or unlisted or lost:
-            bad.append(f"{path.name} has a damaged ZIP directory; {len(replaced) + len(unlisted)} member"
+            bad.append(f"archive: {path.name} has a damaged ZIP directory; {len(replaced) + len(unlisted)} member"
                        f"{'s were' if len(replaced) + len(unlisted) != 1 else ' was'} read from their own headers"
                        + (f" and {len(lost)} could not be found" if lost else ""))
             bad.extend(f"{name} (its directory entry matches no member)" for name in lost)
@@ -376,7 +376,8 @@ def _archive_members(path: Path):
                 continue
             if entry.get('conflicting_names'):
                 first, second = entry['conflicting_names']
-                bad.append(f"the member at byte {entry['offset']:,} is named {first} by the ZIP directory and {second} by "
+                bad.append(f"archive: the member at byte {entry['offset']:,} is named {first} by the ZIP directory and "
+                           f"{second} by "
                            f"its own header; neither name can be verified, so it was read as a recording of its own, "
                            f"{entry['name']}, which no other recording's files describe")
             name = entry['name']
@@ -600,11 +601,14 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str]]:
                 count += 1
                 wrote += 1
         done.write_text("")
+        # bad holds three kinds of note: members left out (counted below), members kept with a caveat
+        # ('retained: '), and the damage of the archive as a whole ('archive: '), which no member count includes
         cut = [b for b in bad if b.startswith(a.name + " is cut short")]
         retained = [b.removeprefix('retained: ') for b in bad if b.startswith('retained: ')]
-        members_bad = [b for b in bad if b not in cut and not b.startswith('retained: ')]
+        whole = [b.removeprefix('archive: ') for b in bad if b.startswith('archive: ')]
+        members_bad = [b for b in bad if b not in cut and not b.startswith(('retained: ', 'archive: '))]
         if bad:
-            notes.append('Archive damage: ' + _and_words(cut + members_bad + retained) + '.')
+            notes.append('Archive damage: ' + _and_words(cut + whole + members_bad + retained) + '.')
         notes.append(f"Opened {a.name}: {wrote} files" + (f"; {skipped} left out (links, or names that could leave "
                                                             "the archive's folder)" if skipped else "")
                      + (f"; {len(members_bad)} left out because {'they' if len(members_bad) != 1 else 'it'} could "
