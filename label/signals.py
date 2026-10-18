@@ -7,8 +7,8 @@ A signal is read by how its numbers behave, and only whether it measures touch a
   an end of its range rests at that end (its 1st or 99th percentile, so a rest held for only a few percent of the
   recording is still inside it), else at its median: a force sensor at its offset, an IMU or a position at its middle.
   Which end is never read from how long it sits there, since a sensor can be loaded through most of a recording: it
-  is the end the recordings start and end at, else the end that reads zero, else the one it sits at most
-  (_rest_end). An array (a pressure map) is read as one sensor: its values pooled say which end it rests at the same
+  is the end the recordings start and end at unless the other end reads zero, else the end that reads zero, else the
+  one it sits at most (_rest_end). An array (a pressure map) is read as one sensor: its values pooled say which end it rests at the same
   way (OpenTouch's raw glove reads 3072 untouched and less when pressed), and each value rests at its own extreme on
   that end (its 1st or 99th percentile), so a cell pressed through most of a clip still rests where it reads
   untouched. An array whose pooled values sit in the middle (hand landmarks) rests at each value's median.
@@ -248,7 +248,11 @@ def _rest_end(lo, med, hi, held_lo, held_hi, ends) -> np.ndarray:
       demonstration starts before the hand or gripper takes hold of anything and ends after it lets go;
     - zero, when those do not agree (a recording that starts mid-grasp): the one end that reads zero within
       REST_FRACTION of the range, since a calibrated force, a pressure or a contact flag reads zero unloaded;
-    - else the end it sits at for most of its readings, as when nothing else says."""
+    - else the end it sits at for most of its readings, as when nothing else says.
+    The starts and ends count only when zero does not say otherwise. Ends at the far end from a zero reading are a
+    recording that starts and ends mid-grasp as often as a sensor that rests away from zero, and the two read alike,
+    so then neither is assumed and the end it sits at for most of its readings decides (zero when it sits at
+    neither)."""
     lo, med, hi = (np.asarray(x, dtype=np.float64) for x in (lo, med, hi))
     span = hi - lo
     ok = span > 0
@@ -265,7 +269,9 @@ def _rest_end(lo, med, hi, held_lo, held_hi, ends) -> np.ndarray:
     band = REST_FRACTION * span
     z_lo, z_hi = np.abs(lo) <= band, np.abs(hi) <= band
     by_zero = np.where(z_lo & ~z_hi, -1, np.where(z_hi & ~z_lo, 1, 0))
-    chosen = np.where(by_ends != 0, by_ends, np.where(by_zero != 0, by_zero, by_share))
+    dwell = np.where(by_share != 0, by_share, by_zero)
+    chosen = np.where(by_ends == 0, np.where(by_zero != 0, by_zero, by_share),
+                      np.where((by_zero == 0) | (by_zero == by_ends), by_ends, dwell))
     return np.where(ok, np.where(held, chosen, by_share), 0)
 
 
