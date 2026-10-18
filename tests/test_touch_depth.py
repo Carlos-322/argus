@@ -550,6 +550,21 @@ def test_contacts_placed_from_both_starts_are_never_judged_for_timing():
     assert res["placed_from_both_starts"] == ["c0", "c1", "c2"]
 
 
+def test_strip_times_and_frame_rates_that_are_not_numbers_place_nothing():
+    """A strip time that is NaN or not a number gives no offset (one NaN offset made every median NaN), and a frame
+    rate that is missing, zero or NaN is read as 30, so the clock rule still compares in milliseconds."""
+    contacts = [{"id": f"c{i}", "hand": "right", "start_s": 1.0 + i, "end_s": 1.5 + i} for i in range(4)]
+    strips = {f"c{i}": {"begin": [0.7 + i, 0.85 + i, 1.0 + i + 0.2, 1.15 + i + 0.2, 1.3 + i],
+                        "end": [1.35 + i, 1.5 + i, 1.65 + i]} for i in range(3)}
+    strips["c3"] = {"begin": [np.nan] * 5, "end": [None, "x", 4.6]}
+    seen = [{"id": f"c{i}", "touch_seen": "yes", "first_touch_frame": 3, "last_touch_frame": 2, "hand": "right"}
+            for i in range(4)]
+    for fps in (30, float("nan"), 0, None):
+        res = cc.check({"contacts": seen, "contacts_missing": []}, contacts, strips, fps)
+        assert np.isfinite(res["offset_ms"]["median"]) and res["offset_ms"]["n"] == 6
+        assert [n["check"] for n in res["notes"]] == ["clock_offset"]
+
+
 def _glove_beside_a_video(root: Path, n: int = 300) -> Path:
     """A video with no frame times beside a glove file on an epoch clock: the glove is placed from both starts."""
     one = root / "up" / "one"

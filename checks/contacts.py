@@ -42,9 +42,14 @@ def _between(strip: list, f, first: bool) -> float | None:
     if not isinstance(f, int) or not strip or not 1 <= f <= len(strip):
         return None
     i = f - 1
-    if first:
-        return None if i == 0 else (strip[i - 1] + strip[i]) / 2
-    return None if i == len(strip) - 1 else (strip[i] + strip[i + 1]) / 2
+    pair = (i - 1, i) if first else (i, i + 1)
+    if not 0 <= pair[0] < pair[1] < len(strip):
+        return None
+    a, b = strip[pair[0]], strip[pair[1]]
+    # a strip time that is not a finite number places nothing: a NaN offset would make every median after it NaN
+    if not all(isinstance(x, (int, float, np.number)) and not isinstance(x, bool) and np.isfinite(x) for x in (a, b)):
+        return None
+    return (a + b) / 2
 
 
 def check(labels: dict, contacts: list[dict], strips: dict, fps: float, instrumented_hands=None,
@@ -85,7 +90,9 @@ def check(labels: dict, contacts: list[dict], strips: dict, fps: float, instrume
         if e is not None:
             offsets.append(("end", cid, e - rec["end_s"]))
     shown = [cid for cid in by_id if cid in seen]
-    frame_ms = 1000.0 / float(fps or 30.0)
+    # a frame rate that is missing, zero or not a finite number says nothing; the cameras' usual 30 is taken instead
+    rate = float(fps) if isinstance(fps, (int, float, np.number)) and np.isfinite(fps) and fps > 0 else 30.0
+    frame_ms = 1000.0 / rate
     out = {"contacts": len(by_id), "checked": len(shown), "notes": []}
     if arrival_clock or arrival:
         out.update(timing_basis='mcap_log_time', timing_limitation=RECORDER_ARRIVAL_LIMITATION)
