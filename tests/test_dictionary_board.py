@@ -524,6 +524,8 @@ def test_dictionary_save_invalidates_cached_episode_across_navigation(tmp_path):
     form_start = page.index('function dictionaryRows(data, endpoint)')
     form_end = page.index('\nasync function loadDictionary(', form_start)
     load_end = page.index('\nfunction readerNotesHtml(', form_end)
+    render_start = page.index('const renderCurrent = ')
+    render_end = page.index('\n', render_start) + 1
     script = r'''
     class Element {
       constructor(tag) { this.tag=tag; this.children=[]; this.listeners={}; this.open=false; }
@@ -576,13 +578,15 @@ def test_dictionary_save_invalidates_cached_episode_across_navigation(tmp_path):
       const name=url.endsWith('a.json') ? (revision ? 'fresh A' : 'stale A') : (revision>=3 ? 'fresh B' : 'B');
       return {ok:true,json:async()=>data(name)};
     }
-    ''' + page[cache_start:cache_end] + page[form_start:load_end] + r'''
+    ''' + page[render_start:render_end] + page[cache_start:cache_end] + page[form_start:load_end] + r'''
+    // the page's selectEp, drawing only the dictionary: each draw is a render of its own, which it resolves with
     async function selectEp(file, fromPop, nav) {
       nav=nav || navBegin();
       _activeFile=file;
       const result=await fetchEpisode(file);
-      if (navCurrent(nav) && _activeFile===file)
-        dictionaryRows(result,'/api/dictionary?file='+file);
+      if (navCurrent(nav) && _activeFile===file) {
+        window._epAbort={}; dictionaryRows(result,'/api/dictionary?file='+file); return window._epAbort;
+      }
     }
     (async()=>{
       _epCache.set('a.json',Promise.resolve(data('stale A')));

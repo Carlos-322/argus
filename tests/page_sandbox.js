@@ -7,8 +7,8 @@
 // is code appended to the page's script, to hand its internals to the driver. S.run() runs the page's script without
 // starting it (the page starts itself with loadEpisodes(), which the driver calls). S.failure() is the first uncaught
 // error, unhandled rejection or console error, S.failedRequests every request that did not succeed, S.popstate(url)
-// and S.back() go to url or to the previous history entry and fire the page's popstate listeners, and S.settle()
-// waits until no request is in flight.
+// and S.back() go to url or to the previous history entry and fire the page's popstate listeners, S.settle()
+// waits until no request is in flight, and S.state() is what the page left on each element of its markup.
 'use strict';
 const fs = require('fs');
 const vm = require('vm');
@@ -27,6 +27,14 @@ module.exports = function pageSandbox(pagePath, base, opts) {
   const boot = '\nloadEpisodes();\n';
   if (!m[1].endsWith(boot)) throw new Error('the page does not end with loadEpisodes()');
   const pageJs = m[1].slice(0, -boot.length) + (opts.expose || '');
+  // each element of the markup starts as its tag says: its attributes, classes and hidden
+  const markup = new Map();
+  for (const [, attrs] of html.slice(0, m.index).matchAll(/<[a-zA-Z][\w-]*((?:\s+[\w-]+(?:="[^"]*")?)*)\s*\/?>/g)) {
+    const a = {};
+    for (const [, k, v] of attrs.matchAll(/([\w-]+)(?:="([^"]*)")?/g)) a[k] = v === undefined ? '' : v;
+    if (a.id) markup.set(a.id, a);
+  }
+  const markupIds = [...markup.keys()];
 
   let failure = null;
   const fail = (what, e) => { if (!failure) failure = what + ': ' + (e && e.stack || e); };
@@ -36,13 +44,25 @@ module.exports = function pageSandbox(pagePath, base, opts) {
   // ---- a stub DOM: every element takes any property and call, and keeps what the page writes into it ----
   const noop = () => {};
   function makeEl(id) {
+    // attributes are kept, so a driver can compare what a page left on an element (S.state)
     const t = {id: id || '', _html: '', _text: '', _val: '', dataset: {}, children: [], hidden: false,
+      _attrs: {}, setAttribute(k, v) { this._attrs[k] = String(v); }, removeAttribute(k) { delete this._attrs[k]; },
+      getAttribute(k) { return k in this._attrs ? this._attrs[k] : null; }, hasAttribute(k) { return k in this._attrs; },
       style: {setProperty: noop, removeProperty: noop},
       classList: {_s: new Set(), add(...c) { c.forEach(x => this._s.add(x)); }, remove(...c) { c.forEach(x => this._s.delete(x)); },
         toggle(c, on) { const v = on === undefined ? !this._s.has(c) : !!on; if (v) this._s.add(c); else this._s.delete(c); return v; },
         contains(c) { return this._s.has(c); }}};
+    for (const [k, v] of Object.entries(markup.get(id) || {})) {
+      if (k === 'id') continue;
+      if (k === 'class') v.split(/\s+/).filter(Boolean).forEach(c => t.classList._s.add(c));
+      else if (k === 'hidden') t.hidden = true;
+      else t._attrs[k] = v;
+    }
     return new Proxy(t, {
       get(o, p) {
+        if (p === '__target') return o;
+        // a link's address and an element's title are its attributes, as in a browser
+        if (p === 'href' || p === 'title') return p in o._attrs ? o._attrs[p] : '';
         if (p === 'innerHTML') return o._html;
         if (p === 'textContent') return o._text;
         if (p === 'value') return o._val;
@@ -51,7 +71,6 @@ module.exports = function pageSandbox(pagePath, base, opts) {
           case 'querySelectorAll': return () => [];
           case 'querySelector': return () => makeEl();
           case 'appendChild': case 'removeChild': case 'insertBefore': case 'append': return (c) => c;
-          case 'getAttribute': return () => null;
           case 'closest': return () => null;
           case 'contains': return () => false;
           case 'cloneNode': return () => makeEl();
@@ -65,7 +84,8 @@ module.exports = function pageSandbox(pagePath, base, opts) {
         }
       },
       set(o, p, v) {
-        if (p === 'innerHTML') o._html = String(v);
+        if (p === 'href' || p === 'title') o._attrs[p] = String(v);
+        else if (p === 'innerHTML') o._html = String(v);
         else if (p === 'textContent') o._text = String(v);
         else if (p === 'value') o._val = v;
         else o[p] = v;
@@ -131,6 +151,25 @@ module.exports = function pageSandbox(pagePath, base, opts) {
 
   return {
     ctx, doc, created, failedRequests, fail, failure: () => failure,
+    // what the page has left on each element of its markup (every id outside its script): content, attributes,
+    // classes, hidden and every other property it set; an element it never touched reads as a fresh one
+    state() {
+      const untouched = makeEl();
+      const describe = o => {
+        const props = {};
+        for (const [k, v] of Object.entries(o)) {
+          if (['id', '_html', '_text', '_val', 'dataset', 'children', 'hidden', '_attrs', 'style', 'classList']
+            .includes(k) || typeof v === 'function' || v === undefined) continue;
+          if (v !== untouched[k]) props[k] = v;     // a scroll position of 0 is where an element starts
+        }
+        const style = Object.fromEntries(Object.entries(o.style).filter(([, v]) => typeof v !== 'function'));
+        return {html: o._html, text: o._text, value: o._val, hidden: !!o.hidden, attrs: {...o._attrs},
+          classes: [...o.classList._s].sort(), dataset: {...o.dataset}, style, props};
+      };
+      const out = {};
+      for (const id of markupIds) out[id] = describe((byId.has(id) ? byId.get(id) : makeEl(id)).__target);
+      return out;
+    },
     run() { try { vm.runInContext(pageJs, ctx, {filename: 'board-page.js'}); } catch (e) { fail('top level', e); } },
     // the browser's Back or Forward to url: the URL changes first, then the page hears popstate
     popstate(url) { setUrl(url); return Promise.all(popstate.map(fn => fn({}))); },
