@@ -150,9 +150,35 @@ _CREDENTIAL_VALUE = re.compile(
 _JWT_VALUE = re.compile(r'(?<![\w-])([A-Za-z0-9_-]{8,})\.([A-Za-z0-9_-]{2,})\.[A-Za-z0-9_-]+(?![\w-])')
 
 
+def _key_material(text: str) -> bool:
+    """Whether text holds generated key material: a run of 16 or more letters and digits, with a digit in it, that
+    separators do not split into words. Provider keys are drawn at random, so one without a digit in 16 characters is
+    rare, while names built from words (sk-learn_preprocessing_pipeline_v2, see-the-tokenizer-config) split apart."""
+    return any(len(run) >= 16 and re.search(r'\d', run) and re.search(r'[A-Za-z]', run)
+               for run in re.split(r'[-_.:/=+,;%\s"\']', text))
+
+
+def _weak_match(found: str) -> bool:
+    """Whether a match is only a shape that ordinary names share: a lowercase provider prefix such as sk- or hf_
+    (written in another case it is no provider's), or a token or Cookie label, whose value must then be key
+    material. Every other match is access syntax that is never a name."""
+    lower = found.lower()
+    if lower.startswith(('sk-', 'hf_')):
+        return True
+    return re.match(r'(?:token|cookie)\b', lower) is not None
+
+
 def _credential_value(value: str, _encoded=False) -> bool:
     """Recognize access syntax independently of the publisher's field names."""
-    if _CREDENTIAL_VALUE.search(value) or re.fullmatch(r'\s*Bearer[ \t]+[^\s]{12,}[ \t]*', value, re.I):
+    for found in _CREDENTIAL_VALUE.finditer(value):
+        text = found.group()
+        if not _weak_match(text):
+            return True
+        if text[:3] in ('sk-', 'hf_') and _key_material(text[3:]):
+            return True
+        if text[:3].lower() not in ('sk-', 'hf_') and _key_material(re.split(r'[:=]', text, maxsplit=1)[-1]):
+            return True
+    if re.fullmatch(r'\s*Bearer[ \t]+[^\s]{12,}[ \t]*', value, re.I):
         return True
     basic = re.fullmatch(r'\s*Basic\s+(\S+)\s*', value, re.I)
     if basic:

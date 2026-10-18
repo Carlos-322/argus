@@ -688,3 +688,20 @@ def test_actual_hdf_dictionary_credentials_keep_descriptors_and_native_signal_va
     assert any(field['name'] == 'credentials' and field['summary']['mean'] == 9
                for field in project(private_views[1])['fields'])
     assert hashlib.sha256(source.read_bytes()).hexdigest() == original
+
+
+@pytest.mark.parametrize('value, secret', [
+    ('sk-learn_preprocessing_pipeline_v2', False),
+    ('HF_LeRobot_dataset_v21_conversion', False),
+    ('token: see-the-tokenizer-config', False),
+    ('Cookie: none-observed-in-this-frame', False),
+    ('sk-or-v1-' + '0123456789abcdef' * 4, True),
+    ('hf_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789', True),
+    ('sk-proj-Xy7Qw9Lk2Jh5Gf8Ds3Ap6Zx1Cv4Bn7Mm', True),
+    ('token: 4f9a8b7c' + '6d5e4f3a2b1c', True),
+    ('Cookie: sessionid=3f9a8b7c6d5e4f3a2b1c0d9e', True),
+    ('password: correcthorsebatterystaple', True),
+])
+def test_names_built_from_words_are_not_taken_for_keys(value, secret):
+    from board.public_export import _credential_value
+    assert _credential_value(value) is secret
