@@ -343,3 +343,46 @@ def test_configured_untrusted_prepares_encode_different_episodes_in_parallel(tmp
         for request in requests:
             prepared = json.loads(request.result())
             assert get(base + 'api/footage?ticket=' + prepared['ticket'])
+
+
+@pytest.mark.parametrize('span', [(0, None), (.05, .2)])
+def test_unwritable_receipt_folder_reuses_the_memory_receipt(tmp_path, monkeypatch, span):
+    # The .ready folder is read only, so no receipt reaches disk: the record the server made in memory is the only one,
+    # and it must validate exactly as its file would (a whole download and a span, through HTTP).
+    media(tmp_path, monkeypatch)
+    monkeypatch.setattr(serve, '_FOOTAGE_RECORDS', serve.OrderedDict())
+    ready = serve.FOOTAGE_DIR / '.ready'
+    ready.mkdir(parents=True)
+    ready.chmod(0o555)
+    encode, calls = serve._run_footage, []
+    def run(command):
+        calls.append(True)
+        return encode(command)
+    monkeypatch.setattr(serve, '_run_footage', run)
+    query = 'api/footage?id=episode_x' + ('' if span[1] is None else f'&t0={span[0]}&t1={span[1]}')
+    try:
+        with serving() as base:
+            first = get(base + query)
+            identity = serve._footage_version(next(serve.FOOTAGE_DIR.glob('*.mp4')))
+            assert get(base + query) == first
+            assert serve._footage_version(next(serve.FOOTAGE_DIR.glob('*.mp4'))) == identity
+    finally:
+        ready.chmod(0o755)
+    assert len(calls) == 1 and not list(ready.glob('*.json'))
+
+
+@pytest.mark.parametrize('made', ['published', 'adopted'])
+def test_every_footage_record_the_server_keeps_has_its_stored_shape(tmp_path, monkeypatch, made):
+    # A record made at publication and one made for a video found already prepared (another process published it)
+    # are both kept in memory in the shape their JSON file holds, and both validate there.
+    media(tmp_path, monkeypatch)
+    monkeypatch.setattr(serve, '_FOOTAGE_RECORDS', serve.OrderedDict())
+    result = serve.footage('episode_x', 0, .1)
+    if made == 'adopted':
+        serve._FOOTAGE_RECORDS.clear()
+        serve._remember_ready_footage(result[0].stem, (result[0], result[1]))
+    records = [*serve._FOOTAGE_RECORDS.values(), result.receipt]
+    assert len(records) == 2
+    for record in records:
+        assert record == json.loads(json.dumps(record))
+        assert serve._receipt_footage(record) == result

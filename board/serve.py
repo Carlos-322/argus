@@ -175,7 +175,7 @@ class FootageCapacityError(ValueError):
 class _VerifiedFootage(tuple):
     def __new__(cls, out, name, record):
         result = super().__new__(cls, (out, name))
-        result.receipt = dict(record)
+        result.receipt = _stored_record(record)
         return result
 
 
@@ -779,9 +779,16 @@ def _touch_footage(out):
         _maintenance_error(error)
 
 
+def _stored_record(record: dict) -> dict:
+    """A receipt in the shape its JSON file holds (a stat is a list, never a tuple). The memory copy, the returned
+    receipt and the file are all this one shape, so the validator (_receipt_footage) cannot reject a record the server
+    made itself only because it was never written and read back."""
+    return json.loads(json.dumps(record))
+
+
 def _retain_footage_record(out, record):
     with _FOOTAGE_MEMORY_LOCK:
-        _FOOTAGE_RECORDS[str(out)] = dict(record)
+        _FOOTAGE_RECORDS[str(out)] = _stored_record(record)
         _FOOTAGE_RECORDS.move_to_end(str(out))
         while len(_FOOTAGE_RECORDS) > max(128, _FOOTAGE_DISK_FILES):
             _FOOTAGE_RECORDS.popitem(last=False)
@@ -855,7 +862,7 @@ def _footage_receipt(result: tuple) -> dict:
     version = _footage_version(out)
     if out.is_symlink() or not 0 < version[2] <= _FOOTAGE_DISK_BYTES:
         raise FootageCapacityError('Prepared footage exceeds the disk cache budget')
-    return {'format': 'argus-footage-ready/2', 'file': out.name, 'name': name, 'version': version}
+    return _stored_record({'format': 'argus-footage-ready/2', 'file': out.name, 'name': name, 'version': version})
 
 
 def _discard_changed_footage(out: Path) -> None:
@@ -1251,7 +1258,7 @@ def _encode_and_publish(key, out, name, cams, probes, t0, t1, client=None):
                 if out.exists():
                     _discard_changed_footage(out)
                 os.replace(tmp, out)
-                record.update(file=out.name, version=_footage_version(out))
+                record = _stored_record({**record, 'file': out.name, 'version': _footage_version(out)})
                 _remember_ready_footage(key, (out, name), record)
                 _trim_footage_files(out, client)
         return _VerifiedFootage(out, name, record)
