@@ -31,7 +31,7 @@ from pathlib import Path
 
 import numpy as np
 
-from label.atomic import write_atomic
+from label.atomic import write_atomic, write_bytes_atomic
 from prepare import cli
 from prepare import hub
 
@@ -117,9 +117,7 @@ def download(shard: str, raw: Path, member: str | None = None, seed: int | None 
         clip_meta = json.loads(_get(url, (meta[2], meta[2] + meta[1] - 1))[0]) if meta else {}
         mp4.parent.mkdir(parents=True, exist_ok=True)
         js.write_text(json.dumps(clip_meta, indent=1))
-        part = mp4.with_suffix(".part")
-        part.write_bytes(_get(url, (data_off, data_off + size - 1))[0])
-        part.replace(mp4)
+        write_bytes_atomic(mp4, _get(url, (data_off, data_off + size - 1))[0])
     return name
 
 

@@ -77,7 +77,8 @@ from board.families import Families
 from board.public_export import project as public_json
 from board.to_board import dumps, finite
 from compare.metrics import model_names, reasoning_effort
-from label.atomic import file_version, remove_if, small_file, sweep_removals, write_atomic
+from label.atomic import (cached_while_unchanged, file_version, remove_if, small_file, sweep_removals,
+                          write_atomic)
 
 
 def _find_ffmpeg() -> str | None:
@@ -109,49 +110,53 @@ _FFMPEG_SEM = threading.Semaphore(int(os.environ.get("BOARD_FFMPEG_CONCURRENCY",
 _FRAME_DIR = Path(os.environ["BOARD_FRAME_DIR"]) if os.environ.get("BOARD_FRAME_DIR") else None
 
 
-# Per-process memos of what ffprobe read from a clip, keyed by the clip's stat. A clip can be replaced while it is read,
-# so a result is kept only when the clip still has the stat it was keyed by once the read is over (_clip_key):
-# it then stands for exactly that version, and a later version is a different key.
-_CLIP_TIMES: dict = {}
-_CLIP_HALFWAY: dict = {}
-
-
+# Per-process memos of what ffprobe read from a clip, keyed by the clip's stat (_clip_key) and kept only when the clip
+# still has that stat once the read is over (cached_while_unchanged): each stands for exactly the version it was read
+# from, and a clip replaced during the read is read again.
 def _clip_key(mp4: Path) -> tuple:
     st = mp4.stat()
     return str(mp4), st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino
 
 
-def _still_clip(mp4: Path, key: tuple) -> bool:
+def _still_clip(mp4, key: tuple) -> bool:
     try:
-        return _clip_key(mp4) == tuple(key[:5])
+        return _clip_key(Path(mp4)) == tuple(key[:5])
     except OSError:
         return False
+
+
+def _ffprobe() -> str:
+    probe = Path(FFMPEG).with_name("ffprobe") if FFMPEG else None
+    return str(probe) if probe and probe.exists() else "ffprobe"
+
+
+@cached_while_unchanged(2048, lambda *key: _still_clip(key[0], key))
+def _read_clip_times(*key) -> list:
+    try:
+        r = subprocess.run([_ffprobe(), "-v", "error", "-select_streams", "v:0", "-show_entries",
+                            "packet=pts_time,flags", "-of", "csv=p=0", key[0]], capture_output=True, text=True,
+                           timeout=60)
+        return sorted(float(a) for a, *f in (ln.split(",") for ln in r.stdout.split() if ln)
+                      if a not in ("", "N/A") and "D" not in "".join(f))
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
 
 
 def _clip_times(mp4: Path) -> list:
     """The clip's frame times on the episode clock (sorted presentation times), read once per clip
     version; [] when they cannot be read."""
     try:
-        key = _clip_key(mp4)
+        return _read_clip_times(*_clip_key(mp4))
     except OSError:
         return []
-    hit = _CLIP_TIMES.get(key)
-    if hit is not None:
-        return hit
-    probe = Path(FFMPEG).with_name("ffprobe") if FFMPEG else None
-    try:
-        r = subprocess.run([str(probe) if probe and probe.exists() else "ffprobe", "-v", "error", "-select_streams",
-                            "v:0", "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", str(mp4)],
-                           capture_output=True, text=True, timeout=60)
-        ts = sorted(float(a) for a, *f in (ln.split(",") for ln in r.stdout.split() if ln)
-                    if a not in ("", "N/A") and "D" not in "".join(f))
-    except (OSError, subprocess.SubprocessError, ValueError):
-        ts = []
-    if _still_clip(mp4, key):
-        if len(_CLIP_TIMES) > 2048:
-            _CLIP_TIMES.clear()
-        _CLIP_TIMES[key] = ts
-    return ts
+
+
+@cached_while_unchanged(2048, lambda *key: _still_clip(key[0], key))
+def _read_clip_comment(*key) -> str:
+    # an ffprobe that cannot run raises, so its failure is never kept as the clip's answer
+    r = subprocess.run([_ffprobe(), "-v", "error", "-show_entries", "format_tags=comment", "-of",
+                        "default=nw=1:nk=1", key[0]], capture_output=True, text=True, timeout=60)
+    return r.stdout.strip()
 
 
 def _shown_from_halfway(mp4: Path) -> bool:
@@ -159,24 +164,9 @@ def _shown_from_halfway(mp4: Path) -> bool:
     sets HALFWAY_TAG as the clip's comment), so the frame a time shows is the one on screen then."""
     from board.clips import HALFWAY_TAG
     try:
-        key = _clip_key(mp4)
-    except OSError:
-        return False
-    if key in _CLIP_HALFWAY:
-        return _CLIP_HALFWAY[key]
-    probe = Path(FFMPEG).with_name("ffprobe") if FFMPEG else None
-    try:
-        r = subprocess.run([str(probe) if probe and probe.exists() else "ffprobe", "-v", "error", "-show_entries",
-                            "format_tags=comment", "-of", "default=nw=1:nk=1", str(mp4)],
-                           capture_output=True, text=True, timeout=60)
+        return _read_clip_comment(*_clip_key(mp4)) == HALFWAY_TAG
     except (OSError, subprocess.SubprocessError):
         return False
-    hit = r.stdout.strip() == HALFWAY_TAG
-    if _still_clip(mp4, key):
-        if len(_CLIP_HALFWAY) > 2048:
-            _CLIP_HALFWAY.clear()
-        _CLIP_HALFWAY[key] = hit
-    return hit
 
 
 class CacheBusy(RuntimeError):
@@ -877,8 +867,11 @@ def _write_footage_record(path, record):
 
 
 def _trim_receipt_temps(folder):
-    for temporary in folder.glob('.*.json.tmp'):
-        match = re.fullmatch(r'\.((?:[a-f0-9]{20}|[a-f0-9]{32}|[a-f0-9]{40})\.json)\.tmp', temporary.name)
+    # write_atomic names each writer's temporary file .<receipt>.<random>.tmp (older ones .<receipt>.tmp); a writer
+    # holds the receipt's guard while its temporary file exists, so one whose guard is free is left by a dead writer
+    for temporary in folder.glob('.*.tmp'):
+        match = re.fullmatch(r'\.((?:[a-f0-9]{20}|[a-f0-9]{32}|[a-f0-9]{40})\.json)(?:\.[a-f0-9]{32})?\.tmp',
+                             temporary.name)
         if match is None:
             continue
         try:

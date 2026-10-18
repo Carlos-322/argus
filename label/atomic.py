@@ -3,13 +3,18 @@ loaded: the readers, the checks, the board and the labelling harness all write t
 
 Several processes (board servers, review and label runs) can share one folder. A process may keep its own copy of
 what a shared file said, but that copy stands only for the version of the file it was read from (file_version), so a
-decision is taken on a fresh read whenever the version differs, and a file is removed only through remove_if, which
-reads it again and removes it only when the reason still holds for what it has just read."""
+decision is taken on a fresh read whenever the version differs (cached_while_unchanged keeps a result only for the
+version it was read from), every writer publishes through a temporary file of its own (write_bytes_atomic), and a
+file is removed only through remove_if, which reads it again and removes it only when the reason still holds for what
+it has just read."""
 from __future__ import annotations
 
+import functools
 import json
 import os
+import threading
 import uuid
+from collections import OrderedDict
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -18,11 +23,76 @@ def write_atomic(out_path: Path, result, indent: int | None = 2, default=None, s
     """Write JSON through a temporary file in the same folder, then replace the file with it, so a kill mid-write never
     leaves a truncated file: a resume would take it for a result, and a context.json cut short would stop everything
     that reads the episode. A serializer can apply a consumer's JSON normalization, with the same write rule."""
+    text = serializer(result, indent=indent, default=default, **options)
+    write_bytes_atomic(out_path, text.encode('utf-8'))
+
+
+def temporary_path(out_path, suffix: str = '') -> Path:
+    """A name beside out_path that no other writer, in this process or another, uses: .<name>.<random>.tmp<suffix>.
+    `suffix` keeps an extension a tool chooses its format by (.mp4)."""
+    out_path = Path(out_path)
+    return out_path.with_name(f'.{out_path.name}.{uuid.uuid4().hex}.tmp{suffix}')
+
+
+def write_bytes_atomic(out_path, data: bytes) -> None:
+    """Write `data` to a temporary file of this call's own in out_path's folder, flush it to disk, then rename it over
+    out_path. Every writer has its own temporary file (created exclusively, like tempfile.mkstemp, but with the
+    permissions the umask gives an ordinary file), so two processes writing one path each publish a whole file of their
+    own, never the other's half-written one, and a sweep of a fixed temporary name cannot take a live write."""
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out_path.with_name(f".{out_path.name}.tmp")
-    tmp.write_text(serializer(result, indent=indent, default=default, **options))
-    os.replace(tmp, out_path)
+    while True:
+        tmp = temporary_path(out_path)
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_BINARY', 0), 0o666)
+            break
+        except FileExistsError:
+            continue
+    try:
+        with open(fd, 'wb') as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp, out_path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def cached_while_unchanged(maxsize: int, unchanged):
+    """A per-process memo, like functools.lru_cache, for a function whose arguments name a file and the version of it
+    the caller saw before calling (a stat taken first). unchanged(*args) says whether the file still has that version;
+    a result is kept only when it does once the function has read the file, so it stands for exactly the version it
+    was read from, and a file replaced during the read is read again on the next call."""
+    def decorate(fn):
+        cache, lock = OrderedDict(), threading.Lock()
+
+        @functools.wraps(fn)
+        def call(*args):
+            with lock:
+                if args in cache:
+                    cache.move_to_end(args)
+                    return cache[args]
+            value = fn(*args)
+            try:
+                keep = unchanged(*args)
+            except OSError:
+                keep = False
+            if keep:
+                with lock:
+                    cache[args] = value
+                    cache.move_to_end(args)
+                    while len(cache) > maxsize:
+                        cache.popitem(last=False)
+            return value
+
+        def cache_clear():
+            with lock:
+                cache.clear()
+        call.cache_clear = cache_clear
+        call.__wrapped__ = fn
+        return call
+    return decorate
 
 
 REMOVING = '.removing'      # suffix of a file set aside by remove_if; sweep_removals clears ones a crash left behind

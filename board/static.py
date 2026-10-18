@@ -81,7 +81,7 @@ from board import hands as hands_overlay
 from board import serve as sa
 from board.to_board import dumps
 from board.public_export import project as public_json, public_build_manifest, publication_policy
-from label.atomic import write_atomic
+from label.atomic import temporary_path, write_atomic, write_bytes_atomic
 
 HERE_DIR = Path(__file__).resolve().parent
 TITLE = "Data Dashboard"
@@ -382,13 +382,21 @@ def transcode(src: Path, dst: Path, threads: int, main: bool = True) -> dict:
     cost quality. A clip made some other way (not H.264 4:2:0, larger than the recipe allows, or stored turned or with
     pixels that are not square) is encoded with board/clips.py's recipe at the size it is shown, as the page's main
     camera or a side one (main)."""
+    # each call writes its own temporary file, so two builds of one site never publish each other's half-made copy
+    part = temporary_path(dst, '.mp4')
+    try:
+        return _transcode(src, dst, part, threads, main)
+    finally:
+        part.unlink(missing_ok=True)
+
+
+def _transcode(src: Path, dst: Path, part: Path, threads: int, main: bool) -> dict:
     t0 = time.time()
     sp = probe(src)
     # A retimed clip's movie clock must keep its fine boundaries, including a camera's nonzero first display time.
     fine_clock = ["-movie_timescale", str(bc.DISPLAY_TICKS_PER_S), "-video_track_timescale",
                   str(bc.DISPLAY_TICKS_PER_S)] if sa._shown_from_halfway(src) else []
     dst.parent.mkdir(parents=True, exist_ok=True)
-    part = dst.with_name("." + dst.name + ".part.mp4")
     import av
     compliant = _compliant(sp)
     if compliant:
@@ -562,10 +570,7 @@ def cmd_media(a):
         jpg = sa.extract_frame(j[0], j[1], 640, _wait=True)
         if not jpg:
             return False
-        j[2].parent.mkdir(parents=True, exist_ok=True)
-        tmp = j[2].with_name("." + j[2].name + ".part")
-        tmp.write_bytes(jpg)
-        os.replace(tmp, j[2])
+        write_bytes_atomic(j[2], jpg)
         return True
     with cf.ThreadPoolExecutor(a.jobs) as ex:
         nf = sum(1 for ok in ex.map(do_frame, fjobs) if ok)
@@ -784,9 +789,7 @@ def cmd_site(a):
                 rel = f"g/{g['sha256']}.jpg"
                 dest = a.out / 'media' / rel
                 if not dest.is_file() or hashlib.sha256(dest.read_bytes()).hexdigest() != g['sha256']:
-                    tmp = dest.with_suffix('.tmp')
-                    tmp.write_bytes(raw)
-                    tmp.replace(dest)
+                    write_bytes_atomic(dest, raw)
                 rels.append(rel)
             (stage / 'data/grids' / site_file(rec['file'])).write_text(dumps(bg.view(gidx, lambda i, g: rels[i])))
             rec['_grids'] = len(rels)
@@ -861,9 +864,7 @@ def cmd_site(a):
             rel = f"k/{site_name(f[:-5])}.{hashlib.sha1(body).hexdigest()[:10]}.json"
             dst = a.out / "media" / rel
             if not dst.exists():
-                part = dst.with_name(dst.name + ".part")
-                part.write_bytes(body)
-                part.rename(dst)
+                write_bytes_atomic(dst, body)
             v["path"] = rel
             v["bytes"] = len(body)
         (stage / "data/keypoints/index.json").write_text(dumps(public_json(kidx), separators=(",", ":")))

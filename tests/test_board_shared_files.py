@@ -151,7 +151,7 @@ def test_an_expired_ticket_is_still_removed_by_the_other_server(board):
 RACE = textwrap.dedent('''
     import json, os, sys, time
     sys.path.insert(0, sys.argv[1])
-    from label.atomic import remove_if, small_file
+    from label.atomic import remove_if, small_file, write_atomic
     path, role, until = sys.argv[2], sys.argv[3], float(sys.argv[4])
     read = small_file(4096)
     lapsed = lambda snapshot: snapshot[2] is not None and not json.loads(snapshot[2])['live']
@@ -168,15 +168,7 @@ RACE = textwrap.dedent('''
     while time.time() < until:
         written += 1
         for live in (True, False):
-            tmp = path + '.tmp'
-            with open(tmp, 'w') as out:
-                out.write(json.dumps({'seq': written, 'live': live}))
-            try:
-                os.replace(tmp, path)
-            except FileNotFoundError:
-                print('replace refused while the source was', 'there' if os.path.exists(tmp) else 'gone',
-                      file=sys.stderr, flush=True)
-                os.replace(tmp, path)
+            write_atomic(path, {'seq': written, 'live': live}, indent=None)
             if live:
                 # a live version stays at its name; one set aside by a remover that raced the write comes back at once
                 for _ in range(200):

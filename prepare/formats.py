@@ -145,7 +145,7 @@ from pathlib import Path
 
 import numpy as np
 
-from label.atomic import write_atomic
+from label.atomic import cached_while_unchanged, write_atomic
 from prepare.hdf_metadata import open_hdf5
 from prepare.camera_clock import UNKNOWN_CAMERA_FPS, camera_issue_kind, coarse_rows, presentation_clock
 from prepare.state_notes import STATE_WHY
@@ -6509,9 +6509,15 @@ def state_on_frames(df, state, action, n: int, fps: float | None, kind: str, not
     return st, act, kind, note, issues
 
 
-@functools.lru_cache(maxsize=16)
+def _packed_version(path) -> tuple:
+    stat = os.stat(path)
+    return stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino
+
+
+@cached_while_unchanged(16, lambda path, version: _packed_version(path) == tuple(version))
 def _packed_video_probe(path: str, version: tuple) -> dict:
-    """Scan a shared packed file once per source version, not once for every episode it owns."""
+    """Scan a shared packed file once per source version, not once for every episode it owns; a scan is kept only
+    when the file still has the version the caller named once it is over."""
     return probe(Path(path))
 
 
@@ -12062,9 +12068,15 @@ def sensor_times(p: Path) -> np.ndarray | None:
     return _file_times(str(Path(p).resolve()), st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
 
-@functools.lru_cache(maxsize=SENSOR_TIMES_KEPT)
+def _same_sensor_file(p, inode, size, mtime_ns, ctime_ns) -> bool:
+    st = os.stat(p)
+    return (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns) == (inode, size, mtime_ns, ctime_ns)
+
+
+@cached_while_unchanged(SENSOR_TIMES_KEPT, _same_sensor_file)
 def _file_times(p: str, inode: int, size: int, mtime_ns: int, ctime_ns: int) -> np.ndarray | None:
-    """sensor_times of the file at p, as it is with this inode, size, and modification and change times."""
+    """sensor_times of the file at p, as it is with this inode, size, and modification and change times; kept only
+    when the file still has them once it is read."""
     t = _read_file_times(Path(p))
     if t is not None:
         t.setflags(write=False)

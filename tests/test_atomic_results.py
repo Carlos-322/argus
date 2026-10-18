@@ -66,15 +66,13 @@ def test_interrupted_publication_keeps_the_previous_result_and_can_resume(tmp_pa
     updated = {"labels": {"task_completed": "success"}, "usage": {"cost_usd": 0.7}}
     with monkeypatch.context() as interrupted:
         if failure == "partial_write":
-            original = Path.write_text
-
-            def partial(path, text, *args, **kwargs):
-                if path == target:
-                    pytest.fail("publication overwrote the visible result")
-                original(path, text[:12], *args, **kwargs)
+            # the temporary file holds the bytes written so far when the write is cut off before it reaches disk
+            def partial(fd):
+                written = [p for p in tmp_path.iterdir() if p != target]
+                assert len(written) == 1 and written[0].read_bytes() == json.dumps(updated, indent=2).encode()
                 assert target.read_bytes() == previous
                 raise OSError("interrupted temporary write")
-            interrupted.setattr(Path, "write_text", partial)
+            interrupted.setattr(atomic.os, "fsync", partial)
         else:
             def refused(source, destination):
                 assert json.loads(Path(source).read_text()) == updated
@@ -84,6 +82,7 @@ def test_interrupted_publication_keeps_the_previous_result_and_can_resume(tmp_pa
         with pytest.raises(OSError, match="interrupted"):
             atomic.write_atomic(target, updated)
     assert target.read_bytes() == previous
+    assert sorted(tmp_path.iterdir()) == [target]           # no temporary file is left behind
     atomic.write_atomic(target, updated)
     assert json.loads(target.read_text()) == updated
 
