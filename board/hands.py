@@ -72,6 +72,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from board.to_board import dumps
+from label.atomic import write_bytes_atomic
 
 FORMAT = "board-hand-pose/1"
 STEP = 4
@@ -317,9 +318,7 @@ def build_one(job: tuple) -> dict:
             hh = hands_[h]
             doc[h] = encode_hand(hh["kp"], [c is not None and c >= 0.5 for c in hh["conf"]], sx, sy)
         body = dumps(doc, separators=(",", ":"))
-        tmp = out_dir / f".{label_file}.part"
-        tmp.write_text(body)
-        os.replace(tmp, out_dir / label_file)
+        write_bytes_atomic(out_dir / label_file, body.encode())
         return {"key": key, "file": label_file, "bytes": len(body), "frames": n,
                 "present": {h: sum(e - s for s, e in doc[h]["spans"]) / n for h in ("left", "right")}}
     except Exception as err:  # noqa: BLE001 - reported per episode, the build goes on
@@ -438,9 +437,7 @@ def keypoints_one(job: tuple) -> dict:
         doc = keypoints_doc(key, json.loads(Path(src_file).read_text()), video, label_path.name, eid, ctx,
                             json.loads(label_path.read_text()).get("dataset_source"))
         body = dumps(doc, separators=(",", ":"))
-        tmp = out_dir / f".{label_path.name}.part"
-        tmp.write_text(body)
-        os.replace(tmp, out_dir / label_path.name)
+        write_bytes_atomic(out_dir / label_path.name, body.encode())
         return {"key": key, "file": label_path.name, "frames": doc["video"]["frames"], "bytes": len(body)}
     except Exception as err:  # noqa: BLE001 - reported per episode, the build goes on
         return {"key": key, "skip": f"{type(err).__name__}: {err}"[:300]}

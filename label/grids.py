@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 
 from label import frames as mf
-from label.atomic import write_atomic
+from label.atomic import write_atomic, write_bytes_atomic
 
 
 class GridError(RuntimeError):
@@ -214,9 +214,7 @@ def write(out_dir: Path, record: dict, grids: list[dict]) -> dict:
         with Image.open(io.BytesIO(raw)) as image:
             width, height = image.size
         name = f'grid_{i:02d}.jpg'
-        tmp = out_dir / (name + '.tmp')
-        tmp.write_bytes(raw)
-        tmp.replace(out_dir / name)
+        write_bytes_atomic(out_dir / name, raw)
         entries.append({**{k: g[k] for k in ('t0_s', 't1_s', 'local_t0_s', 'local_t1_s', 'part', 'dispatch_status') if k in g},
                         'file': name, 'sha256': digest(raw), 'bytes': len(raw), 'width': width, 'height': height})
     if [g['sha256'] for g in entries] != [g['sha256'] for g in saved.get('grid_images') or []]:

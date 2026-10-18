@@ -58,7 +58,7 @@ def test_repeat_prepare_renews_the_clients_own_ticket_for_a_full_lifetime(tmp_pa
         record = json.loads(receipt.read_text())
         record['expires_at'] = record['issued_at'] = __import__('time').time() + 20
         receipt.write_text(json.dumps(record))
-        serve._TICKETS.clear()
+        # the server's ticket index sees a ticket file rewritten after it read it, with nothing cleared by hand
         again = prepare(base, (0, .1), '10.0.0.1')
         assert again == first
         assert json.loads(receipt.read_text())['expires_at'] > __import__('time').time() + 3000
