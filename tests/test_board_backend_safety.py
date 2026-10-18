@@ -312,6 +312,48 @@ def test_static_depth_change_gets_new_build_and_same_id_rewrite_is_rejected(tmp_
     assert receipt_path.read_bytes() == original_receipt
 
 
+@pytest.mark.parametrize('change', ['uploader values', 'uploader values forced', 'later option', 'web copy made'])
+def test_every_publication_setting_enters_the_automatic_build_id(tmp_path, change):
+    # Rebuilding the same board with a setting that changes what is published gets a new automatic build id and
+    # publishes; it never reuses the old id and fails as changed content. A later option no code names yet, and a web
+    # copy made after the first build (a hand pose file is published only once it exists), are the same class.
+    from types import SimpleNamespace
+    from board.public_export import publish_uploader_values
+    board = tmp_path / 'board'
+    qa = board / 'qa'
+    qa.mkdir(parents=True)
+    label = {'dataset': 'test', '_rig': 'ego_head', 'duration_s': 1, 'episode_prompt': 'test',
+             'camera_views': ['exo'], '_meta': {'episode_id': 'episode_x'},
+             'uploader_notes': {'kind': 'notes', 'title': 'Source notes',
+                                'items': [{'name': 'Operator note', 'value': 'calibration channel A'}]}}
+    (qa / 'episode_x.json').write_text(json.dumps(label))
+    clips = tmp_path / 'clips'
+    clips.mkdir()
+    (clips / 'episode_x.mp4').write_bytes(b'rgb')
+    args = SimpleNamespace(qa=qa, board=board, clips=clips, compare=None, hands=None, keypoints=None,
+                           sensors=None, dictionary_job=None, out=board / 'static', build_id=None,
+                           force=False, title='test', public_base=None, header=None, publish_uploader_values=False)
+    assert static.cmd_site(args) == 0
+    first = (args.out / 'LATEST').read_text().strip()
+    try:
+        if change.startswith('uploader values'):
+            args.publish_uploader_values, args.force = True, change.endswith('forced')
+            publish_uploader_values(True)
+        elif change == 'later option':
+            args.caption_language = 'de'
+        else:
+            rel = next(iter(static.plan(qa, clips)[0]['media'].values()))['rel']
+            (args.out / 'media' / rel).parent.mkdir(parents=True, exist_ok=True)
+            (args.out / 'media' / rel).write_bytes(b'web copy')
+        assert static.cmd_site(args) == 0
+    finally:
+        publish_uploader_values(False)
+    second = (args.out / 'LATEST').read_text().strip()
+    assert second != first
+    notes = json.loads((args.out / second / 'data/ep/episode_x.json').read_text())['uploader_notes']
+    assert (notes['items'][0]['value'] == 'calibration channel A') == change.startswith('uploader values')
+
+
 @pytest.mark.parametrize('failed_stage', ['copy', 'check'])
 def test_publish_failure_never_promotes_root_page(tmp_path, failed_stage):
     import subprocess
