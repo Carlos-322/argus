@@ -24,6 +24,9 @@ READER_STALL_S = float(os.environ.get('ARGUS_READER_STALL_S') or 300)
 _INLINE = 'ARGUS_READER_INLINE'           # set in a child, whose own reads run in place
 _MODE = 'ARGUS_READER_MODE'
 _HEARTBEAT = 'ARGUS_READER_HEARTBEAT'
+# sh -c _GUARD guard PARENT CHILD: wait while both live, then make sure the child is gone
+_GUARD = ('while kill -0 "$1" 2>/dev/null && kill -0 "$2" 2>/dev/null; do sleep 1; done; '
+          'kill -9 "$2" 2>/dev/null')
 
 
 class ReaderStopped(ValueError):
@@ -97,17 +100,31 @@ def run_isolated(fn, *args, watch=(), mode=None, stall_s=None, **kwargs):
             env.pop(_MODE, None)
         child = subprocess.Popen([sys.executable, '-m', 'prepare.isolation', str(request), str(result)], env=env,
                                  stdin=subprocess.DEVNULL)
+        # A reader stuck inside native code holds the interpreter lock, so it cannot notice its parent die. A shell
+        # outside it does, and stops the child when this process is killed before it could.
+        guard = subprocess.Popen(['/bin/sh', '-c', _GUARD, 'guard', str(os.getpid()), str(child.pid)],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
         watched = {Path(w): _entries(w) for w in (watch if isinstance(watch, (list, tuple)) else [watch])}
-        seen, since = _activity(watched, beat), time.monotonic()
-        while child.poll() is None:
-            time.sleep(.25)
-            now = _activity(watched, beat)
-            if now != seen:
-                seen, since = now, time.monotonic()
-            elif time.monotonic() - since > stall_s:
+        try:
+            seen, since = _activity(watched, beat), time.monotonic()
+            while True:
+                try:
+                    child.wait(timeout=1)       # returns the moment the child exits
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                now = _activity(watched, beat)
+                if now != seen:
+                    seen, since = now, time.monotonic()
+                elif time.monotonic() - since > stall_s:
+                    raise ReaderStopped(f'stopped responding (no progress for {stall_s:g}s) and was stopped')
+        finally:
+            if child.poll() is None:            # stopped, or the parent was interrupted: never left running
                 child.kill()
                 child.wait()
-                raise ReaderStopped(f'stopped responding (no progress for {stall_s:g}s) and was stopped')
+            guard.kill()
+            guard.wait()
         if not result.exists():
             how = (f'was ended by signal {-child.returncode}' if child.returncode < 0
                    else f'exited with status {child.returncode}')

@@ -70,6 +70,37 @@ def test_output_written_by_the_child_counts_as_progress(tmp_path):
     assert run_isolated(writes_slowly, str(tmp_path), 3, watch=tmp_path, stall_s=1.5) == 'done'
 
 
+def records_pid_and_never_returns(path):
+    from pathlib import Path
+    Path(path).write_text(str(os.getpid()))
+    time.sleep(3600)
+
+
+def test_a_killed_parent_never_leaves_its_reader_running(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+    pid_file = tmp_path / 'child.pid'
+    script = ('import sys; sys.path[:0] = sys.argv[1:3]; from prepare.isolation import run_isolated; '
+              'from test_reader_isolation import records_pid_and_never_returns as f; run_isolated(f, sys.argv[3])')
+    parent = subprocess.Popen([sys.executable, '-c', script, str(Path(__file__).parents[1]),
+                               str(Path(__file__).parent), str(pid_file)])
+    deadline = time.monotonic() + 30
+    while not pid_file.exists() and time.monotonic() < deadline:
+        time.sleep(.1)
+    child = int(pid_file.read_text())
+    parent.kill()
+    parent.wait()
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(.2)
+    os.kill(child, signal.SIGKILL)
+    pytest.fail('the reader outlived its killed parent')
+
+
 def test_the_second_attempt_reads_cameras_only():
     assert run_isolated(reports_mode) is False
     assert run_isolated(reports_mode, mode='cameras') is True
