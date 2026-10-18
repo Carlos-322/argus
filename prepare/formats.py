@@ -538,6 +538,10 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str]]:
             notes.append(f"{a.name} could not be opened as an archive; it may be damaged.")
             continue
         with handle:
+            if count + len(members) + skipped > UNPACK_MAX_FILES:
+                # a member whose name is refused is never written, but it still had to be read, so it counts
+                raise UnpackLimit(f"{a.name} holds more than one upload can: at most {UNPACK_MAX_FILES:,} files "
+                                 f"and {UNPACK_MAX_BYTES / 1e9:.0f} GB unpacked")
             members = [m for m in members if not any(hidden_part(x) for x in m[0])]
             tops = {m[0][0] if len(m[0]) > 1 else "" for m in members}
             base = base_of[a] if len(tops) == 1 and "" not in tops else base_of[a] / ARCHIVE_RE.sub("", a.name)
@@ -6555,8 +6559,11 @@ def packed_table_positions(df, owned, fps, length):
             expected = declared / fps
             clock_ok = np.allclose(native_clock.astype(np.float64), expected, rtol=0, atol=1e-6)
             if not clock_ok and native_clock.dtype.kind == 'f':
-                # Compare in the recorded precision. A float32 clock cannot retain sub-microsecond bits at 40 s.
-                clock_ok = np.array_equal(native_clock, expected.astype(native_clock.dtype))
+                # Compare in the recorded precision. A float32 clock cannot retain sub-microsecond bits at 40 s, and
+                # one computed as float32(k) * float32(1 / fps) rounds twice, landing a unit or two in the last
+                # place from float32(k / fps).
+                recorded = expected.astype(native_clock.dtype)
+                clock_ok = bool(np.all(np.abs(native_clock - recorded) <= 4 * np.spacing(np.abs(recorded))))
         lookup = {int(value): index for index, value in enumerate(declared)}
         if clock_ok and len(lookup) == len(df) and all(int(value) in lookup for value in owned):
             return np.asarray([lookup[int(value)] for value in owned], dtype=np.int64)
