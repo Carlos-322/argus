@@ -121,8 +121,10 @@ def test_received_retry_cannot_repurchase_healthy_output(tmp_path, monkeypatch):
     out = tmp_path / 'out'; out.mkdir(); path = out / (ep.name + '.json')
     path.write_text(json.dumps(record)); original = path.read_bytes()
     monkeypatch.setattr(harness.urllib.request, 'urlopen', lambda *a, **kw: pytest.fail('unapproved paid retry'))
-    assert harness.run_batch([ep], out, retry_received=[ep.name], **options()) == 1
+    # a healthy label is kept and nothing is bought; naming it is noted, and the finished job does not fail
+    assert harness.run_batch([ep], out, retry_received=[ep.name], **options()) == 0
     assert path.read_bytes() == original
+    assert not (out / f'stale_{ep.name}.json').exists()
 
 
 def test_unknown_charge_is_retried_only_when_named_and_stays_counted(tmp_path, monkeypatch):

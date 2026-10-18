@@ -12,6 +12,11 @@ import pytest
 from prepare.isolation import ReaderStopped, cameras_only, run_isolated
 
 
+@pytest.fixture(autouse=True)
+def _in_a_child_process(_uploads_read_in_this_process, monkeypatch):
+    monkeypatch.setenv('ARGUS_READER_ISOLATION', '1')        # these tests are of the child process itself
+
+
 def doubles(value):
     return value * 2, os.getpid()
 
@@ -114,6 +119,7 @@ def test_an_hdf5_attribute_read_that_never_returns_costs_the_parts_not_the_camer
     from pathlib import Path
     from prepare import formats, isolation
     monkeypatch.setattr(isolation, 'READER_STALL_S', 4)
+    monkeypatch.setenv('ARGUS_READER_ISOLATION', '1')
     upload = tmp_path / 'upload'
     upload.mkdir()
     (upload / 'episode_1.hdf5').write_bytes(gzip.decompress(

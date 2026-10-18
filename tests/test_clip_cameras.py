@@ -267,7 +267,9 @@ def test_the_cameras_spans_are_measured_again_on_the_new_main_camera(tmp_path):
     eps = tmp_path / "episodes"
     rep = formats.convert(up, "teleop_arms", eps, "mine", float("inf"), grouping={})
     ep = eps / rep["episodes"][0]["episode_id"]
-    assert [x["kind"] for x in json.loads((ep / "context.json").read_text())["reader_issues"]] == ["camera_coverage_partial"]
+    # the reader decodes the main camera once and names its damage; board clips then finds it does not decode at all
+    assert sorted(x["kind"] for x in json.loads((ep / "context.json").read_text())["reader_issues"]) == [
+        "camera_coverage_partial", "frames_damaged"]
     assert _clips(eps, tmp_path / "clips").returncode == 0
     ctx = json.loads((ep / "context.json").read_text())
     assert [x["kind"] for x in ctx["reader_issues"]] == ["camera_not_decodable"], ctx["reader_issues"]

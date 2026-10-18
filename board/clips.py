@@ -1308,7 +1308,10 @@ def record_cameras(ep_dir: Path, short: dict, broken: dict, cut, keep_clock: boo
                                                or x.get("kind") == CAMERA_SHORT and "clip_frames" in x
                                                and x.get("camera") in {name(v) for v in redo}
                                                or is_end(x, zero) and x.get("camera") in ended
-                                               or x.get("kind") == CAMERA_NOT_DECODABLE and x.get("camera") in broken))]
+                                               or x.get("kind") == CAMERA_NOT_DECODABLE and x.get("camera") in broken
+                                               # a camera taken out shows no frame, damaged or not
+                                               or x.get("kind") in ("frames_damaged", "frames_not_decodable")
+                                               and x.get("camera") in {name(v) for v in broken}))]
     issues += own
     have = {(x.get("kind"), x.get("camera")) for x in issues if isinstance(x, dict)}
     issues += [x for x in more if (x["kind"], x.get("camera")) not in have]

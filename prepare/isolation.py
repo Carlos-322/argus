@@ -20,6 +20,7 @@ import tempfile
 import time
 from pathlib import Path
 
+UPLOAD = None                     # reads no dataset of its own (formats.upload_adapters)
 READER_STALL_S = float(os.environ.get('ARGUS_READER_STALL_S') or 300)
 _INLINE = 'ARGUS_READER_INLINE'           # set in a child, whose own reads run in place
 _MODE = 'ARGUS_READER_MODE'
