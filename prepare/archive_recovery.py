@@ -25,7 +25,7 @@ def zip_member(archive, info, damage):
         reader = ChecksumReader(source)
         yield reader
         if reader.complete and reader.crc != info.CRC:
-            damage.append(f'retained: {info.filename} (checksum mismatch; bytes retained for format validation)')
+            damage.append(ArchiveNote(f'{info.filename} (checksum mismatch; bytes retained for format validation)', 'retained'))
 
 
 class SliceReader:
@@ -47,6 +47,17 @@ class SliceReader:
 
     def __exit__(self, *args):
         self.source.close()
+
+
+class ArchiveNote(str):
+    """A note on an archive that is not a member left out: kind 'archive' (damage of the archive as a whole),
+    'retained' (a member kept with a caveat) or 'cut' (the archive ends early). The kind travels with the note as
+    data, so no member name, which the upload controls, can be read as one."""
+
+    def __new__(cls, text, kind):
+        note = str.__new__(cls, text)
+        note.kind = kind
+        return note
 
 
 LOCAL = b'PK\x03\x04'
@@ -282,9 +293,10 @@ def scan_local(path, max_files: int, max_bytes: int) -> tuple[list[dict], list[s
                 nxt = _next_header(source, position + 1, length)
                 if nxt is None:
                     if position:
-                        damage.append(f'archive: {length - position:,} bytes after the last readable member could not be read')
+                        damage.append(ArchiveNote(f'{length - position:,} bytes after the last readable member could not be read', 'archive'))
                     break
-                damage.append(f'archive: {nxt - position:,} damaged bytes at byte {position:,} were skipped to the next member')
+                damage.append(ArchiveNote(f'{nxt - position:,} damaged bytes at byte {position:,} were skipped to the next member',
+                                           'archive'))
                 position = nxt
                 continue
             measured = _measure(source, entry, length, max_bytes - total) if entry['method'] in (0, 8) else (
@@ -332,7 +344,7 @@ def member_opener(path, entry: dict, damage: list):
             reader = ChecksumReader(decoded)
             yield reader
             if reader.complete and reader.crc != entry['crc']:
-                damage.append(f"retained: {entry['name']} (checksum mismatch; bytes retained for format validation)")
+                damage.append(ArchiveNote(f"{entry['name']} (checksum mismatch; bytes retained for format validation)", 'retained'))
     return opener
 
 
@@ -368,7 +380,7 @@ def local_members(path, parts_of, max_files, max_bytes, why):
 def local_stored_members(path, parts_of, max_files, max_bytes):
     """Members of a ZIP cut short before its directory, recovered from their local headers."""
     return local_members(path, parts_of, max_files, max_bytes,
-                         f'{path.name} is cut short; its ZIP directory is unavailable')
+                         ArchiveNote(f'{path.name} is cut short; its ZIP directory is unavailable', 'archive'))
 
 
 def checked_directory(path, infos, max_files, max_bytes):

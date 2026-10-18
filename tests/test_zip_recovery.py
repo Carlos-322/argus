@@ -225,3 +225,22 @@ def test_a_member_of_unproven_name_is_its_own_upload_and_no_file_describes_it(tm
     assert len(apart) == 1 and tasks[apart[0]] == '', tasks
     assert sorted(t for eid, t in tasks.items() if eid not in apart) == ['task of episode three', 'task of episode two']
     assert not any('no recording of this archive owns' in t for t in tasks.values())
+
+
+@pytest.mark.parametrize('what', ['name', 'offset', 'signature'])
+def test_a_member_named_like_a_note_is_still_a_member(tmp_path, what):
+    # what kind a note is travels with it as data, so a member whose name reads like a note is counted as a member
+    global PAYLOADS
+    saved = PAYLOADS
+    try:
+        PAYLOADS = {'archive: damaged/file0.bin': b'x' * 5000, 'retained: file1.bin': b'y' * 6000}
+        raw = corrupt_directory(build(zipfile.ZIP_STORED), what)
+    finally:
+        PAYLOADS = saved
+    path = tmp_path / 'up.zip'
+    path.write_bytes(raw)
+    members, skipped, handle, bad, unverified = formats._archive_members(path)
+    with handle:
+        names = {'/'.join(parts) for parts, _, _ in members} | {f'apart:{label}' for label, *_ in unverified}
+    assert len(names) == 2, names
+    assert all(getattr(note, 'kind', None) in ('archive', 'retained', 'cut', None) for note in bad)

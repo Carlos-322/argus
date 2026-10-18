@@ -345,8 +345,8 @@ def _archive_members(path: Path):
     import zipfile
     out, skipped, bad, unverified = [], 0, [], []
     from contextlib import nullcontext
-    from prepare.archive_recovery import (checked_directory, local_members, local_stored_members, member_opener,
-                                          usable, zip_member)
+    from prepare.archive_recovery import (ArchiveNote, checked_directory, local_members, local_stored_members,
+                                          member_opener, usable, zip_member)
     if not zipfile.is_zipfile(path):
         with path.open('rb') as source:
             local_zip = source.read(4) == b'PK\x03\x04'
@@ -360,14 +360,15 @@ def _archive_members(path: Path):
         except Exception as error:
             # the directory is one of a ZIP's two indexes; the members' own headers are the other
             out, skipped, bad = local_members(path, _member_parts, UNPACK_MAX_FILES, UNPACK_MAX_BYTES,
-                                              f"archive: {path.name} has a ZIP directory that could not be read "
-                                              f"({type(error).__name__}); its members were read from their own headers")
+                                              ArchiveNote(f"{path.name} has a ZIP directory that could not be read "
+                                                          f"({type(error).__name__}); its members were read from their "
+                                                          "own headers", 'archive'))
             return out, skipped, nullcontext(), bad, unverified
         infos, replaced, unlisted, lost = checked_directory(path, infos, UNPACK_MAX_FILES, UNPACK_MAX_BYTES)
         if replaced or unlisted or lost:
-            bad.append(f"archive: {path.name} has a damaged ZIP directory; {len(replaced) + len(unlisted)} member"
-                       f"{'s were' if len(replaced) + len(unlisted) != 1 else ' was'} read from their own headers"
-                       + (f" and {len(lost)} could not be found" if lost else ""))
+            bad.append(ArchiveNote(f"{path.name} has a damaged ZIP directory; {len(replaced) + len(unlisted)} member"
+                                   f"{'s were' if len(replaced) + len(unlisted) != 1 else ' was'} read from their own "
+                                   "headers" + (f" and {len(lost)} could not be found" if lost else ""), 'archive'))
             bad.extend(f"{name} (its directory entry matches no member)" for name in lost)
         for entry in [*replaced.values(), *unlisted]:
             reason = usable(entry)
@@ -382,9 +383,9 @@ def _archive_members(path: Path):
                 ext = Path(first).suffix if Path(first).suffix == Path(second).suffix else ''
                 label = f"{path.stem}-byte_{entry['offset']}"
                 unverified.append((label, f"member{ext}", entry['size'], member_opener(path, entry, bad)))
-                bad.append(f"archive: the member at byte {entry['offset']:,} is named {first} by the ZIP directory and "
-                           f"{second} by its own header; neither name can be verified, so it was read as an upload of "
-                           f"its own, {label}, which no other file describes")
+                bad.append(ArchiveNote(f"the member at byte {entry['offset']:,} is named {first} by the ZIP directory "
+                                       f"and {second} by its own header; neither name can be verified, so it was read as "
+                                       f"an upload of its own, {label}, which no other file describes", 'archive'))
                 continue
             name = entry['name']
             if not entry['flags'] & 0x800:
@@ -443,7 +444,8 @@ def _archive_members(path: Path):
     except Exception:
         # cut short: every member whose header came before the cut is listed, and one whose bytes the cut reaches
         # fails as it is unpacked (open_archives)
-        bad.append(f"{path.name} is cut short, so only the files before the cut were unpacked")
+        from prepare.archive_recovery import ArchiveNote
+        bad.append(ArchiveNote(f"{path.name} is cut short, so only the files before the cut were unpacked", 'cut'))
     for m in members:
         if m.isdir():
             continue
@@ -638,14 +640,17 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
                 count += 1
                 wrote += 1
         done.write_text("")
-        # bad holds three kinds of note: members left out (counted below), members kept with a caveat
-        # ('retained: '), and the damage of the archive as a whole ('archive: '), which no member count includes
-        cut = [b for b in bad if b.startswith(a.name + " is cut short")]
-        retained = [b.removeprefix('retained: ') for b in bad if b.startswith('retained: ')]
-        whole = [b.removeprefix('archive: ') for b in bad if b.startswith('archive: ')]
-        members_bad = [b for b in bad if b not in cut and not b.startswith(('retained: ', 'archive: '))]
+        # bad holds members left out (counted below) and ArchiveNotes, whose kind says what else each is: a member
+        # kept with a caveat, damage of the archive as a whole, or an archive that ends early. Never read from text.
+        kind = lambda b: getattr(b, 'kind', None)
+        cut = [b for b in bad if kind(b) == 'cut']
+        retained = [b for b in bad if kind(b) == 'retained']
+        whole = [b for b in bad if kind(b) == 'archive']
+        members_bad = [b for b in bad if kind(b) is None]
         if bad:
-            notes.append('Archive damage: ' + _and_words(cut + whole + members_bad + retained) + '.')
+            from prepare.archive_recovery import ArchiveNote
+            notes.append(ArchiveNote('Archive damage: ' + _and_words(cut + whole + members_bad + retained) + '.',
+                                     'damage'))
         notes.append(f"Opened {a.name}: {wrote} files" + (f"; {skipped} left out (links, or names that could leave "
                                                             "the archive's folder)" if skipped else "")
                      + (f"; {len(members_bad)} left out because {'they' if len(members_bad) != 1 else 'it'} could "
@@ -12745,7 +12750,7 @@ def _convert_upload(root, rig, out, dataset, max_seconds, grouping, ownership_co
               "used": opened + list(det.get("used") or []), "missing": list(det.get("missing") or [])}
     if det.get("packaging"):
         report["packaging"] = det["packaging"]
-    archive_damage = [note for note in opened if note.startswith('Archive damage: ')]
+    archive_damage = [note for note in opened if getattr(note, 'kind', None) == 'damage']
     report['missing'].extend(archive_damage)
     tables = det.get("annotation_tables", [])
     past = f"past the first {max_seconds / 60:g} minutes"
