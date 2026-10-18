@@ -148,6 +148,21 @@ def _verified_final_cost(usage: dict, model: str) -> tuple[float | None, str]:
     return None, "unverified"
 
 
+# What a request body asks besides its messages, model, reasoning effort and output limit, which input_identity
+# records on their own. usage.include asks for the billed cost (cache reads are about 1/10 price, cache writes about
+# 1.25x), so every recorded cost and spend cap uses what was actually charged.
+OPENROUTER_BODY = {"response_format": {"type": "json_object"}, "usage": {"include": True}}
+OPENAI_BODY = {"response_format": {"type": "json_object"}}
+# These bodies as every saved label so far was requested with. A body that differs is named in input_identity, so
+# a label requested with another body is never taken as current (request_attestation).
+FIRST_BODY_SHA256 = '879adaf179bcedfd6686f0ab4547e79e1862b71b439fc9815cbb789b43a0d50c'
+
+
+def request_body_sha256() -> str:
+    return hashlib.sha256(json.dumps({'openai': OPENAI_BODY, 'openrouter': OPENROUTER_BODY},
+                                     sort_keys=True).encode()).hexdigest()
+
+
 def call_model(content: list, model: str, reasoning: str, api_key: str, max_tokens: int, timeout: int,
                *, attempts: int = 6, pricing_quote=None) -> dict:
     if not is_openrouter_key(api_key):
@@ -162,10 +177,7 @@ def call_model(content: list, model: str, reasoning: str, api_key: str, max_toke
         "messages": [{"role": "user", "content": content}],
         "max_completion_tokens": max_tokens,
         "reasoning": {"effort": reasoning},
-        "response_format": {"type": "json_object"},
-        # ask for the billed cost (cache reads are about 1/10 price, cache writes about 1.25x), so every
-        # recorded cost and spend cap uses what was actually charged
-        "usage": {"include": True},
+        **OPENROUTER_BODY,
     }
     if pricing_quote is not None:
         if pricing_quote.get('model') != model:
@@ -188,8 +200,7 @@ def _call_openai(content: list, model: str, reasoning: str, api_key: str, max_to
     if not model.startswith("openai/"):
         raise RuntimeError(f"{model} is not an OpenAI model, so it needs an OpenRouter key")
     body = {"model": model.split("/", 1)[1], "messages": [{"role": "user", "content": content}],
-            "max_completion_tokens": max_tokens, "reasoning_effort": reasoning,
-            "response_format": {"type": "json_object"}}
+            "max_completion_tokens": max_tokens, "reasoning_effort": reasoning, **OPENAI_BODY}
     resp = _post(OPENAI_URL, body, api_key, timeout, attempts=attempts)
     resp.setdefault("provider", "OpenAI")
     if isinstance(resp.get("usage"), dict):
@@ -460,6 +471,8 @@ def input_identity(ep_dir: Path, *, model: str, reasoning: str, max_tokens: int,
                     separators=(',', ':'), ensure_ascii=True).encode()).hexdigest(),
                 "request_semantics_sha256": semantics.hexdigest(),
                 "reader_projection_sha256": reader_projection_identity(ctx)}
+    if request_body_sha256() != FIRST_BODY_SHA256:
+        settings["request_body_sha256"] = request_body_sha256()
     return {"version": 2, "source_proof": source_proof(ctx, ep_dir), "settings": settings}
 
 
@@ -1498,6 +1511,18 @@ def _release_memory() -> None:
         pass
 
 
+class ExecutionBusy(RuntimeError):
+    """Another process owns a folder's execution lock."""
+
+
+def cli(main) -> int:
+    """A command's main(), where a folder another process is working in is refused in one line, not a traceback."""
+    try:
+        return main()
+    except ExecutionBusy as busy:
+        raise SystemExit(f'refused, {busy}; let it finish or stop it first') from None
+
+
 @contextmanager
 def execution_lock(folder: Path, *, inherited_fd: int | None = None):
     """One process owns execution until dispatched work settles, where flock is shared.
@@ -1526,7 +1551,7 @@ def execution_lock(folder: Path, *, inherited_fd: int | None = None):
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
-            raise RuntimeError(f'Another label execution is running in {folder}') from error
+            raise ExecutionBusy(f'Another label execution is running in {folder}') from error
         yield lock.fileno()
 
 
@@ -2011,4 +2036,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(cli(main))

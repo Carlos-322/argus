@@ -252,4 +252,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from label.harness import cli
+    raise SystemExit(cli(main))

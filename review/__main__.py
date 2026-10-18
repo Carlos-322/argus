@@ -330,6 +330,12 @@ def main() -> int:
     from label.harness import execution_lock
     job = a.out.resolve()
     job.mkdir(parents=True, exist_ok=True)
+    units = sorted(p.name for p in (job / 'units').glob('episode_*'))
+    unknown = set(a.retry_received) - set(units)
+    if units and unknown:
+        # a retried unit received a reply in an earlier run, so it exists before this one prepares anything
+        raise SystemExit('--retry-received names unknown units: ' + ', '.join(sorted(unknown)) +
+                         '; available units: ' + ', '.join(units))
     with execution_lock(job) as lock_fd, execution_lock(job / 'run' / 'out') as output_lock_fd:
         return review_job(a, overrides, lock_fd, output_lock_fd)
 
@@ -497,4 +503,5 @@ def review_job(a, overrides, lock_fd, output_lock_fd) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from label.harness import cli
+    raise SystemExit(cli(main))

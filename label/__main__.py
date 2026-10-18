@@ -1,3 +1,4 @@
+from label.harness import cli
 from label.run import main
 
-raise SystemExit(main())
+raise SystemExit(cli(main))
