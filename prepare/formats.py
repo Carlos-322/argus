@@ -12827,7 +12827,8 @@ def measure_signal_scales(out: Path, ids: list[str]) -> dict:
         a = np.concatenate(arrs)
         if len(a) > SIGNAL_SCALE_ROWS:
             a = a[:: int(np.ceil(len(a) / SIGNAL_SCALE_ROWS))]
-        rest = sg.resting_level(a)
+        # which end is rest is read from where each episode starts and ends, never from the episodes joined
+        rest = sg.resting_level(a, ends=sg.recording_ends(arrs))
         _, swing = sg._distance(a, rest)
         scales[name] = {"rest": [round(float(x), 6) for x in rest], "swing": round(float(swing), 6),
                         "episodes": len(arrs)}

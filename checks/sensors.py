@@ -53,7 +53,7 @@ DEPTH_INVALID_SHARE = 0.5
 DEPTH_OFFSET_FRAMES = 2.0
 DEPTH_SAMPLES = 24
 CLOCK_OFFSET_FRAMES = 1.0
-VERSION = 2
+VERSION = 3
 
 NAMES = {"no_reading": "Signal has no reading at many frames", "partial_reading": "Signal has partial readings",
          "constant": "Signal never changes",
@@ -125,7 +125,9 @@ def _signal_findings(ep: dict, name: str, a, skipped: dict) -> list[dict]:
         if sg.has_rest(ok):
             way = sg.direction(ok)
             if way:
-                edge = np.nanmax(ok) if way == "up" else np.nanmin(ok)
+                # the far end of its finite readings: an infinite value is no reading, never the top of the range
+                edge = np.max(ok, where=np.isfinite(ok), initial=-np.inf) if way == "up" else \
+                    np.min(ok, where=np.isfinite(ok), initial=np.inf)
                 pinned = (ok == edge).mean(axis=0)
                 many = np.flatnonzero(pinned > PINNED_SHARE)
                 if len(many):

@@ -32,6 +32,11 @@ TURBO = np.array([[0.19, 0.07, 0.23], [0.27, 0.42, 0.89], [0.16, 0.73, 0.92], [0
 METRIC_NEAR_M, METRIC_FAR_M = 0.1, 10.0
 FAR_STOP = 0.12              # the far end of the colours, kept off turbo's near-black so only no reading is black
 METRIC_TICKS_M = (0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0)
+# the words for a colour's hue: each band ends at its degree on the colour wheel (red 0, green 120, blue 240), and a
+# colour dimmer than DARK_VALUE (HSV value) is called dark
+HUE_WORDS = ((20, "red"), (45, "orange"), (65, "yellow"), (90, "yellow-green"), (160, "green"), (210, "light blue"),
+             (260, "blue"), (330, "purple"), (361, "red"))
+DARK_VALUE = 0.6
 
 
 def load(ep_dir: Path) -> dict:
@@ -231,12 +236,21 @@ def mark_regions(image, regions: list, source_shape):
     return image
 
 
+def colour_word(rgb) -> str:
+    """The everyday name of an RGB colour (0..1), from its hue (HUE_WORDS), "dark" before it when it is dim."""
+    import colorsys
+    h, s, v = colorsys.rgb_to_hsv(*(float(x) for x in rgb))
+    word = next(w for edge, w in HUE_WORDS if h * 360 < edge)
+    return f"dark {word}" if v < DARK_VALUE else word
+
+
 def legend(entry_or_rng, scale_m: float | None = None) -> str:
-    """The words for a camera's depth colours."""
+    """The words for a camera's depth colours. For metric depth each distance on the colour bar (METRIC_TICKS_M) is
+    named by the colour picture() draws it in (colour_word), so the words cannot drift from the colours."""
     entry = entry_or_rng if isinstance(entry_or_rng, dict) else {"scale_m": scale_m}
     if metric_scale(entry):
-        return (f"metric: one fixed scale in every episode, dark red {METRIC_NEAR_M:g} m, orange 0.3 m, yellow 0.5 m, "
-                f"green 1 m, light blue 3 m, dark blue {METRIC_FAR_M:g} m (a log scale), black no reading")
+        named = ", ".join(f"{colour_word(_ramp(metric_position(np.array(m))))} {m:g} m" for m in METRIC_TICKS_M)
+        return f"metric: one fixed scale in every episode, {named} (a log scale), black no reading"
     return ("red near to blue far, relative to this camera's readings across the upload (the recording does not say "
             "its unit, so not in metres); black no reading")
 
