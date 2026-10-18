@@ -93,7 +93,7 @@ def run_isolated(fn, *args, watch=(), mode=None, stall_s=None, **kwargs):
         request.write_bytes(pickle.dumps((fn.__module__, fn.__qualname__, args, kwargs)))
         beat.touch()
         env = {**os.environ, _INLINE: '1', _HEARTBEAT: str(beat),
-               'PYTHONPATH': os.pathsep.join(p for p in sys.path if p)}
+               'PYTHONPATH': os.pathsep.join(p or os.getcwd() for p in sys.path)}
         if mode:
             env[_MODE] = mode
         else:
