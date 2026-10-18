@@ -201,8 +201,9 @@ def preparation_checkpoint(job: Path, receipt: dict) -> None:
 
 
 def smallest_unit_reserve(job: Path, out: Path) -> float | None:
-    """The smallest final-call reservation among units with no usable label yet, from the dry run's requests, or None
-    when a unit's reservation is unknown (a model priced by quote) or every unit is labelled."""
+    """The least any unit with no usable label yet can reserve for its final call, from the dry run's requests (their
+    output limit, since routing and evidence selection change the prompt), or None when that is unknown (a model
+    priced by quote) or every unit is labelled. A refusal on it never turns away a run the cap could pay for."""
     from label.harness import annotation_complete
     bounds = []
     for dry in sorted((job / 'dry').glob('episode_*.json')):
@@ -213,7 +214,7 @@ def smallest_unit_reserve(job: Path, out: Path) -> float | None:
         except (OSError, ValueError, TypeError, AttributeError):
             pass
         try:
-            bound = (json.loads(dry.read_text()).get('request') or {}).get('final_cost_bound_usd')
+            bound = (json.loads(dry.read_text()).get('request') or {}).get('final_cost_floor_usd')
         except (OSError, ValueError, AttributeError):
             return None
         if not isinstance(bound, (int, float)) or isinstance(bound, bool) or not math.isfinite(bound):

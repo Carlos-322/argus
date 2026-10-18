@@ -1452,11 +1452,13 @@ def merge(parts, ep_dir=None):
 
 
 def rejected_selection_proof(record):
-    """A durable unpaid rejection has explicit HTTP and numeric receipt types, never diagnostic prose."""
+    """A durable unpaid rejection has explicit receipt types, never diagnostic prose. Which failures are unpaid is
+    decided once, where the request is sent (label/harness.py _post, DispatchError.verified_unpaid): an error status,
+    or a request that never left the machine (no status). The receipt records that verdict, and this reads it back
+    rather than keeping a second, shorter list of statuses that would turn a saved unpaid failure into a charge."""
     def attempt(row):
         return (isinstance(row, dict) and row.get('state') == 'rejected unpaid'
-                and type(row.get('http_status')) is int and (row['http_status'] in (401, 402)
-                    or row['http_status'] == 429 and row.get('rejection_code') == 'insufficient_quota')
+                and (row.get('http_status') is None or type(row.get('http_status')) is int)
                 and type(row.get('http_attempt')) is int and row['http_attempt'] == 1
                 and type(row.get('cost_usd')) in (int, float) and row['cost_usd'] == 0
                 and math.isfinite(row['cost_usd']) and row.get('verified_unpaid') is True)

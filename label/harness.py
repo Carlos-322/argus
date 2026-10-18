@@ -1293,8 +1293,11 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
                   "request": {"n_parts": len(content), "n_images": n_images, "image_bytes": img_bytes,
                               "est_input_tokens": round(est_img + est_text)}}
         if model.startswith('openai/') and model.split('/', 1)[-1] in OPENAI_PRICES:
-            # what a paid run reserves for this final call, so review can say up front that a cap is too small
+            # what a paid run reserves for this final call, and the least any final call can reserve (its output limit,
+            # with no prompt at all), since routing and evidence selection change the prompt; review refuses a cap up
+            # front only when it cannot cover even that, never one that routing would make fit
             result['request']['final_cost_bound_usd'] = final_cost_bound(content, max_tokens, model=model)
+            result['request']['final_cost_floor_usd'] = final_cost_bound([], max_tokens, model=model)
         write_atomic(out_path, result)
         return result
     bound = final_cost_bound(content, max_tokens, model=model, require_known_pricing=require_known_pricing,

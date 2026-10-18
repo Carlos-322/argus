@@ -96,7 +96,8 @@ def billing_summary(annotation: dict, path=None) -> dict:
             try:
                 inspection = json.loads(cache.read_text())
                 recover_selection_reservations(inspection)
-                extra = max(0.0, float(inspection['cost_usd']) - inspection_billed(annotation, inspection.get('digest')))
+                # reconciled against the same receipt the totals above came from, as the spend ledger does
+                extra = max(0.0, float(inspection['cost_usd']) - inspection_billed(record, inspection.get('digest')))
             except (OSError, ValueError, TypeError, KeyError, AttributeError):
                 complete = False
             else:
