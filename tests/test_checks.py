@@ -531,6 +531,82 @@ def test_timebase_measures_lag_and_jitter():
     assert timebase.timebase_check(state, action, neighbour_lag=2.7)["sped_up_recording"] is True
 
 
+def _recording_at(fps: float, seed: int = 0, n_s: float = 10.0) -> tuple[np.ndarray, np.ndarray]:
+    """(state, action) of a real-time teleop episode at fps whose recorder skips one sample in 12 (a step that covers
+    two real intervals), the follower 4/30 s behind the leader."""
+    rng = np.random.default_rng(seed)
+    n = int(n_s * fps)
+    steps = np.full(n - 1, 1 / fps)
+    steps[6::12] = 2 / fps
+    t = np.concatenate([[0.0], np.cumsum(steps)]) + 1.0
+    fine = np.arange(0.0, t[-1] + 1.0, 1 / 600)
+    walk = np.cumsum(rng.normal(0, 1, (len(fine), 12)), axis=0)
+    kernel = np.hanning(181) / np.hanning(181).sum()
+    path = np.stack([np.convolve(walk[:, j], kernel, mode="same") for j in range(12)], axis=1) * 0.01
+
+    def joints(at: np.ndarray) -> np.ndarray:
+        out = np.zeros((len(at), 14))
+        out[:, timebase.JOINTS] = np.stack([np.interp(at, fine, path[:, j]) for j in range(12)], axis=1)
+        return out
+    return joints(t - 4 / 30), joints(t)
+
+
+@pytest.mark.parametrize("fps", [15, 30, 60, 120, 240])
+def test_timebase_lag_is_a_time_at_any_frame_rate(fps):
+    """The follower's delay is searched for and judged in seconds: at 120 fps a real 133 ms delay is 16 frames, past
+    the 12 the search stopped at, and was read as a short one. A recorder that skips at a regular period adds the same
+    jump to both streams at that period; those steps are left out, so they never pull the peak to the period."""
+    state, action = _recording_at(fps)
+    lag = timebase.follower_lag_frames(state, action, fps)
+    assert 0.11 < lag / fps < 0.14
+    r = timebase.timebase_check(state, action, lag, fps)
+    assert r["follower_lag_frames"] == lag and r["sped_up_recording"] is False
+
+
+def test_timebase_missing_readings_never_read_as_a_lag():
+    """A NaN or infinite reading is left out of the steps beside it; it no longer turns the correlation into NaN,
+    whose argmax read as a lag of 0 and flagged real-time recordings as sped up."""
+    import warnings
+    base = _recording(0, sped_up=False, skips=False)
+    for spoil in (lambda s, a: s.__setitem__(150, np.nan), lambda s, a: a.__setitem__((150, 3), np.nan),
+                  lambda s, a: s.__setitem__((150, 2), np.inf),
+                  lambda s, a: s.__setitem__(np.random.default_rng(0).random(len(s)) < 0.05, np.nan)):
+        state, action = (x.copy() for x in base)
+        spoil(state, action)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            r = timebase.timebase_check(state, action, 3.0)
+        assert r["follower_lag_frames"] == pytest.approx(4.0, abs=0.3) and r["sped_up_recording"] is False
+    for state in (np.full((300, 14), np.nan), np.ones((300, 14)), np.zeros((0, 14)), np.zeros((300, 3))):
+        r = timebase.timebase_check(state, state.copy(), 3.0)
+        assert r["follower_lag_frames"] is None and r["sped_up_recording"] is False
+
+
+def test_timebase_apply_never_reads_a_context_from_the_working_folder(tmp_path, monkeypatch):
+    """A label file with no episode_dir is matched to the episode folder of its name among EPISODES; with none, it is
+    left as it is. It used to read context.json from whatever folder the command ran in."""
+    out = tmp_path / "timebase.csv"
+    pd.DataFrame({"episode_index": [3, 4], "neighbour_lag_frames": [2.5, 2.5],
+                  "sped_up_recording": [True, True]}).to_csv(out, index=False)
+    eps = tmp_path / "episodes"
+    (eps / "episode_000004").mkdir(parents=True)
+    (eps / "episode_000004" / "context.json").write_text(json.dumps({"profile": "teleop_arms"}))
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    (cwd / "context.json").write_text(json.dumps({"source": {"presentation_clock": {"basis": "mcap_log_time"}}}))
+    monkeypatch.chdir(cwd)
+    labels = tmp_path / "out"
+    labels.mkdir()
+    measured = {"follower_lag_frames": 2.5, "skipped_frac": 0.05, "repeated_frac": 0.0, "sped_up_recording": False}
+    for e in (3, 4):
+        (labels / f"episode_{e:06d}.json").write_text(json.dumps({"dataset_checks": {"timebase": measured}}))
+    assert timebase.cmd_apply(Namespace(timebase=out, roots=[eps], labels=labels)) == 0
+    lone = json.loads((labels / "episode_000003.json").read_text())["dataset_checks"]["timebase"]
+    assert lone == measured
+    found = json.loads((labels / "episode_000004.json").read_text())["dataset_checks"]["timebase"]
+    assert found["sped_up_recording"] is True and "not_assessed" not in found
+
+
 def test_timebase_scan_and_apply(tmp_path, capsys):
     out = tmp_path / "timebase.csv"
     assert timebase.cmd_scan(Namespace(raw=_raw(tmp_path), out=out, jobs=1)) == 0

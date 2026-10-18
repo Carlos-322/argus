@@ -62,6 +62,12 @@ SPEDUP_LAG_FRAMES = 3.4
 # the follower's delay is a time: 3.4 frames at the 30 Hz the rule was calibrated at, compared at each recording's rate
 SPEDUP_LAG_S = SPEDUP_LAG_FRAMES / 30
 SPEDUP_NEIGHBOURS = 3
+# the longest follower delay searched for: 12 frames at the 30 Hz the rule was calibrated at, the same time in each
+# recording's own frames (a real 133 ms delay is 16 frames at 120 fps)
+MAX_LAG_S = 12 / 30
+# the arm moves when its joints step at least this fast (0.3 degrees per frame at the 30 Hz the rule was calibrated
+# at, in radians per second)
+MOVING_RAD_S = np.radians(0.3) * 30
 SPEDUP_RULE = (f"skipped+repeated >= {SPEDUP_JITTER_FRAC:.3f} and follower lag <= {SPEDUP_LAG_FRAMES} frames "
                f"and median lag of the {SPEDUP_NEIGHBOURS} episodes either side <= {SPEDUP_LAG_FRAMES} frames")
 
@@ -111,23 +117,44 @@ def neighbour_lags(episode_index, task, lag):
     return d.index.map(med.to_dict()).tolist()
 
 
-def follower_lag_frames(state: np.ndarray, action: np.ndarray, max_lag: int = 12) -> float | None:
+def follower_lag_frames(state: np.ndarray, action: np.ndarray, fps: float = 30.0,
+                        max_lag_s: float = MAX_LAG_S) -> float | None:
     """Median over the 12 arm joints of how many frames the follower (state) trails the leader
-    (action), from the peak of the velocity cross-correlation with a parabolic sub-frame fit."""
+    (action), from the peak of the velocity cross-correlation with a parabolic sub-frame fit. Lags up to
+    max_lag_s are searched, in this recording's frames at fps: the delay is a time, so at 120 fps it spans four
+    times the frames it does at 30. A step with a missing or infinite reading on either side is left out of the
+    correlation rather than spreading through it, and a joint that never moves (or never reads) is skipped. So are the
+    recorder's timing faults (sample_jitter): a skipped or repeated sample is one step in both streams that is not
+    one frame interval of motion, so both streams jump together there, and faults that come at a regular period
+    would otherwise add a peak at that period."""
     s = np.asarray(state, dtype=np.float64)
     a = np.asarray(action, dtype=np.float64)
-    if len(s) < 4 * max_lag or len(a) != len(s):
+    fps = _num(fps)
+    if fps is None or not fps > 0:
         return None
+    max_lag = max(2, int(np.ceil(max_lag_s * fps)))
+    if s.ndim != 2 or s.shape != a.shape or s.shape[1] <= max(JOINTS) or len(s) < 4 * max_lag:
+        return None
+    fault = np.zeros(len(s) - 1, dtype=bool)
+    r = _step_ratios(s, fps)
+    if r is not None:
+        fault[1:-1] = np.logical_or(*_faults(r))
     lags = []
     for j in JOINTS:
         x = np.diff(a[:, j])
         y = np.diff(s[:, j])
-        if x.std() < 1e-5 or y.std() < 1e-5:
+        okx, oky = np.isfinite(x) & ~fault, np.isfinite(y) & ~fault
+        # a NaN standard deviation never passes a "below" test, so the guard is written as what must hold
+        if not (okx.sum() > 2 and oky.sum() > 2 and x[okx].std() >= 1e-5 and y[oky].std() >= 1e-5):
             continue
-        x = (x - x.mean()) / x.std()
-        y = (y - y.mean()) / y.std()
+        x = np.where(okx, (x - x[okx].mean()) / x[okx].std(), 0.0)
+        y = np.where(oky, (y - y[oky].mean()) / y[oky].std(), 0.0)
         n = len(x)
-        cc = np.array([np.dot(x[:n - k], y[k:]) / (n - k) for k in range(max_lag + 1)])
+        # the mean product over the pairs with a reading on both sides, at each lag
+        pairs = np.array([np.count_nonzero(okx[:n - k] & oky[k:]) for k in range(max_lag + 1)])
+        if (pairs < n // 2).any():
+            continue
+        cc = np.array([np.dot(x[:n - k], y[k:]) for k in range(max_lag + 1)]) / pairs
         k = int(np.argmax(cc))
         if 0 < k < max_lag:
             d = cc[k - 1] - 2 * cc[k] + cc[k + 1]
@@ -137,22 +164,44 @@ def follower_lag_frames(state: np.ndarray, action: np.ndarray, max_lag: int = 12
     return round(float(np.median(lags)), 3) if lags else None
 
 
-def sample_jitter(state: np.ndarray) -> dict:
+def _step_ratios(state: np.ndarray, fps: float = 30.0) -> np.ndarray | None:
+    """Each state step over the mean of its two neighbours (the 12 arm joints), NaN where those neighbours move less
+    than MOVING_RAD_S or a reading is missing; None when the state has too few steps. Entry i is the step between
+    frames i + 1 and i + 2."""
+    s = np.asarray(state, dtype=np.float64)
+    if s.ndim != 2 or s.shape[1] <= max(JOINTS):
+        return None
+    v = np.linalg.norm(np.diff(s[:, JOINTS], axis=0), axis=1)
+    if len(v) < 3:
+        return None
+    nb = (v[:-2] + v[2:]) / 2
+    mid = v[1:-1]
+    # moving is a speed, the same per second at any frame rate, so the step it takes per frame shrinks as the rate
+    # rises. A step next to a missing or infinite reading has no length, so it is neither a skip nor a repeat
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ok = np.isfinite(nb) & np.isfinite(mid) & (nb > MOVING_RAD_S / fps)
+        return np.where(ok, mid / np.where(ok, nb, 1.0), np.nan)
+
+
+def _faults(r: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(skipped, repeated) steps among step ratios r (_step_ratios)."""
+    with np.errstate(invalid="ignore"):
+        return (r > 1.8) & (r < 2.2), r < 0.15
+
+
+def sample_jitter(state: np.ndarray, fps: float = 30.0) -> dict:
     """Recorder timing faults in the state stream, during motion: single steps ~2x both neighbours
     (a skipped sample stamped as one 1/30 s step) and near-zero steps between moving neighbours (a
     repeated sample). Fractions of moving frames."""
-    s = np.asarray(state, dtype=np.float64)[:, JOINTS]
-    v = np.linalg.norm(np.diff(s, axis=0), axis=1)
-    if len(v) < 3:
+    fps = _num(fps)
+    r = _step_ratios(state, fps) if fps and fps > 0 else None
+    if r is None:
         return {"skipped_frac": None, "repeated_frac": None}
-    nb = (v[:-2] + v[2:]) / 2
-    mid = v[1:-1]
-    ok = nb > np.radians(0.3)
-    if not ok.any():
+    r = r[np.isfinite(r)]
+    if not len(r):
         return {"skipped_frac": 0.0, "repeated_frac": 0.0}
-    r = mid[ok] / nb[ok]
-    return {"skipped_frac": round(float(((r > 1.8) & (r < 2.2)).mean()), 4),
-            "repeated_frac": round(float((r < 0.15).mean()), 4)}
+    skipped, repeated = _faults(r)
+    return {"skipped_frac": round(float(skipped.mean()), 4), "repeated_frac": round(float(repeated.mean()), 4)}
 
 
 def arrival_order_only(measurements: dict) -> dict:
@@ -172,8 +221,8 @@ def timebase_check(state: np.ndarray, action: np.ndarray, neighbour_lag: float |
                    fps: float = 30.0, *, context: dict | None = None) -> dict:
     """One episode's measurements and flag, at the recording's frame rate. neighbour_lag comes from the dataset scan
     (via context.json, written by `apply`); without it the episode is measured but not flagged."""
-    lag = follower_lag_frames(state, action)
-    j = sample_jitter(state)
+    lag = follower_lag_frames(state, action, fps)
+    j = sample_jitter(state, fps)
     result = {"follower_lag_frames": lag, **j, "neighbour_lag_frames": _num(neighbour_lag),
             "sped_up_recording": is_sped_up(lag, j["skipped_frac"], j["repeated_frac"], neighbour_lag, fps),
             "rule": rule_text(fps)}
@@ -272,7 +321,7 @@ def measure_folder(eps: Path) -> int:
         z = np.load(d / "state.npz")
         if "action" not in z.files or z["state"].shape[1] != 14:
             continue
-        lag = follower_lag_frames(z["state"], z["action"])
+        lag = follower_lag_frames(z["state"], z["action"], _num(ctx.get("fps")) or 30.0)
         # the generic LeRobot reader keeps the episode's index at the top of its context, a dataset's own adapter
         # (Galaxea, HABIT) in its source; either is the same number from the dataset's metadata
         src = ctx.get("source") or {}
@@ -314,8 +363,10 @@ def cmd_apply(args) -> int:
     import pandas as pd
     tb = pd.read_csv(args.timebase).set_index("episode_index")
     n_ctx = n_lab = changed = 0
+    folders = {}
     for root in args.roots:
         for d in sorted(root.glob("episode_*")):
+            folders[d.name] = d
             e = int(d.name.split("_")[1])
             ctx = json.loads((d / "context.json").read_text())
             if recorder_arrival(ctx):
@@ -330,7 +381,14 @@ def cmd_apply(args) -> int:
         t = (r.get("dataset_checks") or {}).get("timebase")
         if not t:
             continue
-        context_path = Path(r.get('episode_dir') or '') / 'context.json'
+        # the label's own episode folder, else the one of the same name among EPISODES; never a path made from
+        # nothing, which would read a context.json in whatever folder the command runs from
+        ep_dir = Path(r["episode_dir"]) if r.get("episode_dir") else folders.get(p.stem)
+        if ep_dir is None:
+            print(f"{p.name}: no episode folder (no episode_dir, and none of that name in EPISODES), left as it is",
+                  file=sys.stderr)
+            continue
+        context_path = ep_dir / 'context.json'
         context = json.loads(context_path.read_text()) if context_path.is_file() else {}
         if recorder_arrival(context) or t.get('timing_basis') == 'mcap_log_time':
             changed += bool(t.get('sped_up_recording'))
@@ -338,7 +396,7 @@ def cmd_apply(args) -> int:
             write_atomic(p, r)
             n_lab += 1
             continue
-        e = int(Path(r["episode_dir"]).name.split("_")[1])
+        e = int(ep_dir.name.split("_")[1])
         nb = _num(tb.loc[e, "neighbour_lag_frames"])
         flag = is_sped_up(t.get("follower_lag_frames"), t.get("skipped_frac"), t.get("repeated_frac"), nb)
         if flag != bool(tb.loc[e, "sped_up_recording"]):
