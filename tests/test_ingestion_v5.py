@@ -198,7 +198,7 @@ def test_malformed_json_channel_does_not_abort_dedicated_camera_decode(tmp_path)
     assert '/camera/bad' in failures
 
 
-@pytest.mark.parametrize('text_clock', ['capture', 'arrival_only', 'different_capture'])
+@pytest.mark.parametrize('text_clock', ['capture', 'capture_late', 'arrival_only', 'different_capture'])
 def test_mcap_text_uses_its_verified_camera_clock(tmp_path, text_clock):
     import base64
     from mcap.writer import Writer
@@ -215,8 +215,8 @@ def test_mcap_text_uses_its_verified_camera_clock(tmp_path, text_clock):
         schema = writer.register_schema('sensor_msgs/CompressedImage', 'jsonschema', b'{}')
         camera = writer.register_channel('/camera/front/compressed', 'json', schema, metadata={'capture_clock_id': 'fixture'})
         text_schema = writer.register_schema('TaskText', 'jsonschema', b'{}')
-        task = writer.register_channel('/task', 'json', text_schema, metadata={'capture_clock_id': 'fixture' if text_clock == 'capture' else 'other'})
-        step = writer.register_channel('/task/subtask', 'json', text_schema, metadata={'capture_clock_id': 'fixture' if text_clock == 'capture' else 'other'})
+        task = writer.register_channel('/task', 'json', text_schema, metadata={'capture_clock_id': 'fixture' if text_clock.startswith('capture') else 'other'})
+        step = writer.register_channel('/task/subtask', 'json', text_schema, metadata={'capture_clock_id': 'fixture' if text_clock.startswith('capture') else 'other'})
         for index in range(120):
             data = {'header': header(camera_base + index / 30), 'format': 'png',
                     'data': base64.b64encode(picture.getvalue()).decode()}
@@ -224,8 +224,10 @@ def test_mcap_text_uses_its_verified_camera_clock(tmp_path, text_clock):
         for channel, when, text in [(task, 1., 'fold the cloth'), (step, 1., 'pick up'), (step, 2.5, 'fold')]:
             data = {'data': text}
             if text_clock != 'arrival_only':
-                data['header'] = header((camera_base if text_clock == 'capture' else wall) + when)
-            writer.add_message(channel, round((wall + when + 1) * 1e9), json.dumps(data).encode(), 0)
+                data['header'] = header((camera_base if text_clock.startswith('capture') else wall) + when)
+            # text on the camera's clock arrives about as fast as its frames; text on another clock a second late
+            late = .02 if text_clock == 'capture' else 1
+            writer.add_message(channel, round((wall + when + late) * 1e9), json.dumps(data).encode(), 0)
         writer.finish()
     out = tmp_path / 'out'
     report = formats.convert(source, 'ego_head', out, 'clock fixture', 900)

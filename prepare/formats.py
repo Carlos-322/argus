@@ -10204,12 +10204,15 @@ def mcap_text_clock_proof(camera_kind, text_kind, camera, text):
     rows = camera + text
     if any(row['capture_ns'] > row['log_ns'] for row in rows):
         return None
-    # A shared clock is a declaration; the delivery delay (arrival minus stamp) is the one measurement of it. A text
-    # stream that arrives later than the camera's frames and a text stream whose stamps are offset look the same in
-    # the recording, so the declared clock places the text and the difference is the most its stamps can be off
-    # (offset_ms, flagged on the stream when it exceeds CLOCK_OFFSET_FLAG_MS).
+    # A shared clock is a declaration; the delivery delay (arrival minus stamp) is the one measurement of it. A later
+    # delivery and an offset clock look the same in the recording, and either reading is wrong by the difference when
+    # the other holds. Through one recorder, delays past CLOCK_OFFSET_IMPLAUSIBLE_MS are rare while unsynchronised
+    # clocks are not, so such a text stream is not on the camera's clock and is placed by arrival; a smaller difference
+    # is the most its stamps can be off (offset_ms, flagged on the stream when it exceeds CLOCK_OFFSET_FLAG_MS).
     delay = lambda records: float(np.median([r['log_ns'] - r['capture_ns'] for r in records])) / 1e6
     offset_ms = round(abs(delay(text) - delay(camera)), 1)
+    if offset_ms > CLOCK_OFFSET_IMPLAUSIBLE_MS:
+        return None
     ids = {row['capture_clock_id'] for row in rows}
     if len(ids) == 1 and None not in ids:
         return {'basis': 'matching publisher-declared capture clock IDs', 'capture_clock_id': next(iter(ids)),
@@ -10224,7 +10227,9 @@ def mcap_text_clock_proof(camera_kind, text_kind, camera, text):
     return None
 
 
-# A text stream whose delivery delay differs from the camera's by more than this is flagged with the difference.
+# Delivery delays through one recorder that differ by more than this are read as a clock offset (arrival placement);
+# a smaller difference above CLOCK_OFFSET_FLAG_MS is how far the stamps can be off, and is flagged on the stream.
+CLOCK_OFFSET_IMPLAUSIBLE_MS = 250.0
 CLOCK_OFFSET_FLAG_MS = 10.0
 
 
