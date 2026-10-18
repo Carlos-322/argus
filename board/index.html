@@ -2293,12 +2293,38 @@ const navCurrent = tok => tok === _nav;
 // that asked for the episode: it lands while its render is the one on the pane (renderCurrent), so a navigation that
 // keeps the drawn episode (Back from a comparison that never appeared) keeps it too, and it is dropped once another
 // draw replaces the render or the pane is cleared (endRender).
+// Everything else a draw sets outside the two columns it writes (left-col, right-col) is the render's too: the
+// header beside the episode (its name, source, notes, dictionary, downloads and buttons), the band over it, and the
+// window and document listeners, observers and timers its parts set up (_epCleanup). endRender puts each back as the
+// page ships it, so a pane cleared by an error or an empty list shows nothing of the episode drawn before.
 const renderCurrent = render => !!render && render === window._epAbort;
+const KP_DL_TITLE = document.getElementById('kp-dl').getAttribute('title');
 function endRender() {
   if (window._epAbort) window._epAbort.abort();
   window._epAbort = null;
+  if (window._epCleanup) for (const fn of window._epCleanup) { try { fn(); } catch (_) {} }
+  window._epCleanup = [];
+  window._hp = null; window._sn = null;
   clearModelGrids();
+  currentEp.textContent = '';
+  document.getElementById('current-ep-raw').textContent = '';
+  document.getElementById('current-ep-src').innerHTML = '';
+  document.getElementById('current-ep-reader').innerHTML = '';
   document.getElementById('current-ep-dictionary').replaceChildren();
+  for (const id of ['dl-json', 'kp-dl']) {
+    const a = document.getElementById(id);
+    a.removeAttribute('href'); a.setAttribute('download', '');
+  }
+  const kpA = document.getElementById('kp-dl');
+  kpA.hidden = true;
+  if (KP_DL_TITLE != null) kpA.setAttribute('title', KP_DL_TITLE); else kpA.removeAttribute('title');
+  document.getElementById('kp-note').classList.add('off');
+  const aligned = document.getElementById('hp-aligned');
+  aligned.classList.add('off'); aligned.querySelector('.kp-note-in').textContent = '';
+  hpBtn.hidden = true;
+  _vdEp = null; vdOpen(false); vdEl.hidden = true; vdMenu.innerHTML = '';
+  // the band saying the labels are another model's folds away (its text stays while it folds, renderSourceBar)
+  srcBar.classList.remove('on', 'cmp'); sbBack.tabIndex = -1; sbFit();
 }
 
 const msBtn = document.getElementById('ms-btn');
@@ -3629,10 +3655,6 @@ function renderRail(ds, keepFile, fromSearch, nav) {
       (ISSUE_FILTER ? 'No episodes with this issue.' : 'No episodes here yet.') + '</div>';
     endRender(); leftCol.innerHTML = ''; _drawnFile = null;
     rightCol.innerHTML = '<div class="rail-empty" style="padding:48px 28px">No episodes in this dataset yet.</div>';
-    currentEp.textContent = '';
-    document.getElementById('current-ep-raw').textContent = '';
-    document.getElementById('current-ep-src').innerHTML = '';
-    document.getElementById('current-ep-reader').innerHTML = '';
     updateKpExport();
     return;
   }
@@ -3769,9 +3791,6 @@ function showEpisodeError(file, err) {
   _drawnFile = null;
   const rec = ALL_EPS.find(e => e.file === file);
   currentEp.textContent = epName(rec ? rec.episode_id : file.replace(/\.json$/, ''));
-  document.getElementById('current-ep-raw').textContent = '';
-  document.getElementById('current-ep-src').innerHTML = '';
-  document.getElementById('current-ep-reader').innerHTML = '';
   leftCol.innerHTML = '';
   rightCol.innerHTML = `<div class="rail-empty" style="padding:48px 28px">This episode could not be loaded `
     + `(${esc(err && err.message || 'no response')}). Open it again to retry.</div>`;
@@ -6642,12 +6661,9 @@ function renderEp(d, opts) {
     on(vid, 'loadeddata', layoutFrame);
     on(vid, 'error', scheduleTopPlacement);
   }
-  // Tear down the window/document listeners + interval from the PREVIOUS episode
-  // before wiring this one. renderEp runs on every episode/dataset switch; without
-  // this, each switch leaks another resize/fullscreen listener + 500ms interval
-  // (all closing over the detached previous video), degrading a long-open session.
-  if (window._epCleanup) { for (const fn of window._epCleanup) { try { fn(); } catch (_) {} } }
-  window._epCleanup = [];
+  // the previous episode's window/document listeners and intervals were torn down by endRender at the top: renderEp
+  // runs on every episode/dataset switch, and without that each switch would leak another resize/fullscreen listener
+  // and 500ms interval (all closing over the detached previous video), degrading a long-open session
   if (vid && typeof ResizeObserver !== 'undefined') {
     const frameObserver = new ResizeObserver(layoutFrame);
     frameObserver.observe(vid);
