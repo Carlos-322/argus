@@ -112,6 +112,89 @@ def test_text_refines_only_a_tag_that_names_no_one_problem():
     assert family('No glare', 'the exo view is frozen from 4 s to 9 s') == 'camera-image'
 
 
+# ---------------------------------------------------------------- spelling
+
+def _spelled_whole_text(fam, text):
+    """The spelling rule read over the whole text for every word and every swap, as it was first written: slow, and
+    the reference the windowed reading must agree with."""
+    import re
+    out = text
+    hit = lambda s, a, b: any(x.start() < b and x.end() > a for r in fam._re.values() for x in r.finditer(s))
+    for m in re.finditer(r"[^\W\d_]{4,}", text):
+        a, b = m.span()
+        if hit(out, a, b):
+            continue
+        w = m.group()
+        for k in range(len(w) - 1):
+            if w[k] != w[k + 1]:
+                cand = out[:a] + w[:k] + w[k + 1] + w[k] + w[k + 2:] + out[b:]
+                if hit(cand, a, b):
+                    out = cand
+                    break
+    return out
+
+
+def test_spelling_reads_the_same_as_the_whole_text_reading():
+    """Spelling correction reads only the stretch of text around each word and tries only the swaps that can spell a
+    piece of a family's word; on notes made of family words, their swapped spellings and filler it puts right exactly
+    the words the whole-text reading does."""
+    rng = random.Random(5)
+    words = ['frozen', 'freezes', 'stale', 'corrupt', 'dropout', 'glare', 'clipping', 'overexposed', 'washed-out',
+             'removed', 'lifted', 'rotated', 'sideways', 'upside', 'covered', 'occluded', 'finger', 'anonymised',
+             'black screen', 'no signal', 'loses its image', 'fills much of the kitchen lens', 'turned away',
+             'faces the wearer', 'blurred patch', 'images are identical', 'repeats the same', 'the', 'operator',
+             'holds', 'kitchen', 'table', 'not', 'looks', 'like', 'at', '3s', 'and', 'it', 'is', 'item_4', 'a']
+    def swap(x):
+        if len(x) < 2:
+            return x
+        k = rng.randrange(len(x) - 1)
+        return x[:k] + x[k + 1] + x[k] + x[k + 2:]
+
+    swapped = 0
+    for _ in range(300):
+        note = []
+        for _ in range(rng.randrange(2, 40)):
+            w = rng.choice(words)
+            if rng.random() < 0.5:
+                w = ' '.join(map(swap, w.split(' ')))
+            note.append(w + rng.choice([' ', ' ', ', ', '. ', '\n', '-']))
+        text = ''.join(note)
+        want = _spelled_whole_text(FAMILIES, text)
+        swapped += want != text
+        assert FAMILIES._spelled(text) == want, text
+    assert swapped > 150
+
+
+def test_spelling_reads_a_long_note_in_time_linear_in_its_length():
+    """A label's evidence has no length limit, and the board classifies every issue when it loads. Spelling
+    correction read the whole note for every word and every swap, so 13 KB of evidence took 19 s and 44 KB 212 s.
+    It now reads a bounded stretch per word: the characters its patterns scan grow with the note, not its square,
+    and the family is the same."""
+    class Counting:
+        scanned = 0
+
+        def __init__(self, r):
+            self.r, self.pattern, self.flags = r, r.pattern, r.flags
+
+        def finditer(self, s, *a):
+            Counting.scanned += len(s)
+            return self.r.finditer(s, *a)
+
+    fam = Families()
+    fam._re = {k: Counting(r) for k, r in fam._re.items()}
+    per_byte = []
+    for n in (100, 1000):
+        for issue, tail in [('The video is frozen.', ''), ('The video is forzen.', ''),
+                            ('The camera is on the table.', ' Then a dorpout.')]:
+            evidence = 'The operator holds the cup above the table. ' * n + tail
+            Counting.scanned = 0
+            got = fam.family_of('data_issues', {'category': 'camera_fault', 'severity': 'high', 'issue': issue,
+                                                'evidence': evidence})
+            assert got == 'camera-image', (issue, n)
+            per_byte.append(Counting.scanned / len(evidence))
+    assert max(per_byte) < 200 and max(per_byte[3:]) < 1.2 * max(per_byte[:3]), per_byte
+
+
 # ---------------------------------------------------------------- corpora
 
 def reviewer_corpus():
