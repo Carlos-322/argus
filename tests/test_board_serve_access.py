@@ -1,4 +1,4 @@
-"""Per-client download tickets and Host checks of the live board."""
+"""Per-client download tickets, Host checks and media validators of the live board."""
 import json
 import os
 import urllib.error
@@ -112,3 +112,26 @@ def test_refused_host_names_the_host_and_the_flag(tmp_path, monkeypatch):
         assert 'box.tail1234.ts.net' in message and '--allow-host box.tail1234.ts.net' in message
         code, _, body = status(urllib.request.Request(base + 'api/episodes', headers={'Host': '<b>x'}))
         assert code == 403 and b'<' not in body
+
+
+def test_clip_and_frame_revalidate_and_a_replaced_clip_is_never_served_stale(tmp_path, monkeypatch):
+    source = media(tmp_path, monkeypatch)
+    paths, tags = ('api/video?id=episode_x&cam=exo', 'api/frame?id=episode_x&cam=exo&t=0.1&w=64'), {}
+    with serving() as base:
+        for path in paths:
+            code, headers, first = status(base + path)
+            assert code == 200 and headers['Cache-Control'] == 'no-cache' and headers['ETag']
+            tag = tags[path] = headers['ETag']
+            code, headers, body = status(urllib.request.Request(base + path, headers={'If-None-Match': tag}))
+            assert code == 304 and body == b'' and headers['ETag'] == tag
+            if 'video' in path:
+                ranged = urllib.request.Request(base + path, headers={'Range': 'bytes=0-9', 'If-Range': '"old"'})
+                code, _, body = status(ranged)
+                assert code == 200 and body == first
+        before = source.stat()
+        replacement = source.with_suffix('.new')
+        replacement.write_bytes((tmp_path / 'blue.mp4').read_bytes().ljust(before.st_size, b'\0'))
+        os.replace(replacement, source)
+        for path in paths:
+            code, headers, body = status(urllib.request.Request(base + path, headers={'If-None-Match': tags[path]}))
+            assert code == 200 and body and headers['ETag'] != tags[path]

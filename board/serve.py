@@ -1711,6 +1711,17 @@ def host_allowed(host: str, bound: str, allowed=()) -> bool:
         return host in machine_names()
 
 
+def media_tag(path: Path, version: tuple, *made) -> str:
+    """An entity tag for a served clip, or for what was made from it (`made`: a frame's time, width and recipe): its
+    trusted stat (_trusted_version), so a browser keeps unchanged media and revalidates it, and a replaced clip gets a
+    new tag."""
+    identity = repr((str(path), _trusted_version(path, version), made)).encode()
+    return '"' + hashlib.sha1(identity).hexdigest()[:32] + '"'
+
+
+REVALIDATE = 'no-cache'      # browsers may keep media, but ask each time whether it is still current
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     # keep-alive: a page asks for its labels, posters and three videos at once, and a proxy in front (or a browser
     # that talks to the board directly) reuses one connection for them instead of opening one per request; an idle
@@ -1803,17 +1814,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_file(self, p: Path, ctype: str, download: str | None = None, *, source=None):
+    def _not_modified(self, tag: str) -> bool:
+        """Answer 304 when the browser's copy carries this entity tag."""
+        given = self.headers.get('If-None-Match')
+        if not given or not ({t.strip().removeprefix('W/') for t in given.split(',')} & {tag, '*'}):
+            return False
+        self.send_response(304)
+        self.send_header('ETag', tag)
+        self.send_header('Cache-Control', REVALIDATE)
+        self.end_headers()
+        return True
+
+    def _send_file(self, p: Path, ctype: str, download: str | None = None, *, source=None, validate=False):
         """Serve a file with proper HTTP Range support so the browser
-        can stream/seek without downloading the whole thing first; download names the saved file."""
+        can stream/seek without downloading the whole thing first; download names the saved file. With validate, the
+        response carries the file's entity tag (media_tag) so a browser revalidates its copy instead of fetching it
+        again."""
         try:
             st = os.fstat(source.fileno()) if source is not None else p.stat()
         except OSError:
             self._send(404, {"error": "not found"})
             return
         size = st.st_size
+        tag = media_tag(p, (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)) if validate else None
+        if tag and self._not_modified(tag):
+            return
 
         rng = self.headers.get("Range") or self.headers.get("range")
+        if tag and rng and (self.headers.get('If-Range') or tag) != tag:
+            rng = None          # the copy the browser is completing has changed: send the whole file
         start = 0
         end = size - 1
         partial = False
@@ -1855,7 +1884,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(length))
             self.send_header("Accept-Ranges", "bytes")
-            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+            if tag:
+                self.send_header('ETag', tag)
+                self.send_header('Cache-Control', REVALIDATE)
+            else:
+                self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
             if download:
                 self.send_header("Content-Disposition", f'attachment; filename="{download}"')
             self.end_headers()
@@ -2194,7 +2227,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             name = f"{eid}_{cam if own else 'main'}.mp4" \
                 if (q.get("download") or [""])[0] == "1" \
                 else None
-            self._send_file(mp4, "video/mp4", name)
+            self._send_file(mp4, "video/mp4", name, validate=name is None)
             return
         if parsed.path == "/api/footage":
             # the episode's cameras in one video (footage), whole or from t0 to t1 s; prepare=1 makes it and answers
@@ -2264,6 +2297,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 w = int((q.get("w") or ["640"])[0])
             except ValueError:
                 w = 640
+            tag = None
+            try:
+                if _under(MP4_DIR, mp4) and math.isfinite(t):
+                    from board.static import FRAME_TAG
+                    tag = media_tag(mp4, _footage_version(mp4), t, w, FRAME_TAG)
+            except OSError:
+                tag = None
+            if tag and self._not_modified(tag):
+                return
             try:
                 jpg = extract_frame(mp4, t, w) if _under(MP4_DIR, mp4) else None
             except CacheBusy as error:
@@ -2276,7 +2318,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "image/jpeg")
             self.send_header("Content-Length", str(len(jpg)))
-            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+            if tag:
+                self.send_header('ETag', tag)
+            self.send_header("Cache-Control", REVALIDATE if tag else "no-store, no-cache, must-revalidate, max-age=0")
             self.end_headers()
             try:
                 self.wfile.write(jpg)

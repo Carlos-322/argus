@@ -75,7 +75,8 @@ def test_live_video_and_poster_require_browser_revalidation(tmp_path, monkeypatc
     with serving() as base:
         for route in ('api/video?id=episode_x&cam=exo', 'api/frame?id=episode_x&cam=exo&t=0'):
             with urllib.request.urlopen(base + route) as response:
-                assert 'no-store' in response.headers['Cache-Control']
+                # kept but revalidated by entity tag (test_board_serve_access), never reused unchecked
+                assert response.headers['Cache-Control'] == 'no-cache' and response.headers['ETag']
 
 
 @pytest.mark.parametrize('camera_start,camera_duration,t0', [(5,3,6), (0,5,10)])
