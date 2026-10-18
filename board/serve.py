@@ -417,13 +417,8 @@ _FOOTAGE_READY_LOCK = threading.Lock()
 _FOOTAGE_MEMORY_LOCK = threading.Lock()
 _FOOTAGE_RECORDS = OrderedDict()
 _FOOTAGE_ACCESS = OrderedDict()
-_FOOTAGE_HINTS = OrderedDict()
-_PREPARE_WAITERS = threading.BoundedSemaphore(max(4, 2 * int(os.environ.get('BOARD_FOOTAGE_CONCURRENCY', 1))))
-_CONTENT_PROBES = OrderedDict()
-_CONTENT_PROBE_LOCK = threading.Lock()
 _FOOTAGE_TICKET_SECONDS = 3600
 _MEDIA_READERS = threading.local()
-_FOOTAGE_DOWNLOAD_SEM = threading.BoundedSemaphore(4)
 _FOOTAGE_THREADS = int(os.environ.get("BOARD_FOOTAGE_THREADS", 2))
 _FOOTAGE_STALL_TIMEOUT = max(1.0, float(os.environ.get('BOARD_FOOTAGE_STALL_TIMEOUT', 300)))
 _EXPORT_SEM = threading.BoundedSemaphore(2)
@@ -540,17 +535,25 @@ def footage_layout(sizes: list, gap: int = FOOTAGE_GAP) -> tuple:
     return up(x + col_w), up(h0), cells
 
 
+def _trusted_version(path, version) -> tuple:
+    """The part of a file's stat that stands for its content: all of it (device, inode, size, modification and change
+    times) where the filesystem keeps change times (static._durable_metadata), and only size and modification time on
+    exFAT, NFS, SMB and FUSE, whose inodes and change times are not reliable. A receipt records this when the file is
+    made, and requests compare only this against it: content is never hashed on a request, so an edit by hand that
+    keeps a file's size and modification time is not seen, as on most file servers."""
+    from board.static import _durable_metadata
+    version = tuple(version)
+    return version if _durable_metadata(str(path), version) else (version[2], version[3])
+
+
 def _probe(p: Path) -> tuple:
-    version = next((version for reader, version, _ in getattr(_MEDIA_READERS, 'active', [])
+    version = next((version for reader, version in getattr(_MEDIA_READERS, 'active', [])
                     if Path(reader.name) == p), None)
     return _probe_versioned(p, version or _footage_version(p))
 
 
 def _probe_versioned(p: Path, version: tuple) -> tuple:
-    from board.static import _durable_metadata
-    if _durable_metadata(str(p), version):
-        return _cached_probe_versioned(p, version)
-    return _cached_probe_versioned.__wrapped__(p, version)
+    return _cached_probe_versioned(p, _trusted_version(p, version))
 
 
 @contextmanager
@@ -569,7 +572,7 @@ def _probe_admission(key):
 
 @lru_cache(maxsize=2048)
 def _cached_probe_versioned(p: Path, version: tuple) -> tuple:
-    # Trusted cache hits bypass admission; cold probes and hashes share its bound.
+    # Cache hits bypass admission; cold probes share its bound.
     with _probe_admission((p, version)):
         return _probe_uncached(p)
 
@@ -655,31 +658,6 @@ def _footage_version(path: Path) -> tuple:
     return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
 
 
-def _stream_digest(source, size, destination=None):
-    """Hash exactly the admitted byte count, never follow a growing source."""
-    digest = hashlib.sha256()
-    remaining = size
-    while remaining:
-        chunk = source.read(min(1024 * 1024, remaining))
-        if not chunk:
-            raise ValueError('Media changed while its snapshot was being read')
-        digest.update(chunk)
-        if destination is not None:
-            destination.write(chunk)
-        remaining -= len(chunk)
-    if source.read(1):
-        raise ValueError('Media grew while its snapshot was being read')
-    return digest.hexdigest()
-
-
-def _copy_source_snapshot(source: Path, target: Path, version: tuple) -> str:
-    with source.open('rb') as incoming, target.open('xb') as outgoing:
-        digest = _stream_digest(incoming, version[2], outgoing)
-    if _footage_version(source) != version:
-        raise ValueError('Media changed while its snapshot was being read')
-    return digest
-
-
 @contextmanager
 def _file_lock(path, *, blocking=True):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -712,163 +690,54 @@ def _file_lock(path, *, blocking=True):
                 fcntl.flock(lock, fcntl.LOCK_UN)
 
 
-@contextmanager
-def _snapshot_workspace():
-    """Portable fallback uses independent, crash-recoverable copy slots."""
-    from board.build import remove_tree
-    folder = FOOTAGE_DIR / '.sources'
-    folder.mkdir(parents=True, exist_ok=True)
-    with ExitStack() as stack:
-        for slot in range(max(1, int(os.environ.get('BOARD_FOOTAGE_CONCURRENCY', 1)))):
-            try:
-                stack.enter_context(_file_lock(folder / f'.slot-{slot}.lock', blocking=False))
-                break
-            except CacheBusy:
-                continue
-        else:
-            raise CacheBusy('Media snapshot preparation is busy; try again shortly')
-        prefix = f'snapshot-{slot}-'
-        for old in folder.glob(prefix + '*'):
-            if old.is_dir() and not old.is_symlink():
-                remove_tree(old)
-        temporary = Path(tempfile.mkdtemp(prefix=prefix, dir=folder))
-        try:
-            yield temporary
-        finally:
-            remove_tree(temporary)
-
-
 def _source_path(path):
     if os.name == 'posix':
-        for reader, _, _ in getattr(_MEDIA_READERS, 'active', []):
+        for reader, _ in getattr(_MEDIA_READERS, 'active', []):
             if Path(reader.name) == path:
                 return Path('/dev/fd') / str(reader.fileno())
     return path
 
 
-@contextmanager
-def _encode_sources(cams):
-    if os.name == 'posix':
-        yield [(cam, _source_path(path)) for cam, path in cams]
-        return
-    readers = {Path(reader.name): (version, digest) for reader, version, digest
-               in getattr(_MEDIA_READERS, 'active', [])}
-    if not any(digest is not None for _, digest in readers.values()):
-        yield cams
-        return
-    with _snapshot_workspace() as temporary:
-        working = []
-        for index, (cam, path) in enumerate(cams):
-            version, digest = readers[path]
-            if digest is not None:
-                target = temporary / f'{index}.mp4'
-                with _FOOTAGE_PROBE_SEM:
-                    if _copy_source_snapshot(path, target, version) != digest:
-                        raise ValueError('Media changed during footage preparation')
-                path = target
-            working.append((cam, path))
-        yield working
-
-
 def _source_process_options():
     readers = getattr(_MEDIA_READERS, 'active', [])
-    return {'pass_fds': tuple(reader.fileno() for reader, _, _ in readers)} if os.name == 'posix' and readers else {}
+    return {'pass_fds': tuple(reader.fileno() for reader, _ in readers)} if os.name == 'posix' and readers else {}
 
 
 def _validate_active_sources():
-    # An open descriptor binds pathname replacements. Input bytes must remain
-    # stable throughout preparation; before/after hashes detect persistent edits,
-    # not a transient in-place edit restored while an encoder is reading.
-    for reader, version, digest in getattr(_MEDIA_READERS, 'active', []):
+    # An open descriptor binds pathname replacements. A source edited in place while it is encoded changes its trusted
+    # stat (_trusted_version), so the output is not published.
+    for reader, version in getattr(_MEDIA_READERS, 'active', []):
         stat = os.fstat(reader.fileno())
         current = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
-        if digest is not None:
-            with _FOOTAGE_PROBE_SEM:
-                reader.seek(0)
-                if _stream_digest(reader, version[2]) != digest:
-                    raise ValueError('Media changed during footage preparation')
-        elif current != version:
+        if _trusted_version(reader.name, current) != _trusted_version(reader.name, version):
             raise ValueError('Media changed during footage preparation')
 
 
 @contextmanager
-def _prepare_admission():
-    # Waiting requests are bounded independently of encoder slots. One HTTP
-    # request can wait for a progressing long encode without polling source bytes.
-    if not _PREPARE_WAITERS.acquire(blocking=False):
-        raise CacheBusy('Media preparation queue is busy; try again shortly')
-    acquired = False
-    previous = getattr(_MEDIA_READERS, 'prepare_slot', False)
-    try:
-        _FOOTAGE_SEM.acquire()
-        acquired = True
-        _MEDIA_READERS.prepare_slot = True
-        yield
-    finally:
-        _MEDIA_READERS.prepare_slot = previous
-        if acquired:
-            _FOOTAGE_SEM.release()
-        _PREPARE_WAITERS.release()
+def _footage_sources(cams):
+    """Hold each source open for the probe and the encode, and name it by its trusted stat (_trusted_version).
 
-
-def _cached_prepare_hint(key):
-    with _FOOTAGE_MEMORY_LOCK:
-        output = _FOOTAGE_HINTS.get(key)
-    return output is not None and output.is_file()
-
-
-def _remember_prepare_hint(key, output):
-    if key is None:
-        return
-    with _FOOTAGE_MEMORY_LOCK:
-        _FOOTAGE_HINTS[key] = output
-        _FOOTAGE_HINTS.move_to_end(key)
-        while len(_FOOTAGE_HINTS) > max(128, _FOOTAGE_DISK_FILES):
-            _FOOTAGE_HINTS.popitem(last=False)
-
-
-@contextmanager
-def _footage_sources(cams, request_options=None):
-    """Retain source handles; untrusted files are content-validated on every prepare.
-
-    POSIX probe and encode children inherit these same handles. A ready hit reads
-    each untrusted source once, without copying it. Misses verify its content again
-    before publication. Source media must not be edited during preparation.
+    POSIX probe and encode children read these same descriptors, so a path replaced meanwhile cannot switch the bytes.
+    A source is never hashed: its name in the output's key is its stat, so a prepared span is found from stats alone
+    and never waits for an encode of anything else.
     """
-    from board.static import _durable_metadata
     if len(cams) > 64:
         raise ValueError('Too many footage cameras')
     with ExitStack() as stack:
-        previous = (getattr(_MEDIA_READERS, 'active', []), getattr(_MEDIA_READERS, 'untrusted', False),
-                    getattr(_MEDIA_READERS, 'prepare_hint', None))
-        active, working, identities, digests, opened = [], [], [], [], []
-        for cam, path in cams:
+        previous = getattr(_MEDIA_READERS, 'active', [])
+        active, identities = [], []
+        for _, path in cams:
             reader = stack.enter_context(path.open('rb'))
             stat = os.fstat(reader.fileno())
             version = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
-            opened.append((cam, path, reader, version, not _durable_metadata(str(path), version)))
-        untrusted = any(item[4] for item in opened)
-        hint = (hashlib.sha1(json.dumps([request_options, [(str(path), version)
-                for _, path, _, version, _ in opened]]).encode()).hexdigest() if request_options is not None else None)
-        _MEDIA_READERS.active, _MEDIA_READERS.untrusted, _MEDIA_READERS.prepare_hint = active, untrusted, hint
+            active.append((reader, version))
+            trusted = _trusted_version(path, version)
+            identities.append([str(path), *trusted] if len(trusted) > 2 else [str(path), 'size-mtime', *trusted])
+        _MEDIA_READERS.active = active
         try:
-            # Hints permit only a potential ready hit to perform its mandatory
-            # content check under contention. They never authorize source bytes.
-            if untrusted and not _cached_prepare_hint(hint):
-                stack.enter_context(_prepare_admission())
-            for cam, path, reader, version, weak in opened:
-                digest = None
-                if weak:
-                    with _probe_admission(('source', str(path), version)):
-                        digest = _stream_digest(reader, version[2])
-                    reader.seek(0)
-                active.append((reader, version, digest))
-                working.append((cam, path))
-                identities.append([str(path), 'sha256', digest] if digest else [str(path), *version])
-                digests.append(digest)
-            yield working, identities, digests
+            yield list(cams), identities
         finally:
-            _MEDIA_READERS.active, _MEDIA_READERS.untrusted, _MEDIA_READERS.prepare_hint = previous
+            _MEDIA_READERS.active = previous
 
 
 @contextmanager
@@ -950,37 +819,14 @@ def _temporary_guard(path):
     return path.with_name(path.name.replace('.part.len.mp4', '.part.mp4') + '.lock')
 
 
-def _content_probe(path: Path, digest: str) -> tuple:
-    # The digest identifies validated source content, independent of its FD pathname.
-    with _CONTENT_PROBE_LOCK:
-        hit = _CONTENT_PROBES.get(digest)
-        if hit is not None:
-            _CONTENT_PROBES.move_to_end(digest)
-            return hit
-    with _probe_admission(('content', digest)):
-        result = _probe_uncached(path)
-    with _CONTENT_PROBE_LOCK:
-        _CONTENT_PROBES[digest] = result
-        _CONTENT_PROBES.move_to_end(digest)
-        while len(_CONTENT_PROBES) > 2048:
-            _CONTENT_PROBES.popitem(last=False)
-    return result
-
-
 def _footage_receipt(result: tuple) -> dict:
-    from board.static import _durable_metadata
+    """The receipt of a prepared video, written when it is made: its stat, which every later request compares
+    (_receipt_footage)."""
     out, name = result
     version = _footage_version(out)
     if out.is_symlink() or not 0 < version[2] <= _FOOTAGE_DISK_BYTES:
         raise FootageCapacityError('Prepared footage exceeds the disk cache budget')
-    record = {'format': 'argus-footage-ready/2', 'file': out.name, 'name': name, 'version': version}
-    if not _durable_metadata(str(out), version):
-        with _FOOTAGE_DOWNLOAD_SEM:
-            with out.open('rb') as source:
-                record['sha256'] = _stream_digest(source, version[2])
-        if _footage_version(out) != version:
-            raise ValueError('Prepared footage changed while its identity was being read')
-    return record
+    return {'format': 'argus-footage-ready/2', 'file': out.name, 'name': name, 'version': version}
 
 
 def _discard_changed_footage(out: Path) -> None:
@@ -991,32 +837,21 @@ def _discard_changed_footage(out: Path) -> None:
 
 
 def _receipt_footage(record: dict, *, reader=None) -> tuple | None:
-    from board.static import _durable_metadata
     if (record.get('format') != 'argus-footage-ready/2' or
             not re.fullmatch(r'[a-f0-9]{20}\.mp4', record['file']) or
             not isinstance(record['name'], str) or Path(record['name']).name != record['name']):
         return None
     out = FOOTAGE_DIR / record['file']
     version = _footage_version(out)
-    if out.is_symlink() or list(version) != list(record['version']) or not 0 < version[2] <= _FOOTAGE_DISK_BYTES:
+    trusted = _trusted_version(out, version)
+    if (out.is_symlink() or not isinstance(record['version'], list) or len(record['version']) != 5
+            or trusted != _trusted_version(out, record['version']) or not 0 < version[2] <= _FOOTAGE_DISK_BYTES):
         return None
     if reader is not None:
         stat = os.fstat(reader.fileno())
         opened_version = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
-        if opened_version != version:
+        if _trusted_version(out, opened_version) != trusted:
             return None
-    if 'sha256' in record:
-        with _FOOTAGE_DOWNLOAD_SEM:
-            if reader is None:
-                with out.open('rb') as source:
-                    digest = _stream_digest(source, version[2])
-            else:
-                digest = _stream_digest(reader, version[2])
-                reader.seek(0)
-        if digest != record['sha256'] or _footage_version(out) != version:
-            return None
-    elif not _durable_metadata(str(out), version):
-        return None
     _touch_footage(out)
     return _VerifiedFootage(out, record['name'], record)
 
@@ -1219,16 +1054,11 @@ def footage(eid: str, t0: float = 0.0, t1: float | None = None) -> tuple | None:
         return None
     if _FOOTAGE_DISK_BYTES <= 0:
         raise FootageCapacityError('Prepared footage disk cache has no capacity')
-    options = [eid, float(t0), None if t1 is None else float(t1), FOOTAGE_TAG,
-               label.get('duration_s'), label.get('camera_views')]
-    with _footage_sources(cams, options) as (working, identities, digests):
-        result = _footage_from_sources(eid, t0, t1, label, working, identities, digests)
-        if result is not None:
-            _remember_prepare_hint(_MEDIA_READERS.prepare_hint, result[0])
-        return result
+    with _footage_sources(cams) as (working, identities):
+        return _footage_from_sources(eid, t0, t1, label, working, identities)
 
 
-def _footage_from_sources(eid, t0, t1, label, cams, identities, digests):
+def _footage_from_sources(eid, t0, t1, label, cams, identities):
     request_parts = [eid, float(t0), None if t1 is None else float(t1), FOOTAGE_TAG,
                      label.get('duration_s'), label.get('camera_views'), identities]
     request = hashlib.sha1(json.dumps(request_parts).encode()).hexdigest()
@@ -1236,11 +1066,7 @@ def _footage_from_sources(eid, t0, t1, label, cams, identities, digests):
     if ready is not None:
         _trim_footage_cache(ready[0])
         return ready
-    if getattr(_MEDIA_READERS, 'untrusted', False) and not getattr(_MEDIA_READERS, 'prepare_slot', False):
-        with _FOOTAGE_MEMORY_LOCK:
-            _FOOTAGE_HINTS.pop(_MEDIA_READERS.prepare_hint, None)
-    probes = [_content_probe(path, digest) if digest else _probe(path)
-              for (_, path), digest in zip(cams, digests)]
+    probes = [_probe(path) for _, path in cams]
     clocks = label.get('camera_views') or ['exo', 'left', 'right']
     anchor = next((cam for cam in clocks if any(c == cam for c, _ in cams)), cams[0][0])
     dur = label.get('duration_s')
@@ -1256,22 +1082,14 @@ def _footage_from_sources(eid, t0, t1, label, cams, identities, digests):
     name = f'{eid}.mp4' if whole else f'{eid}_{t0:.1f}-{t1:.1f}s.mp4'
     key = hashlib.sha1(json.dumps([eid, t0, t1, FOOTAGE_TAG, identities]).encode()).hexdigest()[:20]
     out = FOOTAGE_DIR / f'{key}.mp4'
-    with ExitStack() as stack:
-        if getattr(_MEDIA_READERS, 'untrusted', False) and not getattr(_MEDIA_READERS, 'prepare_slot', False):
-            ready = _ready_footage(key)
-            if ready is not None:
-                _remember_ready_footage(request, ready)
-                return ready
-            # Admission always precedes the output lock, including stale hints.
-            stack.enter_context(_prepare_admission())
-        with _footage_lock(key):
-            ready = _ready_footage(key)
-            if ready is not None:
-                _remember_ready_footage(request, ready)
-                return ready
-            result = _uncached_footage(key, out, name, cams, probes, t0, t1)
-            _remember_ready_footage(request, result)
-            return result
+    with _footage_lock(key):
+        ready = _ready_footage(key)
+        if ready is not None:
+            _remember_ready_footage(request, ready)
+            return ready
+        result = _uncached_footage(key, out, name, cams, probes, t0, t1)
+        _remember_ready_footage(request, result)
+        return result
 
 
 def _run_footage(cmd: list) -> subprocess.CompletedProcess:
@@ -1306,19 +1124,14 @@ def _run_footage(cmd: list) -> subprocess.CompletedProcess:
 
 
 def _uncached_footage(key, out, name, cams, probes, t0, t1):
-    if getattr(_MEDIA_READERS, 'prepare_slot', False):
-        return _encode_reserved_footage(key, out, name, cams, probes, t0, t1)
-    return _admitted_uncached_footage(key, out, name, cams, probes, t0, t1)
-
-
-@_bounded_work(_FOOTAGE_SEM)
-def _admitted_uncached_footage(*args):
-    return _encode_reserved_footage(*args)
-
-
-def _encode_reserved_footage(key, out, name, cams, probes, t0, t1):
-    with _encode_sources(cams) as working:
+    # An encode never waits for another: a request that finds every encoder busy is answered 503 and retries.
+    if not _FOOTAGE_SEM.acquire(blocking=False):
+        raise CacheBusy('Media preparation is busy; try again shortly')
+    try:
+        working = [(cam, _source_path(path)) for cam, path in cams]
         return _encode_and_publish(key, out, name, working, probes, t0, t1)
+    finally:
+        _FOOTAGE_SEM.release()
 
 
 def _encode_and_publish(key, out, name, cams, probes, t0, t1):
@@ -1420,21 +1233,31 @@ def labels_license(board: Path) -> dict | None:
 
 
 def _label_identity(path):
-    from board.static import _durable_metadata, src_sig
-    version = _footage_version(path)
-    return version if _durable_metadata(str(path), version) else (*version, src_sig(path))
+    return _trusted_version(path, _footage_version(path))
+
+
+def _opened_version(source) -> tuple:
+    stat = os.fstat(source.fileno())
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
 
 def _read_label(path):
     """Reuse bytes already read by an episode request to refresh its rail row."""
-    raw = path.read_bytes()
+    with path.open('rb') as source:
+        opened = _trusted_version(path, _opened_version(source))
+        raw = source.read()
     label = json.loads(raw)
     key = str(path.parent)
     if isinstance(label, dict) and 'episode_prompt' in label:
         with _LIST_LOCK:
             known = key in _LIST_ROWS
+        try:
+            # the row stands for the file only while nothing replaced the bytes this request read
+            known = known and _label_identity(path) == opened
+        except OSError:
+            known = False
         if known:
-            row = (hashlib.sha256(raw).hexdigest(), _rail_record(path, label))
+            row = (opened, _rail_record(path, label))
             with _LIST_LOCK:
                 rows = _LIST_ROWS[key]
                 rows[path.name] = row
@@ -1444,7 +1267,7 @@ def _read_label(path):
 
 
 def _refresh_weak_list(here: Path):
-    """Hash and parse the same stable bytes, preserving last complete writer output."""
+    """Read only the labels whose size or modification time changed, preserving last complete writer output."""
     key = str(here)
     with _LIST_LOCK:
         previous = dict(_LIST_ROWS.get(key, {}))
@@ -1453,22 +1276,19 @@ def _refresh_weak_list(here: Path):
         try:
             if not _under(here, path):
                 continue
-            before = _footage_version(path)
-            with path.open('rb') as source:
-                raw = source.read(_EXPORT_LABEL_BYTES + 1)
-                source.seek(0)
-                repeated = source.read(_EXPORT_LABEL_BYTES + 1)
-            if (len(raw) > _EXPORT_LABEL_BYTES or raw != repeated
-                    or _footage_version(path) != before):
-                raise ValueError('Label changed during snapshot')
-            digest = hashlib.sha256(raw).hexdigest()
+            version = _label_identity(path)
             old = previous.get(path.name)
-            if old and old[0] == digest:
+            if old and old[0] == version:
                 rows[path.name] = old
                 continue
+            with path.open('rb') as source:
+                opened = _trusted_version(path, _opened_version(source))
+                raw = source.read()
+            if opened != version or _label_identity(path) != version:
+                raise ValueError('Label changed during snapshot')
             label = json.loads(raw)
             if isinstance(label, dict) and 'episode_prompt' in label:
-                rows[path.name] = (digest, _rail_record(path, label))
+                rows[path.name] = (version, _rail_record(path, label))
         except (OSError, ValueError, TypeError, AttributeError, RecursionError):
             if path.name in previous:
                 rows[path.name] = previous[path.name]
@@ -1493,11 +1313,13 @@ def _refresh_weak_list_worker(here):
 
 
 def list_episodes(here: Path | None = None) -> list:
-    """Serve complete rail snapshots; weak filesystem byte checks run off requests.
+    """Serve complete rail snapshots; on a weak filesystem the scan runs off requests.
 
     Live weak-filesystem lists can lag writes by one refresh interval plus scan
-    time. A malformed in-progress write retains its last complete row; a removed
-    file disappears on the next complete scan. Episode exports read current files.
+    time, and see a label as changed when its size or modification time changes
+    (_trusted_version). A malformed in-progress write retains its last complete row;
+    a removed file disappears on the next complete scan. Episode exports read
+    current files.
     """
     from board.static import _durable_metadata
     here = here or HERE

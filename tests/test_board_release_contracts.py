@@ -148,7 +148,7 @@ def test_weak_list_serves_last_complete_snapshot_while_background_refresh_blocks
         release.set()
 
 
-def test_weak_list_keeps_complete_row_during_partial_write_and_refreshes_same_stat(tmp_path, monkeypatch):
+def test_weak_list_keeps_complete_row_during_partial_write_and_refreshes_a_rewrite(tmp_path, monkeypatch):
     import os
     import time
     monkeypatch.setattr(static, '_durable_metadata', lambda *args: False)
@@ -160,7 +160,7 @@ def test_weak_list_keeps_complete_row_during_partial_write_and_refreshes_same_st
     path.write_text('{')
     assert serve.list_episodes(tmp_path)[0]['episode_prompt'] == 'original'
     path.write_text(json.dumps({'episode_prompt':'replaced'}))
-    os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns))
+    os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns + 1_000_000))
     deadline = time.monotonic()+3
     while time.monotonic() < deadline:
         rows = serve.list_episodes(tmp_path)
