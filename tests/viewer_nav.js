@@ -1,5 +1,6 @@
 // The board page under navigation that outruns its requests, against a live board: a read that fails once must not
-// stay failed for the rest of the visit, and a response that arrives after the reader moved on must not undo the move.
+// stay failed for the rest of the visit, a response that arrives after the reader moved on must not undo the move, and
+// what fills in a drawn episode afterwards must land while that episode stays drawn, whatever navigation kept it.
 //
 //   node tests/viewer_nav.js PAGE.html BASE_URL
 //
@@ -13,17 +14,44 @@ const expose = `
 globalThis.__nav = {eps: () => ALL_EPS, cmp: () => CMP, active: () => _activeFile, by: () => BY, cmpHas,
                     dataset: () => currentDataset, rail: () => railEps().filter(e => datasetOf(e) === currentDataset),
                     drawn: () => { try { return _drawnFile; } catch (_) { return 'unknown'; } },
-                    cached: f => _epCache.has(f)};
+                    cached: f => _epCache.has(f), grids: () => _msView, shown: () => SHOWN};
 `;
 
-// a page whose requests matching a rule can fail once or be held until released
-function page(rules) {
-  const P = sandbox(pagePath, base, {expose, fetch: async (url, real) => {
-    for (const rule of rules) if (rule.match(String(url))) return rule.answer(real);
+// a page whose requests matching a rule can fail once or be held until released, with setup code run before it starts
+function page(rules, setup) {
+  const P = sandbox(pagePath, base, {expose: expose + (setup || ''), fetch: async (url, real) => {
+    for (const rule of rules) if (rule.match(String(url))) return rule.answer(real, String(url));
     return real();
   }});
   P.run();
   return P;
+}
+// every episode's frame grids and dictionary rows, each marked with the episode's file so what is shown says whose it
+// is (every episode asks for grids under a fingerprint of its own); late(kind, file) delays each response
+const fileOf = u => decodeURIComponent((String(u).match(/[?&]file=([^&]*)/) || [])[1] || '');
+const FILLED_IN = 'BOARD.grids = true; window.__DICTIONARY_URL = "api/probe-dictionary";';
+const filledIn = late => [
+  {match: u => /api\/episode\?file=/.test(u), answer: async (real, u) => {
+    await late('episode', fileOf(u));
+    const d = await (await real()).json();
+    d.request_images = {fingerprint: 'fp:' + fileOf(u), grid_images: [{}]};
+    return Response.json(d); }},
+  {match: u => /api\/grids\?|probe-dictionary/.test(u), answer: async (real, u) => {
+    const dictionary = /probe-dictionary/.test(u), f = fileOf(u);
+    await late(dictionary ? 'dictionary' : 'grids', f);
+    return Response.json(dictionary ? {fields: [{id: 'probe', name: f, kind: 'text'}]}
+      : {fingerprint: 'fp:' + f, grids: [{dispatch_status: 'response_received', src: 'grid.jpg'}]}); }},
+];
+// whose fetched dictionary rows are on the pane: each draw first shows the episode's own rows (no endpoint), which
+// have none
+function dictionaryShown(P) {
+  let of = null;
+  const rows = P.ctx.dictionaryRows;
+  P.ctx.dictionaryRows = (data, endpoint) => {
+    of = endpoint ? ((data && data.fields) || [{}])[0].name : null;
+    return rows(data, endpoint);
+  };
+  return () => of;
 }
 const shown = P => ({active: P.ctx.__nav.active(), drawn: P.ctx.__nav.drawn(), search: P.ctx.location.search,
   compare_view: P.doc.body.classList.contains('view-cmp'), fading: P.doc.body.classList.contains('view-fade'),
@@ -75,9 +103,47 @@ const shown = P => ({active: P.ctx.__nav.active(), drawn: P.ctx.__nav.drawn(), s
     done(P);
   }
 
-  // 3. Random clicks, tabs, labellers, the comparison and Back, each made before the last one's responses arrive, and
+  // 3. What fills in a drawn episode after it is drawn (its frame grids, its data dictionary), held until released:
+  // it lands while that draw is on the pane, whatever navigations kept it there (the comparison opened, then Back
+  // before it appeared), and is dropped once another episode is drawn in its place. Each episode's grids carry its own
+  // fingerprint and its dictionary its own name, so what is shown says whose it is.
+  for (const kind of ['grids', 'dictionary']) {
+    for (const how of ['back', 'no_back', 'replaced']) {
+      let releaseAux, releaseMetrics, holdFile = null;
+      const auxHeld = new Promise(r => { releaseAux = r; }), metricsHeld = new Promise(r => { releaseMetrics = r; });
+      const P = page([
+        {match: u => /compare\/metrics/.test(u), answer: async real => { await metricsHeld; return real(); }},
+        ...filledIn(async (k, f) => { if (k === kind && f === holdFile) await auxHeld; }),
+      ], FILLED_IN);
+      const dictionaryOf = dictionaryShown(P);
+      await P.ctx.loadEpisodes(); await P.settle();
+      const [a, b] = P.ctx.__nav.eps();
+      holdFile = a.file;
+      P.ctx.setDataset(a.dataset, a.file); await wait(150);
+      if (how === 'back') {
+        const before = P.ctx.location.search;
+        const opening = P.ctx.showCompare();
+        await wait(20); await P.popstate(before);
+        releaseMetrics(); await opening;
+      } else if (how === 'replaced') {
+        // the other episode drawn, and its own grids and dictionary landed, while the first one's are still held
+        await P.ctx.setDataset(b.dataset, b.file);
+        for (let i = 0; i < 100 && P.ctx.__nav.drawn() !== b.file; i++) await wait(20);
+        await wait(150);
+      }
+      releaseAux(); releaseMetrics(); await wait(50); await P.settle();
+      const grids = P.ctx.__nav.grids();
+      out[kind + '_' + how] = {active: P.ctx.__nav.active(), drawn: P.ctx.__nav.drawn(),
+        compare_view: P.doc.body.classList.contains('view-cmp'), a: a.file, b: b.file,
+        grids: grids && grids.fingerprint, grids_hidden: P.doc.getElementById('ms-btn').hidden, dictionary: dictionaryOf()};
+      done(P);
+    }
+  }
+
+  // 4. Random clicks, tabs, labellers, the comparison and Back, each made before the last one's responses arrive, and
   // every response late by a random time: once all have arrived, the page shows what its URL says (the comparison
-  // exactly when the URL asks for it, otherwise the URL's episode drawn under the URL's labeller, and no fade left on).
+  // exactly when the URL asks for it, otherwise the URL's episode drawn under the URL's labeller, and no fade left on),
+  // and the frame grids and dictionary rows on the pane are the drawn episode's (no grids under another labeller's).
   const rng = seed => () => {
     seed = seed + 0x6D2B79F5 | 0;
     let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
@@ -87,7 +153,11 @@ const shown = P => ({active: P.ctx.__nav.active(), drawn: P.ctx.__nav.drawn(), s
   out.random = {runs: 0, wrong: []};
   for (let seed = 1; seed <= Number(process.env.VIEWER_NAV_RUNS || 25); seed++) {
     const rand = rng(seed), pick = xs => xs[Math.floor(rand() * xs.length)];
-    const P = page([{match: () => true, answer: async real => { await wait(rand() * 120); return real(); }}]);
+    // the grids' delays come from a stream of their own, so the actions and other delays of a seed stay as they were
+    const randGrids = rng(seed + 1000);
+    const P = page([...filledIn(async k => { await wait((k === 'grids' ? randGrids : rand)() * 120); }),
+                    {match: () => true, answer: async real => { await wait(rand() * 120); return real(); }}], FILLED_IN);
+    const dictionaryOf = dictionaryShown(P);
     const N = () => P.ctx.__nav, inCompare = () => P.doc.body.classList.contains('view-cmp');
     let last = null;
     const renderEp = P.ctx.renderEp;
@@ -128,11 +198,15 @@ const shown = P => ({active: P.ctx.__nav.active(), drawn: P.ctx.__nav.drawn(), s
     const rec = eps.find(e => e.file === active) || {};
     const shows = {compare: inCompare(), fading: P.doc.body.classList.contains('view-fade')
       || P.doc.body.classList.contains('lb-swap'), active, by: N().by(), drawn: last};
+    const drawn = N().drawn(), grids = N().grids();
+    const filled = {grids: grids && grids.fingerprint, dictionary: dictionaryOf()};
+    const filledRight = !drawn || (filled.dictionary === drawn
+      && filled.grids === (N().shown() ? null : 'fp:' + drawn));
     const right = shows.compare === want.compare && !shows.fading && (want.compare || (
       (!want.ep || want.ep === active) && shows.by === want.by && last && last.id === rec.episode_id
       && last.by === (shows.by && N().cmpHas(shows.by, active) ? shows.by : null)));
     out.random.runs++;
-    if (!right) out.random.wrong.push({seed, steps, url: P.ctx.location.search, shows});
+    if (!right || !filledRight) out.random.wrong.push({seed, steps, url: P.ctx.location.search, shows, drawn, filled});
     done(P);
   }
 

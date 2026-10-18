@@ -1,7 +1,7 @@
 """The board page under navigation that outruns its requests (tests/viewer_nav.js), against a live board.
 
-A read that fails is never remembered as the episode, and a response that arrives after the reader moved on never
-takes the view back."""
+A read that fails is never remembered as the episode, a response that arrives after the reader moved on never takes
+the view back, and what fills in a drawn episode (its frame grids, its dictionary) lands while that draw is on screen."""
 import json
 import shutil
 import subprocess
@@ -39,6 +39,21 @@ def test_navigation_outrunning_requests(tmp_path, monkeypatch):
         assert back["drawn"] == back["active"], case
     # the same steps without Back do open the comparison, so the cases above are not passing by doing nothing
     assert res["no_back"]["compare_view"] and res["no_back"]["search"].startswith("?view=compare")
+    # what fills in a drawn episode (its frame grids, its dictionary rows) belongs to that draw: held while the
+    # comparison opened and Back came before it appeared, it still lands on the episode Back kept (the page before
+    # this fix dropped the grids and left their button hidden), as it does with no Back at all
+    for kind in ("grids", "dictionary"):
+        for how in ("back", "no_back"):
+            case = res[kind + "_" + how]
+            assert case["drawn"] == case["active"] == case["a"] and not case["compare_view"], (kind, how)
+            assert case["grids"] == "fp:" + case["a"] and not case["grids_hidden"], (kind, how)
+            assert case["dictionary"] == case["a"], (kind, how)
+        # and once another episode is drawn in its place, the first one's late response is dropped
+        case = res[kind + "_replaced"]
+        assert case["drawn"] == case["active"] == case["b"], kind
+        assert case["grids"] == "fp:" + case["b"] and case["dictionary"] == case["b"], kind
     # random clicks, tabs, labellers, comparisons and Backs, each outrunning randomly late responses: the page always
-    # ends showing what its URL says (the page before this fix ended wrong in 8 of these 25)
+    # ends showing what its URL says (the page before this fix ended wrong in 8 of these 25), with the drawn episode's
+    # own frame grids and dictionary rows (the page that tied them to the navigation lost them in 4 of these 25, and in
+    # 9 of 100 seeds)
     assert res["random"]["runs"] == 25 and res["random"]["wrong"] == []
