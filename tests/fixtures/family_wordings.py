@@ -451,7 +451,7 @@ THIRD = [
     ('corrected-withdrawn', 'At first glance anonymized, but no; the faces are fully visible.', '', 'D'),
     ('corrected-withdrawn', 'I almost called this a freeze, but the clock in the corner keeps moving. The real problem is that the camera is turned toward the ceiling.', '', 'F'),
     ('corrected-withdrawn', 'My earlier glare flag stands, and I am withdrawing only the clipping flag.', '', 'L'),
-    ('corrected-withdrawn', 'Ignore the previous note about a black screen. There was none.', '', 'D'),
+    ('corrected-withdrawn', 'Ignore the previous note about a black screen. There was none.', '', 'I'),
     ('corrected-withdrawn', 'Revised: no occlusion.', 'Earlier pass said a palm covered the lens; on review the palm is beside the lens, not over it.', 'F'),
     ('corrected-withdrawn', 'Previous flag withdrawn.', 'I first reported glare, but the real issue is that the camera is upside down for the whole clip.', 'L'),
     ('corrected-withdrawn', 'Correction to the first pass: the camera is not removed.', 'The stream lost its feed at 1:15 and stays empty.', 'I'),

@@ -363,7 +363,7 @@ def test_withdrawing_and_searching_verbs_read_in_every_inflection():
         assert family(f'Suspected glare, {participle}.') == BROAD, participle
         assert family(f'The glare flag was {participle}.') == BROAD, participle
     for form in ('retract', 'retracts', 'retracting', 'withdraw', 'withdraws', 'withdrawing', 'withdrew',
-                 'dismisses', 'disregarding', 'discards'):
+                 'dismisses', 'cancelling', 'discards'):
         assert form in polarity.WITHDRAW and family(f'{form.capitalize()} the glare flag.') == BROAD, form
     for form in sorted(polarity.SEARCH):
         assert family(f'The operator {form} for glare.') == BROAD, form

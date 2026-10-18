@@ -157,12 +157,13 @@ def _verbs(*entries) -> tuple[set, set]:
     return set().union(*(f for f, _ in forms)), set().union(*(p for _, p in forms))
 
 
-# verbs that withdraw what their object names ("retracting the occlusion flag", "ignore the note about a black
+# verbs that withdraw the claim their object names ("retracting the occlusion flag", "discard the note about a black
 # screen"); they deny their object as a negative determiner does, and their past forms withdraw an impression
 # outright ("suspected obstruction, retracted", "the overexposure I flagged is withdrawn"). "scratch" withdraws only
-# as the bare imperative ("scratch that"); its other forms name damage to a lens.
-WITHDRAW, _WITHDRAWN = _verbs('retract', 'withdraw/withdrew/withdrawn', 'ignore', 'disregard', 'cancel', 'discard',
-                              'dismiss', 'disprove/disproven')
+# as the bare imperative ("scratch that"); its other forms name damage to a lens. Verbs whose object is the
+# phenomenon itself ("the operator ignores the glare", which says the glare is there) are not among them.
+WITHDRAW, _WITHDRAWN = _verbs('retract', 'withdraw/withdrew/withdrawn', 'cancel', 'discard', 'dismiss',
+                              'disprove/disproven')
 WITHDRAW |= {'scratch'}
 VERDICTS = _WITHDRAWN | {'unfounded'}
 # verbs of looking for something: what is looked for is named, not found ("checked for occlusion and rotation")
