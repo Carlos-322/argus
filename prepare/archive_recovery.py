@@ -1,5 +1,6 @@
 """Bounded recovery of ZIP member bytes, with checksum damage kept explicit."""
 from contextlib import contextmanager
+import os
 import struct
 import zlib
 
@@ -191,6 +192,34 @@ def _next_header(source, start: int, length: int):
         position += CHUNK
 
 
+SIGNATURES = (LOCAL, b'PK\x01\x02', DESCRIPTOR, b'PK\x05\x06', b'PK\x06\x06')
+HEADER_FIELDS = 1 << 17     # a local header's name and extra field together hold at most this many bytes
+
+
+def _ending_starts(source, base: int, compressed: int, length: int) -> list[int]:
+    """Where a member's data can start, after a header at base whose name or extra-field length is damaged: every
+    offset within the longest name and extra field whose data, compressed bytes long, ends where the archive ends or
+    where another ZIP record begins. A few candidates, each then checked against the member's checksum."""
+    source.seek(base + compressed)
+    block = source.read(HEADER_FIELDS + 4)
+    starts = [base + i for i in range(len(block)) if block[i:i + 4] in SIGNATURES]
+    if base <= length - compressed <= base + HEADER_FIELDS:
+        starts.append(length - compressed)
+    return starts
+
+
+def _verified(source, start: int, compressed: int, method: int, size: int, crc: int, length: int) -> bool:
+    """Whether the data at start, compressed bytes long, inflates to size bytes with checksum crc. A wrong claim, even
+    one that would inflate past any limit, is only a candidate that does not match."""
+    if start < 0 or start + compressed > length or method not in (0, 8):
+        return False
+    try:
+        got = _content(source, start, compressed, method, size + 1)
+    except ValueError:
+        return False
+    return got is not None and got[2] and got[0] == size and got[1] == crc
+
+
 def _measure(source, entry: dict, length: int, budget: int):
     """(compressed, size, crc) of the member's data as its bytes are, or None. The header's sizes are used only when
     the data they bound inflates to the header's checksum; otherwise the data is measured from itself: a deflate
@@ -201,6 +230,14 @@ def _measure(source, entry: dict, length: int, budget: int):
         got = _content(source, start, entry['compressed'], method, budget)
         if got is not None and got[2] and got[0] == entry['size'] and got[1] == entry['crc']:
             return entry['compressed'], entry['size'], entry['crc']
+    if entry['compressed'] and entry['crc'] is not None:
+        # the header's name or extra-field length may be what is damaged: its data starts where, at its own
+        # length, it ends at the next record and inflates to its checksum
+        for candidate in _ending_starts(source, entry['offset'] + 30, entry['compressed'], length):
+            if candidate != start and _verified(source, candidate, entry['compressed'], method, entry['size'],
+                                                entry['crc'], length):
+                entry['start'] = candidate
+                return entry['compressed'], entry['size'], entry['crc']
     if method == 8:
         return _deflate_end(source, start, budget)
     if method == 0:
@@ -351,6 +388,18 @@ def checked_directory(path, infos, max_files, max_bytes):
                     info.CRC, info.compress_size & 0xFFFFFFFF, info.file_size & 0xFFFFFFFF)) or (
                 len(fields) >= 20 and struct.unpack('<IQQ', fields[:20]) == (info.CRC, info.compress_size, info.file_size))
 
+    def bounded(source, entry, info):
+        # the data the header locates ends where the next ZIP record begins (after its descriptor, when it has one):
+        # a header whose name or extra-field length is damaged locates the data at the wrong offset, which no other
+        # field of either index shows
+        end = entry['start'] + info.compress_size
+        source.seek(end)
+        tail = source.read(28)
+        if end == length or tail[:4] in SIGNATURES:
+            return True
+        return bool(info.flag_bits & 8) and (tail[12:16] in SIGNATURES or tail[20:24] in SIGNATURES
+                                              or end + 12 == length or end + 20 == length)
+
     agree, disagree = [], []
     with path.open('rb') as source:
         for info in infos:
@@ -359,7 +408,8 @@ def checked_directory(path, infos, max_files, max_bytes):
             if (entry is not None and entry['raw_name'] == name and entry['method'] == info.compress_type
                     and entry['start'] + info.compress_size <= length
                     and (entry['compressed'] == info.compress_size if entry['compressed'] is not None
-                         else described(source, entry, info))):
+                         else described(source, entry, info))
+                    and bounded(source, entry, info)):
                 agree.append(info)
             else:
                 disagree.append(info)
@@ -372,8 +422,12 @@ def checked_directory(path, infos, max_files, max_bytes):
             if entry is not None:
                 replaced[info] = entry
                 disagree.remove(info)
-    if not disagree:
-        return agree, replaced, [], []
+    others = [info.filename for info in agree] + [entry['name'] for entry in replaced.values()]
+    for entry in replaced.values():
+        local = entry.pop('local', None)
+        if local is not None and _likelier_name(local['name'], entry['name'], others) == local['name']:
+            entry.update(local)
+    # a directory with one damaged entry may have lost others too: its members' own headers say which are missing
     entries, _ = scan_local(path, max_files, max_bytes)
     by_offset = {entry['offset']: entry for entry in entries}
     by_name = {}
@@ -409,18 +463,31 @@ def _directory_entry(source, info, length):
         starts.append(info.header_offset + 30 + sum(struct.unpack('<HH', lengths)))
     starts.append(info.header_offset + 30 + len(info.orig_filename.encode('utf-8' if info.flag_bits & 0x800 else 'cp437',
                                                                            'replace')) + len(info.extra))
+    if 0 < info.compress_size < length:
+        starts += _ending_starts(source, info.header_offset + 30, info.compress_size, length)
     for start in dict.fromkeys(starts):
-        if start + info.compress_size > length or info.compress_type not in (0, 8):
-            continue
-        got = _content(source, start, info.compress_size, info.compress_type, info.file_size + 1)
-        if got is not None and got[2] and got[0] == info.file_size and got[1] == info.CRC:
+        if _verified(source, start, info.compress_size, info.compress_type, info.file_size, info.CRC, length):
             entry = {'offset': info.header_offset, 'flags': info.flag_bits, 'method': info.compress_type,
                      'raw_name': info.orig_filename.encode('utf-8' if info.flag_bits & 0x800 else 'cp437', 'replace'),
                      'name': info.filename, 'start': start, 'crc': info.CRC, 'compressed': info.compress_size,
                      'size': info.file_size}
-            if header is not None and start == header['start']:
-                # the member's own header located its data, so its name is the one written with that data; the
-                # directory's copy is what disagreed
-                entry.update(flags=header['flags'], raw_name=header['raw_name'], name=header['name'])
+            if header is not None and start == header['start'] and header['raw_name'] != entry['raw_name']:
+                # the two indexes name the member differently and no checksum covers a name (checked_directory)
+                entry['local'] = {'flags': header['flags'], 'raw_name': header['raw_name'], 'name': header['name']}
             return entry
     return None
+
+
+def _likelier_name(first: str, second: str, others: list) -> str:
+    """Of two names the two indexes give one member, the one the archive's other members bear out: a flipped byte
+    breaks a name's agreement with its siblings' folders, stems and extensions. With nothing to compare, second."""
+    def agreement(name):
+        best = 0
+        for other in others:
+            if other == name:
+                continue
+            prefix = len(os.path.commonprefix([name, other]))
+            suffix = len(os.path.commonprefix([name[::-1], other[::-1]]))
+            best = max(best, min(prefix + suffix, len(name)))
+        return best
+    return first if agreement(first) > agreement(second) else second
