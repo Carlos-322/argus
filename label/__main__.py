@@ -1,3 +1,3 @@
 from label.run import main
 
-main()
+raise SystemExit(main())

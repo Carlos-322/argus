@@ -216,7 +216,7 @@ def score(runs: list[Path]) -> dict:
             if r.startswith("cost:"):
                 c = p["cost"].setdefault(r[5:], {'billed_usd': 0.0, 'reserved_usd': 0.0,
                     'cost_complete': True, 'seconds': 0.0, 'episodes': 0, 'measured_usd': 0.0})
-                billing = billing_summary(d)
+                billing = billing_summary(d, f)
                 c['billed_usd'] += billing['billed_usd']
                 c['reserved_usd'] += billing['reserved_usd']
                 c['cost_complete'] &= billing['cost_complete']

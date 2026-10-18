@@ -38,6 +38,7 @@ import argparse
 import base64
 import copy
 import hashlib
+import http.client
 import json
 import math
 import os
@@ -57,7 +58,7 @@ from pathlib import Path
 
 from label import episode as me, policy
 from label.atomic import write_atomic
-from label.errors import KeyExhausted, SpendCap, Truncated
+from label.errors import DispatchError, KeyExhausted, SpendCap, Truncated
 from label.route import route_width
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -196,20 +197,47 @@ def _call_openai(content: list, model: str, reasoning: str, api_key: str, max_to
     return resp
 
 
+# What an HTTP failure says about billing. An error status is the provider declining to produce a completion, so
+# nothing was billed, except a gateway timeout, behind which the request may still be running and billed.
+UNKNOWN_OUTCOME_STATUS = frozenset({504, 520, 521, 522, 523, 524})
+TRANSIENT_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 529})
+UNPAID_ATTEMPTS = 4          # a provably unpaid failure is retried even on a paid call: retrying it cannot pay twice
+
+
+def _retry_after(headers, attempt: int) -> float:
+    try:
+        stated = float((headers or {}).get('Retry-After'))
+        if math.isfinite(stated) and stated >= 0:
+            return min(60.0, stated)
+    except (TypeError, ValueError):
+        pass
+    return min(60.0, 4.0 * 2 ** attempt)
+
+
 def _post(url: str, body: dict, api_key: str, timeout: int, *, attempts: int = 6) -> dict:
+    """POST one request. attempts bounds retries of failures whose billing is unknown, so a paid call passes 1 and
+    is never replayed after it may have been billed. A failure that provably cost nothing (the request never fully
+    left the machine, or the provider answered with an error status) is retried up to UNPAID_ATTEMPTS times, and
+    when it persists it raises DispatchError with verified_unpaid True, so its caller releases the reservation and a
+    plain resume tries the unit again."""
     if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 1:
         raise ValueError("HTTP attempts must be a positive integer")
     req = urllib.request.Request(url, data=json.dumps(body).encode(),
                                  headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
-    last = None
-    for attempt in range(attempts):
+    unknown_left, unpaid_left = attempts, max(attempts, UNPAID_ATTEMPTS)
+    clean = True          # no earlier attempt of this call may have been billed
+    tries = 0
+    while True:
+        tries += 1
         try:
+            # urllib raises URLError only while connecting and sending the request; every error after the request
+            # was sent (waiting for or reading the response) propagates as itself
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 resp = json.loads(r.read().decode())
             if not resp.get("choices"):
                 # HTTP 200 carrying an error body and no completion: fail loudly, never record an empty parse
                 err = json.dumps(resp.get("error") or resp)[:300]
-                raise RuntimeError(f"200 response with no choices: {err}")
+                raise DispatchError(f"200 response with no choices: {err}", http_status=200, stage='unknown')
             return resp
         except urllib.error.HTTPError as e:
             # Read a bounded complete envelope before shortening its display message.
@@ -223,22 +251,46 @@ def _post(url: str, body: dict, api_key: str, timeout: int, *, attempts: int = 6
                     quota = json.loads(text).get('error', {}).get('code') if complete_error else None
                 except (ValueError, AttributeError):
                     pass
-                if attempt == 0 and (e.code in (401, 402) or (
-                        url == OPENAI_URL and e.code == 429 and quota == 'insufficient_quota')):
+                # a key rejection proves the key is spent only when no earlier attempt of this call may have been
+                # billed; after one, it is just a failure whose cost is unknown
+                if clean and (e.code in (401, 402) or (url == OPENAI_URL and e.code == 429
+                                                         and quota == 'insufficient_quota')):
                     raise KeyExhausted(last, http_status=e.code, first_attempt=True, rejection_code=quota)
-                raise RuntimeError(last)
-            if e.code in (429, 500, 502, 503, 504, 529):
-                if attempt + 1 == attempts:
-                    break
-                time.sleep(min(60, 4 * 2 ** attempt))
+                raise DispatchError(last, http_status=e.code, verified_unpaid=clean, stage='rejected')
+            if e.code in UNKNOWN_OUTCOME_STATUS:
+                clean = False
+                unknown_left -= 1
+                if unknown_left > 0:
+                    time.sleep(_retry_after(None, tries - 1))
+                    continue
+                raise DispatchError(f"model call failed after {tries} HTTP attempts: {last}", http_status=e.code,
+                                    stage='unknown')
+            if e.code in TRANSIENT_STATUS:
+                unpaid_left -= 1
+                if unpaid_left > 0:
+                    time.sleep(_retry_after(e.headers, tries - 1))
+                    continue
+            raise DispatchError(f"model call failed after {tries} HTTP attempts: {last}", http_status=e.code,
+                                verified_unpaid=clean, stage='rejected')
+        except urllib.error.URLError as e:
+            last = f"request not sent: {e.reason}"
+            unpaid_left -= 1
+            if unpaid_left > 0:
+                time.sleep(min(30.0, 2.0 ** (tries - 1)))
                 continue
-            raise RuntimeError(last)
-        except (urllib.error.URLError, TimeoutError) as e:
-            last = str(e)
-            if attempt + 1 == attempts:
-                break
-            time.sleep(2 ** attempt)
-    raise RuntimeError(f"model call failed after {attempts} HTTP attempts: {last}")
+            raise DispatchError(f"model call failed after {tries} HTTP attempts: {last}", verified_unpaid=clean,
+                                stage='not sent') from e
+        except DispatchError:
+            raise
+        except (OSError, http.client.HTTPException, ValueError) as e:
+            # sent, then timed out, reset or answered with an unreadable body: the outcome is unknown
+            last = f"{type(e).__name__}: {e}"
+            clean = False
+            unknown_left -= 1
+            if unknown_left > 0:
+                time.sleep(min(30.0, 2.0 ** (tries - 1)))
+                continue
+            raise DispatchError(f"model call failed after {tries} HTTP attempts: {last}", stage='unknown') from e
 
 
 def label_episode(ep_dir: Path, out_path: Path, *, model: str, reasoning: str, api_key: str, max_tokens: int,
@@ -632,7 +684,6 @@ def final_cost_bound(content: list, max_tokens: int, *, model=DEFAULT_MODEL, req
     # Uncapped custom models retain a provisional hold if their provider loses the cost receipt.
     # This fallback is never used to authorize a capped dispatch.
     rates = tiers or OPENAI_PRICES[DEFAULT_MODEL.split('/', 1)[-1]]
-    price_in, price_out = max(t[0] for t in rates), max(t[2] for t in rates)
     import io
     from PIL import Image
     text_bytes = sum(len(c.get('text', '').encode('utf-8')) for c in content if c.get('type') == 'text')
@@ -642,7 +693,15 @@ def final_cost_bound(content: list, max_tokens: int, *, model=DEFAULT_MODEL, req
             raw = base64.b64decode(part['image_url']['url'].split(',', 1)[1])
             with Image.open(io.BytesIO(raw)) as image:
                 images += estimate_image_tokens(*image.size)
-    return math.ceil(((text_bytes + 4 * images + 1024) * price_in + max_tokens * price_out) * 1_000_000) / 1_000_000
+    # an upper bound on the prompt's tokens (a token is at least one byte, images at four times their estimate)
+    prompt_bound = text_bytes + 4 * images + 1024
+    # The long-context rates apply only from LONG_PROMPT_TOKENS prompt tokens, so a prompt bounded below that is
+    # billed at the standard rates, input and output alike. Reserving the long rates for it held half again too much.
+    if prompt_bound < LONG_PROMPT_TOKENS:
+        price_in, price_out = rates[0][0], rates[0][2]
+    else:
+        price_in, price_out = max(t[0] for t in rates), max(t[2] for t in rates)
+    return math.ceil((prompt_bound * price_in + max_tokens * price_out) * 1_000_000) / 1_000_000
 
 
 def persist_final_claim(path: Path, claim: dict) -> None:
@@ -1147,9 +1206,22 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
                     'episode_dir': str(ep_dir), 'model': model, 'reasoning_effort': reasoning, **fields,
                     'parse_ok': False, 'final_dispatch_outcome': 'not dispatched', 'final_reserved_usd': 0.0,
                     'no_reply': 'Inspection refresh requested; earlier receipts retained in billing history.'})
+            selection_dispatch = reserve_selection
+            if reserve_selection is not None and settle_selection is not None:
+                final_floor = final_cost_bound(content, max_tokens, model=model,
+                                               require_known_pricing=require_known_pricing,
+                                               **({'pricing_quote': pricing_quote} if pricing_quote is not None else {}))
+
+                def selection_dispatch(amount):
+                    # Evidence selection serves the final request, so it is paid only when the final request can
+                    # still be paid after it; a cap that cannot cover the final buys no selection.
+                    if not reserve_selection(amount + final_floor):
+                        return False
+                    settle_selection(final_floor, 0.0)
+                    return True
             try:
                 doc, extra = ea.discover(evidence_access, content, select, cache, reserve_cost=reserve,
-                                        reserve_dispatch=reserve_selection, settle_dispatch=settle_selection,
+                                        reserve_dispatch=selection_dispatch, settle_dispatch=settle_selection,
                                         force_refresh=force_refresh, refresh_id=inspection_refresh_id,
                                         ledger_managed=(pricing_quote is not None and reserve_selection is not None
                                                         and settle_selection is not None),
@@ -1207,6 +1279,9 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
                   "dry_run": True, "prompt_text": prompt_text,
                   "request": {"n_parts": len(content), "n_images": n_images, "image_bytes": img_bytes,
                               "est_input_tokens": round(est_img + est_text)}}
+        if model.startswith('openai/') and model.split('/', 1)[-1] in OPENAI_PRICES:
+            # what a paid run reserves for this final call, so review can say up front that a cap is too small
+            result['request']['final_cost_bound_usd'] = final_cost_bound(content, max_tokens, model=model)
         write_atomic(out_path, result)
         return result
     bound = final_cost_bound(content, max_tokens, model=model, require_known_pricing=require_known_pricing,
@@ -1230,18 +1305,21 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
     try:
         resp = call_model_once(content, model, reasoning, api_key, max_tokens, timeout,
             **({'pricing_quote': pricing_quote} if pricing_quote is not None else {}))
-    except KeyExhausted as error:
+    except DispatchError as error:
         if error.verified_unpaid:
             fields['config']['request_images']['dispatch_status'] = 'not_dispatched'
+            sent = error.stage != 'not sent'
             write_atomic(claim_path, {**claim, 'final_dispatch_outcome': 'not dispatched',
-                'final_reserved_usd': 0.0, 'no_reply': 'final request rejected before processing',
+                'final_reserved_usd': 0.0,
+                'no_reply': ('final request rejected before processing' if sent else
+                             'final request could not be sent') + f'; nothing was billed ({str(error)[:200]})',
                 'final_rejection': {'http_status': error.http_status, 'http_attempt': 1,
-                                    'state': 'rejected unpaid', 'cost_usd': 0.0,
+                                    'state': 'rejected unpaid' if sent else 'not sent', 'cost_usd': 0.0,
                                     **({'rejection_code': error.rejection_code} if error.rejection_code else {})}})
         else:
             fields['config']['request_images']['dispatch_status'] = 'outcome_unknown'
             write_atomic(claim_path, {**claim, 'final_dispatch_outcome': 'unverified',
-                                      'no_reply': f'KeyExhausted: {error}'})
+                                      'no_reply': f'{type(error).__name__}: {error}'})
         raise
     except Exception as error:
         fields['config']['request_images']['dispatch_status'] = 'outcome_unknown'
@@ -1568,11 +1646,15 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                 stale[ep.name] = f"saved output {q.name} has changed or missing input; use --force to refresh"
                 return True
         if any(record.get('final_dispatch_outcome') in ('claimed', 'unverified') for _, record in records):
+            if ep.name in retry_received and not dry:
+                # The caller named this unit, accepting that its unknown charge may have been real. The unresolved
+                # attempt stays in the billing history with its reservation (_final_cost_history), so the cap still
+                # counts it, and nothing else is sent again.
+                return False
             saved_failures.add(ep.name)
-            unverified[ep.name] = 'saved dispatch has an unresolved charge; no automatic paid retry'
-            if ep.name in retry_received:
-                saved_failures.add(ep.name)
-                unverified[ep.name] = 'received retry refused: the saved charge is unresolved'
+            retryable_received.add(ep.name)
+            unverified[ep.name] = ('saved dispatch has an unresolved charge (it may have been billed); no automatic '
+                                   f'paid retry. --retry-received {ep.name} sends this unit alone again')
             if not dry and any(record.get('parse_ok') is True and not annotation_complete(record) for _, record in records):
                 stale[ep.name] = 'saved annotation is unusable and its charge is unresolved; use --force to refresh explicitly'
             return True
@@ -1596,6 +1678,11 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
         if dry:
             return bool(record.get('dry_run'))
         complete = annotation_complete(record)
+        if ep.name in retry_received and complete:
+            # nothing to retry: the unit is labelled, and naming it changes nothing (it never fails the run)
+            print(f"NOTE {ep.name}: --retry-received skipped, it already has a usable annotation", file=sys.stderr,
+                  flush=True)
+            return True
         if ep.name in retry_received:
             saved_failures.add(ep.name)
             unverified[ep.name] = 'received retry refused: this episode already has a usable annotation'
@@ -1614,6 +1701,9 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
 
     stale, unverified, saved_failures, retryable_received = {}, {}, set(), set()
     todo = [ep for ep in episodes if not is_done(ep)]
+    # a marker says what this run found; one left by an earlier run for a unit now current would say it twice
+    for name in {ep.name for ep in episodes} - set(stale) - set(unverified):
+        (out_dir / f"stale_{name}.json").unlink(missing_ok=True)
     for name, reason in {**unverified, **stale}.items():
         write_atomic(out_dir / f"stale_{name}.json", {"episode": name, "status": "stale" if name in stale else
                      "unverified", "reason": reason,
@@ -1724,6 +1814,21 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                     spend_lock.notify_all()
                 pool.retire(key, str(e))
                 continue
+            except DispatchError as e:
+                if not e.verified_unpaid:
+                    failure = out_for(ep).with_name(f'noreply_{out_for(ep).name}')
+                    if failure.exists() and not reserved[0]:
+                        with spend_lock:
+                            spent['usd'] += episode_cost(json.loads(failure.read_text())) - selection_accounted[0] - prior_cost
+                    return ('fail', ep, f'{type(e).__name__}: {e}')
+                # the provider refused it or it never left the machine: nothing was billed, so its reservation is
+                # released and a plain resume sends it again
+                with spend_lock:
+                    spent['usd'] -= reserved[0]
+                    pending[ep] = max(0.0, pending.get(ep, 0.0) - reserved[0])
+                    reserved[0] = 0.0
+                    spend_lock.notify_all()
+                return ('fail', ep, f'not billed, a resume retries it: {e}')
             except Truncated as e:
                 with spend_lock:
                     spent["usd"] += e.cost - reserved[0] - selection_accounted[0] - prior_cost

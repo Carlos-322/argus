@@ -15,7 +15,7 @@ from pathlib import Path, PureWindowsPath
 
 import numpy as np
 
-from label.errors import KeyExhausted
+from label.errors import DispatchError, KeyExhausted
 
 SCHEMA = 1
 CHUNK_VALUES = 65_536
@@ -646,7 +646,7 @@ def prepare_upload(job: Path, episodes: list[Path], api_key, call_model, *, dry_
             _save(receipt, result)
             try:
                 response = call_model(content, MODEL, REASONING, key, max_tokens=token_limit, timeout=timeout)
-            except KeyExhausted as error:
+            except DispatchError as error:
                 if error.verified_unpaid is not True:
                     raise
                 attempt.update(state='rejected unpaid', http_status=error.http_status,

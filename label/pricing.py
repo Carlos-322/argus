@@ -82,7 +82,7 @@ def quote(model: str, timeout: int) -> dict:
                 'prompt_token_bound': context, 'input_usd_per_token': input_rate,
                 'output_usd_per_token': output_rate, 'request_usd': maxima['request'],
                 'image_usd': maxima['image'],
-                'bound_basis': ('Full published context window; separate image and request fees bounded by provider.max_price. '
+                'bound_basis': ('Prompt bounded by the request text and IMAGE_TOKEN_CEILING tokens per image, at most the published context window; separate image and request fees bounded by provider.max_price. '
                                 + ('Claude search requires an explicit tool; none is supplied. Cache TTL is 5 minutes.'
                                    if claude else 'No published native search charge.')),
                 'provider_max_price': {**maxima, 'prompt': float(Decimal(str(maxima['prompt'])) * 1_000_000),
@@ -91,10 +91,19 @@ def quote(model: str, timeout: int) -> dict:
         raise ValueError(f'No verified pricing rates for {model}: {error}; no paid request was dispatched') from error
 
 
+# More tokens than any published image tokenizer charges for one image of the size requests send (OpenAI high
+# detail tiles, Anthropic's resize to 1568 px, Gemini's 258-token tiles all stay far below it for a 2048 px grid).
+IMAGE_TOKEN_CEILING = 8192
+
+
 def cost_bound(content: list, max_tokens: int, quote: dict) -> float:
-    """Use the full published context bound because image tokenizers differ by provider."""
+    """Bound the prompt from the request itself: its text (a token is at least one byte) and IMAGE_TOKEN_CEILING per
+    image, never more than the published context window. Reserving the whole window held about $6 for a request
+    that costs well under $1, so a small cap labelled nothing."""
     images = sum(part.get('type') == 'image_url' for part in content)
-    amount = (quote['prompt_token_bound'] * quote['input_usd_per_token']
+    text_bytes = sum(len(str(part.get('text', '')).encode('utf-8')) for part in content if part.get('type') == 'text')
+    prompt_tokens = min(quote['prompt_token_bound'], text_bytes + images * IMAGE_TOKEN_CEILING + 1024)
+    amount = (prompt_tokens * quote['input_usd_per_token']
               + max_tokens * quote['output_usd_per_token'] + quote['request_usd'] + images * quote['image_usd'])
     if not math.isfinite(amount) or amount < 0:
         raise ValueError('provider cost bound is invalid')

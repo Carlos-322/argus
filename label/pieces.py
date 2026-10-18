@@ -620,9 +620,22 @@ def stitch_run(job: Path, eps: Path, long_eps: dict, out: Path) -> dict:
                                'use an explicit fresh job to label changed inputs')
     out.mkdir(parents=True, exist_ok=True)
     res = {"stitched": 0, "incomplete": [], "unlabelled": []}
-    # every short episode's reply as it came, a cut-off one (failed_<episode>.json) too: the board shows each
-    for p in short_outputs:
-        shutil.copy(p, out / p.name)
+    # every short episode's reply as it came, a cut-off one (failed_<episode>.json) too: the board shows each. Only a
+    # unit's active record is published (annotation_record's choice), so an earlier no-reply or cut-off copy never
+    # stands beside the label that replaced it, here or left from an earlier run
+    from label.harness import annotation_record
+    for name in sorted({p.stem.removeprefix('failed_').removeprefix('noreply_') for p in short_outputs}):
+        try:
+            selected = annotation_record(src, f'{name}.json')
+            keep = {selected[0].name} if selected is not None else set()
+        except (OSError, ValueError, TypeError, AttributeError):
+            keep = {p.name for p in short_outputs if p.stem.removeprefix('failed_').removeprefix('noreply_') == name}
+        for prefix in ('', 'failed_', 'noreply_'):
+            target = out / f'{prefix}{name}.json'
+            if target.name in keep:
+                shutil.copy(src / target.name, target)
+            else:
+                target.unlink(missing_ok=True)
     for ep, parts in long_eps.items():
         got, missing, failed = [], [], []
         for n in parts:

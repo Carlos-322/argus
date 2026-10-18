@@ -148,6 +148,19 @@ def prepare(job: Path, eps: Path, ids: list[str], *, free: bool, cap: float,
         except (OSError, ValueError, TypeError, AttributeError):
             saved_labels = True
             break
+    # An evidence selection paid before a run stopped lives only in its inspection cache, which the spend ledger also
+    # reads (_label_receipts). Its request was built on the current interpretation, so a dispatched or unknown
+    # selection keeps that interpretation, as a saved label does.
+    for cache in (out / '.evidence').glob('episode_*.json.inspection.json') if not saved_labels else ():
+        try:
+            rounds = json.loads(cache.read_text()).get('rounds') or []
+        except (OSError, ValueError, AttributeError):
+            saved_labels = True
+            break
+        if any(isinstance(row, dict) and row.get('state') not in (None, 'rejected unpaid', 'not dispatched')
+               for row in rounds):
+            saved_labels = True
+            break
     result = {'status': 'skipped', 'cost_usd': 0.0, 'attempted': False, 'limitations': []}
     try:
         if saved_labels:

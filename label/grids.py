@@ -194,7 +194,11 @@ def rebuild(record: dict, ep_dir: Path | None = None) -> list[dict]:
         if not out:
             raise GridError('no part has a verified frame-grid input receipt')
         return out
-    return _one(record, Path(ep_dir or record.get('episode_dir') or ''))
+    folder = ep_dir or record.get('episode_dir')
+    if not folder:
+        # Path('') is the working directory, which would read whatever episode happens to be there
+        raise GridError('the record names no episode folder')
+    return _one(record, Path(folder))
 
 
 def write(out_dir: Path, record: dict, grids: list[dict]) -> dict:

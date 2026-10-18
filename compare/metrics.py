@@ -160,7 +160,7 @@ def read_output(p: Path, record: dict | None = None) -> dict:
                 "latency": None, "out_tokens": None, "path": p, "model": None}
     if r.get("dry_run"):
         return {"status": "pending"}
-    billing = billing_summary(r)
+    billing = billing_summary(r, p)
     base = {**billing, 'cost': billing['billed_usd'] if billing['cost_complete'] else None,
             'path': p, 'model': r.get('model'), '_record': r}
     if r.get('final_dispatch_outcome') == 'not dispatched' or (

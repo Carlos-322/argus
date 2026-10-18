@@ -1550,7 +1550,17 @@ def replay_selection(access, saved):
     for index, row in enumerate(doc['rounds']):
         if row.get('state') != 'received' or not isinstance(row.get('response'), dict):
             raise ValueError('saved selection has no returned response')
-        count, requested = replay_selection_round(access, row, doc, extra, count, skipped, strict=True)
+        # The replay does exactly what the paid run did with each reply (discover), and the rebuilt request must
+        # then match the paid one byte for byte (request_attestation), which is the proof; a reply the run could not
+        # read is replayed as unread, never treated as a reason to pay again.
+        try:
+            count, requested = replay_selection_round(access, row, doc, extra, count, skipped)
+        except InvalidSelection as error:
+            if index != len(doc['rounds']) - 1:
+                raise ValueError('saved selection has unexplained trailing rounds') from error
+            doc.update(status='incomplete')
+            doc['limitations'].append(f'Invalid selection ({str(error)[:120]}); no repair call.')
+            break
         if not requested or count >= MAX_REQUESTS:
             if index != len(doc['rounds']) - 1:
                 raise ValueError('saved selection has unexplained trailing rounds')
@@ -1716,8 +1726,8 @@ def discover(access, base_content, call, cache_path, *, rounds=2, reserve_cost=0
                 if type(cost) in (int, float) and math.isfinite(cost) and cost >= 0 and settle_dispatch is not None:
                     settle_dispatch(reserve, cost)
             except Exception as error:
-                from label.errors import KeyExhausted
-                if isinstance(error, KeyExhausted) and error.verified_unpaid:
+                from label.errors import DispatchError
+                if isinstance(error, DispatchError) and error.verified_unpaid:
                     saved.update(state='rejected unpaid', http_status=error.http_status,
                                  http_attempt=1, verified_unpaid=True, cost_usd=0.0,
                                  **({'rejection_code': error.rejection_code} if error.rejection_code else {}))

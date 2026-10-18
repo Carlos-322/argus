@@ -29,11 +29,13 @@ def _verified_auxiliary(invoice):
         if row.get('state') == 'received':
             known += _amount(usage.get('cost', usage.get('list_cost'))) or 0.0
     for part in invoice.get('parts') or []:
-        known += _verified_auxiliary(part.get('record') or {})
+        # inspection parts wrap their invoice as {part, record}; a stitched route lists the part invoices themselves
+        if isinstance(part, dict):
+            known += _verified_auxiliary(part['record'] if isinstance(part.get('record'), dict) else part)
     return known
 
 
-def billing_summary(annotation: dict) -> dict:
+def billing_summary(annotation: dict, path=None) -> dict:
     """Separate verified charges from unresolved holds, including cumulative retry history.
 
     Missing invoices are unknown, never free. A partially verified inspection reports
@@ -81,4 +83,26 @@ def billing_summary(annotation: dict) -> dict:
         auxiliary(invoice)
     auxiliary((record.get('config') or {}).get('resolution_route') or {}, routing=True)
     auxiliary(record.get('evidence_inspection') or {})
+    if path is not None:
+        # The spend ledger (dictionary_stage._label_receipts) also counts evidence selections paid before a run was
+        # killed, kept only in the inspection cache; the reports read the same receipts, so they never miss them.
+        import json
+        from pathlib import Path
+        from label.harness import inspection_billed
+        from label.evidence_access import recover_selection_reservations
+        name = Path(path).name.removeprefix('failed_').removeprefix('noreply_')
+        cache = Path(path).parent / '.evidence' / f'{name}.inspection.json'
+        if cache.exists():
+            try:
+                inspection = json.loads(cache.read_text())
+                recover_selection_reservations(inspection)
+                extra = max(0.0, float(inspection['cost_usd']) - inspection_billed(annotation, inspection.get('digest')))
+            except (OSError, ValueError, TypeError, KeyError, AttributeError):
+                complete = False
+            else:
+                if inspection.get('cost_is_conservative_estimate'):
+                    complete = False
+                    reserved += extra
+                else:
+                    billed += extra
     return {'billed_usd': billed, 'reserved_usd': reserved, 'cost_complete': complete}

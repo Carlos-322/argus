@@ -81,7 +81,7 @@ def request(ep: dict) -> list:
 
 
 def _paid_route(ep, api_key, call_model, timeout, receipt_path, identity, reserve_dispatch, settle_dispatch, billing_fields, force_refresh):
-    from label.errors import KeyExhausted, SpendCap
+    from label.errors import DispatchError, KeyExhausted, SpendCap
     from label.harness import OPENAI_PRICES, _verified_final_cost, persist_final_claim, same_input_identity
     text = route_text(ep)
     routing_identity = {'version': 1, 'task_sha256': hashlib.sha256(text.encode()).hexdigest(),
@@ -141,7 +141,7 @@ def _paid_route(ep, api_key, call_model, timeout, receipt_path, identity, reserv
     try:
         resp = call_model(content, ROUTE_MODEL, ROUTE_REASONING, api_key,
                           max_tokens=ROUTE_MAX_TOKENS, timeout=timeout)
-    except KeyExhausted as error:
+    except DispatchError as error:
         if error.verified_unpaid:
             persist({'fine_detail': None, 'why': 'routing request rejected before processing', 'cost_usd': 0.0,
                      'dispatch_outcome': 'not dispatched'})

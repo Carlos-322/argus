@@ -168,7 +168,7 @@ def test_failure_receipts_survive_resume_and_free_runs_do_not_claim(tmp_path, re
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize('outcome', ['timeout', 'http200_error', 'http429', 'bare_key_exhausted', 'untyped_key_proof', 'paid_malformed'])
+@pytest.mark.parametrize('outcome', ['timeout', 'http200_error', 'http504', 'bare_key_exhausted', 'untyped_key_proof', 'paid_malformed'])
 def test_dictionary_unknown_or_paid_response_does_not_try_next_key(tmp_path, monkeypatch, outcome):
     import io
     import urllib.error
@@ -191,8 +191,9 @@ def test_dictionary_unknown_or_paid_response_does_not_try_next_key(tmp_path, mon
             raise error
         if outcome == 'bare_key_exhausted':
             raise harness.KeyExhausted('Legacy exception without unpaid HTTP proof')
-        if outcome == 'http429':
-            raise urllib.error.HTTPError(req.full_url, 429, 'Limited', {}, io.BytesIO(b'{}'))
+        if outcome == 'http504':
+            # a gateway timeout: the request may still be running, and billed, behind the gateway
+            raise urllib.error.HTTPError(req.full_url, 504, 'Gateway timeout', {}, io.BytesIO(b'{}'))
         if outcome == 'http200_error':
             return io.BytesIO(b'{"error":{"code":402,"message":"quota"}}')
         return io.BytesIO(json.dumps({'choices': [{'message': {'content': 'not JSON'}}],
@@ -215,6 +216,34 @@ def test_dictionary_unknown_or_paid_response_does_not_try_next_key(tmp_path, mon
     assert resumed['status'] == 'failed'
     assert calls == ['sk-or-first']
     assert all((job / name).read_bytes() == value for name, value in before.items())
+
+
+@pytest.mark.parametrize('rejection', ['http429', 'http503', 'refused'])
+def test_dictionary_rate_limits_and_unsent_requests_are_unpaid(tmp_path, monkeypatch, rejection):
+    # A provider error status, or a connection that never carried the request, provably cost nothing: the call is
+    # retried, then the next key is tried, and nothing stays reserved.
+    import io
+    import urllib.error
+    from label import dictionary as dd, dictionary_stage, harness
+    ep = episode(tmp_path, 'one', [('pressure', np.array([[1., 2.], [3., 4.]]),
+                                  {'names': ['pad0', 'pad1'], 'source': 'native.h5/pressure'})])
+    job = tmp_path / 'job'
+    job.mkdir()
+    (job / 'dictionary_status.json').write_text(json.dumps({'projected_upper_usd': .37}))
+    calls = []
+    def transport(req, timeout):
+        calls.append(req.get_header('Authorization').split()[-1])
+        if rejection == 'refused':
+            raise urllib.error.URLError(ConnectionRefusedError(61, 'Connection refused'))
+        raise urllib.error.HTTPError(req.full_url, int(rejection[4:]), 'Busy', {}, io.BytesIO(b'{}'))
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', transport)
+    monkeypatch.setattr(harness.time, 'sleep', lambda seconds: None)
+    record = dd.prepare_upload(job, [ep], 'sk-or-first', harness.call_model_once,
+                               api_keys=['sk-or-first', 'sk-or-next'])
+    assert record['status'] == 'failed' and record['entries'] == {}
+    assert calls == ['sk-or-first'] * harness.UNPAID_ATTEMPTS + ['sk-or-next'] * harness.UNPAID_ATTEMPTS
+    assert [a['state'] for a in record['dispatch_attempts']] == ['rejected unpaid', 'rejected unpaid']
+    assert dictionary_stage.dictionary_spend(job) == {'cost_usd': 0., 'reserved_usd': 0., 'complete': True}
 
 
 @pytest.mark.parametrize('terminal', ['all_rejected', 'next_unknown'])

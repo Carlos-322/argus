@@ -94,7 +94,7 @@ def harness_cmd(slice_dir: Path, run: Path, kind: str, cap: float, concurrency: 
     return cmd + [x for x in extra if x != "--"]
 
 
-def finish(run: Path, info: dict, cmd: list, slice_dir: Path, mode: str) -> None:
+def finish(run: Path, info: dict, cmd: list, slice_dir: Path, mode: str) -> int:
     env = dict(os.environ)
     keys = _keys().split(",") if info["kind"] != "dry" else []
     env["OPENROUTER_API_KEYS"] = ",".join(k for k in keys if is_openrouter_key(k))
@@ -113,6 +113,7 @@ def finish(run: Path, info: dict, cmd: list, slice_dir: Path, mode: str) -> None
     finalize(run, info, slice_dir, rc)
     print(json.dumps({k: info[k] for k in ("run_id", "status", "cost_usd", "episodes_done", "episodes_failed",
                                            "footage_hours", "usd_per_hour")} | {"run": str(run)}))
+    return rc
 
 
 
@@ -145,6 +146,18 @@ def finalize_worker(out_dir: Path, rc: int) -> None:
     info = json.loads(path.read_text())
     if info.get('kind') in ('dry', 'smoke', 'full') and info.get('status') == 'running':
         finalize(path.parent, info, Path(info['slice']), rc)
+    elif info.get('kind') == 'review' and info.get('status') == 'running':
+        # A review whose wrapper was killed still has its labels settled here; the wrapper, if alive, writes its own
+        # final status after this, and a rerun of review builds the board.
+        from label.dictionary_stage import dictionary_spend, label_spend, label_spend_complete
+        job = path.parent.parent
+        spend = dictionary_spend(job)
+        complete = spend['complete'] and label_spend_complete(job)
+        total = label_spend(job) + (spend['cost_usd'] or 0.0)
+        info.update(status='labelled; board not built (rerun review to build it)' if rc == 0 else f'labelling exit {rc}',
+                    cost_usd=total if complete else None, reserved_cost_usd=label_spend(job) + spend['reserved_usd'],
+                    cost_complete=complete, labels_finished_at=dt.datetime.now().isoformat(timespec='seconds'))
+        write_atomic(path, info, indent=1)
 
 
 def resume(a, slice_dir: Path) -> None:
@@ -172,6 +185,13 @@ def _resume(a, slice_dir: Path) -> None:
     if not a.why:
         raise SystemExit("--resume needs --why")
     spent = billed_cost(run)
+    if info["kind"] != "dry" and getattr(a, "cap", 0):
+        # a new --cap on a resume replaces the run's cap, so a run the cap stopped can be finished
+        if not math.isfinite(a.cap) or a.cap <= 0:
+            raise SystemExit("--resume: --cap must be a positive amount")
+        info.setdefault("cap_changes", []).append({"at": dt.datetime.now().isoformat(timespec="seconds"),
+                                                   "from": info["cap_usd"], "to": a.cap})
+        info["cap_usd"] = a.cap
     left = float(info["cap_usd"]) - spent
     if info["kind"] != "dry" and left <= 0:
         raise SystemExit(f"--resume: the run's cap ${info['cap_usd']} is already spent (${spent:.2f})")
@@ -182,15 +202,16 @@ def _resume(a, slice_dir: Path) -> None:
                                            "spent_before": spent, "command": cmd})
     info["status"] = "running"
     write_atomic(run / "run.json", info, indent=1)
-    finish(run, info, cmd, slice_dir, "a")
+    return finish(run, info, cmd, slice_dir, "a")
 
 
-def main() -> None:
+def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dataset", required=True, help="the dataset's short name, e.g. molmo, fastumi, openaoe")
     ap.add_argument("--episodes", type=Path, required=True, help="the slice: a folder of prepared episode_* folders")
     ap.add_argument("--kind", required=True, choices=["dry", "smoke", "full"], help="dry calls no model")
-    ap.add_argument("--cap", type=float, default=0.0, help="most this run may spend in USD (required unless dry)")
+    ap.add_argument("--cap", type=float, default=0.0, help="most this run may spend in USD (required unless dry); "
+                                                           "with --resume, a new cap for the run")
     ap.add_argument("--runs", type=Path, default=REPO / "data" / "runs", help="where run folders go")
     ap.add_argument("--concurrency", type=int, default=16, help="episodes in flight (default 16)")
     ap.add_argument("--note", default="", help="free text recorded in run.json")
@@ -211,17 +232,24 @@ def main() -> None:
             raise SystemExit("refused: the checkout has uncommitted changes, so run.json could not name the code "
                              "that made these labels; commit or stash them first")
     now = dt.datetime.now()
-    run_id = f"{now:%Y%m%d-%H%M}_{a.kind}_{sha}" + (f"_{a.label}" if a.label else "")
+    base_id = f"{now:%Y%m%d-%H%M}_{a.kind}_{sha}" + (f"_{a.label}" if a.label else "")
+    run_id = base_id
+    (a.runs / a.dataset).mkdir(parents=True, exist_ok=True)
+    for n in range(2, 1000):
+        try:
+            (a.runs / a.dataset / run_id).mkdir()
+            break
+        except FileExistsError:
+            run_id = f"{base_id}-{n}"          # two runs started in the same minute get their own folders
     run = a.runs / a.dataset / run_id
-    run.mkdir(parents=True, exist_ok=False)
     cmd = harness_cmd(a.episodes, run, a.kind, a.cap, a.concurrency, a.harness_args)
     info = {"run_id": run_id, "kind": a.kind, "dataset": a.dataset, "slice": str(a.episodes.resolve()),
             "code": sha, "code_dirty": dirty, "started_at": now.isoformat(timespec="seconds"), "cap_usd": a.cap,
             "status": "running", "command": cmd, "note": a.note}
     with execution_lock(run):
         write_atomic(run / "run.json", info, indent=1)
-        finish(run, info, cmd, a.episodes, "w")
+        return finish(run, info, cmd, a.episodes, "w")
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
