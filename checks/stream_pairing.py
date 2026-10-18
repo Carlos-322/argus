@@ -46,6 +46,7 @@ from label import state as ms
 from label.atomic import write_atomic
 from checks.camera_intervals import to_anchor
 from checks import EXIT_PARTIAL
+from prepare.signal_alignment import recorder_arrival
 
 SMALL_W = 64          # image change is measured on a 64-px-wide grey copy of each frame
 
@@ -146,6 +147,9 @@ def unaligned(ep: dict) -> dict | None:
 
 def camera_alignment_reason(ep: dict, cam: str) -> str | None:
     """An assumed camera or anchor clock cannot place this camera against recorded state motion."""
+    if recorder_arrival(ep['context']):
+        return ('Camera and state use recorder arrival timing. Transport delays do not establish '
+                'physical synchronization, so their motion was not compared.')
     clocks = ep["context"].get("camera_clock") or {}
     affected = [v for v in {cam, me.anchor(ep)} if v in clocks]
     return (f"Camera placement for {', '.join(sorted(affected))} uses assumed presentation timing."
@@ -321,7 +325,7 @@ MODES = {"pairing": ("stream_pairing", pairing, "crossed"),
          "grippers": ("gripper_channels", grippers, "flagged")}
 
 # Bump the affected mode when its measurement or decision rule changes.
-ALGORITHM_VERSIONS = {"stream_pairing": 1, "recorded_jumps": 1, "gripper_channels": 1}
+ALGORITHM_VERSIONS = {"stream_pairing": 2, "recorded_jumps": 2, "gripper_channels": 1}
 
 
 def needs_check(ctx: dict, mode: str) -> bool:

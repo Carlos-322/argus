@@ -53,6 +53,7 @@ from pathlib import Path
 import numpy as np
 
 from label.atomic import write_atomic
+from prepare.signal_alignment import recorder_arrival, RECORDER_ARRIVAL_LIMITATION
 
 JOINTS = [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12]    # the 12 arm joints of the 14 state values (6 are grippers)
 
@@ -154,15 +155,29 @@ def sample_jitter(state: np.ndarray) -> dict:
             "repeated_frac": round(float((r < 0.15).mean()), 4)}
 
 
+def arrival_order_only(measurements: dict) -> dict:
+    """Retain recorded sequence measurements without interpreting transport as a physical clock."""
+    return {**measurements,
+            'recorded_order_lag_frames': measurements.get('recorded_order_lag_frames',
+                                                          measurements.get('follower_lag_frames')),
+            'follower_lag_frames': None, 'neighbour_lag_frames': None, 'sped_up_recording': False,
+            'timing_basis': 'mcap_log_time', 'status': 'not evaluated',
+            'reason': RECORDER_ARRIVAL_LIMITATION,
+            'not_assessed': RECORDER_ARRIVAL_LIMITATION,
+            'rule': 'Physical follower-delay rule not evaluated on recorder arrival timestamps.',
+            'measurement_note': 'Lag and sample-step ratios describe recorded row order, not physical delay or acquisition timing.'}
+
+
 def timebase_check(state: np.ndarray, action: np.ndarray, neighbour_lag: float | None = None,
-                   fps: float = 30.0) -> dict:
+                   fps: float = 30.0, *, context: dict | None = None) -> dict:
     """One episode's measurements and flag, at the recording's frame rate. neighbour_lag comes from the dataset scan
     (via context.json, written by `apply`); without it the episode is measured but not flagged."""
     lag = follower_lag_frames(state, action)
     j = sample_jitter(state)
-    return {"follower_lag_frames": lag, **j, "neighbour_lag_frames": _num(neighbour_lag),
+    result = {"follower_lag_frames": lag, **j, "neighbour_lag_frames": _num(neighbour_lag),
             "sped_up_recording": is_sped_up(lag, j["skipped_frac"], j["repeated_frac"], neighbour_lag, fps),
             "rule": rule_text(fps)}
+    return arrival_order_only(result) if recorder_arrival(context or {}) else result
 
 
 def scan_file(raw: Path, chunk: int, file: int) -> list[dict]:
@@ -243,6 +258,13 @@ def measure_folder(eps: Path) -> int:
     from prepare.state_contract import action_semantics
     for d in sorted(Path(eps).glob("episode_*")):
         ctx = json.loads((d / "context.json").read_text())
+        if recorder_arrival(ctx):
+            before = dict(ctx)
+            ctx.pop('timebase_neighbour_lag_frames', None)
+            ctx['timebase_neighbours_in_upload'] = 0
+            if ctx != before:
+                write_atomic(d / 'context.json', ctx, indent=1, default=str)
+            continue
         if ctx.get("profile") != "teleop_arms" or ctx.get("state_kind") != "joints" or not (d / "state.npz").exists():
             continue
         if action_semantics(ctx)['role'] != 'command':
@@ -296,13 +318,25 @@ def cmd_apply(args) -> int:
         for d in sorted(root.glob("episode_*")):
             e = int(d.name.split("_")[1])
             ctx = json.loads((d / "context.json").read_text())
-            ctx["timebase_neighbour_lag_frames"] = _num(tb.loc[e, "neighbour_lag_frames"])
+            if recorder_arrival(ctx):
+                ctx.pop('timebase_neighbour_lag_frames', None)
+                ctx['timebase_neighbours_in_upload'] = 0
+            else:
+                ctx["timebase_neighbour_lag_frames"] = _num(tb.loc[e, "neighbour_lag_frames"])
             write_atomic(d / "context.json", ctx)
             n_ctx += 1
     for p in sorted(args.labels.glob("episode_*.json")) if args.labels else []:
         r = json.loads(p.read_text())
         t = (r.get("dataset_checks") or {}).get("timebase")
         if not t:
+            continue
+        context_path = Path(r.get('episode_dir') or '') / 'context.json'
+        context = json.loads(context_path.read_text()) if context_path.is_file() else {}
+        if recorder_arrival(context) or t.get('timing_basis') == 'mcap_log_time':
+            changed += bool(t.get('sped_up_recording'))
+            r['dataset_checks']['timebase'] = arrival_order_only(t)
+            write_atomic(p, r)
+            n_lab += 1
             continue
         e = int(Path(r["episode_dir"]).name.split("_")[1])
         nb = _num(tb.loc[e, "neighbour_lag_frames"])

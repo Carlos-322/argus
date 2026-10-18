@@ -32,7 +32,8 @@ has no board label to set it against, so it is left out):
     a call that returned nothing is reported beside it, not counted as a response. The reference is asked every
     episode the board has a label of, and a board label is always a response that parsed
   - schema violations: every parsed response of that model
-  - cost and latency: every response returned (an unparsed response is still paid for)
+  - cost and latency: every response returned (an unparsed response is still paid for). Costs include earlier
+    paid attempts for that unit. Unresolved invoices are reported separately and excluded from cost averages.
   - events per minute, key events, subgoals, data issues, operator mistakes: the episodes every model in the
     chart parsed, so no model's number moves because it failed on other episodes than another
   - agreement: each pair on the episodes both parsed
@@ -52,7 +53,8 @@ from collections import defaultdict
 from pathlib import Path
 
 from board.families import Families
-from label.harness import episode_cost, annotation_record, billing_view, reply_truncated
+from label.harness import annotation_record, reply_truncated
+from label.receipts import billing_summary, has_response
 
 FAMILIES = Families()
 MODELS_PATH = Path(__file__).resolve().parent.parent / "configs" / "models.json"
@@ -158,18 +160,22 @@ def read_output(p: Path, record: dict | None = None) -> dict:
                 "latency": None, "out_tokens": None, "path": p, "model": None}
     if r.get("dry_run"):
         return {"status": "pending"}
+    billing = billing_summary(r)
+    base = {**billing, 'cost': billing['billed_usd'] if billing['cost_complete'] else None,
+            'path': p, 'model': r.get('model'), '_record': r}
+    if r.get('final_dispatch_outcome') == 'not dispatched' or (
+            not has_response(r) and (r.get('final_dispatch_outcome') in ('claimed', 'unverified')
+                                    or p.name.startswith('noreply_'))):
+        return {'status': 'no_response', **base}
     if reply_truncated(r) or p.name.startswith("failed_"):
         # a failed_<episode>.json: the board's own label of an episode whose reply was cut off (board/to_board.py)
         u = r.get("usage") or {}
-        cost = episode_cost(r) if (billing_view(r).get("usage") or {}).get("est_cost_usd") is not None or "_billing_receipt" in r else u.get("cost")
-        return {"status": "cut_off", "cost": cost, "latency": None, "out_tokens": u.get("completion_tokens"),
+        return {**base, "status": "cut_off", "latency": None, "out_tokens": u.get("completion_tokens"),
                 "finish_reason": r.get("finish_reason"), "tail": r.get("content_tail") or "", "path": p,
                 "model": r.get("model")}
     u = r.get("usage") or {}
     # the episode's billed cost: its model call and, for a routed episode, the routing call made for it
-    cost = episode_cost(r) if (billing_view(r).get("usage") or {}).get("est_cost_usd") is not None or "_billing_receipt" in r else None
-    base = {"cost": cost, "latency": u.get("latency_s"), "out_tokens": u.get("completion_tokens"), "path": p,
-            "model": r.get("model")}
+    base.update(latency=u.get('latency_s'), out_tokens=u.get('completion_tokens'))
     if r.get("parse_ok"):
         return {"status": "parsed", "labels": r.get("labels") or {}, "config": r.get("config") or {}, **base}
     lab = r.get("labels") or {}
@@ -421,6 +427,9 @@ def _responses(k: str, eps: list, rows: dict) -> dict:
             "violations_any": _r(sum(1 for x in viol if x) / len(viol)) if viol else None,
             "violations_n": len(viol),
             "cost": _mean(costs), "cost_n": len([c for c in costs if c is not None]),
+            'billed_usd': sum(rec.get('billed_usd', 0) for rec in mine),
+            'reserved_usd': sum(rec.get('reserved_usd', 0) for rec in mine),
+            'cost_incomplete': sum(rec.get('cost_complete') is False for rec in mine),
             "latency": _r(_mean(lats), 1), "latency_n": len([x for x in lats if x is not None])}
 
 
@@ -479,7 +488,8 @@ def compute(manifest: dict, base: Path | None = None, sources: dict | None = Non
             row = rows.setdefault(ident["file"], {**ident, "by": {}})
             r = response(m, name)
             rec = {"status": r["status"],
-                   **{f: r[f] for f in ("cost", "latency", "out_tokens") if r.get(f) is not None}}
+                   **{f: r[f] for f in ("cost", "latency", "out_tokens", 'billed_usd', 'reserved_usd', 'cost_complete')
+                      if r.get(f) is not None}}
             if r["status"] == "parsed":
                 rec.update(measure(r["labels"], row["dataset"], r.get("config")))
             row["by"][m["key"]] = rec
@@ -500,7 +510,8 @@ def compute(manifest: dict, base: Path | None = None, sources: dict | None = Non
                 continue
             r = read_output(selected[0], selected[1])
         seen.add(r.get("model"))
-        rec = {"status": r["status"], **{f: r[f] for f in ("cost", "latency", "out_tokens") if r.get(f) is not None}}
+        rec = {"status": r["status"], **{f: r[f] for f in ("cost", "latency", "out_tokens", 'billed_usd',
+                'reserved_usd', 'cost_complete') if r.get(f) is not None}}
         if r["status"] == "parsed":
             rec.update(measure(r["labels"], row["dataset"], r.get("config")))
         row["by"][REFERENCE_KEY] = rec

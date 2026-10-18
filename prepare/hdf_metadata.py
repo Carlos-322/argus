@@ -1,9 +1,139 @@
 """Bounded reads of original HDF5 metadata, without duplicating source arrays."""
 from pathlib import Path
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import numpy as np
 
 MAX_VALUES = 4096
+_SOURCES = ContextVar('hdf_sources', default=None)
+
+
+@contextmanager
+def authorized_sources(paths):
+    """Only files selected by the upload may supply linked HDF objects or storage."""
+    token = _SOURCES.set(frozenset(Path(p).resolve() for p in paths))
+    try:
+        yield
+    finally:
+        _SOURCES.reset(token)
+
+
+def object_id(obj):
+    import h5py
+    return (str(Path(obj.file.filename).resolve()), h5py.h5o.get_info(obj.id).addr)
+
+
+def storage_admitted(obj, allowed, seen=None):
+    """Resolve virtual source datasets too, since their paths can hide external links."""
+    import h5py
+    path = Path(obj.file.filename).resolve()
+    if path not in allowed:
+        return False
+    if not isinstance(obj, h5py.Dataset):
+        return True
+    if any((path.parent / name).resolve() not in allowed for name, _, _ in obj.external or []):
+        return False
+    if not obj.is_virtual:
+        return True
+    seen = set() if seen is None else seen
+    identity = object_id(obj)
+    if identity in seen:
+        return False
+    seen.add(identity)
+    try:
+        for source in obj.virtual_sources():
+            filename = path if source.file_name == '.' else (path.parent / source.file_name).resolve()
+            if filename not in allowed:
+                return False
+            with h5py.File(filename, 'r') as linked:
+                if not storage_admitted(linked[source.dset_name], allowed, seen):
+                    return False
+        return True
+    finally:
+        seen.remove(identity)
+
+
+def children(group, issues=None):
+    import h5py
+    allowed = _SOURCES.get()
+    if allowed is None:
+        allowed = {Path(group.file.filename).resolve()}
+
+    def admitted(path):
+        return Path(path).resolve() in allowed
+
+    def excluded(name):
+        if issues is not None:
+            issue = {'kind': 'external_source_unread',
+                     'what': f'HDF5 object {name} references storage outside the selected upload; '
+                             'its external values were not read.'}
+            if issue not in issues:
+                issues.append(issue)
+
+    for key in group:
+        name = group.name.rstrip('/') + '/' + key
+        try:
+            link = group.get(key, getlink=True)
+            if isinstance(link, h5py.ExternalLink):
+                target = Path(group.file.filename).resolve().parent / link.filename
+                if not admitted(target):
+                    excluded(name)
+                    continue
+            obj = group[key]
+            if not storage_admitted(obj, allowed):
+                excluded(name)
+                continue
+            yield key, obj
+        except (KeyError, OSError):
+            continue
+
+
+def objects(group, prefix='', issues=None):
+    """Walk each owned group once, including legal hard-link and soft-link cycles."""
+    import h5py
+    seen = {object_id(group)}
+    pending = [(prefix, iter(children(group, issues)))]
+    while pending:
+        base, entries = pending[-1]
+        try:
+            key, obj = next(entries)
+        except StopIteration:
+            pending.pop()
+            continue
+        name = f'{base}/{key}' if base else key
+        yield name, obj
+        if isinstance(obj, h5py.Group) and object_id(obj) not in seen:
+            seen.add(object_id(obj))
+            pending.append((name, iter(children(obj, issues))))
+
+
+class NumericRows:
+    """Read healthy numeric rows when an individual HDF chunk fails its checksum."""
+    def __init__(self, dataset, issues):
+        self.dataset, self.issues = dataset, issues
+        self.shape = dataset.shape
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, key):
+        try:
+            return self.dataset[key]
+        except OSError:
+            rows = range(len(self))[key if isinstance(key, slice) else slice(None)]
+            result = np.full((len(rows), *self.shape[1:]), np.nan)
+            missing = []
+            for destination, row in enumerate(rows):
+                try:
+                    result[destination] = self.dataset[row]
+                except OSError:
+                    missing.append(row)
+            if missing:
+                self.issues.append({'kind': 'signal_bad_cells', 'signal': self.dataset.name,
+                                    'what': f'{self.dataset.name}: {len(missing)} numeric rows could not '
+                                            'be read from damaged HDF5 chunks and remain missing.'})
+            return result
 
 
 def value(x):
@@ -50,7 +180,9 @@ def inventory(f, group, recording_paths, shared_paths, episode_groups):
                            'shape': list(raw.shape) if raw.shape is not None else None, 'dtype': str(raw.dtype)})
 
     attributes('', f)
-    f.visititems(attributes)
+    # h5o.visit can traverse a damaged dataset B-tree even when its useful peers and attributes are readable.
+    for name, obj in objects(f):
+        attributes(name, obj)
     return {'source_path': str(path), 'source_size': stat.st_size, 'source_mtime_ns': stat.st_mtime_ns,
             'source_required_for_inspection': True, 'fields': fields}
 

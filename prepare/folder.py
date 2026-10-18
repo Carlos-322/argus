@@ -53,8 +53,12 @@ def main() -> int:
                    help="the dataset name written into context.json (default: the folder's name)")
     p.add_argument("--max-minutes", type=float, default=None, help="stop after this much footage (default: all)")
     a = ap.parse_args()
-    report = formats.convert(a.root, a.rig, a.out, a.dataset or a.root.resolve().name.split(".")[0],
-                             a.max_minutes * 60 if a.max_minutes else math.inf)
+    try:
+        report = formats.convert(a.root, a.rig, a.out, a.dataset or a.root.resolve().name.split(".")[0],
+                                 a.max_minutes * 60 if a.max_minutes else math.inf)
+    except formats.UploadInputError as error:
+        report = {'episodes': [], 'failed': [{'name': a.root.name, 'why': str(error)}],
+                  'used': [], 'missing': [str(error)], 'skipped': [], 'notes': []}
     print(json.dumps(report, indent=1))
     return 1 if report["failed"] and not report["episodes"] else 0
 

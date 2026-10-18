@@ -113,8 +113,10 @@ def shown_cams(d: dict) -> list:
     retained = [u["view"] for u in d.get("unshown_cameras") or []
                 if isinstance(u, dict) and sa.EXTRA_CAM.fullmatch(str(u.get("view") or ""))]
     candidates = list(dict.fromkeys([*views, *retained]))
+    unpaired = {u.get('view') for u in d.get('unshown_cameras') or []
+                if isinstance(u, dict) and u.get('clock_alignment') == 'unverified'}
     roles = d.get("camera_presentation") or {}
-    main = next((v for v in candidates if (roles.get(v) or {}).get("role") == "scene"),
+    main = next((v for v in candidates if v not in unpaired and (roles.get(v) or {}).get("role") == "scene"),
                 "exo" if "exo" in views else views[0])
     rank = {"scene": 0, "other": 1, "sensor": 2, "tactile": 3}
     return [main, *sorted((v for v in candidates if v != main),
@@ -684,6 +686,9 @@ def cmd_site(a):
         raise ValueError('--public-base must be a public URL without credentials or signed access parameters')
     compare = compare_dir(a.qa, a.compare)
     eps = plan(a.qa, a.clips, compare, getattr(a, "dictionary_job", None))
+    if not eps:
+        print('No episodes are available for publication. Build a board with labels before creating a static site.')
+        return 1
     files = [e["rec"]["file"] for e in eps]
     hands = hands_dir(a.qa, a.hands)
     keypoints = keypoints_dir(a.qa, a.keypoints)
@@ -925,7 +930,7 @@ def main():
     a = ap.parse_args()
     a.qa = a.board / "qa"
     if not a.qa.is_dir():
-        ap.error('No board qa directory exists. A free review stops before board generation; use a built board or a custom qa directory.')
+        ap.error('No board qa directory exists. A free review stops before board generation; use a built board with labels.')
     a.out = a.out or a.board / "static"
     if not FFMPEG or not FFPROBE:
         sys.exit("ffmpeg/ffprobe not found")

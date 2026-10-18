@@ -355,7 +355,8 @@ def test_review_reuses_real_preparation_and_refuses_unverified_paid_resume(tmp_p
     generated = next(ep.glob('*.mp4'))
     generated_proof = (generated.stat().st_mtime_ns, hashlib.sha256(generated.read_bytes()).hexdigest())
     out = job / 'run' / 'out'
-    out.mkdir(parents=True)
+    assert (out / '.execution.lock').is_file()
+    out.mkdir(parents=True, exist_ok=True)
     invoice = out / f'{ep.name}.json'
     invoice.write_text(json.dumps({'usage': {'est_cost_usd': .125, 'cost_source': 'billed'},
                                    'generation_id': 'historical-generation', 'parse_ok': True}))
@@ -381,7 +382,7 @@ def test_review_reuses_real_preparation_and_refuses_unverified_paid_resume(tmp_p
         (job / 'report.json').write_text('{"episodes": []}')
     elif change == 'legacy':
         (job / 'preparation_receipt.json').unlink()
-    if change in (None, 'source_in_job'):
+    if change in (None, 'source_in_job', 'producer'):
         with pytest.raises(ReachedLabel):
             rv.main()
         assert dictionaries == [1, 1]

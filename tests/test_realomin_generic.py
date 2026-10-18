@@ -115,11 +115,24 @@ def test_recorded_pose_gripper_join_matches_original_native_reader(tmp_path, mon
         for key in a.files:
             assert key in b.files and a[key].dtype == b[key].dtype
             if key.endswith('_pts'):
-                # Original wrapper encoded each camera from zero; generic clips keep the common clock offset.
-                assert np.array_equal(a[key] - a[key][0], b[key] - b[key][0]), key
+                view = key[:-4]
+                source = json.loads((new_ep / 'sources.json').read_text())[view]
+                # Packet addresses are independent of the native clocks and exact pictures checked below.
+                np.testing.assert_array_equal(b[key], formats.probe(source['packed'])['pts'])
+                assert len(b[key]) == 6 and np.all(np.diff(b[key]) > 0), key
             else:
                 assert np.array_equal(a[key], b[key]), key
             clock_facts[key] = {'old': a[key].tolist(), 'generic': b[key].tolist(), 'dtype': str(a[key].dtype)}
+    from mcap.reader import make_reader
+    assert new['source']['presentation_clock']['basis'] == 'mcap_log_time'
+    assert new['source']['presentation_clock']['physical_synchronization_verified'] is False
+    with np.load(new_ep / new['recorded_camera_clocks']) as native:
+        for view, topic in [('left', '/robot0/sensor/camera0/compressed'), ('right', '/robot1/sensor/camera0/compressed')]:
+            with raw.open('rb') as stream:
+                stamps = np.asarray([message.log_time for _, _, message in make_reader(stream).iter_messages(
+                    topics=[topic])], dtype=np.int64)
+            np.testing.assert_array_equal(native[view + '_log_ns'], stamps)
+            assert not native[view + '_capture_present'].any()
     with np.load(old_ep / 'signals.npz') as a, np.load(new_ep / 'signals.npz') as b:
         for old_entry in old['signals']:
             new_entry = next(row for row in new['signals'] if row['name'] == old_entry['name'])
@@ -132,14 +145,15 @@ def test_recorded_pose_gripper_join_matches_original_native_reader(tmp_path, mon
         for path in [old_ep, new_ep]:
             source = json.loads((path / 'sources.json').read_text())[view]
             with np.load(path / 'times.npz') as times:
-                frames = extract_frames(source['packed'], 0, 6, after['plan']['ks'], pts=times[view + '_pts'])
+                frames = extract_frames(source['packed'], 0, 6, list(range(6)), pts=times[view + '_pts'])
             decoded.append({key: image.tobytes() for key, image in frames.items()})
+        assert len(decoded[1]) == 6
         assert decoded[0] == decoded[1]
     assert hashlib.sha256(raw.read_bytes()).hexdigest() == digest
     print(json.dumps({'original_sha256': digest, 'state_dtype': 'float32', 'state_shape': [6, 14],
-                      'native_capture_arrays_exact': True, 'encoded_clock_facts': clock_facts,
+                      'native_recorder_log_arrays_exact': True, 'encoded_clock_facts': clock_facts,
                       'selected_indices': after['plan']['ks'],
-                      'qualified_difference': 'Old wrapper starts each encoded clip at zero. Generic encoded PTS retain the shared camera offset. Capture arrays and decoded selected frames remain exact.'}))
+                      'qualified_difference': 'Encoded PTS address source-message rows. Native recorder logs, presentation times and all decoded pictures remain exact.'}))
 
 
 def test_structural_pose_join_matches_literal_old_arrays(tmp_path):

@@ -121,6 +121,34 @@ def test_assumed_wrist_clock_does_not_qualify_pairing_or_jump_video(tmp_path):
     assert all("right" in capture[c]["why"] for c in capture_qc.CAMERA_MOTION_CHECKS)
 
 
+@pytest.mark.parametrize('basis', ['capture', 'mcap_log_time'])
+def test_recorder_arrival_retains_state_measurements_without_physical_video_comparison(tmp_path, basis):
+    state, left, right = two_grippers(1)
+    state[60:, 0] += .10
+    state[:, 6] = .5
+    path = write_episode(tmp_path / 'episode_000000', state,
+                         {'left': levels_for(right), 'right': levels_for(left)},
+                         source={'presentation_clock': {'basis': basis,
+                             'physical_synchronization_verified': False}})
+    pair = stream_pairing.pairing(path)
+    jump = stream_pairing.jumps(path)
+    assert any(event['step'] > 9 for event in jump['events'])
+    assert stream_pairing.grippers(path)['actors']['left']['flat'] is True
+    if basis == 'capture':
+        assert pair['crossed'] is True
+        assert any('visual_jump' in event for event in jump['events'])
+    else:
+        assert 'recorder arrival' in pair['not_assessed'].lower() and 'crossed' not in pair
+        assert all('visual_jump' not in event for event in jump['events'])
+        report = capture_qc.run_episode(path)
+        assert report['metrics']['episode']['clock'] == 'recorder arrival times'
+        checks = {check['check']: check for check in report['checks']}
+        assert checks['nonfinite_signal']['status'] == 'clear'
+        for name in capture_qc.CAMERA_MOTION_CHECKS:
+            assert checks[name]['status'] == 'not_applicable'
+            assert 'recorder arrival' in checks[name]['why'].lower()
+
+
 def test_stream_pairing_needs_two_mounted_streams(tmp_path):
     s, vL, _ = two_grippers()
     d = write_episode(tmp_path / "episode_000000", s[:, :7], {"right": levels_for(vL)})

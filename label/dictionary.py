@@ -31,7 +31,7 @@ DERIVED_CONTEXT = frozenset(("data_dictionary", "dictionary_overrides", "diction
                             "dictionary_usage", "dictionary_used", "contacts", "capture", "capture_qc", "sensor_checks",
                             "stream_pairing", "recorded_jumps", "gripper_channels", "check_versions", "checks", "reader_display",
                             "timebase_neighbours_in_upload", "timebase_neighbour_lag_frames"))
-DERIVED_CONTEXT = DERIVED_CONTEXT | {'represented_source_members'}
+DERIVED_CONTEXT = DERIVED_CONTEXT | {'represented_source_members', 'pieces'}
 
 
 def _json(value):

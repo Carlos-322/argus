@@ -664,13 +664,13 @@ def test_run_batch_caps_selection_before_dispatch_and_keeps_paid_inspection(tmp_
     args = dict(keys=['sk-or-fixture'], concurrency=1, force=False, model='openai/gpt-6-astra',
                 reasoning='medium', max_tokens=64000, timeout=1, cell_w=128)
     small = tmp_path / 'small'
-    assert harness.run_batch([ep], small, max_spend=.01, **args) == 0
+    assert harness.run_batch([ep], small, max_spend=.01, **args) == 1
     assert calls == []
     small_receipt = json.loads((small / f'noreply_{ep.name}.json').read_text())
     assert small_receipt['final_dispatch_outcome'] == 'not dispatched'
     assert small_receipt['evidence_inspection']['status'] == 'incomplete'
     paid = tmp_path / 'job' / 'run' / 'out'
-    assert harness.run_batch([ep], paid, max_spend=1.5, **args) == 0
+    assert harness.run_batch([ep], paid, max_spend=1.5, **args) == 1
     assert calls == [1]
     paid_receipt = json.loads((paid / f'noreply_{ep.name}.json').read_text())
     assert paid_receipt['evidence_inspection']['cost_usd'] == pytest.approx(.02)

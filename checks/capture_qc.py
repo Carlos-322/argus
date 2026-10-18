@@ -40,7 +40,7 @@ This module does three things around them:
 3. The command line above.
 
 Output, context["capture_qc"]:
-    {"source": "public-dataset-adapter@99d0a9e", "version": 2,
+    {"source": "public-dataset-adapter@99d0a9e", "version": 3,
      "flags": [{"check", "title", "t_s", "camera", "actor", "evidence"}],
      "notes": [{"check", "text"}],
      "not_assessed": {check: why},
@@ -67,9 +67,10 @@ from label import episode as me
 from label import frames as mf
 from label.atomic import write_atomic
 from prepare.state_notes import STATE_WHY, NOT_RECORDED, LAYOUT
+from prepare.signal_alignment import recorder_arrival
 
 SOURCE = up.SOURCE
-VERSION = 2          # the format version of context["capture_qc"]
+VERSION = 3          # the assessment version of context["capture_qc"]
 GRAY = 64
 
 # ------------------------------------------------------------------------------------------ thresholds
@@ -523,13 +524,14 @@ def assess(feats: dict) -> dict:
     ep, T, cams = feats["ep"], feats["T"], feats["cams"]
     ctx = ep["context"]
     assumed_clocks = ctx.get("camera_clock") or {}
+    arrival_clock = recorder_arrival(ctx)
     anchor = me.anchor(ep) if cams else None
     # The same frame-window eligibility as label.episode.plan, without running its sampling work here.
     state_window_ok = (anchor is not None and not ctx.get("state_unaligned")
                        and int(ep["sources"][anchor]["n_frames"]) == T
                        and all(len(km) >= T for v, km in ep["kmap"].items() if v != anchor and v in cams))
     comparison_cameras = ({v for v in cams if v not in assumed_clocks and anchor not in assumed_clocks}
-                          if state_window_ok else set())
+                          if state_window_ok and not arrival_clock else set())
     rig = me.rig(ep)
     kind = me.state_kind(ep)
     policy, extra = policy_for(rig)
@@ -1167,10 +1169,12 @@ def assess(feats: dict) -> dict:
         why = f"The recorded state is not on these cameras' frames. {ctx['state_unaligned']}"
         for c in STATE_VS_VIDEO + (("video_frozen_run",) if extra["frozen_needs_motion"] else ()):
             R[c] = _na(why)
-    if assumed_clocks or not state_window_ok:
+    if assumed_clocks or arrival_clock or not state_window_ok:
         skipped = sorted(set(cams) - comparison_cameras)
         why = ("The recorded state does not match the anchor camera's frame window."
                if not state_window_ok else
+               'State and video motion were not compared: recorder arrival timing does not establish physical synchronization.'
+               if arrival_clock else
                f"State and video motion were not compared for {', '.join(skipped)}: camera placement uses assumed presentation timing.")
         for c in CAMERA_MOTION_CHECKS + (("video_frozen_run",) if extra["frozen_needs_motion"] else ()):
             r = R.get(c)
@@ -1194,7 +1198,8 @@ def assess(feats: dict) -> dict:
         R.update({c: _errored(state_error) for c in STATE_CHECKS})
     return {"checks": R, "cameras": cam_metrics, "actors": actor_metrics,
             "episode": {"duration_s": round(duration, 2), "rig": rig, "state_kind": kind, "gripper_unit": unit,
-                        "clock": ("assumed camera presentation" if ctx.get("camera_clock") else
+                        "clock": ("recorder arrival times" if arrival_clock else
+                                  "assumed camera presentation" if ctx.get("camera_clock") else
                                   "capture times" if real_times else "frame_index / fps")}}
 
 

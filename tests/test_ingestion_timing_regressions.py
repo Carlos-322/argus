@@ -179,7 +179,8 @@ def test_uninitialized_ros_header_uses_arrival_for_display_without_losing_native
     ctx = formats.convert_mcap_generic({'file': source, 'name': 'zero', 'seconds': .2, 'topics': topics},
                                        'teleop_arms', ep, 'ROS header clocks')
     loaded = episode.load(ep)
-    assert ctx['source']['camera_clock'] == 'mixed capture and arrival stamps'
+    assert ctx['source']['camera_clock'] == 'arrival'
+    assert ctx['source']['presentation_clock']['basis'] == 'mcap_log_time'
     assert any(i['kind'] == 'capture_timestamp_invalid' and 'uninitialized' in i['what']
                for i in ctx['reader_issues'])
     assert not any(i['kind'] in ('camera_coverage_partial', 'main_camera_short') for i in ctx['reader_issues'])

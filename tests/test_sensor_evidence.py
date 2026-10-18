@@ -242,6 +242,10 @@ const roleData={camera_views:['exo','extra1','extra2'],camera_labels:['head','to
   camera_presentation:{extra1:{role:'scene'},extra2:{role:'tactile'}}};
 assert.deepEqual(api.supportingCameras(roleData).map(c=>[c.view,c.role]),[['exo','other'],['extra2','tactile']]);
 assert.equal(api.episodeCams(roleData).main,'extra1');
+const separateClock={camera_views:['exo'], unshown_cameras:[{view:'unshown1',clock_alignment:'unverified'}],
+  camera_presentation:{unshown1:{role:'scene'}}};
+assert.equal(api.episodeCams(separateClock).main,'exo','an unrelated clock must not drive the labelled timeline');
+assert.equal(api.supportingCameras(separateClock)[0].view,'unshown1','retain its independently playable camera');
 const generic={camera_views:['exo','left','right'],camera_presentation:{exo:{role:'sensor'},left:{role:'scene'},right:{role:'tactile'}}};
 assert.equal(api.episodeCams(generic).main,'left');
 assert.deepEqual(api.supportingCameras(generic).map(c=>c.role),['sensor','tactile']);

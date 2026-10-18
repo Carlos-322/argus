@@ -32,7 +32,7 @@ def rebind(record: dict) -> None:
         return json.dumps(fields, sort_keys=True, separators=(',', ':'), allow_nan=False)
     reviewed = {}
     for doc in (record.get('sensor_evidence') or {}, record.get('evidence_inspection') or {}):
-        for finding in [*doc.get('findings', []), *doc.get('untimed_findings', [])]:
+        for finding in [*doc.get('findings', []), *doc.get('untimed_findings', []), *doc.get('withheld_findings', [])]:
             if isinstance(finding, dict) and finding.get('review_status') is not None:
                 reviewed[finding_key(finding)] = finding['review_status']
     def retain_reviews(findings):
@@ -91,6 +91,48 @@ def rebind(record: dict) -> None:
     evidence['provenance'] = provenance
 
 
+def refresh_received(record: dict) -> dict:
+    """Regrade a compatible raw reply, retaining human decisions and financial fields."""
+    raw = record.get('response_text')
+    if not isinstance(raw, str):
+        raise ValueError('saved reply has no complete retained response text')
+    updated = copy.deepcopy(record)
+    labels, ok = harness.parse_response(raw)
+    if '_reparsed' in (record.get('labels') or {}):
+        labels['_reparsed'] = copy.deepcopy(record['labels']['_reparsed'])
+    updated.update(labels=labels, parse_ok=ok)
+    if ok:
+        if 'camera_observations' not in labels:
+            updated.pop('camera_observations', None)
+        rebind(updated)
+        for name in ('sensor_evidence', 'camera_observations'):
+            if isinstance(updated.get(name), dict) and isinstance(record.get(name), dict):
+                if 'provenance' in record[name]:
+                    updated[name]['provenance'] = copy.deepcopy(record[name]['provenance'])
+                else:
+                    updated[name].pop('provenance', None)
+    else:
+        updated.pop('camera_observations', None)
+        for name, fields in (('sensor_evidence', ('findings',)), ('evidence_inspection', ('untimed_findings',))):
+            if isinstance(updated.get(name), dict):
+                for field in fields:
+                    updated[name].setdefault('withheld_findings', []).extend(updated[name].get(field) or [])
+                    updated[name][field] = []
+    return updated
+
+
+def save_annotation(out: Path, name: str, path: Path, record: dict) -> None:
+    """Repair selected reply authority without replacing a newer billing ledger."""
+    if record.get('_authority_history_index') is not None:
+        ledger = harness.billing_record(out, name)
+        invoice = ledger[1]['final_cost_history'][record['_authority_history_index']]
+        invoice.update({key: value for key, value in record.items()
+                        if key not in ('_billing_receipt', '_authority_history_index')})
+        write_atomic(ledger[0], ledger[1])
+    else:
+        write_atomic(path, {key: value for key, value in record.items() if key != '_billing_receipt'})
+
+
 def reparse(run: Path) -> dict:
     run = Path(run)
     if not (run / 'run.json').is_file() or not (run / 'out').is_dir():
@@ -109,7 +151,8 @@ def _reparse(run: Path) -> dict:
         if selected is None:
             continue
         p, r = selected
-        if r.get('final_dispatch_outcome') in ('claimed', 'unverified', 'not dispatched'):
+        if r.get('final_dispatch_outcome') in ('claimed', 'unverified', 'not dispatched') and not (
+                r.get('response') is not None or r.get('response_text') is not None):
             continue
         raw = (r.get("labels") or {}).get("_raw") or r.get('response_text')
         if r.get("parse_ok") or not raw:
@@ -127,16 +170,7 @@ def _reparse(run: Path) -> dict:
         labels["_reparsed"] = {"was": previous_labels.get("_parse_error"), "code": code}
         r["labels"], r["parse_ok"] = labels, True
         rebind(r)
-        if r.get('_authority_history_index') is not None:
-            # Repair the retained received attempt without replacing its newer financial ledger.
-            history = ledger[1]['final_cost_history']
-            invoice = history[r['_authority_history_index']]
-            invoice.update({key: value for key, value in r.items()
-                            if key not in ('_billing_receipt', '_authority_history_index')})
-            write_atomic(ledger[0], ledger[1])
-        else:
-            r.pop('_billing_receipt', None)
-            write_atomic(p, r)
+        save_annotation(out, name, p, r)
         done.append({"episode": p.stem, "was": labels["_reparsed"]["was"]})
     rj = run / "run.json"
     meta = json.loads(rj.read_text())

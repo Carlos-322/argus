@@ -391,7 +391,7 @@ def write_pieces(ep_dir: Path, pieces_root: Path) -> list[Path]:
     return out
 
 
-def write_units(job: Path, eps: Path) -> dict:
+def write_units(job: Path, eps: Path, *, refresh_unpaid_interpretation=False) -> dict:
     """The requests to send for a folder of prepared episodes: short episodes as they are, long recordings as their
     parts. job/units holds one link per request so one labelling run covers both, and job/pieces the parts.
     Returns {long episode: [its part folders' names]}."""
@@ -403,7 +403,7 @@ def write_units(job: Path, eps: Path) -> dict:
     long_eps = {}
     for d in sorted(Path(eps).glob("episode_*")):
         if needs_pieces(d):
-            parts = _write_or_reuse(d, proot)
+            parts = _write_or_reuse(d, proot, refresh_unpaid_interpretation=refresh_unpaid_interpretation)
             long_eps[d.name] = [p.name for p in parts]
             for p in parts:
                 (units / p.name).symlink_to(p.resolve())
@@ -412,7 +412,7 @@ def write_units(job: Path, eps: Path) -> dict:
     return long_eps
 
 
-def _write_or_reuse(d: Path, proot: Path) -> list[Path]:
+def _write_or_reuse(d: Path, proot: Path, *, refresh_unpaid_interpretation=False) -> list[Path]:
     from label.evidence_access import same_source_proof, source_proof
     ctx = json.loads((d / "context.json").read_text())
     names = (ctx.get("pieces") or {}).get("parts") or []
@@ -429,6 +429,22 @@ def _write_or_reuse(d: Path, proot: Path) -> list[Path]:
         except (OSError, ValueError):
             raise RuntimeError(f"{d.name}: existing pieces have no verifiable source proof; use an explicit fresh job")
         if not same_source_proof(saved, ctx, d):
+            from label.harness import billing_record, has_dispatch_receipt
+            from label.evidence_access import equivalent_source_proof
+            current = source_proof(ctx, d)
+            unchanged_sources = equivalent_source_proof(
+                [row for row in saved if row['name'] != 'prepared:context.json'],
+                [row for row in current if row['name'] != 'prepared:context.json'])
+            out = proot.parent / 'run' / 'out'
+            receipts = [billing_record(out, name + '.json') for name in names]
+            if (refresh_unpaid_interpretation and unchanged_sources
+                    and not any(receipt and has_dispatch_receipt(receipt[1]) for receipt in receipts)):
+                # Review verified the preparation before applying dictionary overlays.
+                # No request used these parts, so rebuild their derived interpretation.
+                parts = write_pieces(d, proot)
+                ctx = json.loads((d / 'context.json').read_text())
+                write_atomic(proof_path, source_proof(ctx, d))
+                return parts
             raise RuntimeError(f"{d.name}: prepared source changed since pieces were cut; use an explicit fresh job")
         if not all((proot / n / "context.json").exists() for n in names):
             raise RuntimeError(f"{d.name}: a saved piece is missing; use an explicit fresh job")
@@ -531,7 +547,9 @@ def _carry_part_billing(result: dict, parts: list) -> None:
                 cost = auxiliary_cost(value, routing=kind == 'route')
                 if cost:
                     auxiliary.append({**copy.deepcopy(value), 'kind': kind, 'part': part,
-                                      'cost_usd': cost, 'previously_billed_usd': 0.0})
+                                      'cost_usd': cost, 'previously_billed_usd': 0.0,
+                                      'rounds_cost_offset_usd': float(value.get('rounds_cost_offset_usd') or 0)
+                                          + max(0.0, float(value.get('cost_usd', 0)) - cost)})
                     auxiliary[-1].pop('previously_billed', None)
         result['final_cost_history'], result['auxiliary_cost_history'] = final, auxiliary
         result['usage']['est_cost_usd'] = 0.0

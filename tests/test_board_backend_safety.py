@@ -181,31 +181,43 @@ def test_hand_pose_full_exits_nonzero_for_failed_episode(tmp_path):
 
 
 def test_subsecond_footage_replacement_gets_a_new_clip(tmp_path, monkeypatch):
-    import subprocess
-    from board import clips
+    import av
+    import numpy as np
+    def write_color(path, color):
+        with av.open(str(path), 'w') as container:
+            stream = container.add_stream('libx264', rate=30)
+            stream.width = stream.height = 32
+            stream.pix_fmt = 'yuv420p'
+            for _ in range(6):
+                frame = av.VideoFrame.from_ndarray(np.full((32, 32, 3), color, np.uint8), format='rgb24')
+                for packet in stream.encode(frame):
+                    container.mux(packet)
+            for packet in stream.encode():
+                container.mux(packet)
     source = tmp_path / 'clips/episode_x.mp4'
     source.parent.mkdir()
-    source.write_bytes(b'old')
+    write_color(source, (240, 0, 0))
     qa = tmp_path / 'qa'
     qa.mkdir()
     monkeypatch.setattr(serve, 'HERE', qa)
     monkeypatch.setattr(serve, 'MP4_DIR', source.parent)
     monkeypatch.setattr(serve, 'FOOTAGE_DIR', tmp_path / 'footage')
     monkeypatch.setattr(serve, 'FFMPEG', 'ffmpeg')
-    monkeypatch.setattr(serve, '_probe', lambda p: (16, 16, 1, 30))
-    monkeypatch.setattr(clips, 'frame_lengths', lambda p: None)
     calls = []
+    original = serve._run_footage
     def encode(cmd, **kwargs):
         calls.append(cmd)
-        Path(cmd[-1]).write_bytes(source.read_bytes())
-        return subprocess.CompletedProcess(cmd, 0, '', '')
+        return original(cmd, **kwargs)
     monkeypatch.setattr(serve, '_run_footage', encode)
     first, _ = serve.footage('episode_x')
     timestamp = source.stat().st_mtime_ns
-    source.write_bytes(b'new')
+    write_color(source, (0, 0, 240))
     os.utime(source, ns=(timestamp, timestamp + 1))
     second, _ = serve.footage('episode_x')
-    assert first != second and second.read_bytes() == b'new'
+    assert first != second
+    with av.open(str(second)) as container:
+        pixels = next(container.decode(video=0)).to_ndarray(format='rgb24').mean(axis=(0, 1))
+    assert pixels[2] > 200 and pixels[0] < 20
     assert len(calls) == 2 and not serve._FOOTAGE_LOCKS
 
 
@@ -228,7 +240,7 @@ def test_review_records_label_failure_atomically(tmp_path, monkeypatch, failure)
     monkeypatch.setattr(dictionary_stage, 'label_spend_complete', lambda *args: True)
     monkeypatch.setattr(clips, 'set_aside_failed', lambda *args: [])
     monkeypatch.setattr(clips, 'note_camera_problems', lambda *args: None)
-    monkeypatch.setattr(pieces, 'write_units', lambda *args: [])
+    monkeypatch.setattr(pieces, 'write_units', lambda *args, **kwargs: [])
     def stitch(*args):
         assert json.loads((job / 'run/run.json').read_text())['status'] == 'running'
         if failure == 'stitch':

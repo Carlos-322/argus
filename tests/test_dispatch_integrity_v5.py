@@ -41,7 +41,7 @@ def test_run_fractional_cent_cap_reaches_real_harness_without_rounding(tmp_path,
     def finish(folder, info, command, slice_dir, mode):
         commands.append(command)
         monkeypatch.setattr(sys, 'argv', command[2:])
-        assert harness.main() == 0
+        assert harness.main() == 1
     monkeypatch.setattr(run, 'finish', finish)
     monkeypatch.setattr(sys, 'argv', ['label', '--dataset', 'fixture', '--episodes', str(tmp_path),
         '--kind', 'full', '--cap', '.004', '--runs', str(tmp_path / 'runs'), '--', '--cell-w', '128', '--max-tokens', '100'])
@@ -254,7 +254,11 @@ def test_stitch_keeps_paid_history_and_unknown_reservations(tmp_path, monkeypatc
     pieces.stitch_run(job, ep.parent, {ep.name: [p.name for p in parts]}, final)
     assert output_spend(final) == pytest.approx(expected)
     assert output_spend_complete(final) is (not prior_unknown)
-    assert metrics.read_output(final / (ep.name + '.json'))['cost'] == pytest.approx(expected, abs=1e-6)
+    report = metrics.read_output(final / (ep.name + '.json'))
+    assert report['cost_complete'] is (not prior_unknown)
+    assert report['billed_usd'] + report['reserved_usd'] == pytest.approx(expected, abs=1e-6)
+    assert report['reserved_usd'] > 0 if prior_unknown else report['reserved_usd'] == 0
+    assert report['cost'] is None if prior_unknown else report['cost'] == pytest.approx(expected, abs=1e-6)
 
 
 def test_malformed_contact_and_task_objects_do_not_abort_stitch(tmp_path, monkeypatch):

@@ -87,6 +87,7 @@ def extract_frames(packed: str | Path, base_s: float, n_frames: int, ks: list[in
         s.codec_context.thread_count = 1
         step = frame_pts_step(s.time_base, fps) if pts is None else None
         dec, last_k, seek_cost = None, None, []
+        reference_damaged = False
         for k in ks:
             target = int(pts[k]) if pts is not None else (b0 + k) * step
             # Seek to the keyframe at or before the target, then decode forward to the frame whose
@@ -97,14 +98,20 @@ def extract_frames(packed: str | Path, base_s: float, n_frames: int, ks: list[in
             if not forward:
                 c.seek(target, stream=s, backward=True, any_frame=False)
                 dec = c.decode(s)
+                reference_damaged = False
             n = 0
             for fr in dec:
                 n += 1
+                # Inspect every decoded dependency, including pictures preceding the requested target.
+                if fr.key_frame:
+                    reference_damaged = False
+                if fr.is_corrupt:
+                    reference_damaged = True
                 if fr.pts is None or fr.pts < target:
                     continue
                 if fr.pts != target:
                     raise FrameError(f"frame {k}: expected pts {target}, decoder gave {fr.pts} ({packed})")
-                if fr.is_corrupt:
+                if reference_damaged:
                     raise DamagedFrame(f"frame {k}: the decoder marks it damaged ({packed})")
                 im = upright(fr, geom)
                 out[k] = keep(k, im) if keep is not None else im

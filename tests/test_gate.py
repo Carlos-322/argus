@@ -72,7 +72,7 @@ def _episode(tmp_path, name, seconds=60.0):
 
 def _out(run, name, ep, labels=None, cost=0.5, cached=0, parse_ok=True, route_cost=0.0):
     (run / "out").mkdir(parents=True, exist_ok=True)
-    rec = {"episode_dir": str(ep), "parse_ok": parse_ok, "labels": labels or {},
+    rec = {"episode_dir": str(ep), "model": score.DEFAULT_MODEL, "parse_ok": parse_ok, "labels": labels or {},
            "usage": {"est_cost_usd": cost, "cached_tokens": cached},
            "config": {"resolution_route": {"routed": True, "cost_usd": route_cost}}}
     (run / "out" / f"{name}.json").write_text(json.dumps(rec))

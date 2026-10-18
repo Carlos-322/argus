@@ -131,7 +131,23 @@ def prepare(job: Path, eps: Path, ids: list[str], *, free: bool, cap: float,
     bound = prior.get('projected_upper_usd', 0.0)
     if not isinstance(bound, (int, float)) or isinstance(bound, bool) or not math.isfinite(bound) or bound < 0:
         bound = 0.0
-    saved_labels = any((job / 'run' / 'out').glob('*episode_*.json'))
+    # Unpaid refusals have no interpretation to preserve. Unknown or received
+    # dispatches, including auxiliary calls, must retain their original inputs.
+    saved_labels = False
+    out = job / 'run' / 'out'
+    for path in out.glob('*episode_*.json'):
+        if path.name.startswith('stale_'):
+            continue
+        try:
+            record = json.loads(path.read_text())
+            if record.get('dry_run'):
+                continue
+            if harness.has_dispatch_receipt(record):
+                saved_labels = True
+                break
+        except (OSError, ValueError, TypeError, AttributeError):
+            saved_labels = True
+            break
     result = {'status': 'skipped', 'cost_usd': 0.0, 'attempted': False, 'limitations': []}
     try:
         if saved_labels:

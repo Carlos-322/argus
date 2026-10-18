@@ -360,3 +360,35 @@ def test_unknown_severity_is_not_minor_in_family_or_live_and_static_rail(tmp_pat
         assert row['n_unrated_' + suffix] == 1
         assert not row['families']
         assert row['unrated_families']
+
+
+@pytest.mark.parametrize('text,wanted', [
+    ('The exo view appears to be frozen.', 'camera-image'),
+    ('The wrist feed seems to be corrupted.', 'camera-image'),
+    ('Glare never clears during the placement.', 'low-light'),
+    ('Frozen frame is not present in any view.', 'd:Camera fault'),
+    ('The footage is free of glare.', 'd:Camera fault'),
+    ('No task progress while the image is frozen.', 'camera-image'),
+    ('Initially looks like occlusion but it is not. The image is frozen.', 'camera-image'),
+])
+def test_legacy_camera_family_uses_asserted_problem_not_hedge_or_remedy(text, wanted):
+    issue = {'category': 'camera_fault', 'severity': 'high', 'issue': text}
+    assert Families().family_of('data_issues', issue) == wanted
+
+
+@pytest.mark.parametrize('problem', ['Anonymization', 'Overexposure', 'Occlusion', 'Corruption', 'Streaking'])
+@pytest.mark.parametrize('predicate', ['is not present', 'was not observed', 'absent throughout'])
+def test_partial_word_family_patterns_still_respect_denied_predicates(problem, predicate):
+    issue = {'category': 'camera_fault', 'severity': 'high',
+             'issue': 'The camera is slightly out of focus.', 'evidence': f'{problem} {predicate}'}
+    assert Families().family_of('data_issues', issue) == 'd:Camera fault'
+
+
+@pytest.mark.parametrize('text,wanted', [
+    ('Glare? No.', 'd:Camera fault'),
+    ('The view is not without glare.', 'low-light'),
+    ('Washed-out highlights are not present.', 'd:Camera fault'),
+    ('Rotated camera is not present.', 'd:Camera fault'),
+])
+def test_legacy_family_keeps_question_answers_and_presence_predicates_together(text, wanted):
+    assert Families().family_of('data_issues', {'category': 'camera_fault', 'issue': text}) == wanted

@@ -77,3 +77,37 @@ def test_published_cases_accept_explicit_word_variants_without_substring_matches
     assert not score.judge(cards, {'task_summary': 'Move a cardboard box.'})[0]
     sewing = score.case_for('episode_factory_042_worker_061_0059', cases)
     assert score.judge(sewing, {'tasks': [{'task': 'Sewing the fabric panels.'}]})[0]
+
+
+@pytest.mark.parametrize('outcome,cost,hold,measured,complete', [
+    ('received', .02, 0, 1, True),
+    ('unverified', None, .8, 0, False),
+    ('not dispatched', None, 0, 0, True),
+])
+def test_cost_sample_excludes_unreceived_and_unverified_calls(tmp_path, monkeypatch,
+                                                            outcome, cost, hold, measured, complete):
+    ep = tmp_path / 'episode_x'; ep.mkdir()
+    (ep / 'context.json').write_text('{"duration_s": 60}')
+    run = tmp_path / 'run'; (run / 'out').mkdir(parents=True)
+    record = {'episode_dir': str(ep), 'final_dispatch_outcome': outcome,
+              'parse_ok': outcome == 'received', 'labels': {},
+              'final_reserved_usd': hold, 'usage': {'est_cost_usd': cost},
+              'evidence_inspection': {'cost_usd': .003} if outcome != 'not dispatched' else {}}
+    (run / 'out' / ('episode_x.json' if measured else 'noreply_episode_x.json')).write_text(json.dumps(record))
+    monkeypatch.setattr(score, 'load_cases', lambda: {})
+    monkeypatch.setattr(score, 'load_selection', lambda: {'ego': [{'name': 'episode_x', 'role': 'cost:fixture'}]})
+    result = score.score([run])['ego']['cost_sample']
+    assert result['episodes'] == measured
+    assert result['cost_complete'] is complete
+    assert result['reserved_usd'] == pytest.approx(hold)
+    assert result['billed_usd'] == pytest.approx((cost or 0) + (.003 if outcome != 'not dispatched' else 0))
+    if not measured:
+        assert result['billed_per_hour'] is None and result['cold_per_hour'] is None
+
+
+def test_scoring_unrelated_run_does_not_report_empty_success(tmp_path, monkeypatch):
+    import sys
+    monkeypatch.setattr(sys, 'argv', ['gate score', str(tmp_path)])
+    with pytest.raises(SystemExit) as error:
+        score.main()
+    assert error.value.code == 2

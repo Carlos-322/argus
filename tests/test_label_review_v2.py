@@ -387,7 +387,7 @@ def test_quote_handles_published_opus_fee_shape_without_inventing_surcharges(tmp
     monkeypatch.setattr(harness.urllib.request, 'urlopen', provider)
     out = tmp_path / 'out'
     assert harness.run_batch([ep], out, keys=['sk-or-test'], concurrency=1, force=False,
-        model=model, reasoning='medium', max_tokens=64000, timeout=1, cell_w=128, max_spend=cap) == 0
+        model=model, reasoning='medium', max_tokens=64000, timeout=1, cell_w=128, max_spend=cap) == (1 if cap < 5.28 else 0)
     if cap == 2.:
         assert sent == ['GET']
         result = json.loads((out / ('noreply_' + ep.name + '.json')).read_text())
@@ -477,7 +477,7 @@ def test_budget_increase_resumes_undispatched_selection(tmp_path, monkeypatch, i
     out = tmp_path / 'out'
     args = dict(keys=['sk-or-test'], concurrency=1, force=False, model='custom/model',
                 reasoning='medium', max_tokens=100, timeout=1, cell_w=128)
-    assert harness.run_batch([ep], out, max_spend=initial_cap, **args) == 0
+    assert harness.run_batch([ep], out, max_spend=initial_cap, **args) == 1
     cache = out / '.evidence' / (ep.name + '.json.inspection.json')
     paused = json.loads(cache.read_text())
     assert paused['rounds'] == [] and paused['cost_usd'] == 0 and sent == []

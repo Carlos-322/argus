@@ -2447,7 +2447,7 @@ function mediaKey(cam) {
 }
 // web copy of one camera's clip; cam is the value the page asks /api/video for (left, right, or the top camera)
 function videoSrc(eidEnc, cam) {
-  if (!STATIC) return 'api/video?id=' + eidEnc + '&cam=' + cam;
+  if (!STATIC) return 'api/video?id=' + eidEnc + '&cam=' + cam + '&v=' + encodeURIComponent(BOARD._mediaLoadVersion || '');
   const rec = ALL_EPS.find(e => e.file === _activeFile) || {};
   return BOARD.media + ((rec._media || {})[mediaKey(cam)] || '');
 }
@@ -2474,7 +2474,7 @@ function markTallGoalFrames() {
 }
 function frameSrc(eidEnc, cam, t) { return frameSrcOf(_activeFile, eidEnc, cam, t); }
 function frameSrcOf(file, eidEnc, cam, t) {
-  if (!STATIC) return `api/frame?id=${eidEnc}&cam=${encodeURIComponent(cam)}&t=${encodeURIComponent(t)}&w=640`;
+  if (!STATIC) return `api/frame?id=${eidEnc}&cam=${encodeURIComponent(cam)}&t=${encodeURIComponent(t)}&w=640&v=${encodeURIComponent(BOARD._mediaLoadVersion || '')}`;
   const rec = ALL_EPS.find(e => e.file === file) || {};
   return BOARD.media + ((rec._frames || {})[mediaKey(cam) + '|'
     + Math.round(Number(t) * 1000)] || '');
@@ -2483,7 +2483,7 @@ function frameSrcOf(file, eidEnc, cam, t) {
 // and the side cells' (a head camera is shown alone)
 function episodeCams(d) {
   const views = (d.camera_views && d.camera_views.length) ? d.camera_views : d._rig === 'ego_head' ? ['exo'] : ['exo', 'left', 'right'];
-  const candidates = [...new Set([...views, ...unshownCams(d).map(c => c.view)])];
+  const candidates = [...new Set([...views, ...unshownCams(d).filter(c => c.clock_alignment !== 'unverified').map(c => c.view)])];
   const verifiedScene = candidates.find(view => (d.camera_presentation || {})[view]?.role === 'scene');
   const main = verifiedScene || (views.includes('exo') ? 'exo' : views[0]);
   return {views, main, side: views.filter(view => view !== main)};
@@ -2793,8 +2793,8 @@ function unshownCams(d) {
 function unshownCellsHtml(d, eidEnc, kept) {
   return unshownCams(d).map(u => `
         <div class="cam-cell cam-wrist cam-unshown${['sensor', 'tactile'].includes(cameraPresentation(d, u.view, u.name)) ? ' cam-tactile' : ''}">
-          <span class="cam-label">${esc(u.name || u.view)}, not shown to the model</span>
-          <video id="video-${esc(u.view)}" preload="auto" muted playsinline${kept ? ''
+          <span class="cam-label">${esc(u.name || u.view)}, not shown to the model${u.clock_alignment === 'unverified' ? '; independent clock' : ''}</span>
+          <video id="video-${esc(u.view)}"${u.clock_alignment === 'unverified' ? ' data-unsynced="true" controls' : ''} preload="auto" muted playsinline${kept ? ''
             : ` src="${esc(videoSrc(eidEnc, u.view))}"${posterAttr(eidEnc, u.view)}`} `
             + `onloadedmetadata="this.currentTime=0.03"></video>
         </div>`).join('');
@@ -2805,7 +2805,8 @@ function unshownNote(d) {
   const each = us.map(u => `${esc(u.name || u.view)}${u.why ? ` (${esc(u.why)})` : ''}`);
   const list = each.length > 1 ? `${each.slice(0, -1).join(', ')} and ${each[each.length - 1]}` : each[0];
   return `<p class="unshown-note">The model was not shown ${us.length === 1 ? 'the camera' : 'the cameras'} ${list}. `
-    + `${us.length === 1 ? 'It plays' : 'They play'} here so every camera of the upload can be watched.</p>`;
+    + `${us.length === 1 ? 'It plays' : 'They play'} here so every camera of the upload can be watched.`
+    + (us.some(u => u.clock_alignment === 'unverified') ? ' Independent-clock cameras have separate controls and are excluded from synchronized downloads.' : '') + '</p>';
 }
 // next to a session's success count: how many parts of a long recording have no labels (label/pieces.py stitch_run)
 function partsGapHtml(d) {
@@ -3182,11 +3183,11 @@ function checksSection(d) {
       ['touch_not_seen', 'Contacts the frames show no touch at', ran],
       ['hand_mismatch', 'Contacts seen on the other hand', ran],
       ['contact_missing', 'Grasps no recorded contact covers', ran]]
-      .map(([k, name, run]) => ({name, st: ev[k] ? 'note' : run ? 'clear' : 'na', text: (ev[k] || []).map(asWritten)
-        .join(' ')}))
+      .map(([k, name, run]) => ({name, st: (tc.not_assessed || {})[k] ? 'na' : ev[k] ? 'note' : run ? 'clear' : 'na',
+        text: (tc.not_assessed || {})[k] ? asWritten(tc.not_assessed[k]) : (ev[k] || []).map(asWritten).join(' ')}))
       .concat(Object.keys(ev).filter(k => !['clock_offset', 'touch_not_seen', 'hand_mismatch', 'contact_missing']
         .includes(k)).map(k => ({name: k.replace(/_/g, ' '), st: 'note', text: ev[k].map(asWritten).join(' ')})))
-      .filter(r => r.st !== 'na');
+      .filter(r => r.st !== 'na' || r.text);
     // contacts placed from both starts are not judged for timing (checks/contacts.py placed_from_both_starts)
     const placed = Array.isArray(tc.placed_from_both_starts) ? tc.placed_from_both_starts : [];
     if (placed.length) all.push({name: 'Contacts placed from both starts', st: 'na', text: `${placed.length === 1
@@ -3199,6 +3200,7 @@ function checksSection(d) {
       `Contacts ${cameraPlaced.join(', ')} use assumed camera presentation times. They are not used to judge `
       + "the touch sensor's clock or whether the frames show touch."});
     for (const [field, by] of [['placed_within_stamp_intervals', 'coarse clock'],
+      ['placed_on_recorder_arrival_clock', 'recorder arrival'],
       ['placed_row_per_frame', 'row per frame'], ['placed_with_unspecified_alignment', 'unknown']]) {
       const ids = Array.isArray(tc[field]) ? tc[field] : [];
       if (ids.length) all.push({name: 'Contacts ' + placementText(by), st: 'na', text:
@@ -4130,6 +4132,7 @@ function placementText(by) {
   const text = {'row per frame': 'placed one row per frame as an assumption',
     'assumed start': 'placed from both starts',
     'coarse clock': 'placed within each stamp interval as an assumption',
+    'recorder arrival': 'placed on the recorder arrival clock; physical synchronization is unverified',
     'assumed camera clock': 'placed on the assumed camera clock'};
   return by ? (Object.hasOwn(text, by) ? text[by] : 'placed using an unspecified alignment assumption') : '';
 }
@@ -6044,6 +6047,10 @@ function renderEp(d, opts) {
       + `${tickLabel(t)}</div>`;
   }
 
+  if (!STATIC && !keep) {
+    BOARD._mediaLoadCounter = (BOARD._mediaLoadCounter || 0) + 1;
+    BOARD._mediaLoadVersion = Date.now().toString(36) + '-' + BOARD._mediaLoadCounter;
+  }
   const eidEnc = encodeURIComponent(meta.episode_id || '');
   // cameras this episode actually has (FastUMI: grippers only, no top camera). The main player shows
   // the top camera when there is one, else the first gripper camera; side cells show the rest.
@@ -6588,7 +6595,7 @@ function renderEp(d, opts) {
   // Hard-resync after each scrub to fight drift introduced by separate
   // video elements decoding at slightly different rates.
   // every camera beside the main one follows it: the two mounted cameras and any others
-  const slaves = [...document.querySelectorAll('.cam-cell.cam-wrist video:not(.dp-vid)')];
+  const slaves = [...document.querySelectorAll('.cam-cell.cam-wrist video:not(.dp-vid):not([data-unsynced])')];
   const SYNC_TOL = 0.10;  // seconds; tighter than this won't reseek
   function syncSlavesNow() {
     if (!vid) return;
@@ -7437,8 +7444,12 @@ async function setLabeller(key, opts) {
   opts = opts || {};
   key = key && cmpModel(key) ? key : null;
   lbOpen(false);
-  if (key === BY) return;
   const tok = ++_lbToken, main = document.querySelector('main');
+  if (key === BY) {
+    document.body.classList.remove('lb-swap');
+    main.classList.remove('src-fade', 'ep-fade');
+    return;
+  }
   const stays = !key || cmpHas(key, _activeFile);
   document.body.classList.add('lb-swap'); main.classList.add('src-fade'); main.classList.toggle('ep-fade', !stays);
   const [list] = await Promise.all([key ? loadCmpList(key) : null, sleep(170)]);
