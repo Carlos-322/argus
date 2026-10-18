@@ -1057,3 +1057,75 @@ def test_a_value_with_no_reading_reads_its_rest_as_zero_without_a_warning():
         warnings.simplefilter("error")
         rb, rs = sg.resting_level(big), sg.resting_level(small)
     assert rb[6] == 0.0 and rb[0] == 3072.0 and rs.tolist() == [0.0, 0.0]
+
+
+def _two_contacts(f: float, n: int = 240, from_start: bool = False) -> list[tuple[int, int]]:
+    """Two contacts covering a share f of n frames, with the rest before, between and after them (none before the
+    first when from_start), the gap between them kept over the 0.15 s that joins two contacts."""
+    loaded = int(round(f * n))
+    gaps = n - loaded
+    mid = max(gaps // 3, 6)
+    first = 0 if from_start else (gaps - mid) // 2
+    a = (first, first + loaded // 2 - 1)
+    b = (a[1] + 1 + mid, a[1] + mid + loaded - loaded // 2)
+    return [a, b]
+
+
+@pytest.mark.parametrize("kind", ["force", "negative force", "raw falling", "flag", "whole pad"])
+def test_contacts_do_not_depend_on_how_long_a_sensor_is_loaded(kind):
+    """Which end a sensor rests at is read from where the recording starts and ends, then from zero, never from how
+    long it sits there: a sensor loaded through 5% to 95% of a recording times its contacts within a frame. A force
+    loaded through more than half of it used to take its loaded level as rest and report every contact inverted."""
+    rng = np.random.default_rng(0)
+    t = np.arange(240) / 30
+    for f in np.arange(0.05, 0.96, 0.05):
+        spans = _two_contacts(f)
+        base, step, name, meta = {
+            "force": (rng.normal(0, 0.05, (240, 1)), 5.0, "right_fingertip_force", {}),
+            "negative force": (rng.normal(0, 0.05, (240, 1)), -5.0, "right_fingertip_force", {}),
+            "raw falling": (3072 + rng.normal(0, 2, (240, 1)), -900.0, "right_fingertip_pressure", {}),
+            "flag": (np.zeros((240, 1)), 1.0, "right_contact", {}),
+            "whole pad": (rng.normal(0, 2, (240, 16)), 400.0, "right_pressure", {"right_pressure": {"shape": [4, 4]}}),
+        }[kind]
+        a = base.copy()
+        for k0, k1 in spans:
+            a[k0:k1 + 1] += step
+        got = [(c["start_s"], c["end_s"]) for c in lc.find({name: a}, meta, t)]
+        want = [(k0 / 30, k1 / 30) for k0, k1 in spans]
+        assert len(got) == 2 and np.allclose(got, want, atol=1 / 30 + 1e-9), (kind, f, got, want)
+
+
+def test_an_upload_rest_reads_each_episodes_start_and_end():
+    """prepare measures rest across an upload's episodes joined (measure_signal_scales): which end is rest comes from
+    where each episode starts and ends, so it holds when every episode is loaded most of the time and when some start
+    mid-grasp."""
+    rng = np.random.default_rng(1)
+    arrs = []
+    for e in range(5):
+        a = 3072 + rng.normal(0, 2, (240, 1))
+        for k0, k1 in _two_contacts(0.8, from_start=e < 2):
+            a[k0:k1 + 1] -= 900
+        arrs.append(a)
+    joined = np.concatenate(arrs)
+    rest = sg.resting_level(joined, ends=sg.recording_ends(arrs))
+    assert abs(rest[0] - 3072) < 10
+    assert abs(sg.resting_level(arrs[2])[0] - 3072) < 10        # one episode alone, at rest at both ends
+
+
+def test_an_infinite_reading_is_no_reading():
+    """An infinite value counts as no reading, as a NaN does: it is never the largest activity of the episode or the
+    rest of a value, and reading it warns of nothing."""
+    import warnings
+    a = np.random.default_rng(2).normal(0, 0.05, (240, 1))
+    a[60:90] += 5.0
+    a[150] = np.inf
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        act = sg.activity(a)
+        rest = sg.resting_level(a)
+        rows = sg.summary_rows("right_pressure", np.repeat(a, 16, axis=1), [0, 150, 160], shape=[4, 4])
+    assert np.isnan(act[150]) and np.isfinite(rest).all() and abs(rest[0]) < 0.5
+    assert [(c["start_s"], c["end_s"]) for c in lc.find({"right_fingertip_force": a}, {}, np.arange(240) / 30)] \
+        == [(2.0, round(89 / 30, 3))]
+    assert all(v in ("-",) or np.isfinite(float(v)) for _, vals in rows for v in vals)
+
