@@ -14,13 +14,16 @@ grammar English uses to deny something, so a new wording of an old form needs no
     never an issue"). Any other negated predicate leaves its subject asserted: "glare never clears" and "the
     occlusion is not removed until 9 s" say the problem lasted. A negated remedy asserts what it would have ended
     ("never turned back", "does not fix the upside-down camera");
-  - two negations cancel ("not without glare");
+  - two negations cancel ("not without glare"), and a negative prefix denies the rest of its word ("unobstructed");
+  - what is withdrawn or only looked for is not asserted ("retracting the occlusion flag", "checked for occlusion
+    and rotation"), nor is a name judged wrong ("it would be inaccurate to call this overexposed");
   - a question asserts nothing unless the next sentence answers it ("Frozen? Yes, at 4 s"); a label is denied by a
-    bare negative ("Occlusion: none"), and a negative label denies the bare list it introduces ("Absent: glare,
-    occlusion");
+    bare negative or a count of zero ("Occlusion: none", "Dropout - no", "Glare: 0"), and a negative or searching
+    label denies the bare list it introduces ("Absent: glare, occlusion", "Checked: glare, freezing"); a bare
+    denial that points back denies the sentence before it ("Earlier I wrote the lens was covered. It never was.");
   - an impression that is then corrected is retracted ("looks like glare, actually a white tablecloth", "seems frozen
-    but it isn't", "what looks like glare is a white plate", "resembles a black frame, but it is a shadow"); a hedge
-    on its own still asserts ("appears to be frozen");
+    but it isn't", "what looks like glare is a white plate", "resembles a black frame, but it is a shadow", "I took
+    it for glare; on a closer look it is paper"); a hedge on its own still asserts ("appears to be frozen");
   - a condition ("if glare hits the plate") asserts nothing.
 
 Scope never crosses a clause: a sentence boundary, a subordinating or contrasting conjunction ("because", "while",
@@ -29,10 +32,11 @@ visible because the view is frozen") never reaches the problem.
 
 The word lists below are closed grammatical classes (negators, auxiliaries, determiners, prepositions,
 conjunctions) and a few small semantic classes: predicates that only state existence, predicates that end or undo a
-state, hedges, and words that introduce a correction. None is a wording of any one problem.
-tests/test_family_polarity.py measures the module on a corpus.
+state, verbs of withdrawing, searching and naming, hedges, and words that introduce a correction. None is a wording of
+any one problem. tests/test_family_polarity.py measures the module on corpora.
 
     denied_spans(text)            -> [(start, end)] character spans the text does not assert
+    hedged_spans(text)            -> [(start, end)] spans of the clauses that state only an impression
     asserted(pattern, text)       -> whether some match of the compiled pattern is asserted
 """
 from __future__ import annotations
@@ -40,7 +44,7 @@ from __future__ import annotations
 import re
 
 _TOKEN = re.compile(r"\d+(?:\.\d+)?|[^\W\d_]+(?:[-'][^\W\d_]+)*|\n|[^\w\s]")
-_SENTENCE_END = {'.', '!', ';', '\n', '?'}
+_SENTENCE_END = {'.', '!', ';', '\n', '?', '|'}
 
 AUX = {'is', 'are', 'was', 'were', 'be', 'been', 'being', 'am', "'s", 'has', 'have', 'had', 'does', 'do', 'did',
        'can', 'could', 'will', 'would', 'shall', 'should', 'may', 'might', 'must', "it's", "that's", "there's"}
@@ -73,7 +77,8 @@ REMEDY = {'stop', 'stops', 'stopped', 'end', 'ends', 'ended', 'cease', 'ceases',
           'disappeared', 'fade', 'fades', 'faded', 'subside', 'subsides', 'subsided', 'lift', 'lifts', 'fix', 'fixes',
           'fixed', 'correct', 'corrects', 'corrected', 'repair', 'repairs', 'repaired', 'restore', 'restores',
           'restored', 'straighten', 'straightens', 'straightened', 'reposition', 'repositions', 'repositioned',
-          'undo', 'undoes', 'undone', 'address', 'addresses', 'addressed'}
+          'undo', 'undoes', 'undone', 'address', 'addresses', 'addressed', 'reduce', 'reduces', 'reduced',
+          'improve', 'improves', 'improved', 'eliminate', 'eliminates', 'eliminated'}
 # verbs of motion that, with "back" or "away", undo a state ("turned back", "put back", "goes away")
 _RETURNING = {'turn', 'turns', 'turned', 'put', 'puts', 'move', 'moves', 'moved', 'bring', 'brings', 'brought',
               'come', 'comes', 'came', 'set', 'sets', 'go', 'goes', 'went', 'gone', 'get', 'gets', 'got', 'rotate',
@@ -112,27 +117,59 @@ PHRASE_END = {'during', 'due', 'because', 'owing', 'after', 'before', 'until', '
 HEDGES = {'looks', 'look', 'looked', 'looking', 'seems', 'seem', 'seemed', 'appears', 'appear', 'appeared',
           'initially', 'first', 'resembles', 'resemble', 'resembled', 'resembling', 'might', 'may', 'could',
           'apparently', 'possibly', 'probably', 'likely', 'superficially', 'seemingly', 'suspected', 'suspect',
-          'apparent', 'possible', 'potential', 'presumed', 'presumably'}
+          'apparent', 'possible', 'potential', 'presumed', 'presumably', 'called', 'marked', 'flagged',
+          'labelled', 'labeled', 'took', 'mentioned', 'wrote', 'said', 'reported', 'thought', 'assumed',
+          'believed', 'mistook'}
 # words that introduce what something really is
 CORRECTIONS = {'actually', 'just', 'merely', 'simply', 'really', 'reality', 'fact', 'only', 'instead'}
+# labels that announce a correction of the sentence before
+_CORRECTION_LABELS = {'correction', 'update', 'updated', 'revised', 'revision', 'erratum', 'edit'}
 # words that withdraw an impression outright
 VERDICTS = {'retracted', 'dismissed', 'disproved', 'disproven', 'unfounded'}
+# verbs that withdraw what their object names ("retracting the occlusion flag", "ignore the note about a black
+# screen"); they deny their object as a negative determiner does
+WITHDRAW = {'retract', 'retracts', 'retracting', 'withdraw', 'withdraws', 'withdrawing', 'withdrew', 'scratch',
+            'ignore', 'ignoring', 'disregard', 'disregarding', 'cancel', 'cancelling', 'canceling', 'discard',
+            'discarding'}
+# verbs of looking for something: what is looked for is named, not found ("checked for occlusion and rotation")
+SEARCH = {'check', 'checks', 'checked', 'checking', 'look', 'looks', 'looked', 'looking', 'search', 'searched',
+          'searching', 'scan', 'scanned', 'scanning', 'inspect', 'inspected', 'inspecting', 'test', 'tested',
+          'screen', 'screened', 'examine', 'examined', 'watch', 'watched'}
+# words that open a second look at the footage, which can correct the first
+RE_EXAMINE = {'closer', 'review', 'reviewing', 'inspection', 'rewatch', 'rewatching', 'recheck', 'rechecked',
+              'reexamination', 're-examination', 'second'}
+# a naming verb with a negative judgement denies the name ("it would be wrong to call this overexposed")
+NAMING = {'call', 'calls', 'calling', 'called', 'describe', 'describes', 'describing', 'described', 'label',
+          'labelling', 'labeling', 'labelled', 'labeled', 'classify', 'classifying', 'classified', 'term'}
+JUDGED_WRONG = {'wrong', 'inaccurate', 'incorrect', 'false', 'mistaken', 'misleading', 'unfair', 'unjustified',
+                'overstated', 'untrue', 'inappropriate', 'unwarranted'}
+# words that point back to what was said before ("it never was", "none of these were found")
+ANAPHORS = {'it', 'this', 'that', 'these', 'those', 'they', 'them', 'there', "it's", "that's", "there's"}
+# prefixes that negate the word they are part of ("unobstructed", "non-overexposed")
+_NEGATIVE_PREFIXES = ('non-', 'non', 'un')
 # nouns that say what caused something, so "X is the cause" explains rather than corrects
 _EXPLAINS = EXISTENCE_NOUNS | {'cause', 'causes', 'reason', 'source', 'culprit', 'result'}
 # words that restrict an impression in time or extent instead of correcting it ("but only for 2 s")
 _RESTRICTS = {'briefly', 'moment', 'moments', 'second', 'seconds', 'minute', 'minutes', 'instant', 'partly',
               'partially'}
+# prepositions that limit an impression to a time or place ("only for 2 s", "just at the edge")
+_TIME_WORDS = {'for', 'during', 'until', 'at', 'near', 'around', 'after', 'before', 'between', 'briefly', 'once'}
 # answers that leave a question open
 _UNSURE = {'unclear', 'uncertain', 'unknown', 'unsure', 'maybe', 'perhaps', 'possibly', 'undetermined',
            'unconfirmed', 'inconclusive', 'undecided', 'unverified', 'ambiguous'}
-_UNSURE_AFTER_NEGATOR = {'tell', 'say', 'sure', 'certain', 'clear', 'determine', 'confirm', 'know', 'verify'}
+_UNSURE_AFTER_NEGATOR = {'tell', 'say', 'sure', 'certain', 'clear', 'determine', 'confirm', 'know', 'verify',
+                         'decide'}
 # words that add nothing to a bare answer ("No, not at all", "None observed", "Not present")
 _ANSWER_FILLER = EXISTENCE | EXISTENCE_NOUNS | AUX | {'at', 'all', 'really', 'here', 'either', 'so', 'it', 'this',
                                                       'that', 'the', 'any', 'anywhere', 'whatsoever', 'ever',
                                                       'definitely', 'certainly', 'clearly', 'of', 'course', 'sir',
-                                                      'a', 'an', 'in', 'frame', 'frames', 'view', 'footage'}
-_BARE_NO = {'no', 'none', 'nope', 'nah', 'negative'}
-NEGATORS = PREDICATE_NEGATORS | DETERMINER_NEGATORS | POST_NEGATORS | _NT | {'nope', 'nah', 'negative'}
+                                                      'a', 'an', 'in', 'frame', 'frames', 'view', 'footage',
+                                                      'these', 'those', 'they', 'them', 'there', 'times', 's',
+                                                      'i', 'we', 'can', 'see', 'tell', 'once', 'single', 'one',
+                                                      'bit', 'trace', 'sign', 'point', 'time'}
+_BARE_NO = {'no', 'none', 'nope', 'nah', 'negative', 'n', 'false'}
+NEGATORS = PREDICATE_NEGATORS | DETERMINER_NEGATORS | POST_NEGATORS | _NT | {'nope', 'nah', 'negative', '0', 'n',
+                                                                             'false', 'unchecked'}
 
 
 def _transpositions(word):
@@ -152,7 +189,8 @@ class _Tok:
 
 
 def _tokens(text: str) -> list[_Tok]:
-    text = text.replace('’', "'").replace('‘', "'")
+    # a slash between spaces separates two field notes ("removed: N / black frames: Y"); same length, same offsets
+    text = text.replace('’', "'").replace('‘', "'").replace(' / ', ' | ')
     return [_Tok(m.group().lower(), m.start(), m.end()) for m in _TOKEN.finditer(text)]
 
 
@@ -171,7 +209,7 @@ def _is_word(t: _Tok) -> bool:
 def _negative_only(toks: list[_Tok]) -> bool:
     """A bare negative answer: a negator and nothing else that says anything ("No.", "None observed", "Not at all",
     "No, ..." where the comma closes the answer)."""
-    words = [t for t in toks if _is_word(t) or t.w == ',']
+    words = [t for t in toks if _is_word(t) or t.w == ',' or t.w[:1].isdigit()]
     if not words:
         return False
     if words[0].w in _BARE_NO and (len(words) == 1 or words[1].w == ','):
@@ -192,6 +230,37 @@ def _bare_list(toks: list[_Tok]) -> bool:
     """Noun phrases separated by commas or "and"/"or", with no verb of their own ("glare, occlusion, dropout")."""
     words = [t.w for t in toks if _is_word(t)]
     return bool(words) and words[0] not in DETERMINERS and not any(w in AUX or _negator(w) for w in words)
+
+
+def _negative_label(toks: list[_Tok]) -> bool:
+    """A label whose list is denied or only looked for ("Absent", "None of these were seen", "Ruled out",
+    "Checked")."""
+    words = [t.w for t in toks]
+    return any(_negator(w) or w in SEARCH or w in VERDICTS for w in words) or any(
+        pair in DETERMINER_PAIRS for pair in zip(words, words[1:]))
+
+
+def _status_overrides(toks: list[_Tok]) -> tuple[list, list]:
+    """Items of a list annotated with their own status in parentheses: ("glare (absent), dropout (present at
+    1:02)"). Returns (denied, affirmed) spans of the items."""
+    denied, affirmed = [], []
+    for x, t in enumerate(toks):
+        if t.w != '(' or not x:
+            continue
+        close = next((y for y in range(x + 1, len(toks)) if toks[y].w == ')'), None)
+        if close is None:
+            continue
+        inner = toks[x + 1:close]
+        start = x - 1
+        while start > 0 and _is_word(toks[start - 1]) and toks[start - 1].w not in ('and', 'or', 'for'):
+            start -= 1
+        item = (toks[start].start, toks[x - 1].end)
+        words = [u.w for u in inner if _is_word(u)]
+        if _negative_only(inner):
+            denied.append(item)
+        elif words and words[0] in ('present', 'yes', 'found', 'seen', 'observed', 'confirmed', 'detected', 'y'):
+            affirmed.append(item)
+    return denied, affirmed
 
 
 def _clauses(toks: list[_Tok]) -> list[list[_Tok]]:
@@ -229,13 +298,20 @@ def _clauses(toks: list[_Tok]) -> list[list[_Tok]]:
 
 
 def _phrase_end(clause, j, stop):
-    """Index just past a noun or predicate phrase starting at j: it runs to a word in stop, an auxiliary or the clause
-    end, and on over "and", "or", "nor" and commas while the next word does not start a new subject."""
+    """Index just past a noun or predicate phrase starting at j: it runs to a word in stop, an auxiliary, a new
+    negation, a remedy verb or the clause end, over a parenthesis ("none of the usual suspects (glare, clipping)"),
+    and on over "and", "or", "nor" and commas while the next word does not start a new subject."""
     n = len(clause)
     k = j
     while k < n:
         w = clause[k].w
-        if w in stop or w in AUX or w in BOUNDARY:
+        if w == '(':
+            close = next((x for x in range(k + 1, n) if clause[x].w == ')'), n - 1)
+            k = close + 1
+            continue
+        # a negative subject's remedy verb ends it: "no change in lighting fixes the overexposure"
+        if (w in stop or w in AUX or w in BOUNDARY or (k > j and (_negator(w) or w in WITHDRAW))
+                or (k > j and stop is PHRASE_END and w in REMEDY)):
             break
         if w in (',', 'and', 'or', 'nor', '&', '/'):
             nxt = clause[k + 1].w if k + 1 < n else ''
@@ -277,6 +353,14 @@ def _clause_denials(clause: list[_Tok]) -> list[tuple[int, int]]:
     words = [t.w for t in clause]
     if words and words[0] in CONDITIONAL:
         return [_span(clause, 0, n)]
+    if any(w in NAMING for w in words) and any(w in JUDGED_WRONG for w in words):
+        return [_span(clause, 0, n)]
+    for t in clause:
+        # "unobstructed", "non-overexposed": the rest of the word is denied
+        for prefix in _NEGATIVE_PREFIXES:
+            if t.w.startswith(prefix) and len(t.w) > len(prefix) + 3:
+                spans.append((t.start + len(prefix), t.end))
+                break
     cancelled = set()
     i = 0
     while i < n:
@@ -288,6 +372,14 @@ def _clause_denials(clause: list[_Tok]) -> list[tuple[int, int]]:
         pair = (w, nxt) in DETERMINER_PAIRS
         if i in cancelled:
             i += 2 if pair else 1
+            continue
+        # what is withdrawn, and what was only looked for, is not asserted
+        if w in WITHDRAW or (w in SEARCH and nxt == 'for'):
+            j = i + (2 if w in SEARCH else 1)
+            k = _phrase_end(clause, j, PHRASE_END)
+            if _span(clause, j, k):
+                spans.append(_span(clause, j, k))
+            i = max(k, i + 1)
             continue
         if pair or w in DETERMINER_NEGATORS:
             width = 2 if pair else 1
@@ -381,7 +473,7 @@ def _identity(words, start):
 
 def _restricts(words):
     return (any(w in _RESTRICTS for w in words) or any(w[:1].isdigit() for w in words)
-            or any(a in ('only', 'just') and b in PREDICATE_END for a, b in zip(words, words[1:])))
+            or any(a in ('only', 'just') and b in _TIME_WORDS for a, b in zip(words, words[1:])))
 
 
 def _correction(clause, cross_sentence=False):
@@ -398,12 +490,14 @@ def _correction(clause, cross_sentence=False):
     if any(a in ('turns', 'turned') and b == 'out' for a, b in zip(body, body[1:])):
         return True
     if cross_sentence:
-        return any(w in CORRECTIONS for w in body)
+        anaphoric = _identity(body, 0) is not None and any(w in ANAPHORS for w in body[:_identity(body, 0)])
+        return (any((w in CORRECTIONS and w != 'only') or w in RE_EXAMINE or w in _CORRECTION_LABELS for w in body)
+                or anaphoric)
     if not lead:
         return False
     content = [w for w in body if w not in ('it', 'this', 'that', 'is', 'was', "it's", "that's", 'really', 'the',
-                                            'case', 'so', 'not', 'isnt', 'wasnt', "isn't", "wasn't")]
-    if not content and any(map(_pred_negator, body)):
+                                            'case', 'so', 'there', "there's", 'any', 'at', 'all') and not _negator(w)]
+    if not content and any(map(_negator, body)):
         return True
     return lead in ('actually', 'in', 'instead', 'rather') or any(w in CORRECTIONS for w in body) \
         or _identity(body, 0) is not None
@@ -419,6 +513,10 @@ def _corrected_within(clause):
         return None
     if any(w in VERDICTS for w in words[h + 1:]):
         return (clause[0].start, clause[-1].end)
+    turns = next((x for x in range(h + 1, len(words) - 1) if words[x] in ('turns', 'turned')
+                  and words[x + 1] == 'out'), None)
+    if turns is not None:
+        return _span(clause, 0, turns)
     x = _identity(words, h + 1)
     if x is not None and not _restricts(words[x:]):
         return _span(clause, 0, x)
@@ -427,7 +525,11 @@ def _corrected_within(clause):
 
 def _sentences(toks):
     out, cur = [], []
-    for t in toks:
+    for x, t in enumerate(toks):
+        # a checkbox ("[x] lens covered  [ ] glare") starts a note of its own
+        if t.w == '[' and cur and x + 1 < len(toks) and toks[x + 1].w in (']', 'x', 'X', 'v', '*'):
+            out.append(cur)
+            cur = []
         cur.append(t)
         if t.w in _SENTENCE_END:
             out.append(cur)
@@ -455,25 +557,45 @@ def denied_spans(text: str) -> list[tuple[int, int]]:
         # a label and its answer: either side that is a bare negative denies the other ("Glare: none"), and a
         # negative label denies the bare list it introduces ("None of these were seen: glare, rotation")
         parts, cur = [], []
-        for t in body:
-            if t.w == ':':
+        for x, t in enumerate(body):
+            # a colon or a free-standing dash separates a label from its answer, but not the parts of a time (0:15)
+            between_digits = (0 < x < len(body) - 1 and body[x - 1].w[:1].isdigit()
+                              and body[x + 1].w[:1].isdigit())
+            if t.w in (':', '-') and not between_digits:
                 parts.append(cur)
                 cur = []
             else:
                 cur.append(t)
         parts.append(cur)
+        # a checkbox left empty denies its note
+        if len(body) > 1 and body[0].w == '[' and body[1].w == ']':
+            spans.append((body[0].start, body[-1].end))
+        # a bare denial that points back ("Correction: it never was.", "There was none.", "None of these were
+        # found."), or a judgement that it was wrong ("that was wrong"), denies the sentence before it
+        words = [t.w for t in body if _is_word(t)]
+        judged = (len(words) > 2 and words[0] in ANAPHORS and words[1] in COPULA | {'is', 'was'}
+                  and any(w in JUDGED_WRONG for w in words[2:4]))
+        if si and (judged or any(_negative_only(part) and any(t.w in ANAPHORS for t in part) for part in parts)):
+            before = [t for t in sentences[si - 1] if t.w not in _SENTENCE_END]
+            if before:
+                spans.append((before[0].start, before[-1].end))
         for a, b in zip(parts, parts[1:]):
             if not (a and b):
                 continue
             if _negative_only(b) and not _negative_only(a):
                 spans.append((a[0].start, a[-1].end))
-            elif (_negative_only(a) or any(_negator(t.w) for t in a) and _bare_list(b)) and not _negative_only(b):
+            elif ((_negative_only(a) or _negative_label(a) and _bare_list(b)) and not _negative_only(b)):
                 spans.append((b[0].start, b[-1].end))
         for part in parts:
             for clause in _clauses(part):
                 flat.append((si, clause))
                 spans.extend(_clause_denials(clause))
     # an impression that is then corrected is retracted, back to the hedge that made it
+    affirmed = []
+    for sentence in sentences:
+        d, a = _status_overrides(sentence)
+        spans.extend(d)
+        affirmed.extend(a)
     for si, clause in flat:
         span = _corrected_within(clause)
         if span:
@@ -482,6 +604,10 @@ def denied_spans(text: str) -> list[tuple[int, int]]:
         if not k:
             continue
         same = flat[k - 1][0] == sk
+        if not same:
+            # a later sentence corrects with any of its clauses ("Correction: it is aimed correctly, the operator
+            # is just leaning back")
+            clause = [t for s2, c in flat if s2 == sk for t in c]
         if not _correction(clause, cross_sentence=not same):
             continue
         back = k - 1
@@ -493,7 +619,27 @@ def denied_spans(text: str) -> list[tuple[int, int]]:
             if words and words[0] in CONTRAST or not same:
                 break
             back -= 1
-    return spans
+    # an item affirmed by its own status is asserted whatever frames it ("checked for dropout (present at 1:02)")
+    out = []
+    for a, b in spans:
+        cuts = sorted((x, y) for x, y in affirmed if a <= x < b)
+        for x, y in cuts:
+            if x > a:
+                out.append((a, x))
+            a = max(a, y)
+        if a < b:
+            out.append((a, b))
+    return out
+
+
+def hedged_spans(text: str) -> list[tuple[int, int]]:
+    """Character spans of the clauses that present something as an impression ("I initially suspected glare")."""
+    out = []
+    for sentence in _sentences(_tokens(str(text or ''))):
+        for clause in _clauses([t for t in sentence if t.w not in _SENTENCE_END and t.w not in (':', '-')]):
+            if _hedge_at([t.w for t in clause]) is not None:
+                out.append((clause[0].start, clause[-1].end))
+    return out
 
 
 def asserted(pattern: re.Pattern, text: str, spans: list[tuple[int, int]] | None = None) -> bool:

@@ -38,7 +38,7 @@ import re
 from pathlib import Path
 
 from board.label_projection import severity as _sev
-from board.polarity import asserted, denied_spans
+from board.polarity import denied_spans, hedged_spans
 
 HERE = Path(__file__).resolve().parent
 LISTS = {"data_issues": "data", "operator_mistakes": "mistake"}
@@ -129,16 +129,39 @@ class Families:
         # "among") or one it coined (no entry in tag_names.json). A known tag keeps its own name.
         if not (self._broad(plain) or cat not in self.plain.get(key, {})):
             return ("d:" if lst == "data" else "m:") + plain
-        # The issue says what the problem is; its evidence is read only when the issue asserts none of the families.
-        # A word counts only where its clause asserts it (board/polarity.py).
-        for field in ('issue', 'evidence'):
-            text = self._spelled(str(i.get(field) or ''))
-            spans = denied_spans(text) if text else []
+        # The issue and its evidence are read as one note, so a later sentence can deny or withdraw an earlier one.
+        # The issue says what the problem is; its evidence decides only when the issue asserts none of the families.
+        issue, evidence = (self._spelled(str(i.get(field) or '')) for field in ('issue', 'evidence'))
+        text = issue + '\n' + evidence if evidence else issue
+        spans, hedges = denied_spans(text), hedged_spans(text)
+        claimed = {}
+        for f in eligible:
+            if f["slug"] in self._re and (not f.get('among') or plain in f['among']):
+                start = self._claim(self._re[f["slug"]], text, spans, hedges)
+                if start is not None:
+                    claimed[f["slug"]] = start
+        for in_issue in (True, False):
             for f in eligible:
-                if (f["slug"] in self._re and (not f.get('among') or plain in f['among'])
-                        and asserted(self._re[f["slug"]], text, spans)):
+                if f["slug"] in claimed and (claimed[f["slug"]] <= len(issue)) == in_issue:
                     return f["slug"]
         return ("d:" if lst == "data" else "m:") + plain
+
+    @staticmethod
+    def _claim(pattern, text, spans, hedges):
+        """Where the note first asserts this family, or None: a word its clause asserts (board/polarity.py), unless
+        every such word was only an impression and the note later denies the family outright ("I initially suspected
+        glare ... I am withdrawing the glare flag"). A later denial limited to a time ("it is not frozen after 6 s")
+        narrows the impression and does not withdraw it."""
+        inside = lambda m, ranges: any(a <= m.start() < b for a, b in ranges)
+        timed = lambda m: bool(re.search(r'\d', re.split(r'[.!?;\n]', text[m.start():], maxsplit=1)[0]))
+        matches = list(pattern.finditer(text))
+        kept = [m for m in matches if not inside(m, spans)]
+        if not kept:
+            return None
+        if all(inside(m, hedges) for m in kept) and any(inside(m, spans) and m.start() > kept[0].start()
+                                                        and not timed(m) for m in matches):
+            return None
+        return kept[0].start()
 
     def _spelled(self, text: str) -> str:
         """text with each word that two swapped letters keep from being a family's word put right ("dorpout"). A

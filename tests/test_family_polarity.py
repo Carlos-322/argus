@@ -85,6 +85,16 @@ def worst_precision_recall(items):
     ('No glare. The exo view is frozen from 4 s', 'camera-image'),
     ('nto glare anywhere', BROAD),
     ('A rcetangular blur covers the cutting board', 'privacy-blur'),
+    # notes that withdraw, search, judge a name wrong, or answer in field notation
+    ('Earlier I wrote that the lens was covered. Correction: it never was.', BROAD),
+    ('I initially suspected glare. Nothing is clipped. I am withdrawing the glare flag.', BROAD),
+    ('Three things checked: glare, occlusion, and freezing. Glare is absent. Freezing occurs twice.', 'camera-image'),
+    ('It would be inaccurate to call this footage overexposed.', BROAD),
+    ('Unobstructed view of the workspace for the full clip.', BROAD),
+    ('Frozen: no | Clipping: no | Rotation: yes, from 0:15', 'camera-fault'),
+    ('Black frames: 4. Glare: 0.', 'camera-image'),
+    ('No change in lighting fixes the overexposure; it persists through the end.', 'low-light'),
+    ('None of the usual suspects (glare, clipping) show up; instead the feed lost its video at 0:45.', 'camera-image'),
 ])
 def test_reported_wordings(text, wanted):
     assert family(text) == wanted
@@ -187,6 +197,8 @@ def reviewer_corpus():
     ('reviewer corpus', reviewer_corpus(), 0.97),
     ('written before the matcher', [(i, e, CODE[x]) for _, i, e, x in wordings.WRITTEN], 0.97),
     ('written independently', [(i, e, CODE[x]) for _, i, e, x in wordings.INDEPENDENT], 0.95),
+    ('third independent set', [(i, e, CODE[x]) for _, i, e, x in wordings.THIRD], 0.95),
+    ('fourth independent set', [(i, e, CODE[x]) for _, i, e, x in wordings.FOURTH], 0.94),
 ])
 def test_family_precision_and_recall_over_corpora(name, items, bound):
     worst, wrong = worst_precision_recall(items)
@@ -195,7 +207,7 @@ def test_family_precision_and_recall_over_corpora(name, items, bound):
 
 def test_corpus_has_the_reviewed_size():
     assert len(reviewer_corpus()) == 744
-    assert len(wordings.WRITTEN) >= 150 and len(wordings.INDEPENDENT) >= 150
+    assert all(len(rows) >= 150 for rows in (wordings.WRITTEN, wordings.INDEPENDENT, wordings.THIRD, wordings.FOURTH))
 
 
 # ---------------------------------------------------------------- gate
