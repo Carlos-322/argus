@@ -146,6 +146,7 @@ from pathlib import Path
 import numpy as np
 
 from label.atomic import write_atomic
+from prepare.hdf_metadata import ForeignStorage, open_hdf5
 from prepare.camera_clock import UNKNOWN_CAMERA_FPS, camera_issue_kind, coarse_rows, presentation_clock
 from prepare.state_notes import STATE_WHY
 from prepare.signal_alignment import ALIGNED_ROWS, ALIGNED_ASSUMED, ALIGNED_CAMERA, COARSE_CLOCK
@@ -575,8 +576,16 @@ def no_camera_words(root: Path, files: list[Path], sensors: list[Path]) -> str:
     gives nothing to label (up to NO_CAMERA_FILES_MAX names)."""
     def why(p):
         if p in sensors:
-            return ("an HDF5 file with no image frames or encoded images" if p.suffix.lower() in H5_EXT
-                    else "an MCAP file with no camera channel")
+            if p.suffix.lower() in H5_EXT:
+                from prepare.hdf_metadata import foreign_references
+                try:
+                    foreign = foreign_references(p)
+                except Exception as error:
+                    return f"an HDF5 file that could not be opened ({type(error).__name__})"
+                if foreign:
+                    return f"an HDF5 file that was not read because it names storage outside the upload ({foreign[0]})"
+                return "an HDF5 file with no image frames or encoded images"
+            return "an MCAP file with no camera channel"
         return "not a recording" if p.suffix.lower() in NOTE_EXT else "not a kind of file a reader opens"
     named = [f"{p.relative_to(root).as_posix()} ({why(p)})" for p in files[:NO_CAMERA_FILES_MAX]]
     kinds = {"HDF5 file": 0, "MCAP file": 0, "other file": 0}
@@ -7308,7 +7317,7 @@ def plan_hdf5(det: dict, root: Path) -> list[dict]:
     items = []
     for fpath in det["files"]:
         try:
-            with h5py.File(fpath, "r") as f:
+            with open_hdf5(fpath) as f:
                 groups = h5_episodes(f)
                 for g in groups:
                     st = h5_streams(f, g)
@@ -7330,7 +7339,8 @@ def plan_hdf5(det: dict, root: Path) -> list[dict]:
         except Exception as e:
             items.append({"kind": "hdf5", "name": Path(fpath).relative_to(root).with_suffix("").as_posix(),
                           "file": Path(fpath), "group": "", "seconds": None, "has_camera": False,
-                          "error": f"the HDF5 file could not be opened ({type(e).__name__})"})
+                          "error": str(e) if isinstance(e, ForeignStorage) else
+                                   f"the HDF5 file could not be opened ({type(e).__name__})"})
     return items
 
 
@@ -7721,7 +7731,7 @@ def convert_hdf5(item: dict, rig: str, out: Path, dataset: str, *, source_scope:
         raise ValueError(item["error"])
     ep = unique_dir(out, item.get("output_name") or episode_name(item["name"]))
     ep.mkdir(parents=True, exist_ok=True)
-    with h5py.File(item["file"], "r") as f:
+    with open_hdf5(item["file"]) as f:
         g = item["group"]
         from prepare.annotations import hdf_source_context, merge_source_contexts
         represented = {}
@@ -8063,7 +8073,7 @@ def depth_scale_attr(ds) -> float | None:
 def h5_has_camera(path: Path) -> bool:
     import h5py
     try:
-        with h5py.File(path, "r") as f:
+        with open_hdf5(path) as f:
             return any(h5_kind(p, ds) == "camera" for p, ds in _h5_datasets(f))
     except Exception:
         return False
@@ -8077,7 +8087,7 @@ def h5_file_signals(paths: list[Path], q_abs: np.ndarray, n_anchor: int, fps: fl
     out = Signals()
     for p in paths:
         try:
-            with h5py.File(p, "r") as f:
+            with open_hdf5(p) as f:
                 st = h5_streams(f, "")
                 got = h5_signals(f, {**st, "signal": [s for s in st["signal"] if s["clock"]]}, q_abs, fps,
                                  n_anchor, presentation_q=presentation_q)
@@ -11459,7 +11469,7 @@ def _read_file_times(p: Path) -> np.ndarray | None:
             t = np.sort(np.array([m.log_time for _, _, m in _mcap_stream(Path(p))], dtype=np.float64)) / 1e9
             return t if len(t) else None
         import h5py
-        with h5py.File(p, "r") as f:
+        with open_hdf5(p) as f:
             clocks = [np.sort(t[np.isfinite(t)]) for t in h5_streams(f, "")["clock"].values() if len(t)]
         clocks = [t for t in clocks if len(t)]
         return max(clocks, key=len) if clocks else None
@@ -11479,7 +11489,7 @@ def no_time_why(p: Path) -> str:
                 return "it is cut short before its first message, so nothing in it could be read"
         else:
             import h5py
-            with h5py.File(p, "r"):
+            with open_hdf5(p):
                 pass
     except Exception:
         return "it could not be opened; it may be damaged or cut short"
@@ -11525,7 +11535,7 @@ def h5_state_arrays(p: Path) -> list[str]:
     """The arrays of an HDF5 file that are named as the state (H5_STATE_NAME, outside an action group)."""
     import h5py
     try:
-        with h5py.File(p, "r") as f:
+        with open_hdf5(p) as f:
             return sorted(s["name"] for s in h5_streams(f, "")["signal"]
                           if H5_STATE_NAME.search(s["name"]) and not H5_ACTION_GROUP.search(s["name"]))
     except Exception:
@@ -11671,7 +11681,7 @@ def sensor_clock_namespace(path: Path, basis: str, reference_records=()) -> tupl
         import h5py
         keys = ('log_clock_id',) if basis == 'arrival' else ('capture_clock_id', 'clock_id')
         try:
-            with h5py.File(path, 'r') as source:
+            with open_hdf5(path) as source:
                 root_ids = [source.attrs[key] for key in keys if key in source.attrs]
                 declarations = root_ids + [dataset.attrs[key] for _, dataset in _h5_datasets(source)
                                             for key in keys if key in dataset.attrs]
@@ -11765,7 +11775,7 @@ def note_sensors(extra: dict, signals: Signals, by_clock: list, assumed: list, u
             continue
         try:
             import h5py
-            with h5py.File(path, 'r') as f:
+            with open_hdf5(path) as f:
                 metadata = h5_original_metadata(f, '', [])
             extra.setdefault('recorded_sensor_fields', []).append(
                 {'source': str(path), 'recorded_hdf5_metadata': metadata})

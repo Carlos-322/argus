@@ -9,6 +9,116 @@ MAX_VALUES = 4096
 _SOURCES = ContextVar('hdf_sources', default=None)
 
 
+MAX_SCANNED_OBJECTS = 2_000_000
+_SCANS = {}
+
+
+class ForeignStorage(ValueError):
+    """An HDF5 file whose links or storage name files outside the upload. It is never opened for reading."""
+
+
+def _allowed_now(path):
+    allowed = _SOURCES.get()
+    return frozenset(allowed) if allowed is not None else frozenset({Path(path).resolve()})
+
+
+def foreign_references(path, allowed=None, _active=None):
+    """Why reading this HDF5 file could touch a file outside `allowed`, or [] when it cannot.
+
+    HDF5 resolves a link's or virtual dataset's file next to the HDF5 file, but falls back to the working directory
+    when that file is missing, and it resolves external raw storage against the working directory and never
+    against the file. An absolute name ignores every prefix. So a reader that opens such a file can be steered to
+    any file on the host by a fixed dataset name, whatever the walker admitted. One scan of every object at open
+    is the only boundary every read passes through."""
+    import h5py
+    path = Path(path).resolve()
+    allowed = frozenset(allowed) if allowed is not None else _allowed_now(path)
+    stat = path.stat()
+    key = (path, stat.st_size, stat.st_mtime_ns, allowed)
+    if key in _SCANS:
+        return _SCANS[key]
+    active = set() if _active is None else _active
+    if path in active:
+        return []
+    active.add(path)
+    problems = []
+    try:
+        with h5py.File(path, 'r') as f:
+            seen, pending, count = set(), [f], 0
+            while pending and not problems:
+                group = pending.pop()
+                try:
+                    keys = list(group)
+                except (KeyError, OSError, RuntimeError, ValueError):
+                    continue          # an unreadable group cannot be read through by any later reader either
+                for key_name in keys:
+                    count += 1
+                    if count > MAX_SCANNED_OBJECTS:
+                        problems.append(f'more than {MAX_SCANNED_OBJECTS:,} objects to verify')
+                        break
+                    name = group.name.rstrip('/') + '/' + key_name
+                    try:
+                        link = group.get(key_name, getlink=True)
+                    except (KeyError, OSError, RuntimeError, ValueError):
+                        continue
+                    if isinstance(link, h5py.ExternalLink):
+                        target = (path.parent / link.filename).resolve()
+                        if target not in allowed:
+                            problems.append(f'{name} links to {link.filename}')
+                        elif target != path:
+                            nested = foreign_references(target, allowed, active)
+                            if nested:
+                                problems.append(f'{name} links to {link.filename}, which {nested[0]}')
+                        continue
+                    if isinstance(link, h5py.SoftLink):
+                        continue      # names an object in this file, which the hard links reach
+                    try:
+                        obj = group[key_name]
+                    except (KeyError, OSError, RuntimeError, ValueError):
+                        continue
+                    if isinstance(obj, h5py.Group):
+                        address = h5py.h5o.get_info(obj.id).addr
+                        if address not in seen:
+                            seen.add(address)
+                            pending.append(obj)
+                        continue
+                    if not isinstance(obj, h5py.Dataset):
+                        continue
+                    try:
+                        if obj.external:
+                            problems.append(f'{name} stores its values in {obj.external[0][0]}')
+                            break
+                        sources = obj.virtual_sources() if obj.is_virtual else []
+                    except (KeyError, OSError, RuntimeError, ValueError):
+                        continue
+                    for source in sources:
+                        target = path if source.file_name == '.' else (path.parent / source.file_name).resolve()
+                        if target not in allowed:
+                            problems.append(f'{name} reads values from {source.file_name}')
+                            break
+                        if target != path and target.exists():
+                            nested = foreign_references(target, allowed, active)
+                            if nested:
+                                problems.append(f'{name} reads values from {source.file_name}, which {nested[0]}')
+                                break
+                    if problems:
+                        break
+    finally:
+        active.discard(path)
+    _SCANS[key] = problems
+    return problems
+
+
+def open_hdf5(path, allowed=None):
+    """Open an uploaded HDF5 file for reading, or raise ForeignStorage when anything in it names another file."""
+    import h5py
+    problems = foreign_references(path, allowed)
+    if problems:
+        raise ForeignStorage(f'{Path(path).name} was not read because it names storage outside the upload '
+                             f'({problems[0]})')
+    return h5py.File(path, 'r')
+
+
 @contextmanager
 def authorized_sources(paths):
     """Only files selected by the upload may supply linked HDF objects or storage."""
@@ -202,7 +312,7 @@ def read(source, field, pointer):
     import h5py
     path = check_source(source)
     tokens = [t.replace('~1', '/').replace('~0', '~') for t in pointer.split('/')[1:]]
-    with h5py.File(path, 'r') as f:
+    with open_hdf5(path, {Path(path).resolve()}) as f:
         obj = f[field['object'] or '/']
         if Path(obj.file.filename).resolve() != path.resolve():
             raise ValueError('External HDF5 metadata requires its own source inventory')
