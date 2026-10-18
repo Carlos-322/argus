@@ -813,19 +813,27 @@ def _trim_footage_files(protect, owner):
                      protect=others | ({protect} if protect is not None else set()), last=mine)
 
 
-def _footage_room(owner):
-    """Refuse to make another video while videos other clients' live tickets name fill the cache budget, instead of
-    evicting them."""
+def _reserve_footage(owner, out: Path, size: int):
+    """Refuse to keep `out` (`size` bytes) unless it fits in the cache budget beside the videos other clients' live
+    tickets name. Those videos are never evicted (_trim_footage_files), so the budget is a reservation: the video about
+    to be kept counts against it before it is kept, and one that does not fit is refused (503, retried later) instead
+    of growing the cache past its limit."""
     held = _ticketed_footage()
     sizes = []
     for name, owners in held.items():
-        if owners != {_ticket_owner(owner)}:
+        if owners != {_ticket_owner(owner)} and name != out.name:
             try:
                 sizes.append((FOOTAGE_DIR / name).stat().st_size)
             except OSError:
                 continue
-    if sum(sizes) >= _FOOTAGE_DISK_BYTES or (_FOOTAGE_DISK_FILES > 0 and len(sizes) >= _FOOTAGE_DISK_FILES):
+    if sum(sizes) + size > _FOOTAGE_DISK_BYTES or (_FOOTAGE_DISK_FILES > 0 and len(sizes) + 1 > _FOOTAGE_DISK_FILES):
         raise CacheBusy('Prepared video storage is full of downloads in progress; try again later.')
+
+
+def _footage_room(owner, out: Path):
+    """Refuse to start an encode that cannot be kept. Before encoding, the video's size is unknown but at least one
+    byte; publication reserves its real size (_encode_and_publish)."""
+    _reserve_footage(owner, out, 1)
 
 
 def _receipt_guard(path):
@@ -1074,6 +1082,20 @@ def prepare_footage_ticket(result: tuple, client=None, *, reuse: bool = False) -
         raise ValueError('Prepared footage changed before ticket publication')
     owner, now = _ticket_owner(client), time.time()
     record.update(owner=owner, issued_at=now, expires_at=now + _FOOTAGE_TICKET_SECONDS)
+    # A ticket protects its video from eviction, so issuing one is a reservation too. It holds the cache lock that
+    # publication and trimming hold, so a trim cannot remove the video between this check and the ticket's write.
+    with _file_lock(FOOTAGE_DIR / '.locks' / 'cache'):
+        try:
+            current = _footage_version(result[0])
+        except FileNotFoundError as error:
+            raise CacheBusy('Prepared video was evicted; prepare it again.') from error
+        if list(current) != list(version):
+            raise ValueError('Prepared footage changed before ticket publication')
+        _reserve_footage(client, result[0], version[2])
+        return _issue_footage_ticket(result, record, owner, version, now, reuse)
+
+
+def _issue_footage_ticket(result, record, owner, version, now, reuse):
     with _FOOTAGE_READY_LOCK:
         folder = FOOTAGE_DIR / '.tickets'
         index = _ticket_index()
@@ -1177,7 +1199,7 @@ def _footage_from_sources(eid, t0, t1, label, cams, identities, client=None):
         if ready is not None:
             _remember_ready_footage(request, ready)
             return ready
-        _footage_room(client)
+        _footage_room(client, out)
         result = _uncached_footage(key, out, name, cams, probes, t0, t1, client)
         _remember_ready_footage(request, result)
         return result
@@ -1255,6 +1277,7 @@ def _encode_and_publish(key, out, name, cams, probes, t0, t1, client=None):
             # Only the short rename/receipt/prune transaction shares a cache lock.
             # Source work, encoding and full output hashing run independently.
             with _file_lock(FOOTAGE_DIR / '.locks' / 'cache'):
+                _reserve_footage(client, out, record['version'][2])
                 if out.exists():
                     _discard_changed_footage(out)
                 os.replace(tmp, out)

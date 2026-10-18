@@ -345,6 +345,61 @@ def test_configured_untrusted_prepares_encode_different_episodes_in_parallel(tmp
             assert get(base + 'api/footage?ticket=' + prepared['ticket'])
 
 
+def _footage_sizes(tmp_path, monkeypatch, spans):
+    """The prepared size of each span, measured in a separate cache folder that is then set aside."""
+    monkeypatch.setattr(serve, 'FOOTAGE_DIR', tmp_path / 'measure')
+    sizes = [serve.footage('episode_x', a, b)[0].stat().st_size for a, b in spans]
+    monkeypatch.setattr(serve, 'FOOTAGE_DIR', tmp_path / 'footage')
+    return sizes
+
+
+def _client_get(url, client):
+    request = urllib.request.Request(url, headers={'X-Forwarded-For': client})
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status, response.read()
+    except urllib.error.HTTPError as error:
+        return error.code, error.read()
+
+
+@pytest.mark.parametrize('budget', ['bytes', 'files', 'fits', 'same client'])
+def test_other_clients_tickets_are_a_reservation_of_the_footage_budget(tmp_path, monkeypatch, budget):
+    # Two prepared videos that do not fit together, each held by another client's ticket: the second is refused
+    # retryably and the first keeps downloading, instead of the cache growing past its limit. One that fits, and one
+    # whose only competitor is the same client's own ticket (which that client may lose), are both kept.
+    media(tmp_path, monkeypatch)
+    spans = [(0, .1), (.1, .3)]
+    sizes = _footage_sizes(tmp_path, monkeypatch, spans)
+    monkeypatch.setattr(serve, '_FOOTAGE_DISK_BYTES', sum(sizes) - (budget != 'fits'))
+    if budget == 'files':
+        monkeypatch.setattr(serve, '_FOOTAGE_DISK_BYTES', 10 * sum(sizes))
+        monkeypatch.setattr(serve, '_FOOTAGE_DISK_FILES', 1)
+    clients = ['198.51.100.1', '198.51.100.1' if budget == 'same client' else '198.51.100.2']
+    with serving() as base:
+        answers = [_client_get(base + f'api/footage?id=episode_x&t0={a}&t1={b}&prepare=1', client)
+                   for (a, b), client in zip(spans, clients)]
+        kept = [path.stat().st_size for path in serve.FOOTAGE_DIR.glob('*.mp4')]
+        first = _client_get(base + 'api/footage?ticket=' + json.loads(answers[0][1])['ticket'], clients[0])
+    assert sum(kept) <= serve._FOOTAGE_DISK_BYTES and len(kept) <= max(serve._FOOTAGE_DISK_FILES, 2)
+    if budget in ('bytes', 'files'):
+        assert answers[0][0] == 200 and first[0] == 200
+        assert answers[1][0] == 503 and json.loads(answers[1][1])['retryable'] is True
+    else:
+        assert [code for code, _ in answers] == [200, 200]
+        assert first[0] == (200 if budget == 'fits' else 404)
+
+
+def test_a_ticket_is_refused_when_other_clients_tickets_leave_no_room(tmp_path, monkeypatch):
+    # Issuing a ticket protects its video, so it reserves budget as publication does.
+    media(tmp_path, monkeypatch)
+    results = [serve.footage('episode_x', a, b) for a, b in [(0, .1), (.1, .3)]]
+    serve.prepare_footage_ticket(results[0], '198.51.100.1')
+    monkeypatch.setattr(serve, '_FOOTAGE_DISK_BYTES', sum(r[0].stat().st_size for r in results) - 1)
+    with pytest.raises(serve.CacheBusy):
+        serve.prepare_footage_ticket(results[1], '198.51.100.2')
+    assert serve.prepare_footage_ticket(results[1], '198.51.100.1')
+
+
 @pytest.mark.parametrize('span', [(0, None), (.05, .2)])
 def test_unwritable_receipt_folder_reuses_the_memory_receipt(tmp_path, monkeypatch, span):
     # The .ready folder is read only, so no receipt reaches disk: the record the server made in memory is the only one,
