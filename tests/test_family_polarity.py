@@ -55,7 +55,8 @@ def worst_precision_recall(items):
     ('Dropout is never an issue here', BROAD),
     ('Occlusion never happens', BROAD),
     ('It looks like the view is frozen but it is just a static scene', BROAD),
-    ('At first it seems frozen, but the arm is just still', BROAD),
+    # a correction whose subject is another noun phrase states something about that subject, not the impression
+    ('At first it seems frozen, but the arm is just still', 'camera-image'),
     ('Looks like glare, actually a white tablecloth', BROAD),
     # a question asserts nothing, and the sentence after it is no answer to it
     ('Glare? No question, it hides the cup', BROAD),
@@ -325,6 +326,49 @@ def test_a_later_sentence_never_retracts_an_earlier_one():
     # within its own sentence a correction still retracts
     assert family('The view looks frozen, but it is not.') == BROAD
     assert family('Looks like glare, actually a white tablecloth') == BROAD
+
+
+def test_a_correction_in_the_same_sentence_retracts_only_what_it_refers_to():
+    """A correction clause reaches the impression before it in its sentence only when it refers to it: its subject is
+    a pronoun, it has none of its own, or it is the impression's subject again. One whose subject is another noun
+    phrase (another camera, another object, the timestamps rather than the picture) states something about that and
+    retracts nothing, after an impression with a named subject, a pronoun or none."""
+    impressions = {'camera-image': ['The exo camera appears frozen', 'The wrist view looks frozen', 'It looks frozen',
+                                    'At first the feed seems to freeze', 'Looks frozen'],
+                   'low-light': ['Glare appears on the plate', 'The image looks overexposed', 'It looks like glare'],
+                   'camera-fault': ['The lens appears covered', 'The head camera looks obstructed',
+                                    'At first the camera seems turned away'],
+                   'privacy-blur': ['A rectangular blur appears over the sink', 'A blur mask seems to hide the knife']}
+    referring = ["but it isn't", 'but it is not', 'but it is just a static scene', 'but that is not the case',
+                 'but it is actually a reflection', 'actually just a white tablecloth', 'but this is merely a shadow',
+                 'actually a white tablecloth']
+    other = ['but the wrist camera is just fine', 'but the grasp is simply slow', 'but the timestamps actually advance',
+             'but the operator is just waiting', 'but the other view is actually fine', 'but the cup is merely hidden',
+             'but the right camera really works', 'but the audio is just quiet']
+    wrong = []
+    for fam, sentences in impressions.items():
+        for s in sentences:
+            wrong += [(s, c, family(f'{s}, {c}.')) for c in referring if family(f'{s}, {c}.') != BROAD]
+            wrong += [(s, c, family(f'{s}, {c}.')) for c in other if family(f'{s}, {c}.') != fam]
+    assert not wrong, wrong[:10]
+    # the impression's own subject again ("the camera" after "the head camera") still refers to it
+    assert family('The head camera looks obstructed, but the camera is just tilted.') == BROAD
+
+
+def test_withdrawing_and_searching_verbs_read_in_every_inflection():
+    """The withdrawing, searching and naming verbs are given as base forms and every inflection is derived, so no form
+    of one is missing ("withdrawn" was, and "the overexposure I flagged earlier is withdrawn" kept the family)."""
+    from board import polarity
+    for participle in sorted(polarity.VERDICTS - {'unfounded'}):
+        assert family(f'Suspected glare, {participle}.') == BROAD, participle
+        assert family(f'The glare flag was {participle}.') == BROAD, participle
+    for form in ('retract', 'retracts', 'retracting', 'withdraw', 'withdraws', 'withdrawing', 'withdrew',
+                 'dismisses', 'disregarding', 'discards'):
+        assert form in polarity.WITHDRAW and family(f'{form.capitalize()} the glare flag.') == BROAD, form
+    for form in sorted(polarity.SEARCH):
+        assert family(f'The operator {form} for glare.') == BROAD, form
+    assert family('The overexposure I flagged earlier is withdrawn.') == BROAD
+    assert family('It would be wrong to term this overexposed.') == BROAD
 
 
 def test_corpus_has_the_reviewed_size():

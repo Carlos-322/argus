@@ -21,8 +21,10 @@ grammar English uses to deny something, so a new wording of an old form needs no
     none", "Dropout - no", "Glare: 0"), and a negative or searching label denies the bare list it introduces
     ("Absent: glare, occlusion", "Checked: glare, freezing");
   - an impression corrected in its own sentence is retracted ("looks like glare, actually a white tablecloth", "seems
-    frozen but it isn't", "what looks like glare is a white plate", "resembles a black frame, but it is a shadow"); a
-    hedge on its own still asserts ("appears to be frozen");
+    frozen but it isn't", "what looks like glare is a white plate", "resembles a black frame, but it is a shadow"),
+    when the correction is about the impression's subject: its own subject is a pronoun, or it has none, or it is the
+    impression's subject again. A clause about another subject retracts nothing ("the exo camera appears frozen, but
+    the wrist camera is just fine"). A hedge on its own still asserts ("appears to be frozen");
   - a condition ("if glare hits the plate") asserts nothing.
 
 A statement is denied, retracted, asked about or supposed only within its own grammatical scope: its clause, the list
@@ -33,12 +35,14 @@ not the answer to a question. A later sentence could only be tied to an earlier 
 every rule that tried to (a list of words that mean all is well, a test for pronouns, a list of correction labels)
 retracted real faults on notes whose next sentence was about something else. Within a sentence, a negation stops at
 a subordinating or contrasting conjunction ("because", "while", "but", "then", "which"), or a comma or "and" that
-starts a new subject. So an unrelated negation ("the grasp is not visible because the view is frozen") never reaches the problem.
+starts a new subject. So an unrelated negation ("the grasp is not visible because the view is frozen") never reaches
+the problem.
 
 The word lists below are closed grammatical classes (negators, auxiliaries, determiners, prepositions,
-conjunctions) and a few small semantic classes: predicates that only state existence, predicates that end or undo a
-state, verbs of withdrawing, searching and naming, hedges and words that introduce a correction. None is a wording of
-any one problem. tests/test_family_polarity.py measures the module on corpora.
+conjunctions, pronouns) and a few small semantic classes: predicates that only state existence, predicates that end
+or undo a state, verbs of withdrawing, searching and naming (given as base forms, every inflection derived), hedges
+and words that introduce a correction. None is a wording of any one problem. tests/test_family_polarity.py measures
+the module on corpora.
 
     denied_spans(text)            -> [(start, end)] character spans the text does not assert
     asserted(pattern, text)       -> whether some match of the compiled pattern is asserted
@@ -109,6 +113,9 @@ DETERMINERS = {'the', 'a', 'an', 'this', 'that', 'these', 'those', 'its', 'it', 
                'her', 'he', 'she', 'we', 'i', 'you', 'our', 'my', 'there', "there's", 'someone', 'something',
                'each', 'every'}
 _ARTICLES = {'the', 'a', 'an', 'its', 'their', 'his', 'her', 'this', 'that', 'some'}
+# the personal and demonstrative pronouns: a subject that refers back instead of naming something new
+PRONOUNS = {'it', "it's", 'this', 'that', "that's", 'these', 'those', 'they', 'them', 'there', "there's", 'i', 'we',
+            'you', 'he', 'she'}
 # prepositions that end a negated predicate: what follows is an adjunct of it, not part of it
 PREDICATE_END = {'in', 'on', 'at', 'from', 'to', 'for', 'with', 'during', 'until', 'after', 'before', 'since',
                  'throughout', 'across', 'near', 'around', 'within', 'beyond', 'behind', 'due', 'because',
@@ -126,20 +133,42 @@ HEDGES = {'looks', 'look', 'looked', 'looking', 'seems', 'seem', 'seemed', 'appe
           'believed', 'mistook'}
 # words that introduce what something really is
 CORRECTIONS = {'actually', 'just', 'merely', 'simply', 'really', 'reality', 'fact', 'only', 'instead'}
-# words that withdraw an impression outright
-VERDICTS = {'retracted', 'dismissed', 'disproved', 'disproven', 'unfounded'}
+
+
+def _verb(entry: str) -> tuple[set, set]:
+    """(every form, the past forms) of a verb given as its base, with any irregular past forms after slashes
+    ("withdraw/withdrew/withdrawn"). The regular forms follow English spelling, so no inflection of a listed verb is
+    ever missing: -s or -es, -ed and -ing with a final e dropped and a final y after a consonant turned to i, and a
+    final consonant after a single vowel doubled or not (scanned, cancelled and canceled)."""
+    base, *irregular = entry.split('/')
+    stem = base[:-1] if base.endswith('e') else base
+    ied = base[:-1] + 'i' if base.endswith('y') and base[-2] not in 'aeiou' else None
+    third = (ied + 'es' if ied else base + 'es' if base.endswith(('s', 'sh', 'ch', 'x', 'z')) else base + 's')
+    past = {ied + 'ed' if ied else stem + 'ed', *irregular}
+    ing = {stem + 'ing' if base.endswith('e') and not base.endswith('ee') else base + 'ing'}
+    if len(base) > 2 and base[-1] not in 'aeiouwxy' and base[-2] in 'aeiou' and base[-3] not in 'aeiou':
+        past.add(base + base[-1] + 'ed')
+        ing.add(base + base[-1] + 'ing')
+    return {base, third} | past | ing, past
+
+
+def _verbs(*entries) -> tuple[set, set]:
+    forms = [_verb(e) for e in entries]
+    return set().union(*(f for f, _ in forms)), set().union(*(p for _, p in forms))
+
+
 # verbs that withdraw what their object names ("retracting the occlusion flag", "ignore the note about a black
-# screen"); they deny their object as a negative determiner does
-WITHDRAW = {'retract', 'retracts', 'retracting', 'withdraw', 'withdraws', 'withdrawing', 'withdrew', 'scratch',
-            'ignore', 'ignoring', 'disregard', 'disregarding', 'cancel', 'cancelling', 'canceling', 'discard',
-            'discarding'}
+# screen"); they deny their object as a negative determiner does, and their past forms withdraw an impression
+# outright ("suspected obstruction, retracted", "the overexposure I flagged is withdrawn"). "scratch" withdraws only
+# as the bare imperative ("scratch that"); its other forms name damage to a lens.
+WITHDRAW, _WITHDRAWN = _verbs('retract', 'withdraw/withdrew/withdrawn', 'ignore', 'disregard', 'cancel', 'discard',
+                              'dismiss', 'disprove/disproven')
+WITHDRAW |= {'scratch'}
+VERDICTS = _WITHDRAWN | {'unfounded'}
 # verbs of looking for something: what is looked for is named, not found ("checked for occlusion and rotation")
-SEARCH = {'check', 'checks', 'checked', 'checking', 'look', 'looks', 'looked', 'looking', 'search', 'searched',
-          'searching', 'scan', 'scanned', 'scanning', 'inspect', 'inspected', 'inspecting', 'test', 'tested',
-          'screen', 'screened', 'examine', 'examined', 'watch', 'watched'}
+SEARCH, _ = _verbs('check', 'look', 'search', 'scan', 'inspect', 'test', 'screen', 'examine', 'watch')
 # a naming verb with a negative judgement denies the name ("it would be wrong to call this overexposed")
-NAMING = {'call', 'calls', 'calling', 'called', 'describe', 'describes', 'describing', 'described', 'label',
-          'labelling', 'labeling', 'labelled', 'labeled', 'classify', 'classifying', 'classified', 'term'}
+NAMING, _ = _verbs('call', 'describe', 'label', 'classify', 'term')
 JUDGED_WRONG = {'wrong', 'inaccurate', 'incorrect', 'false', 'mistaken', 'misleading', 'unfair', 'unjustified',
                 'overstated', 'untrue', 'inappropriate', 'unwarranted'}
 # prefixes that negate the word they are part of ("unobstructed", "non-overexposed")
@@ -359,6 +388,9 @@ def _clause_denials(clause: list[_Tok]) -> list[tuple[int, int]]:
         if i in cancelled:
             i += 2 if pair else 1
             continue
+        # a withdrawing verb in the passive withdraws its subject ("the glare flag was withdrawn")
+        if w in _WITHDRAWN and i and words[i - 1] in AUX and _span(clause, _subject_start(clause, i), i):
+            spans.append(_span(clause, _subject_start(clause, i), i))
         # what is withdrawn, and what was only looked for, is not asserted
         if w in WITHDRAW or (w in SEARCH and nxt == 'for'):
             j = i + (2 if w in SEARCH else 1)
@@ -491,6 +523,41 @@ def _correction(clause):
         or _identity(body, 0) is not None
 
 
+def _subject(words):
+    """The subject a clause opens with, as (kind, its words, whether a predicate follows it). kind is "pronoun", "noun"
+    for a noun phrase, or "none" when the clause has no subject of its own ("but isn't", "actually just a static
+    scene", "looks like glare"). Words that introduce a clause ("but", "and", "at first") come before it, and a noun
+    phrase ends at its verb's auxiliary, an adverb, a preposition or a negation."""
+    x = 0
+    while x < len(words) and (words[x] in CONTRAST or words[x] in ('and', 'or', 'at', 'first', 'fact', 'reality')
+                              or words[x] in HEDGES and x + 1 < len(words) and words[x + 1] in DETERMINERS):
+        x += 1
+    if x < len(words) and words[x] in PRONOUNS:
+        return 'pronoun', words[x:x + 1], x + 1 < len(words)
+    while x < len(words) and words[x] in _ARTICLES:
+        x += 1
+    y = x
+    stop = AUX | SKIP | CORRECTIONS | PREDICATE_END | PHRASE_END | BOUNDARY | HEDGES
+    while y < len(words) and words[y] not in stop and not _negator(words[y]):
+        y += 1
+    return ('noun' if y > x else 'none'), words[x:y], y < len(words)
+
+
+def _refers(correction, impression):
+    """Whether a correction clause is about the subject of the impression clause before it in its sentence: its
+    subject is a pronoun, or it has none of its own (a bare noun phrase with no predicate, "actually a white
+    tablecloth", says what the impression was), or it is no more than the impression's own subject ("the camera" after
+    "the exo camera"). A clause whose subject is another noun phrase states something about that other subject and
+    retracts nothing ("The exo camera appears frozen, but the wrist camera is just fine", "it looks frozen, but the
+    timestamps actually advance")."""
+    kind, said, predicate = _subject(correction)
+    if kind != 'noun' or not predicate:
+        return True
+    kind, before, _ = _subject(impression)
+    norm = lambda ws: {w[:-1] if w.endswith('s') and len(w) > 3 else w for w in ws}
+    return kind == 'noun' and norm(said) <= norm(before)
+
+
 def _corrected_within(clause):
     """The part of a clause that an impression and its correction share, which the correction retracts: the hedged
     subject of "what looks like glare is a white plate", "the washed-out look is the white tablecloth", and a whole
@@ -588,7 +655,8 @@ def denied_spans(text: str) -> list[tuple[int, int]]:
             words = [t.w for t in flat[back][1]]
             h = _hedge_at(words)
             if h is not None:
-                if _correction(clause):
+                if _correction(clause) and _refers([t.w for t in clause if _is_word(t)],
+                                                   [t.w for t in flat[back][1] if _is_word(t)]):
                     spans.append((flat[back][1][0].start, flat[k - 1][1][-1].end))
                 break
             if words and words[0] in CONTRAST:

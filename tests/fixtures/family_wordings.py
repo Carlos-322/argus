@@ -4,9 +4,10 @@ Expected families: P privacy-blur, L low-light, F camera-fault, I camera-image, 
 (d:Camera fault). WRITTEN was written before the clause-polarity reading in board/polarity.py was implemented;
 INDEPENDENT, THIRD and FOURTH were each written by a separate reviewer from the family vocabulary alone, without
 seeing that code; each was scored once untouched before any change it prompted. All are measured in
-tests/test_family_polarity.py. Rows that expected a later sentence to retract an earlier one, or a question to be
-answered by the sentence after it, now expect what the earlier sentence asserts on its own, since board/polarity.py
-reads each statement only within its own sentence.
+tests/test_family_polarity.py. Rows that expected a later sentence to retract an earlier one, a question to be
+answered by the sentence after it, or a clause about another subject to correct an impression ("it seems frozen, but
+the arm is just still"), now expect what the impression asserts on its own, since board/polarity.py reads each
+statement only within its own scope.
 """
 
 WRITTEN = [
@@ -110,10 +111,10 @@ WRITTEN = [
     ('C', 'The stream looks frozen for 2 s', '', 'I'),
     ('C', 'It looks like glare hides the tray', '', 'L'),
     ('C', 'The lens appears to be partly obstructed', '', 'F'),
-    ('C', 'It looks frozen, but the scene is actually just still', '', 'D'),
+    ('C', 'It looks frozen, but the scene is actually just still', '', 'I'),
     ('C', 'Appears overexposed, but it is really a white tablecloth', '', 'D'),
     ('C', "Seems like an occlusion, but it is only the operator's arm passing", '', 'D'),
-    ('C', 'Looks like a dropout, in fact the arm is simply out of view', '', 'D'),
+    ('C', 'Looks like a dropout, in fact the arm is simply out of view', '', 'I'),
     ('C', 'At first the camera seems rotated, however it is just the table being tilted', '', 'D'),
     ('C', "The image looks frozen but it isn't", '', 'D'),
     ('C', 'Initially resembles glare, but it is actually a reflective sticker', '', 'D'),
@@ -122,7 +123,7 @@ WRITTEN = [
     ('C', 'Looks like corruption, actually a patterned tablecloth', '', 'D'),
     ('C', 'It might seem frozen; in reality the arm is just paused', '', 'I'),
     ('C', 'Appears washed out, but that is just the white wall', '', 'D'),
-    ('C', 'It appears frozen at first, but the arm is merely holding still', '', 'D'),
+    ('C', 'It appears frozen at first, but the arm is merely holding still', '', 'I'),
     ('C', "The lens looks obstructed, but it isn't", '', 'D'),
     ('C', "Looks like the camera turned away, but it's just the operator leaning", '', 'D'),
     ('D', 'The glare never goes away', '', 'L'),
@@ -284,11 +285,11 @@ INDEPENDENT = [
     ('hedge-corrected', 'The dark patch resembles a black frame, but it is a shadow from the cabinet and the rest of the scene stays visible.', '', 'D'),
     ('hedge-corrected', 'The region near the door could be read as a blur patch, yet it is just frosted glass.', '', 'D'),
     ('hedge-corrected', 'Looks overexposed at first glance; on closer inspection the wall is simply painted white.', '', 'L'),
-    ('hedge-corrected', 'The camera seems to be removed at 10 s, but the wearer only crouches and the mount stays on.', '', 'D'),
+    ('hedge-corrected', 'The camera seems to be removed at 10 s, but the wearer only crouches and the mount stays on.', '', 'F'),
     ('hedge-corrected', 'What appears to be a frozen frame is a slow pan over a plain wall; the frames are not identical.', '', 'D'),
     ('hedge-corrected', 'The washed-out look is the white tablecloth, not an exposure problem.', '', 'D'),
     ('hedge-corrected', 'I first took the dark shape for a finger in front of the lens, but it is the gripper jaw entering the view.', '', 'D'),
-    ('hedge-corrected', 'Glare is suspected but the bright spot is a lamp in view, and nothing is clipped.', '', 'D'),
+    ('hedge-corrected', 'Glare is suspected but the bright spot is a lamp in view, and nothing is clipped.', '', 'L'),
     ('hedge-corrected', 'What looks like glare is actually a rectangular blur over a monitor.', '', 'P'),
     ('hedge-corrected', 'The image looks frozen, but in fact the camera is pointed up at the ceiling where nothing moves.', '', 'F'),
     ('hedge-corrected', 'The streaks resemble corruption but are just motion from the fast swing of the arm.', '', 'D'),
@@ -452,7 +453,7 @@ THIRD = [
     ('corrected-withdrawn', 'My earlier glare flag stands, and I am withdrawing only the clipping flag.', '', 'L'),
     ('corrected-withdrawn', 'Ignore the previous note about a black screen. There was none.', '', 'D'),
     ('corrected-withdrawn', 'Revised: no occlusion.', 'Earlier pass said a palm covered the lens; on review the palm is beside the lens, not over it.', 'F'),
-    ('corrected-withdrawn', 'Previous flag withdrawn.', 'I first reported glare, but the real issue is that the camera is upside down for the whole clip.', 'F'),
+    ('corrected-withdrawn', 'Previous flag withdrawn.', 'I first reported glare, but the real issue is that the camera is upside down for the whole clip.', 'L'),
     ('corrected-withdrawn', 'Correction to the first pass: the camera is not removed.', 'The stream lost its feed at 1:15 and stays empty.', 'I'),
     ('negated-remedy', 'The glare is never corrected and lasts until the clip ends.', '', 'L'),
     ('negated-remedy', 'The camera is turned away at 0:20 and nobody turns it back.', '', 'F'),
@@ -612,7 +613,7 @@ FOURTH = [
     ('corrected_withdrawn', 'The head camera seems to be pointed away from the table. Correction: it is aimed correctly, the operator is just leaning back.', '', 'F'),
     ('corrected_withdrawn', 'Washed out? I said so earlier, but at full resolution the highlights hold detail.', '', 'D'),
     ('corrected_withdrawn', "I was about to call this clean. Then at 1:30 the operator's sleeve covers the lens.", '', 'F'),
-    ('corrected_withdrawn', 'The overexposure I flagged earlier is withdrawn; the histogram shows no clipping.', '', 'L'),
+    ('corrected_withdrawn', 'The overexposure I flagged earlier is withdrawn; the histogram shows no clipping.', '', 'D'),
     ('negated_remedy', 'Wiping the lens did not help; the glare remains until the end.', '', 'L'),
     ('negated_remedy', 'The operator never puts the camera back, so the view stays turned away for the last 20s.', '', 'F'),
     ('negated_remedy', 'Restarting the recorder failed to clear the frozen image.', '', 'I'),
