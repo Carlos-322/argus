@@ -212,6 +212,32 @@ def test_recorded_jump_on_a_half_rate_camera(tmp_path, mapping, seen):
         assert ev and all(e["visual_jump"] is seen for e in ev), (i, ev)
 
 
+def _ego(tmp_path: Path, name: str, speed: np.ndarray) -> dict:
+    d = write_episode(tmp_path / name / "episode_000000", np.zeros((len(speed) + 1, 0)), {"exo": levels_for(speed)},
+                      profile="ego_head", kind="none")
+    r = capture_qc.run_episode(d)
+    return {c["check"]: c for c in r["checks"]}["video_frozen_run"]
+
+
+def test_a_video_only_frozen_camera_is_judged_from_its_pixels(tmp_path):
+    """With no recorded motion to say the view had to change, a still run is a frozen camera when the picture moves
+    on the frame steps right before and after it (it stops dead and resumes), shown as a note; a scene that slows into
+    stillness and out of it cannot be told from a frozen camera, so the check is not assessed rather than clear; a
+    picture that never holds still is clear."""
+    rng = np.random.default_rng(0)
+    stops = rng.uniform(0.5, 1.0, T - 1)
+    stops[40:85] = 0.0
+    frozen = _ego(tmp_path, "stops", stops)
+    assert frozen["status"] == "fired" and frozen["shown_as"] == "note"
+    slows = rng.uniform(0.5, 1.0, T - 1)
+    slows[30:40] = np.linspace(0.5, 0.0, 10)
+    slows[40:85] = 0.0
+    slows[85:95] = np.linspace(0.0, 0.5, 10)
+    still = _ego(tmp_path, "slows", slows)
+    assert still["status"] == "not_applicable" and "camera exo" in still["why"]
+    assert _ego(tmp_path, "moves", rng.uniform(0.5, 1.0, T - 1))["status"] == "clear"
+
+
 def test_no_jump_in_smooth_motion(tmp_path):
     s, vL, vR = two_grippers(2)
     d = write_episode(tmp_path / "episode_000000", s, {"left": levels_for(vL), "right": levels_for(vR)})
@@ -372,6 +398,8 @@ def test_capture_qc_trimmed_all_placeholder_window_has_no_pixel_assessment(tmp_p
 
 
 def test_capture_qc_frozen_motion_needs_usable_pairs_on_aligned_camera(tmp_path):
+    """The left camera has no usable frame; the right one's timing cannot be compared with the state, but its picture
+    never holds still for a second, which the pixels alone show, so it is clear for it, with the left camera named."""
     s, _, vR = two_grippers(3)
     d = write_episode(tmp_path / "episode_000000", s,
                       {"left": np.zeros(T), "right": levels_for(vR)},
@@ -381,8 +409,8 @@ def test_capture_qc_frozen_motion_needs_usable_pairs_on_aligned_camera(tmp_path)
     listed = {c["check"]: c for c in r["checks"]}
     assert listed["video_decode_frame_count_mismatch"]["status"] == "fired"
     frozen = listed["video_frozen_run"]
-    assert frozen["status"] == "not_applicable"
-    assert "left" in frozen["why"] and "right" in frozen["why"]
+    assert frozen["status"] == "clear"
+    assert "left" in frozen["why"]
     assert listed["video_extreme_exposure"]["status"] in ("clear", "fired")
 
 
