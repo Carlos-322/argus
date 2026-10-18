@@ -554,7 +554,7 @@ def test_spend_cap_stops_new_episodes(tmp_path, monkeypatch):
     out = tmp_path / 'out'
     assert harness.run_batch(episodes, out, keys=['sk-or-a'], concurrency=1, force=False,
         max_spend=cap, model=harness.DEFAULT_MODEL, reasoning='medium', max_tokens=100,
-        timeout=1, cell_w=128) == 0
+        timeout=1, cell_w=128) == 1
     assert len(calls) == len(list(out.glob('episode_*.json'))) == 3
     left = sorted(out.glob('noreply_episode_*.json'))
     assert len(left) == 7
@@ -931,7 +931,7 @@ def test_final_claim_survives_worker_crash_and_budget_refusal_has_no_dispatch(tm
     args = dict(keys=['sk-or-fixture'], concurrency=1, force=False, model='openai/gpt-6-astra',
                 reasoning='medium', max_tokens=2000, timeout=1, cell_w=128)
     refused = tmp_path / 'refused'
-    assert harness.run_batch([ep], refused, max_spend=.001, **args) == 0
+    assert harness.run_batch([ep], refused, max_spend=.001, **args) == 1
     assert calls == []
     out = tmp_path / 'crashed'
     assert harness.run_batch([ep], out, max_spend=20, **args) == 130

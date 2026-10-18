@@ -502,6 +502,8 @@ def test_canonical_receipts_follow_media_lifetime_and_unknown_metadata_is_not_tr
     monkeypatch.setattr(serve, 'FFMPEG', 'ffmpeg-fixture')
     monkeypatch.setattr(serve, '_FOOTAGE_DISK_FILES', 2)
     monkeypatch.setattr(serve, '_probe', lambda p: (16, 16, 10, 30))
+    # This cache-lifetime fixture stubs the container and encoder together.
+    monkeypatch.setattr(serve, '_footage_seek', lambda p, t: max(0, t - 3))
     monkeypatch.setattr(clips, 'frame_lengths', lambda p: None)
     def encode(cmd):
         Path(cmd[-1]).write_bytes(b'prepared footage')

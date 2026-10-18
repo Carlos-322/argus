@@ -39,7 +39,8 @@ import warnings
 
 import numpy as np
 
-from prepare.signal_alignment import ALIGNED_ASSUMED, ALIGNED_ROWS, ALIGNED_CAMERA, COARSE_CLOCK, placement_text
+from prepare.signal_alignment import (ALIGNED_ASSUMED, ALIGNED_ROWS, ALIGNED_CAMERA, COARSE_CLOCK,
+                                      RECORDER_ARRIVAL, placement_text)
 
 REST_FRACTION = 0.1
 MIN_REST = 0.2
@@ -644,7 +645,8 @@ def describe(name: str, a: np.ndarray, shape=None, names=None, rest=None, swing=
                     + (f", {' x '.join(str(int(x)) for x in shape)} shape" if shape and len(shape) > 1 else ""))
     if rate_hz and fps and float(rate_hz) < RATE_SLOWER * float(fps):
         rate = _num(float(rate_hz))
-        what += (f", estimated at {rate} Hz from assumed placement" if aligned_by == COARSE_CLOCK or clock_problem else
+        what += (f", recorder arrivals at {rate} Hz" if aligned_by == RECORDER_ARRIVAL else
+                 f", estimated at {rate} Hz from assumed placement" if aligned_by == COARSE_CLOCK or clock_problem else
                  f", recorded at {rate} Hz")
     if aligned_by == ALIGNED_ROWS:
         if clock_problem:

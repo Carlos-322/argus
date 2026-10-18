@@ -63,6 +63,7 @@ def test_ready_footage_is_served_while_another_encode_holds_admission(tmp_path, 
     monkeypatch.setattr(serve, 'FOOTAGE_DIR', tmp_path / 'footage')
     monkeypatch.setattr(serve, 'FFMPEG', 'ffmpeg')
     monkeypatch.setattr(serve, '_probe', lambda p: (16, 16, 4, 30))
+    monkeypatch.setattr(serve, '_footage_seek', lambda p, t: max(0, min(t - 3, 1)))
     monkeypatch.setattr(clips, 'frame_lengths', lambda p: None)
     entered, release, busy = threading.Event(), threading.Event(), threading.Event()
     def encode(cmd, **kwargs):

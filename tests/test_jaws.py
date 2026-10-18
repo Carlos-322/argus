@@ -159,3 +159,14 @@ def test_existing_small_video_without_declaration_is_never_decoded(tmp_path, mon
     assert result['status'] == 'abstained'
     assert result['reason'] == 'unsupported_geometry'
     assert not (tmp_path / 'analysis').exists()
+
+
+def test_read_only_measurement_does_not_create_or_change_output_cache(tmp_path, monkeypatch):
+    source = tmp_path / 'source'; source.mkdir()
+    video = source / 'camera.mp4'; video.write_bytes(b'synthetic decoder input')
+    monkeypatch.setattr(jaws, 'read_frames', lambda *args, **kwargs: iter(marker_frames()))
+    args = dict(times_s=np.arange(18) * .04 + 20, camera='wrist', declaration=DECLARATION,
+                output_dir=tmp_path / 'cache', source_proof={'sha256': 'a' * 64})
+    result = jaws.analyse(video, read_only=True, **args)
+    assert result['status'] == 'measured'
+    assert not (tmp_path / 'cache').exists()

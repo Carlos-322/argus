@@ -45,24 +45,29 @@ def _supported_text(pattern, text):
     Causal clauses have their own predicates. A trailing correction or a denial
     of the predicate itself cannot establish the specialized family.
     """
-    sentences = re.split(r'[.!?;\n]+', text)
+    sentences = re.split(r'[.!;\n]+', text)
     for sentence in sentences:
         # A retracted impression is not an observed fault. Prefer the broad
         # source category to guessing the referent of a correction.
         if re.search(r'\b(?:but|however)\s+(?:it|this|that)\s+(?:is|was)\s+not\s*$', sentence, re.I):
             continue
-        clauses = re.split(r'\b(?:but|however|whereas|because|since)\b|'
+        clauses = re.split(r'\b(?:but|however|whereas|because|since|while)\b|'
                            r',\s*(?=(?:the|this|that|camera|image|view|frame|video|stream)\b)',
                            sentence, flags=re.I)
         for clause in clauses:
-            if re.search(r'\b(?:looks?|seems?|appears?)\s+(?:like|to be)\b', clause, re.I):
-                continue
             for match in pattern.finditer(clause):
                 before = clause[:match.start()]
-                after = re.split(r'[,;]|\b(?:and|or)\b', clause[match.end():], maxsplit=1, flags=re.I)[0]
-                denied = re.match(r'\w*\s+(?:(?:is|are|was|were|has|have)\s+)?'
-                                  r'(?:not\b|never\b|absent\b|(?:is|are|was|were)n\x27t\b)', after, re.I)
-                if not _NEGATION.search(before) and not denied:
+                before = re.sub(r'\bnot\s+without\b', 'with', before, flags=re.I)
+                remainder = clause[match.end():]
+                # Catalog patterns include stems, such as "overexpos". Finish
+                # that word before reading the predicate that follows it.
+                remainder = re.sub(r'^\w+', '', remainder)
+                after = re.split(r'[,;]|\b(?:and|or)\b', remainder, maxsplit=1, flags=re.I)[0].strip()
+                denied = re.match(r'(?:\w+\s+)?'
+                                  r'(?:(?:is|are|was|were|has|have)\s+)?'
+                                  r'(?:not\b|absent\b|(?:is|are|was|were)n\x27t\b|'
+                                  r'never\s+(?:present|observed|seen|occurs?)|\?\s*no\b)', after, re.I)
+                if not (_NEGATION.search(before) or re.search(r'\bfree\s+of\b', before, re.I)) and not denied:
                     return True
     return False
 

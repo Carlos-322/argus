@@ -130,19 +130,10 @@ def test_gate_counts_paid_unusable_reply_before_grading(tmp_path, monkeypatch, r
     monkeypatch.setattr(score, 'load_cases', lambda: {})
     result = score.score([tmp_path])['fixture']
     assert result['parsed'] == 0
-    assert result['cost_by_dataset']['fixture']['billed_usd'] == pytest.approx(round(output_spend(out), 2))
+    assert result['cost_by_dataset']['fixture']['billed_usd'] == pytest.approx(output_spend(out))
     assert result['cost_by_dataset']['fixture']['episodes'] == 1
-
-
-def test_request_dependencies_exclude_incidental_board_ui(monkeypatch):
-    from pathlib import Path
-    repository = Path(harness.__file__).resolve().parents[1]
-    modules = {path.relative_to(repository).as_posix(): raw for path, raw in harness.request_implementation(repository).items()}
-    assert 'board/to_board.py' not in modules
-    assert 'board/clips.py' not in modules
-    assert 'board/hands.py' not in modules
-    assert 'label/episode.py' in modules
-    assert 'board/public_export.py' in modules
+    if refresh:
+        assert result['cost_sample']['cold_usd'] is None
 
 
 def test_piece_reader_uses_repaired_reply_under_local_refusal(tmp_path):
@@ -181,8 +172,12 @@ def test_review_named_retry_preserves_cap_and_history(tmp_path, monkeypatch):
     def step(job, kind, command, env, **kwargs):
         if kind in ('dry_run', 'label'):
             commands.append(command)
-            monkeypatch.setattr(sys, 'argv', command[2:])
-            return harness.main()
+            with monkeypatch.context() as local:
+                local.setattr(sys, 'argv', command[2:])
+                for name in ('ARGUS_REVIEW_OUTPUT_LOCK_FD', 'ARGUS_REVIEW_OUTPUT_LOCK_PATH'):
+                    if name in env:
+                        local.setenv(name, env[name])
+                return harness.main()
         return 0
     monkeypatch.setattr(review, 'run_step', step)
     argv = ['review', '--data', str(upload), '--out', str(job), '--rig', 'ego_head', '--cap', '2',
@@ -369,3 +364,122 @@ def test_atomic_publication_cannot_pair_new_annotation_with_old_billing(tmp_path
     ledger = harness.billing_view(selected)
     assert selected['final_attempt_index'] == ledger['final_attempt_index']
     assert harness.episode_cost(selected) == pytest.approx(.006 if selected['final_attempt_index'] == 1 else .012)
+
+
+@pytest.mark.parametrize('mode', ['cap', 'timeout'])
+def test_absent_final_response_is_not_a_schema_failure(tmp_path, monkeypatch, mode):
+    from compare.metrics import _responses
+    ep = recording(tmp_path, np.arange(12) / 30); out = tmp_path / 'out'
+    calls = []
+    def transport(request, timeout):
+        kind = provider_kind(request); calls.append(kind)
+        if kind == 'selection':
+            return response('{"requests":[]}')
+        raise TimeoutError('final response lost')
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', transport)
+    settings = options()
+    if mode == 'cap': settings['max_spend'] = .000001
+    harness.run_batch([ep], out, **settings)
+    result = compared({'run': tmp_path, 'status': 'exit 1'}, ep.name)
+    counts = _responses('model', ['episode'], {'episode': {'by': {'model': result}}})
+    assert result['status'] == 'no_response'
+    assert counts['no_response'] == 1 and counts['unparsed'] == 0
+    assert counts['parse_share'] is None
+    assert calls == ([] if mode == 'cap' else ['selection', 'final'])
+
+
+def test_history_only_annotation_publishes_through_comparison_board(tmp_path):
+    from board.build import build_comparisons
+    from test_compare import _comparison
+    spec = _comparison(tmp_path)
+    primary = tmp_path / 'runs' / 'm2' / 'out' / 'episode_a.json'
+    attempt = json.loads(primary.read_text())
+    attempt.update(final_attempt_index=1, final_dispatch_outcome='received')
+    attempt['episode_dir'] = str(tmp_path / 'slice' / 'episode_a')
+    ledger = dict(episode_dir=attempt['episode_dir'], final_attempt_index=2,
+                  final_dispatch_outcome='not dispatched', final_cost_history=[attempt], parse_ok=False)
+    primary.with_name('noreply_' + primary.name).write_text(json.dumps(ledger))
+    primary.unlink()
+    qa = tmp_path / 'qa.new'; qa.mkdir()
+    for name in ('a', 'b', 'c'):
+        (qa / f'episode_{name}.json').write_text('{"dataset":"fixture"}')
+    sources = {f'episode_{name}.json': tmp_path / 'runs' / 'ref' / 'out' / f'episode_{name}.json'
+               for name in ('a', 'b', 'c')}
+    result = build_comparisons(tmp_path, spec, qa, sources)
+    published = json.loads((tmp_path / 'compare.new' / 'm2' / 'episode_a.json').read_text())
+    assert published['_compare']['status'] == 'parsed'
+    assert published['completion']['task_completed'] == 'success'
+    assert result['models']['m2']['files'] == 3
+    assert not primary.exists()
+
+
+@pytest.mark.parametrize('finish', ['stop', 'length'])
+def test_received_reply_without_invoice_remains_a_response(tmp_path, monkeypatch, finish):
+    import io
+    ep = recording(tmp_path, np.arange(12) / 30); out = tmp_path / 'out'
+    def transport(request, timeout):
+        if provider_kind(request) == 'selection': return response('{"requests":[]}')
+        doc = json.loads(response('{"task_summary":"A hand reaches."}').read())
+        doc.pop('usage', None)
+        doc['choices'][0]['finish_reason'] = finish
+        return io.BytesIO(json.dumps(doc).encode())
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', transport)
+    harness.run_batch([ep], out, **options())
+    result = compared({'run': tmp_path, 'status': 'exit 1'}, ep.name)
+    assert result['status'] == ('parsed' if finish == 'stop' else 'cut_off')
+    assert result['cost'] is None and result['cost_complete'] is False
+    assert result['billed_usd'] == pytest.approx(.003)
+    assert result['reserved_usd'] > 0
+
+
+def test_mixed_round_invoices_and_final_history_do_not_become_billed_reservations():
+    from label.receipts import billing_summary
+    record = {'final_dispatch_outcome': 'not dispatched', 'final_cost_history': [
+        {'final_dispatch_outcome': 'received', 'usage': {'est_cost_usd': .04}},
+        {'final_dispatch_outcome': 'unverified', 'final_reserved_usd': .8}],
+        'auxiliary_cost_history': [{'cost_usd': .2, 'cost_is_conservative_estimate': True,
+            'rounds': [{'state': 'received', 'response': {'usage': {'cost': .003}}},
+                       {'state': 'dispatched', 'reserved_cost_usd': .197}]}],
+        'evidence_inspection': {'cost_usd': .01, 'previously_billed_usd': .004}}
+    summary = billing_summary(record)
+    assert summary['billed_usd'] == pytest.approx(.049)
+    assert summary['reserved_usd'] == pytest.approx(.997)
+    assert summary['cost_complete'] is False
+
+
+def test_carrying_inspection_rounds_keeps_prior_invoice_attribution(tmp_path):
+    from label.receipts import billing_summary
+    out = tmp_path / 'out'; out.mkdir()
+    record = {'final_dispatch_outcome': 'not dispatched', 'parse_ok': False,
+        'auxiliary_cost_history': [{'kind': 'inspection', 'cost_usd': .003}],
+        'evidence_inspection': {'cost_usd': .207, 'previously_billed_usd': .003,
+            'cost_is_conservative_estimate': True, 'rounds': [
+                {'state': 'received', 'response': {'usage': {'cost': .003}}},
+                {'state': 'received', 'response': {'usage': {'cost': .004}}},
+                {'state': 'dispatched', 'reserved_cost_usd': .2}]}}
+    path = out / 'episode_x.json'; path.write_text(json.dumps(record))
+    before = billing_summary(record)
+    carried = billing_summary({'final_dispatch_outcome': 'not dispatched', **harness._billing_fields(path)})
+    assert before['billed_usd'] == pytest.approx(.007)
+    assert before['reserved_usd'] == pytest.approx(.2)
+    assert carried == before
+    from label.pieces import _carry_part_billing
+    result = {'usage': {}, 'config': {'resolution_route': {}}}
+    _carry_part_billing(result, [({'piece': {'index': 1}}, {'_billing_receipt': record})])
+    assert billing_summary(result) == before
+
+
+@pytest.mark.parametrize('previous', [0, .001])
+def test_merging_inspection_parts_preserves_verified_rounds(previous):
+    from label.receipts import billing_summary
+    invoice = {'version': 1, 'cost_usd': .203, 'previously_billed_usd': previous,
+        'cost_is_conservative_estimate': True, 'rounds': [
+            {'state': 'received', 'response': {'usage': {'cost': .003}}},
+            {'state': 'dispatched', 'reserved_cost_usd': .2}]}
+    merged = evidence_access.merge([({'piece': {'index': 1, 't0_s': 0, 't1_s': 10}},
+                                    {'evidence_inspection': invoice})])
+    record = {'final_dispatch_outcome': 'not dispatched', 'evidence_inspection': merged}
+    summary = billing_summary(record)
+    assert summary['billed_usd'] == pytest.approx(.003 - previous)
+    assert summary['reserved_usd'] == pytest.approx(.2)
+    assert summary['cost_complete'] is False

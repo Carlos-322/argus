@@ -15,6 +15,8 @@ the run folders and the episodes they name; nothing is repaired. Per rig:
   served from the provider's prompt cache. In a real run each episode is sent once, so only the rig's shared
   instructions are ever read from the cache. The cold cost reprices every cache read beyond them (the smallest
   nonzero read of the rig in these runs) at the cache-write price, which is the cost of a first send.
+  Unreceived or unverified calls do not become cost samples. Verified charges and unresolved reservations
+  remain separate; incomplete invoice knowledge withholds the cost rate.
 """
 from __future__ import annotations
 
@@ -27,7 +29,8 @@ from pathlib import Path
 import numpy as np
 
 from checks import label_consistency
-from label.harness import PRICE_IN, episode_cost, annotation_record, reply_truncated
+from label.harness import PRICE_IN, DEFAULT_MODEL, annotation_record, billing_view
+from label.receipts import billing_summary
 
 HERE = Path(__file__).resolve().parent
 RIGS = ("teleop", "handheld", "ego")
@@ -175,7 +178,8 @@ def score(runs: list[Path]) -> dict:
 
     def rig_stats(rig):
         return per.setdefault(rig, {"cases": 0, "met": 0, "asked": 0, "parsed": 0, "flags": 0, "cost": {},
-                                    "cache_reads": [], "failures": [], "flagged": [], "unresolved": 0})
+                                    "cache_reads": [], 'cold_valid': True,
+                                    "failures": [], "flagged": [], "unresolved": 0})
     seen = set()
     selected_runs = []
     owners = {}
@@ -207,14 +211,28 @@ def score(runs: list[Path]) -> dict:
             p = rig_stats(rig)
             p["asked"] += 1
             sec = duration_s(Path(d["episode_dir"]))
+            from compare.metrics import read_output
+            response = read_output(f, d)
             if r.startswith("cost:"):
-                c = p["cost"].setdefault(r[5:], [0.0, 0.0, 0])
-                c[0] += episode_cost(d)
-                c[1] += sec
-                c[2] += 1
-                p["cache_reads"].append(int((d.get("usage") or {}).get("cached_tokens") or 0))
-            if not d.get("parse_ok") or reply_truncated(d):
-                p["failures"].append(f"{name}: did not parse" if "labels" in d else f"{name}: reply cut off")
+                c = p["cost"].setdefault(r[5:], {'billed_usd': 0.0, 'reserved_usd': 0.0,
+                    'cost_complete': True, 'seconds': 0.0, 'episodes': 0, 'measured_usd': 0.0})
+                billing = billing_summary(d)
+                c['billed_usd'] += billing['billed_usd']
+                c['reserved_usd'] += billing['reserved_usd']
+                c['cost_complete'] &= billing['cost_complete']
+                if billing['cost_complete'] and response['status'] in ('parsed', 'unparsed', 'cut_off'):
+                    c['seconds'] += sec
+                    c['episodes'] += 1
+                    c['measured_usd'] += billing['billed_usd']
+                    p["cache_reads"].append(int((d.get("usage") or {}).get("cached_tokens") or 0))
+                    # One current usage row cannot reconstruct cache repricing
+                    # across retries or under a different model's tariff.
+                    p['cold_valid'] &= (not billing_view(d).get('final_cost_history')
+                                        and d.get('model') == DEFAULT_MODEL)
+            if response['status'] != 'parsed':
+                reason = {'unparsed': 'did not parse', 'cut_off': 'reply cut off',
+                          'no_response': 'no response', 'pending': 'pending'}[response['status']]
+                p["failures"].append(f'{name}: {reason}')
                 if case_for(name, cases):
                     p["cases"] += 1
                 continue
@@ -241,20 +259,28 @@ def score(runs: list[Path]) -> dict:
                 if case_for(x["name"], cases):
                     p["cases"] += 1
     for p in per.values():
-        billed = sum(c[0] for c in p["cost"].values())
-        hours = sum(c[1] for c in p["cost"].values()) / 3600
+        billed = sum(c['billed_usd'] for c in p["cost"].values())
+        measured = sum(c['measured_usd'] for c in p['cost'].values())
+        reserved = sum(c['reserved_usd'] for c in p['cost'].values())
+        complete = all(c['cost_complete'] for c in p['cost'].values())
+        hours = sum(c['seconds'] for c in p["cost"].values()) / 3600
         reads = [x for x in p["cache_reads"] if x > 0]
         prefix = min(reads) if reads else 0
-        cold = billed + sum(max(0, x - prefix) for x in p["cache_reads"]) * (CACHE_WRITE - CACHE_READ)
-        p["cost_sample"] = {"episodes": sum(c[2] for c in p["cost"].values()), "hours": round(hours, 3),
-                            "billed_usd": round(billed, 2), "cold_usd": round(cold, 2),
-                            "billed_per_hour": round(billed / hours, 1) if hours else None,
-                            "cold_per_hour": round(cold / hours, 1) if hours else None,
+        cold = measured + sum(max(0, x - prefix) for x in p["cache_reads"]) * (CACHE_WRITE - CACHE_READ)
+        p["cost_sample"] = {"episodes": sum(c['episodes'] for c in p["cost"].values()), "hours": round(hours, 3),
+                            "billed_usd": round(billed, 6),
+                            "cold_usd": round(cold, 6) if hours and complete and p['cold_valid'] else None,
+                            'reserved_usd': reserved, 'cost_complete': complete,
+                            "billed_per_hour": round(measured / hours, 1) if hours and complete else None,
+                            "cold_per_hour": round(cold / hours, 1) if hours and complete and p['cold_valid'] else None,
                             "shared_prefix_tokens": prefix}
-        p["cost_by_dataset"] = {ds: {"episodes": c[2], "minutes": round(c[1] / 60, 1), "billed_usd": round(c[0], 2),
-                                     "billed_per_hour": round(c[0] / (c[1] / 3600), 1) if c[1] else None}
+        p["cost_by_dataset"] = {ds: {"episodes": c['episodes'], "minutes": round(c['seconds'] / 60, 1),
+                                     'billed_usd': round(c['billed_usd'], 6), 'reserved_usd': c['reserved_usd'],
+                                     'cost_complete': c['cost_complete'],
+                                     "billed_per_hour": round(c['measured_usd'] / (c['seconds'] / 3600), 1)
+                                     if c['seconds'] and c['cost_complete'] else None}
                                 for ds, c in sorted(p["cost"].items())}
-        del p["cost"], p["cache_reads"]
+        del p["cost"], p["cache_reads"], p['cold_valid']
     return per
 
 
@@ -265,15 +291,22 @@ def main() -> int:
     ap.add_argument("--json", type=Path, default=None, help="also write the full result here")
     a = ap.parse_args()
     per = score(a.runs)
+    if not per:
+        ap.error('No gate episodes found in these runs; use a gate selection to label the sample first.')
     for rig in RIGS:
         if rig not in per:
             continue
         p, c = per[rig], per[rig]["cost_sample"]
+        rate = f"${c['billed_per_hour']}/h billed" if c['billed_per_hour'] is not None else 'cost rate unavailable'
+        if c['cold_per_hour'] is not None:
+            rate += f", ${c['cold_per_hour']}/h cold estimate"
         print(f"{rig:9s} cases {p['met']}/{p['cases']}  parse {p['parsed']}/{p['asked']}  flags {p['flags']}  "
-              f"needs review {p['unresolved']}  cost sample {c['episodes']} episodes, {c['hours'] * 60:.1f} min: ${c['billed_per_hour']}/h billed, "
-              f"${c['cold_per_hour']}/h cold")
+              f"needs review {p['unresolved']}  cost sample {c['episodes']} episodes, {c['hours'] * 60:.1f} min: {rate}")
+        if not c['cost_complete']:
+            print(f"    Verified charges ${c['billed_usd']:.6f}; unresolved reservations ${c['reserved_usd']:.6f}.")
         for ds, x in p["cost_by_dataset"].items():
-            print(f"    {ds:15s} {x['episodes']:3d} episodes {x['minutes']:6.1f} min  ${x['billed_per_hour']}/h billed")
+            rate = f"${x['billed_per_hour']}/h billed" if x['billed_per_hour'] is not None else 'cost rate unavailable'
+            print(f"    {ds:15s} {x['episodes']:3d} episodes {x['minutes']:6.1f} min  {rate}")
         for x in p["failures"]:
             print(f"    FAIL {x}")
         for x in p["flagged"]:

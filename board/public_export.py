@@ -2,6 +2,11 @@
 
 Access attributes and recognizable credential values are withheld. This is not a
 publication-rights decision. Other prose, native fields and public citations stay intact.
+Native fields retain identifiers and measurements, including tokenizer symbols,
+QC booleans, relative working directories and declared version strings. Access
+owner objects and recognizable value syntax are checked in every scope.
+Opaque credentials without access syntax or a credential field name cannot be
+identified reliably. The scanner does not certify arbitrary metadata as public.
 Keep original inputs and operational build receipts in private storage.
 """
 from __future__ import annotations
@@ -70,15 +75,33 @@ def _name(key: str) -> str:
 def _credential_key(key: str, *, native=False, owner='') -> bool:
     """Access attributes use semantic suffixes, not a growing provider-name list."""
     name = _name(key)
+    translated = key.casefold().replace('_', '').replace('-', '').replace(' ', '')
+    if translated in {'contraseña', 'passwort', 'kennwort', 'motdepasse', 'senha', 'wachtwoord',
+                      'hasło', 'пароль', '密码', 'パスワード', '비밀번호', 'claveapi', 'chiaveapi',
+                      'apischlüssel', 'tokendeacceso', 'geheimnis'}:
+        return True
     if not native and name == 'key' and _name(owner) == 'kaggle':
         return True  # Kaggle's service credential object, not an arbitrary native key.
-    if native and name in ('token', 'tokens'):
+    if native and name in ('pass', 'pwd', 'tokens', 'jwt', 'csrf', 'secret'):
         return False
+    if native and name == 'token':
+        return _name(owner) in ('hf', 'huggingface', 'auth', 'github', 'openai', 'openrouter', 'slack')
     if name in _SECRETS or name in ('auth', 'bearer', 'passphrase'):
         return True
     if name.endswith(('password', 'passwd', 'passphrase', 'secret', 'secretkey',
                       'privatekey', 'apikey', 'apitoken', 'accesstoken', 'refreshtoken',
-                      'authtoken', 'bearertoken', 'sessiontoken', 'bottoken', 'accesskey')):
+                      'authtoken', 'bearertoken', 'sessiontoken', 'bottoken', 'accesskey',
+                      'signingkey', 'encryptionkey', 'masterkey', 'clientkey', 'licensekey')):
+        return True
+    if name.endswith('token') and (not native or name in {'npmtoken', 'mapboxtoken', 'secrettoken', 'webhooktoken', 'oauthtoken', 'privatetoken', 'xauthtoken'}) and name not in {'eostoken', 'padtoken', 'stoptoken', 'bostoken',
+                                               'unktoken', 'masktoken', 'septoken', 'clstoken'}:
+        return True
+    if name.startswith('sentrydsn') or name == 'gcpserviceaccount':
+        return True
+    if name in {'wandbkey', 'xauth', 'dbpass', 'mysqlpwd', 'pw', 'passcode', 'pincode',
+                'serviceaccountkey', 'credentialsjson'}:
+        return True
+    if name == 'key' and _name(owner) in {'api', 'openai', 'openrouter', 'anthropic', 'hf', 'wandb'}:
         return True
     # A session ID, signature, tokenizer symbol or field key is not proof of an
     # access mechanism. Credential values are checked independently below.
@@ -86,17 +109,26 @@ def _credential_key(key: str, *, native=False, owner='') -> bool:
 
 
 _CREDENTIAL_VALUE = re.compile(
-    r'-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----|'
+    r'-----BEGIN (?:[A-Z0-9]+ ){0,4}PRIVATE KEY(?: BLOCK)?-----|'
     r'(?<![A-Za-z0-9])(?:AKIA[A-Z0-9]{16}|gh[pousr]_[A-Za-z0-9]{30,}|'
-    r'github_pat_[A-Za-z0-9_]{40,}|sk-ant-[A-Za-z0-9_-]{20,}|'
+    r'github_pat_[A-Za-z0-9_]{40,}|sk-(?:or-|proj-|svcacct-|ant-)?[A-Za-z0-9_-]{20,}|'
+    r'hf_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_-]{20,}|AIza[A-Za-z0-9_-]{35}|'
+    r'npm_[A-Za-z0-9]{30,}|SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}|'
+    r'(?:sk_live_|rk_live_|whsec_)[A-Za-z0-9]{20,}|ASIA[A-Z0-9]{16}|'
+    r'dop_v1_[a-f0-9]{64}|shpat_[a-f0-9]{32}|pypi-[A-Za-z0-9_-]{40,}|'
+    r'SK[a-f0-9]{32}|AC[a-f0-9]{32}:[a-f0-9]{32}|'
+    r'xapp-1-[A-Z0-9]+-[0-9]+-[a-f0-9]{32,}|'
     r'xox[baprs]-[A-Za-z0-9-]{20,})(?![A-Za-z0-9])|'
-    r'\b(?:Proxy-)?Authorization\s*:\s*[A-Za-z][A-Za-z0-9_-]*\s+\S+', re.I)
+    r'\b(?:Proxy-)?Authorization\s*:\s*(?:Bearer|Token|Basic|Digest|AWS4-HMAC-SHA256)\s+\S+|'
+    r'\bBearer[ \t]+[A-Za-z0-9._~+/-]{20,}=*|'
+    r'\b(?:X-Api-Key|api_key|access_token|token|AWS_SECRET_ACCESS_KEY|password|Cookie)[ \t]*[:=][ \t]*[\"\']?[^\s\"\']{12,}|'
+    r'\bAccountKey=[A-Za-z0-9+/]{20,}=*|PuTTY-User-Key-File-[23]:', re.I)
 _JWT_VALUE = re.compile(r'(?<![\w-])([A-Za-z0-9_-]{8,})\.([A-Za-z0-9_-]{2,})\.[A-Za-z0-9_-]+(?![\w-])')
 
 
-def _credential_value(value: str) -> bool:
+def _credential_value(value: str, _encoded=False) -> bool:
     """Recognize access syntax independently of the publisher's field names."""
-    if _CREDENTIAL_VALUE.search(value) or re.fullmatch(r'\s*Bearer\s+\S+\s*', value, re.I):
+    if _CREDENTIAL_VALUE.search(value) or re.fullmatch(r'\s*Bearer[ \t]+[^\s]{12,}[ \t]*', value, re.I):
         return True
     basic = re.fullmatch(r'\s*Basic\s+(\S+)\s*', value, re.I)
     if basic:
@@ -111,17 +143,49 @@ def _credential_value(value: str) -> bool:
                                for part in match.group(1, 2))
         except (ValueError, UnicodeError):
             continue
-        if isinstance(header, dict) and isinstance(payload, dict) and isinstance(header.get('alg'), str):
+        if isinstance(header, dict) and isinstance(payload, dict) and (isinstance(header.get('alg'), str) or header.get('typ') == 'JWT'):
             return True
+    if re.search(r'\bsv=\d{4}-\d{2}-\d{2}&', value) and re.search(r'(?:^|[?&])sig=[A-Za-z0-9%+/=_-]{20,}', value):
+        return True
+    if len(value) <= 65536 and value.lstrip().startswith('{'):
+        try:
+            config = json.loads(value)
+        except (ValueError, RecursionError):
+            config = None
+        registries = config.get('auths') if isinstance(config, dict) else None
+        if isinstance(registries, dict) and any(
+                isinstance(entry, dict) and any(isinstance(entry.get(key), str) and entry[key]
+                    for key in ('auth', 'identitytoken', 'registrytoken', 'password'))
+                for entry in registries.values()):
+            return True
+    # In free prose, private access targets retain their endpoint syntax. Do not
+    # infer a host from ordinary words or resolve publisher names through DNS.
+    if re.search(r'\.(?:ts\.net|localhost|local|internal|lan)(?=[/:)\]\s]|$)|\b(?:ssh|scp|sftp|rsync)\b', value, re.I):
+        for token in value.split():
+            endpoint = token.strip('()[]<>{},;\"\'`').rstrip('.')
+            if _private_access(endpoint):
+                return True
+    # Decode only complete, bounded base64 values. Random opaque blobs and
+    # sensor payloads have no credential meaning unless their decoded syntax does.
+    if not _encoded and 16 <= len(value) <= 65536 and re.fullmatch(r'[A-Za-z0-9+/]+={0,2}', value):
+        try:
+            decoded = base64.b64decode(value, validate=True).decode('utf-8')
+            if (_credential_value(decoded, True)
+                    or re.fullmatch(r'[A-Za-z0-9_.@-]{1,128}:[A-Za-z0-9_!@#$%+=.-]{8,128}', decoded)):
+                return True
+        except (ValueError, UnicodeError):
+            pass
     # Public citation URLs remain intact, including citations embedded in prose.
     return any(_private_url(match[0].rstrip('.,);]'))
-               for match in re.finditer(r'https?://[^\s<>"\']+', value, re.I))
+               for match in re.finditer(r'(?:https?|s3|gs|postgres(?:ql)?|redis|mongodb(?:\+srv)?|amqp|ftp)://[^\s<>"\']+', value, re.I))
 
 
 def _private_access(value: str) -> bool:
     """Private hosts can be bare endpoints or scp-style user@host locations."""
     if not value or any(char.isspace() for char in value):
         return False
+    if _private_host(value):
+        return True
     try:
         parsed = urlsplit('//' + value)
         return bool(parsed.hostname and _private_host(parsed.hostname))
@@ -165,8 +229,10 @@ def _private_url(value: str) -> bool:
             return True
         if host in ('discord.com', 'discordapp.com') and re.match(r'/api/(?:v\d+/)?webhooks/', parsed.path):
             return True
-        for key, _ in parse_qsl(parsed.query, keep_blank_values=True) + parse_qsl(parsed.fragment, keep_blank_values=True):
+        for key, query_value in parse_qsl(parsed.query, keep_blank_values=True) + (parse_qsl(parsed.fragment, keep_blank_values=True) if '=' in parsed.fragment else []):
             name = _name(key)
+            if name == 'code' and query_value.isdecimal() and len(query_value) <= 2:
+                continue
             if _credential_key(key) or name in _URL_QUERY_SECRETS or name.startswith(('xamz', 'xgoog')):
                 return True
     except ValueError:
@@ -262,12 +328,14 @@ def _partial_coverage(value: str) -> str:
 
 
 def _source_keys(value: dict) -> dict:
-    reserved = {key for key in value if not _private_location(key)}
+    reserved = {key for key in value if not _private_location(key) and not _credential_value(key)}
     used, keys = set(), {}
     for key in sorted(value):
         public = key
-        if _private_location(key):
+        if _private_location(key) or _credential_value(key):
             base = _source_name(key) or 'source file'
+            if _credential_value(base):
+                base = 'source file'
             public = base
             if public in reserved or public in used:
                 suffix = hashlib.sha256(key.encode()).hexdigest()
@@ -727,7 +795,7 @@ def _project(value, field: str = '', attribute_owner: str = '', native_fields: b
             name = _name(key)
             attribute = _reader_attribute(key) if not native_fields else None
             owner = _name(attribute) if attribute is not None else attribute_owner
-            if (key in PRIVATE_KEYS or _credential_key(key, native=native_fields, owner=attribute_owner or field)
+            if (key in PRIVATE_KEYS or (key not in source_keys and _credential_value(key)) or _credential_key(key, native=native_fields, owner=attribute_owner or field)
                     or name in _PRIVATE_LOCATIONS
                     or (attribute is not None and _credential_key(attribute))
                     or (field == 'compare' and name in ('runid', 'code'))):
@@ -761,7 +829,7 @@ def _project(value, field: str = '', attribute_owner: str = '', native_fields: b
         # An entire URL is a typed value even in an extension field. Do not scan
         # or rewrite URL fragments embedded in publisher prose.
         stripped = value.strip()
-        version = field.endswith('version') and bool(re.fullmatch(r'\d+(?:\.\d+)+', stripped))
+        version = (field.endswith(('version', 'firmware', 'fw', 'ver')) or field in ('firmware', 'fw', 'build', 'bios', 'driver', 'sdk', 'versionstring')) and bool(re.fullmatch(r'\d+(?:\.\d+)+', stripped))
         if _credential_value(value) or (not version and _private_access(stripped)):
             return _DROP
         if _whole_uri(stripped) and _private_location(stripped):

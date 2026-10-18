@@ -235,8 +235,9 @@ def test_mcap_text_uses_its_verified_camera_clock(tmp_path, text_clock):
         assert [row['t0'] for row in ctx['annotation_subtasks']] == [1., 2.5]
         assert ctx['instruction'] == 'fold the cloth'
     else:
-        assert not ctx.get('annotation_subtasks')
-        assert any(issue['kind'] == 'text_clock_unverified' for issue in ctx['reader_issues'])
+        assert [row['t0'] for row in ctx['annotation_subtasks']] == [2., 3.5]
+        assert ctx['source']['presentation_clock']['basis'] == 'mcap_log_time'
+        assert 'arrival' in ctx['collection_note']
         assert 'pick up' in json.dumps(ctx) and 'fold' in json.dumps(ctx)
 
 
@@ -644,10 +645,11 @@ def test_mcap_outside_topic_bounds_do_not_join_unrelated_capture_domains(tmp_pat
     report = formats.convert(source, 'ego_head', tmp_path / 'out', 'unrelated clock bounds', 900)
     assert not report['failed'], report
     context = json.loads((tmp_path / 'out' / report['episodes'][0]['episode_id'] / 'context.json').read_text())
-    assert not context.get('annotation_subtasks')
-    assert not context.get('instruction')
-    assert any(issue['kind'] == 'text_clock_unverified' for issue in context['reader_issues'])
-    assert 'after recording' in json.dumps(context['recorded_metadata']['unaligned_text_channels'])
+    assert [row['t0'] for row in context['annotation_subtasks']] == [0., 2.5]
+    assert 'fold the cloth' in context['instruction']
+    assert context['source']['presentation_clock']['basis'] == 'mcap_log_time'
+    assert any(issue['kind'] == 'recorder_arrival_timing' for issue in context['reader_issues'])
+    assert 'after recording' in json.dumps(context['recorded_metadata']['text_channels'])
 
 
 def test_generic_mcap_unexpected_decoder_failure_propagates_after_readable_frames(tmp_path, monkeypatch):
@@ -677,10 +679,11 @@ def test_mcap_capture_clock_cannot_lead_its_recorded_arrival_origin(tmp_path):
     report = formats.convert(source, 'ego_head', tmp_path / 'out', 'future capture clock', 900)
     assert not report['failed'], report
     context = json.loads((tmp_path / 'out' / report['episodes'][0]['episode_id'] / 'context.json').read_text())
-    assert not context.get('annotation_subtasks')
-    assert not context.get('instruction')
-    assert any(issue['kind'] == 'text_clock_unverified' for issue in context['reader_issues'])
-    records = context['recorded_metadata']['unaligned_text_channels']['/task/subtask']
+    assert [row['t0'] for row in context['annotation_subtasks']] == [0., 2.5]
+    assert 'fold the cloth' in context['instruction']
+    assert context['source']['presentation_clock']['basis'] == 'mcap_log_time'
+    assert any(issue['kind'] == 'recorder_arrival_timing' for issue in context['reader_issues'])
+    records = context['recorded_metadata']['text_channels']['/task/subtask']
     assert records[0]['capture_ns'] == 1001950000000
     assert 'after recording' in json.dumps(records)
 
@@ -805,8 +808,8 @@ def test_raw_mcap_source_geometry_keeps_neighbor_pixels_and_physical_state(tmp_p
     assert len(streams) == 1
     own = next(iter(streams))
     depth_rows = [0, 1, 3, 4, 5] if damaged == 2 else list(range(6))
-    # FFV1's Matroska container stores this depth clock in integer milliseconds.
-    np.testing.assert_array_equal(streams[own]['t'], np.round(np.array(depth_rows) / 30, 3))
+    # Exact source log nanoseconds are independent of FFV1's millisecond transport ticks.
+    np.testing.assert_array_equal(streams[own]['t'], np.array(depth_rows) * 33_333_333 / 1e9)
     native = depth.decode(streams[own], streams[own]['pts'], list(range(len(depth_rows))))
     assert len(native) == len(depth_rows)
     for row, pixels in native.items():
@@ -879,12 +882,14 @@ def test_mcap_faster_text_retains_exact_timing_only_with_recorded_clock_evidence
     assert not report['failed'], report
     context = json.loads((tmp_path / 'out' / report['episodes'][0]['episode_id'] / 'context.json').read_text())
     if proof == 'unproved':
-        assert not context.get('annotation_subtasks')
-        assert 'pick up' in context['uploader_annotation'] and 'fold the cloth' in context['uploader_annotation']
-        assert 'unverified' in context['uploader_annotation']
+        assert [step['t0'] for step in context['annotation_subtasks']] == [
+            round(1.001 - camera_delay, 3), round(2.501 - camera_delay, 3), round(3.501 - camera_delay, 3)]
+        assert context['source']['presentation_clock']['basis'] == 'mcap_log_time'
+        assert 'fold the cloth' in context['instruction']
+        assert 'unverified' in context['collection_note']
         loaded = episode.load(tmp_path / 'out' / context['episode_id'])
         prompt = episode.build_request(loaded['dir'])['prompt']
-        assert 'pick up' in prompt and 'fold the cloth' in prompt and 'unverified' in prompt
+        assert 'pick up' in prompt and 'fold the cloth' in prompt and 'arrival' in prompt
     else:
         assert [step['t0'] for step in context['annotation_subtasks']] == [1., 2.5, 3.5]
         assert 'fold the cloth' in context['instruction']
@@ -897,10 +902,11 @@ def test_mcap_independent_capture_bias_is_visible_context_without_false_footage_
     report = formats.convert(source, 'ego_head', tmp_path / 'out', 'biased text clock', 900)
     assert not report['failed'], report
     context = json.loads((tmp_path / 'out' / report['episodes'][0]['episode_id'] / 'context.json').read_text())
-    assert not context.get('annotation_subtasks')
-    assert 'pick up' in context['uploader_annotation'] and 'fold the cloth' in context['uploader_annotation']
-    assert 'unverified' in context['uploader_annotation']
-    assert any(issue['kind'] == 'text_clock_unverified' for issue in context['reader_issues'])
+    assert [row['t0'] for row in context['annotation_subtasks']] == [1., 2.5, 3.5]
+    assert context['source']['presentation_clock']['basis'] == 'mcap_log_time'
+    assert 'unverified' in context['collection_note']
+    original = context['recorded_metadata']['text_channels']['/task/subtask']
+    assert original[0]['capture_ns'] == round((1001 + bias) * 1e9)
 
 
 def test_mcap_outside_footage_steps_and_changing_tasks_have_visible_diagnostics(tmp_path):
@@ -920,8 +926,10 @@ def test_mcap_conflicting_explicit_clock_ids_override_equal_numeric_publication_
     report = formats.convert(source, 'ego_head', tmp_path / 'out', 'conflicting clock IDs', 900)
     assert not report['failed'], report
     context = json.loads((tmp_path / 'out' / report['episodes'][0]['episode_id'] / 'context.json').read_text())
-    assert not context.get('annotation_subtasks')
-    assert 'pick up' in context['uploader_annotation'] and 'unverified' in context['uploader_annotation']
+    assert [row['t0'] for row in context['annotation_subtasks']] == [0., 2.5]
+    assert context['source']['presentation_clock']['basis'] == 'mcap_log_time'
+    assert context['recorded_metadata']['text_channels']['/task/subtask'][0]['capture_clock_id'] == 'text-device'
+    assert 'unverified' in context['collection_note']
 
 
 @pytest.mark.parametrize('mixed', [False, True])
@@ -977,10 +985,11 @@ def test_matching_clock_ids_do_not_override_backwards_channel_chronology(tmp_pat
     report = formats.convert(source, 'ego_head', tmp_path / 'out', 'backwards source stamps', 900)
     assert not report['failed'], report
     context = json.loads((tmp_path / 'out' / report['episodes'][0]['episode_id'] / 'context.json').read_text())
-    assert not context.get('annotation_subtasks')
-    assert 'pick up' in context['uploader_annotation'] and 'fold' in context['uploader_annotation']
-    assert any(issue['kind'] == 'text_clock_unverified' and issue['signal'] == '/task/subtask'
-               for issue in context['reader_issues'])
+    assert [row['t0'] for row in context['annotation_subtasks']] == [1., 2.5, 3.5]
+    assert context['source']['presentation_clock']['basis'] == 'mcap_log_time'
+    original = context['recorded_metadata']['text_channels']['/task/subtask']
+    assert original[1]['capture_ns'] < original[0]['capture_ns']
+    assert any(issue['kind'] == 'recorder_arrival_timing' for issue in context['reader_issues'])
 
 
 def test_partial_packed_rows_remain_useful_when_embedded_neighbor_is_unreadable(tmp_path):

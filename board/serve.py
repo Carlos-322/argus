@@ -58,8 +58,10 @@ import math
 import os
 import re
 import shutil
+import socket
 import socketserver
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -405,7 +407,7 @@ def _under(base: Path, p: Path) -> bool:
 # served from a machine that also records.
 FOOTAGE_GAP = 8
 FOOTAGE_FPS = 30
-FOOTAGE_TAG = f"footage-v4-h264-crf20-veryfast-{FOOTAGE_FPS}fps-gap{FOOTAGE_GAP}"   # a new recipe makes new files
+FOOTAGE_TAG = f"footage-v5-h264-crf20-veryfast-{FOOTAGE_FPS}fps-gap{FOOTAGE_GAP}"   # a new recipe makes new files
 _FOOTAGE_SEM = threading.BoundedSemaphore(max(1, int(os.environ.get("BOARD_FOOTAGE_CONCURRENCY", 1))))
 _FOOTAGE_PROBE_SEM = threading.BoundedSemaphore(max(1, int(os.environ.get('BOARD_FOOTAGE_CONCURRENCY', 1))))
 _PROBE_ACTIVE = set()
@@ -454,6 +456,14 @@ def _footage_lock(key):
 def footage_label(eid: str) -> dict:
     """Index episode IDs once and read only labels changed since the previous scan."""
     global _LABEL_INDEX_ROOT, _LABEL_INDEX_CHECKED
+    direct = HERE / f'{eid}.json'
+    if _under(HERE, direct) and direct.is_file():
+        try:
+            label = json.loads(direct.read_text())
+            if isinstance(label, dict) and ((label.get('_meta') or {}).get('episode_id') or direct.stem) == eid:
+                return current_label(label, DICTIONARY_JOB, direct.name)
+        except (OSError, ValueError, TypeError, AttributeError, RecursionError):
+            pass
     with _LABEL_INDEX_LOCK:
         if _LABEL_INDEX_ROOT != HERE or time.monotonic() - _LABEL_INDEX_CHECKED >= 1:
             previous = dict(_LABEL_INDEX) if _LABEL_INDEX_ROOT == HERE else {}
@@ -470,7 +480,7 @@ def footage_label(eid: str) -> dict:
                     label = json.loads(path.read_text())
                     identity = ((label.get('_meta') or {}).get('episode_id') or path.stem) if isinstance(label, dict) else None
                     _LABEL_INDEX[path.name] = (sig, identity)
-                except (OSError, ValueError, TypeError, AttributeError):
+                except (OSError, ValueError, TypeError, AttributeError, RecursionError):
                     continue
             _LABEL_INDEX_ROOT, _LABEL_INDEX_CHECKED = HERE, time.monotonic()
         path = next((HERE / name for name, (_, identity) in _LABEL_INDEX.items() if identity == eid), None)
@@ -479,7 +489,7 @@ def footage_label(eid: str) -> dict:
             label = json.loads(path.read_text())
             if ((label.get('_meta') or {}).get('episode_id') or path.stem) == eid:
                 return current_label(label, DICTIONARY_JOB, path.name)
-        except (OSError, ValueError, TypeError, AttributeError):
+        except (OSError, ValueError, TypeError, AttributeError, RecursionError):
             pass
     return {}
 
@@ -491,6 +501,9 @@ def footage_cams(clips: Path, eid: str, label: dict | None = None) -> list:
     cams = [(c, clip_path(clips, eid, c)) for c in ("exo", "left", "right", *extra)
             if clip_path(clips, eid, c).is_file()]
     label = footage_label(eid) if label is None else label
+    unpaired = {row.get('view') for row in label.get('unshown_cameras') or []
+                if isinstance(row, dict) and row.get('clock_alignment') == 'unverified'}
+    cams = [(cam, path) for cam, path in cams if cam not in unpaired]
     if label.get('camera_views'):
         from board.static import shown_cams
         order = shown_cams(label)
@@ -591,6 +604,20 @@ def _probe_uncached(p: Path) -> tuple:
     return int(s["width"]), int(s["height"]), dur, rate
 
 
+def _footage_seek(clip: Path, t0: float) -> float:
+    """Seek relative to this camera, retaining its final GOP for EOF holds."""
+    if t0 <= 0:
+        return 0.0  # A whole-recording export reads from the native beginning without another probe.
+    import av
+    with av.open(str(_source_path(clip))) as container:
+        stream = container.streams.video[0]
+        if stream.start_time is None or stream.duration is None:
+            return 0.0
+        start = float(stream.start_time * stream.time_base)
+        duration = float(stream.duration * stream.time_base)
+    return max(0.0, min(t0 - start - 3.0, duration - 3.0))
+
+
 def footage_command(inputs: list, t0: float, t1: float, out: Path, threads: int = 2) -> list:
     """The ffmpeg command that composes [(clip, (w, h))] (the main camera first) from t0 to t1 s into out. Timestamps
     are kept as the clips have them (-copyts), a black canvas runs from t0 to t1 at FOOTAGE_FPS, and each camera is
@@ -604,12 +631,12 @@ def footage_command(inputs: list, t0: float, t1: float, out: Path, threads: int 
     cmd = [FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-copyts"]
     for clip, _ in inputs:
         # from a few seconds early, so each camera has the frame showing at t0 (clips have a keyframe every 2 s)
-        cmd += ["-ss", f"{max(0.0, t0 - 3.0):.3f}", "-i", str(clip)]
+        cmd += ["-ss", f"{_footage_seek(clip, t0):.3f}", "-i", str(clip)]
     g = [f"color=c=black:s={W}x{H}:r={fps}:d={t1 - t0:.3f},settb=AVTB,setpts=PTS+{t0:.3f}/TB[b0]"]
     # a camera keeps its last frame on to t1, as the page's video does once it has played to its end: the overlay
     # dropped a camera to black from its last frame's start (a 15 fps camera's last 1/30 s), so each is held there
     # (tpad), and the file keeps the canvas's own frames (those before t1), which the held frames would otherwise run past
-    hold = f"tpad=stop_mode=clone:stop_duration={t1 - t0 + 1:.3f}"
+    hold = f"tpad=stop_mode=clone:stop_duration={t1 + 1:.3f}"
     for i, ((_, wh), (x, y, w, h)) in enumerate(zip(inputs, cells)):
         g.append(f"[{i}:v]{'' if (w, h) == tuple(wh) else f'scale={w}:{h}:flags=lanczos,'}"
                  f"setsar=1,settb=AVTB,{hold}[c{i}]")
@@ -1103,6 +1130,20 @@ def _remember_ready_footage(request: str, result: tuple, record=None) -> None:
         _maintenance_error(error)
 
 
+def _existing_footage_ticket(result):
+    """Cheap repeated prepares share a live ticket without consuming its peers."""
+    version = list(_footage_version(result[0]))
+    for path in (FOOTAGE_DIR / '.tickets').glob('*.json'):
+        try:
+            record = _ticket_record(path.stem)
+            if (record and record.get('file') == result[0].name and record.get('version') == version
+                    and record['expires_at'] - time.time() >= 30):
+                return path.stem
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
+            continue
+    return None
+
+
 def prepare_footage_ticket(result: tuple) -> str:
     record = getattr(result, 'receipt', None)
     if record is None:
@@ -1340,6 +1381,10 @@ HEADER = None                         # a site header in place of the title bar 
 
 _LIST_CACHE = {}         # folder -> (signature, rail records)
 _LIST_LOCK = threading.Lock()
+_LIST_REFRESHING = set()
+_LIST_CHECKED = {}
+_LIST_ROWS = {}
+_LIST_REFRESH_INTERVAL = 1.0
 
 # Plain display names for the issue tags (board/families.py reads the same file). A tag with no entry shows as its
 # words with the first letter capitalised.
@@ -1379,23 +1424,105 @@ def _label_identity(path):
     return version if _durable_metadata(str(path), version) else (*version, src_sig(path))
 
 
-def list_episodes(here: Path | None = None) -> list:
-    """The rail records of the board's own labels, or of one model's labels (compare/<key>). Cached per folder and
-    rebuilt only when its set of json files or their identities change, so concurrent page loads don't each re-parse
-    every episode file."""
-    here = here or HERE
-    try:
-        # Trusted files use metadata; weak files require content proof on each page load.
-        sig = tuple(sorted((p.name, _label_identity(p)) for p in here.glob("*.json")))
-    except OSError:
-        sig = None
+def _read_label(path):
+    """Reuse bytes already read by an episode request to refresh its rail row."""
+    raw = path.read_bytes()
+    label = json.loads(raw)
+    key = str(path.parent)
+    if isinstance(label, dict) and 'episode_prompt' in label:
+        with _LIST_LOCK:
+            known = key in _LIST_ROWS
+        if known:
+            row = (hashlib.sha256(raw).hexdigest(), _rail_record(path, label))
+            with _LIST_LOCK:
+                rows = _LIST_ROWS[key]
+                rows[path.name] = row
+                _LIST_CACHE[key] = (tuple((name, entry[0]) for name, entry in sorted(rows.items())),
+                                    [entry[1] for name, entry in sorted(rows.items())])
+    return label
+
+
+def _refresh_weak_list(here: Path):
+    """Hash and parse the same stable bytes, preserving last complete writer output."""
+    key = str(here)
     with _LIST_LOCK:
-        hit = _LIST_CACHE.get(str(here))
-        if sig is not None and hit and hit[0] == sig:
+        previous = dict(_LIST_ROWS.get(key, {}))
+    rows = {}
+    for path in sorted(here.glob('*.json')):
+        try:
+            if not _under(here, path):
+                continue
+            before = _footage_version(path)
+            with path.open('rb') as source:
+                raw = source.read(_EXPORT_LABEL_BYTES + 1)
+                source.seek(0)
+                repeated = source.read(_EXPORT_LABEL_BYTES + 1)
+            if (len(raw) > _EXPORT_LABEL_BYTES or raw != repeated
+                    or _footage_version(path) != before):
+                raise ValueError('Label changed during snapshot')
+            digest = hashlib.sha256(raw).hexdigest()
+            old = previous.get(path.name)
+            if old and old[0] == digest:
+                rows[path.name] = old
+                continue
+            label = json.loads(raw)
+            if isinstance(label, dict) and 'episode_prompt' in label:
+                rows[path.name] = (digest, _rail_record(path, label))
+        except (OSError, ValueError, TypeError, AttributeError, RecursionError):
+            if path.name in previous:
+                rows[path.name] = previous[path.name]
+    signature = tuple((name, row[0]) for name, row in rows.items())
+    with _LIST_LOCK:
+        hit = _LIST_CACHE.get(key)
+        out = hit[1] if hit and hit[0] == signature else [row[1] for row in rows.values()]
+        _LIST_ROWS[key] = rows
+        _LIST_CACHE[key] = (signature, out)
+        _LIST_CHECKED[key] = time.monotonic()
+    return out
+
+
+def _refresh_weak_list_worker(here):
+    try:
+        _refresh_weak_list(here)
+    except OSError:
+        pass
+    finally:
+        with _LIST_LOCK:
+            _LIST_REFRESHING.discard(str(here))
+
+
+def list_episodes(here: Path | None = None) -> list:
+    """Serve complete rail snapshots; weak filesystem byte checks run off requests.
+
+    Live weak-filesystem lists can lag writes by one refresh interval plus scan
+    time. A malformed in-progress write retains its last complete row; a removed
+    file disappears on the next complete scan. Episode exports read current files.
+    """
+    from board.static import _durable_metadata
+    here = here or HERE
+    key = str(here)
+    try:
+        versions = [(path, _footage_version(path)) for path in sorted(here.glob('*.json'))]
+        weak = any(not _durable_metadata(str(path), version) for path, version in versions)
+    except OSError:
+        weak, versions = True, []
+    if weak:
+        with _LIST_LOCK:
+            hit = _LIST_CACHE.get(key)
+            if hit:
+                if key not in _LIST_REFRESHING and time.monotonic()-_LIST_CHECKED.get(key, 0) >= _LIST_REFRESH_INTERVAL:
+                    _LIST_REFRESHING.add(key)
+                    threading.Thread(target=_refresh_weak_list_worker, args=(here,), daemon=True).start()
+                return hit[1]
+        return _refresh_weak_list(here)
+    sig = tuple((path.name, version) for path, version in versions)
+    with _LIST_LOCK:
+        hit = _LIST_CACHE.get(key)
+        if hit and hit[0] == sig:
             return hit[1]
     out = rail_records(here)
     with _LIST_LOCK:
-        _LIST_CACHE[str(here)] = (sig, out)
+        _LIST_CACHE[key] = (sig, out)
     return out
 
 
@@ -1550,7 +1677,7 @@ def rail_records(here: Path | None = None) -> list:
             d = json.loads(p.read_text())
             if isinstance(d, dict) and "episode_prompt" in d:
                 out.append(_rail_record(p, d))
-        except (OSError, ValueError, TypeError, AttributeError):
+        except (OSError, ValueError, TypeError, AttributeError, RecursionError):
             continue                  # not an episode file, or one too malformed to list
     return out
 
@@ -1646,6 +1773,34 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # connection is closed after `timeout` seconds
     protocol_version = "HTTP/1.1"
     timeout = 30
+    request_read_timeout = 15
+
+    def _stop_read_deadline(self):
+        deadline = getattr(self, '_read_deadline', None)
+        if deadline is not None:
+            deadline.cancel()
+            self._read_deadline = None
+
+    def parse_request(self):
+        return super().parse_request() and not getattr(self, '_read_expired', False)
+
+    def handle_one_request(self):
+        self._read_expired = False
+        def expire():
+            self._read_expired = True
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        self._read_deadline = threading.Timer(self.request_read_timeout, expire)
+        self._read_deadline.daemon = True
+        self._read_deadline.start()
+        try:
+            return super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+        finally:
+            self._stop_read_deadline()
 
     def log_message(self, *a, **kw):
         pass
@@ -1727,7 +1882,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(length))
             self.send_header("Accept-Ranges", "bytes")
-            self.send_header("Cache-Control", "public, max-age=3600")
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
             if download:
                 self.send_header("Content-Disposition", f'attachment; filename="{download}"')
             self.end_headers()
@@ -1773,7 +1928,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not fname or not _under(HERE, p) or not p.is_file() or p.suffix != '.json':
             return self._send(404, {'error': 'No such episode.'})
         try:
-            d = json.loads(p.read_text())
+            d = _read_label(p)
             if not isinstance(d, dict) or not isinstance(d.get('data_dictionary') or {}, dict):
                 raise ValueError('Invalid dictionary document')
         except (OSError, ValueError):
@@ -1795,8 +1950,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
             raise ValueError('Unsupported request body framing')
         return int(lengths[0])
 
+    def _browser_origin_allowed(self):
+        if self.headers.get('Sec-Fetch-Site') == 'cross-site':
+            return False
+        server = getattr(self, 'server', None)
+        if server is None:
+            return True
+        try:
+            host = urllib.parse.urlsplit('http://' + (self.headers.get('Host') or '')).hostname
+        except ValueError:
+            return False
+        if server.server_address[0] in ('127.0.0.1', '::1'):
+            allowed = {'localhost', '127.0.0.1', '::1'}
+            allowed.update(getattr(server, 'allowed_hosts', ()))
+            return host in allowed
+        return bool(host)
+
     def do_POST(self):
         """Export unique episodes through a bounded spool before sending headers."""
+        if not self._browser_origin_allowed():
+            self.close_connection = True
+            return self._send(403, {'error': 'Cross-site requests are disabled.'})
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path not in ('/api/export', '/api/dictionary'):
             self.close_connection = True
@@ -1807,8 +1981,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if len(raw) != n:
                 self.close_connection = True
                 raise ValueError('Incomplete request body')
+            self._stop_read_deadline()
             payload = json.loads(raw)
-        except (ValueError, json.JSONDecodeError):
+        except (ValueError, RecursionError):
             return self._send(400, {'error': 'bad request'})
         if parsed.path == '/api/dictionary':
             return self._dictionary(payload)
@@ -1852,7 +2027,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             if total > _EXPORT_MAX_BYTES:
                                 return self._send(413, {'error': 'The export exceeds the size limit.'})
                             writer.write(b'\n')
-                        except (OSError, ValueError, TypeError, AttributeError):
+                        except (OSError, ValueError, TypeError, AttributeError, RecursionError):
                             return self._send(500, {'error': 'An episode could not be read for export.'})
                 finally:
                     if compressed:
@@ -1871,6 +2046,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             _EXPORT_SEM.release()
 
     def do_GET(self):
+        self._stop_read_deadline()
+        if not self._browser_origin_allowed():
+            self.close_connection = True
+            return self._send(403, {'error': 'Cross-site requests are disabled.'})
+        try:
+            return self._get()
+        except (RecursionError, json.JSONDecodeError, UnicodeDecodeError):
+            return self._send(500, {'error': 'The saved document could not be read.'})
+
+    def _get(self):
         lengths = self.headers.get_all('Content-Length') or []
         if self.headers.get('Transfer-Encoding') is not None or (lengths and lengths != ['0']):
             self.close_connection = True
@@ -1901,7 +2086,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send(404, {"error": "no such file"})
                 return
             if (q.get("download") or [""])[0] == "1":
-                body = dumps(public_label(current_label(json.loads(p.read_text()), DICTIONARY_JOB, p.name)), separators=(",", ":")).encode()
+                body = dumps(public_label(current_label(_read_label(p), DICTIONARY_JOB, p.name)), separators=(",", ":")).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Disposition", f'attachment; filename="{p.name}"')
@@ -1909,7 +2094,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
                 return
-            self._send(200, dumps(episode_view(current_label(json.loads(p.read_text()), DICTIONARY_JOB, p.name))), "application/json")
+            self._send(200, dumps(episode_view(current_label(_read_label(p), DICTIONARY_JOB, p.name))), "application/json")
             return
         if parsed.path.startswith("/api/compare/"):
             # other models' labels (board/build.py compare/): kept beside the board's own and never in its lists
@@ -1919,7 +2104,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if not p.is_file():
                     self._send(404, {"error": "no comparison on this dashboard"})
                     return
-                self._send(200, public_json(json.loads(p.read_text())), "application/json")
+                self._send(200, public_json(_read_label(p)), "application/json")
                 return
             if what == "list":
                 # one model's rail records, the same records the board's own list is made of
@@ -1938,7 +2123,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if not key or "/" in key or not _under(COMPARE_DIR, p) or not p.is_file() or p.suffix != ".json":
                     self._send(404, {"error": "no such comparison"})
                     return
-                self._send(200, dumps(episode_view(current_label(json.loads(p.read_text()), DICTIONARY_JOB, p.name))), "application/json")
+                self._send(200, dumps(episode_view(current_label(_read_label(p), DICTIONARY_JOB, p.name))), "application/json")
                 return
             self._send(404, {"error": "unknown path"})
             return
@@ -1949,7 +2134,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not fname or "/" in fname or not _under(HANDS_DIR, p) or not p.is_file() or p.suffix != ".json":
                 self._send(404, {"error": "no hand pose for this episode"})
                 return
-            self._send(200, public_json(json.loads(p.read_text())), "application/json")
+            self._send(200, public_json(_read_label(p)), "application/json")
             return
         if parsed.path in ("/api/grids", "/api/grid"):
             from board import grids as bg
@@ -1959,7 +2144,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not fname or Path(fname).name != fname or not _under(HERE, p) or not p.is_file():
                 return self._send(404, {'error': 'no verified frame grids'})
             try:
-                record = current_label(json.loads(p.read_text()), DICTIONARY_JOB, p.name)
+                record = current_label(_read_label(p), DICTIONARY_JOB, p.name)
                 expected = (q.get('fingerprint') or [''])[0]
                 if not expected or expected != (record.get('request_images') or {}).get('fingerprint'):
                     return self._send(404, {'error': 'frame grids belong to a different request'})
@@ -1988,7 +2173,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not fname or "/" in fname or not _under(SENSORS_DIR, p) or not p.is_file() or p.suffix != ".json":
                 self._send(404, {"error": "no sensors for this episode"})
                 return
-            self._send(200, public_json(json.loads(p.read_text())), "application/json")
+            self._send(200, public_json(_read_label(p)), "application/json")
             return
         if parsed.path == "/api/keypoints":
             # one head-camera episode's hand keypoints, a download of their own (never in the labels or their
@@ -2000,7 +2185,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send(404, {"error": "no hand keypoints for this episode"})
                 return
             if (q.get("download") or [""])[0] == "1" and fname != "index.json":
-                body = dumps(public_json(json.loads(p.read_text())), separators=(",", ":")).encode()
+                body = dumps(public_json(_read_label(p)), separators=(",", ":")).encode()
                 gz = "gzip" in (self.headers.get("Accept-Encoding") or "")
                 if gz:
                     body = gzip.compress(body, compresslevel=5)
@@ -2013,7 +2198,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
                 return
-            self._send(200, public_json(json.loads(p.read_text())), "application/json")
+            self._send(200, public_json(_read_label(p)), "application/json")
             return
         if parsed.path == "/api/video":
             q = urllib.parse.parse_qs(parsed.query)
@@ -2071,7 +2256,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             out, name = got
             if (q.get("prepare") or [""])[0] == "1":
                 try:
-                    ticket = prepare_footage_ticket(got)
+                    ticket = _existing_footage_ticket(got) or prepare_footage_ticket(got)
                     try:
                         size = out.stat().st_size
                     except FileNotFoundError as error:
@@ -2110,7 +2295,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "image/jpeg")
             self.send_header("Content-Length", str(len(jpg)))
-            self.send_header("Cache-Control", "public, max-age=3600")
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
             self.end_headers()
             try:
                 self.wfile.write(jpg)
@@ -2118,6 +2303,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 pass
             return
         self._send(404, {"error": "unknown path"})
+
+
+class BoardHTTPServer(socketserver.ThreadingTCPServer):
+    """Bound idle and slow connections before allocating a handler thread."""
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = 128
+
+    def __init__(self, *args, **kwargs):
+        self._connections = threading.BoundedSemaphore(64)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        if not self._connections.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._connections.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._connections.release()
 
 
 def main(argv=None) -> int:
@@ -2133,6 +2345,7 @@ def main(argv=None) -> int:
                                                         f"(default {PAGE_TITLE!r})")
     ap.add_argument("--header", type=Path, help="an HTML file with a site's own header, shown in place of the page's "
                                                 "title bar (its <style> blocks go into the page's head)")
+    ap.add_argument('--allow-host', action='append', default=[], help='additional hostname accepted on a loopback listener')
     ap.add_argument("--dictionary-job", type=Path, help="enable local dictionary editing for this upload")
     a = ap.parse_args(argv)
     DICTIONARY_JOB = a.dictionary_job.resolve() if a.dictionary_job else None
@@ -2154,7 +2367,10 @@ def main(argv=None) -> int:
     # overflows it and those connections wait on SYN retries for up to a minute
     socketserver.ThreadingTCPServer.request_queue_size = 128
     socketserver.ThreadingTCPServer.daemon_threads = True
-    with socketserver.ThreadingTCPServer(("127.0.0.1" if DICTIONARY_JOB else a.host, PORT), Handler) as httpd:
+    with BoardHTTPServer(("127.0.0.1" if DICTIONARY_JOB else a.host, PORT), Handler) as httpd:
+        httpd.allowed_hosts = a.allow_host
+        if not list_episodes():
+            print('No episodes are available. A free review stops before board generation; build a board with labels.', file=sys.stderr, flush=True)
         print(f"board at http://localhost:{PORT} ({len(list_episodes())} episodes from {HERE}, clips from {MP4_DIR})",
               flush=True)
         httpd.serve_forever()

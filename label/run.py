@@ -31,7 +31,7 @@ import sys
 from pathlib import Path
 
 from label.harness import annotation_complete, annotation_record, execution_lock, get_keys, is_openrouter_key
-from label.dictionary_stage import output_spend
+from label.dictionary_stage import output_spend, output_spend_complete
 from label.atomic import write_atomic
 
 REPO = Path(__file__).resolve().parent.parent
@@ -99,6 +99,7 @@ def finish(run: Path, info: dict, cmd: list, slice_dir: Path, mode: str) -> None
     keys = _keys().split(",") if info["kind"] != "dry" else []
     env["OPENROUTER_API_KEYS"] = ",".join(k for k in keys if is_openrouter_key(k))
     env["OPENAI_API_KEY"] = ",".join(k for k in keys if not is_openrouter_key(k))
+    env["ARGUS_STAGED_RUN_METADATA"] = str((run / "run.json").resolve())
     env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
     # few malloc arenas, so a long multithreaded run does not keep freed frame buffers in per-thread heaps
     env.setdefault("MALLOC_ARENA_MAX", "2")
@@ -109,20 +110,41 @@ def finish(run: Path, info: dict, cmd: list, slice_dir: Path, mode: str) -> None
         # Do not replace its running metadata with the refused child's exit status.
         with execution_lock(run / 'out'):
             pass
+    finalize(run, info, slice_dir, rc)
+    print(json.dumps({k: info[k] for k in ("run_id", "status", "cost_usd", "episodes_done", "episodes_failed",
+                                           "footage_hours", "usd_per_hour")} | {"run": str(run)}))
+
+
+
+def finalize(run: Path, info: dict, slice_dir: Path, rc: int) -> None:
+    """Publish settled worker results even if the wrapper was killed."""
     tail = (run / "log.txt").read_text().strip().splitlines()
     last = next((l for l in reversed(tail) if l.startswith("done=")), "")
     m = dict(re.findall(r"(\w+)=\$?([\d.]+)", last))
     done_eps = sorted(p.stem for p in (run / "out").glob("episode_*.json")) if (run / "out").exists() else []
     hours = footage_hours(slice_dir, done_eps) if done_eps else 0.0
-    cost = billed_cost(run)
+    reserved = billed_cost(run)
+    complete = output_spend_complete(run / "out")
+    cost = reserved if complete else None
     info.update({"status": "done" if rc == 0 else f"exit {rc}",
                  "finished_at": dt.datetime.now().isoformat(timespec="seconds"),
-                 "cost_usd": cost, "episodes_done": len(done_eps), "episodes_parsed": parsed(run, done_eps),
+                 "cost_usd": cost, "reserved_cost_usd": reserved, "cost_complete": complete, "episodes_done": len(done_eps), "episodes_parsed": parsed(run, done_eps),
                  "episodes_failed": int(m.get("failed", 0)),
                  "footage_hours": round(hours, 3), "usd_per_hour": round(cost / hours, 2) if hours and cost else None})
     write_atomic(run / "run.json", info, indent=1)
-    print(json.dumps({k: info[k] for k in ("run_id", "status", "cost_usd", "episodes_done", "episodes_failed",
-                                           "footage_hours", "usd_per_hour")} | {"run": str(run)}))
+
+
+
+def finalize_worker(out_dir: Path, rc: int) -> None:
+    metadata = os.environ.get('ARGUS_STAGED_RUN_METADATA')
+    if not metadata:
+        return
+    path = Path(metadata)
+    if path.name != 'run.json' or path.parent.resolve() != Path(out_dir).resolve().parent:
+        return
+    info = json.loads(path.read_text())
+    if info.get('kind') in ('dry', 'smoke', 'full') and info.get('status') == 'running':
+        finalize(path.parent, info, Path(info['slice']), rc)
 
 
 def resume(a, slice_dir: Path) -> None:

@@ -364,7 +364,7 @@ def request_implementation(repository: Path) -> dict[Path, bytes]:
 def input_identity(ep_dir: Path, *, model: str, reasoning: str, max_tokens: int, cell_w: int,
                    example_dir: str | None, sample_fps=None, task_mode=None, dataset_note=None) -> dict:
     """Bounded proof for source files and the settings that shape a paid annotation request."""
-    from label.evidence_access import source_proof
+    from label.evidence_access import source_proof, reader_projection_identity
     ep_dir = Path(ep_dir)
     ctx = json.loads((ep_dir / "context.json").read_text())
     from prepare.state_contract import prepared_state_problem
@@ -406,7 +406,8 @@ def input_identity(ep_dir: Path, *, model: str, reasoning: str, max_tokens: int,
                 "annotation_policy": resolved, "jaw_algorithm_sha256": jaw_algorithm,
                 "interpretation_sha256": hashlib.sha256(json.dumps(meanings, sort_keys=True,
                     separators=(',', ':'), ensure_ascii=True).encode()).hexdigest(),
-                "request_semantics_sha256": semantics.hexdigest()}
+                "request_semantics_sha256": semantics.hexdigest(),
+                "reader_projection_sha256": reader_projection_identity(ctx)}
     return {"version": 2, "source_proof": source_proof(ctx, ep_dir), "settings": settings}
 
 
@@ -580,6 +581,8 @@ def _billing_fields(out_path: Path) -> dict:
     def retain(kind, value, cost):
         if cost:
             history.append({'kind': kind, 'cost_usd': cost,
+                'rounds_cost_offset_usd': float(value.get('rounds_cost_offset_usd') or 0)
+                    + max(0.0, float(value.get('cost_usd', 0)) - cost),
                 **{key: copy.deepcopy(value[key]) for key in (
                     'model', 'generation_id', 'usage', 'cost_source', 'dispatch_outcome',
                     'reserved_usd', 'digest', 'rounds', 'cost_is_conservative_estimate') if key in value}})
@@ -652,6 +655,25 @@ def persist_final_claim(path: Path, claim: dict) -> None:
         os.fsync(directory)
     finally:
         os.close(directory)
+
+
+def has_dispatch_receipt(record: dict) -> bool:
+    """Whether saved interpretation is backed by a received or uncertain dispatch."""
+    if record.get('dry_run'):
+        return False
+    if record.get('final_dispatch_outcome') != 'not dispatched':
+        return True
+    if record.get('response') is not None or record.get('response_text') is not None:
+        return True
+    if record.get('final_cost_history') or record.get('auxiliary_cost_history'):
+        return True
+    route = (record.get('config') or {}).get('resolution_route') or {}
+    if route.get('dispatch_outcome') in ('claimed', 'unverified', 'received', 'cached'):
+        return True
+    inspection = record.get('evidence_inspection') or {}
+    if inspection.get('rounds') or inspection.get('cost_is_conservative_estimate'):
+        return True
+    return episode_cost(record) != 0
 
 
 def record_budget_refusal(path: Path, request: dict) -> bool:
@@ -1159,26 +1181,9 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
                     'parse_ok': False, 'no_reply': reason, 'no_reply_kind': 'spend_cap',
                     'final_dispatch_outcome': 'not dispatched', 'final_reserved_usd': 0.0})
                 raise SpendCap(reason)
-            addition = [{'type': 'text', 'text': ea.FINAL + '\nINSPECTION COVERAGE\n' +
-                        ea.packed(ea.Access.coverage_summary(doc))}] + extra
-            # Extra images must fit the existing request cap. Their receipts alone cannot authorize image claims.
-            extra_images = [p for p in addition if p.get('type') == 'image_url']
-            extra_bytes = sum(len(base64.b64decode(p['image_url']['url'].split(',', 1)[1])) for p in extra_images)
-            if (img_bytes + extra_bytes) * IMAGE_SIZE_INFLATION > IMAGE_LIMIT_BYTES or (
-                    sum(p.get('type') == 'image_url' for p in content) + len(extra_images) > MAX_IMAGES):
-                fields['evidence_inspection']['limitations'].append('Inspected image batch exceeds final request cap; image findings withheld.')
-                for r in evidence_access.receipts:
-                    if r['mode'] in ('images', 'regions'):
-                        r['withheld_from_final'] = True
-                fields['evidence_inspection']['inspections'] = ea.clean(evidence_access.receipts)
-                addition = [p for p in addition if p.get('type') != 'image_url' and not (
-                    p.get('type') == 'text' and (p.get('text', '').startswith('Inspected ') or (
-                        p.get('text', '').startswith('INSPECTED EVIDENCE\n') and
-                        json.loads(p['text'].split('\n', 1)[1]).get('mode') in ('images', 'regions'))))]
-                extra_bytes = 0
-            content = content + addition
-            img_bytes += extra_bytes
-            prompt_text += '\n' + '\n'.join(p['text'] for p in addition if p.get('type') == 'text')
+            content, img_bytes, suffix = ea.final_content(content, img_bytes, evidence_access, doc, extra,
+                image_limit=MAX_IMAGES, image_bytes_limit=IMAGE_LIMIT_BYTES, image_inflation=IMAGE_SIZE_INFLATION)
+            prompt_text += '\n' + suffix
     verify_inputs()
     n_images = sum(1 for c in content if c.get("type") == "image_url")
     if n_images > MAX_IMAGES:
@@ -1416,25 +1421,45 @@ def _release_memory() -> None:
 
 
 @contextmanager
-def execution_lock(folder: Path):
+def execution_lock(folder: Path, *, inherited_fd: int | None = None):
     """One process owns execution until dispatched work settles, where flock is shared.
 
     Cross-host writers require a filesystem with working shared locks. Client-local
     NFS nolock/local_lock mounts do not provide that guarantee.
     """
     import fcntl
+    import stat
     Path(folder).mkdir(parents=True, exist_ok=True)
-    with (Path(folder) / '.execution.lock').open('a') as lock:
+    lock_path = Path(folder) / '.execution.lock'
+    if inherited_fd is not None:
+        try:
+            held, expected = os.fstat(inherited_fd), lock_path.stat()
+            if (not stat.S_ISREG(held.st_mode)
+                    or (held.st_dev, held.st_ino) != (expected.st_dev, expected.st_ino)):
+                raise ValueError('descriptor does not identify this output lock')
+            # A different open description cannot borrow an existing flock. This
+            # succeeds for the description inherited from the owning review.
+            fcntl.flock(inherited_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (OSError, ValueError) as error:
+            raise RuntimeError(f'Invalid inherited execution lease for {folder}: {error}') from error
+        yield inherited_fd
+        return  # The encompassing review still owns the inherited description.
+    with lock_path.open('a') as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise RuntimeError(f'Another label execution is running in {folder}') from error
-        yield
+        yield lock.fileno()
 
 
-def run_batch(episodes: list[Path], out_dir: Path, **kwargs) -> int:
-    with execution_lock(out_dir):
-        return _run_batch(episodes, out_dir, **kwargs)
+def run_batch(episodes: list[Path], out_dir: Path, *, execution_lease_fd=None, **kwargs) -> int:
+    with execution_lock(out_dir, inherited_fd=execution_lease_fd):
+        result = _run_batch(episodes, out_dir, **kwargs)
+        # The worker owns its receipts until metadata is settled. A killed wrapper
+        # must not leave completed paid work permanently marked as running.
+        from label.run import finalize_worker
+        finalize_worker(out_dir, result)
+        return result
 
 
 def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurrency: int, force: bool,
@@ -1474,11 +1499,7 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
             return False
         records = [selected]
         try:
-            never_dispatched = all(record.get('final_dispatch_outcome') == 'not dispatched'
-                and not record.get('final_cost_history') and not record.get('auxiliary_cost_history')
-                and not record.get('evidence_inspection')
-                and not ((record.get('config') or {}).get('resolution_route') or {}).get('routed')
-                and episode_cost(record) == 0 for _, record in records)
+            never_dispatched = all(not has_dispatch_receipt(record) for _, record in records)
         except (ValueError, TypeError, AttributeError):
             never_dispatched = False
         if len(records) == 1 and records[0][0] == p and records[0][1].get('input_identity') is None:
@@ -1528,7 +1549,22 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                 # request limit does not invalidate a durably received reply.
                 comparison = {**current, 'settings': {**current['settings'],
                     'max_tokens': saved['settings'].get('max_tokens')}}
-            if not same_input_identity(saved, comparison) or any(item.get("missing") for item in current["source_proof"]):
+            matches = same_input_identity(saved, comparison)
+            if not matches and not dry:
+                from label.request_attestation import matches as actual_request_matches
+                matches = actual_request_matches(record, comparison, ep, out_dir,
+                                                 example_dir=label_kw.get('example_dir'))
+                if matches:
+                    from label.reparse import refresh_received, save_annotation
+                    try:
+                        updated = refresh_received(record)
+                        if updated != record:
+                            save_annotation(out_dir, p.name, q, updated)
+                            record.clear()
+                            record.update(updated)
+                    except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError):
+                        matches = False
+            if not matches or any(item.get("missing") for item in current["source_proof"]):
                 stale[ep.name] = f"saved output {q.name} has changed or missing input; use --force to refresh"
                 return True
         if any(record.get('final_dispatch_outcome') in ('claimed', 'unverified') for _, record in records):
@@ -1592,7 +1628,7 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
     if not todo:
         print(f'done=0 failed={len(saved_failures)} skipped={skipped} total_cost=$0.00 out_dir={out_dir}', flush=True)
         return 1 if saved_failures else 0
-    done, failed = 0, len(saved_failures)
+    done, failed, cap_refused = 0, len(saved_failures), 0
     total_cost = 0.0
     fails = []
     spent = {"usd": 0.0}
@@ -1761,6 +1797,7 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                 print(f"FAIL {ep.name}: annotation did not parse", file=sys.stderr, flush=True)
             elif status == "skip":
                 skipped += 1
+                cap_refused += 1
                 try:
                     total_cost += episode_cost(json.loads(out_for(ep).with_name(f"noreply_{out_for(ep).name}").read_text()))
                 except (OSError, ValueError, TypeError, AttributeError):
@@ -1785,7 +1822,18 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
           f"total_cost=${total_cost:.2f} out_dir={out_dir} retired_keys={len(pool.dead)}", flush=True)
     if fails:
         print("failures:\n  " + "\n  ".join(fails), file=sys.stderr)
-    return 1 if failed else 0
+    return 1 if failed or cap_refused else 0
+
+
+def inherited_review_lease(folder: Path) -> int | None:
+    """Match the declared output path before validating the inherited kernel lock."""
+    lease_path = os.environ.get('ARGUS_REVIEW_OUTPUT_LOCK_PATH')
+    if not lease_path or Path(lease_path).resolve() != (Path(folder) / '.execution.lock').resolve():
+        return None
+    try:
+        return int(os.environ['ARGUS_REVIEW_OUTPUT_LOCK_FD'])
+    except (KeyError, ValueError) as error:
+        raise RuntimeError('Invalid inherited execution lease descriptor') from error
 
 
 def main() -> int:
@@ -1841,6 +1889,7 @@ def main() -> int:
             return 1
         return run_batch([args.episode_dir], target.parent, keys=keys, concurrency=1,
                          force=args.force, max_spend=args.max_spend, output_path=target,
+                         execution_lease_fd=inherited_review_lease(target.parent),
                          retry_received=args.retry_received, **label_kw)
     if not args.out_dir:
         print("--out-dir is required with --episodes-root", file=sys.stderr)
@@ -1852,7 +1901,8 @@ def main() -> int:
     if args.limit > 0:
         episodes = episodes[:args.limit]
     return run_batch(episodes, args.out_dir, keys=keys, concurrency=args.concurrency or 4 * len(keys),
-                     force=args.force, max_spend=args.max_spend, retry_received=args.retry_received, **label_kw)
+                     force=args.force, max_spend=args.max_spend, retry_received=args.retry_received,
+                     execution_lease_fd=inherited_review_lease(args.out_dir), **label_kw)
 
 
 if __name__ == "__main__":

@@ -29,7 +29,7 @@ def test_partial_inspection_budget_resume_finishes_without_rebilling(tmp_path, m
     out = tmp_path / 'out'
     args = dict(keys=['sk-or-test'], concurrency=1, force=False, model='custom/model',
                 reasoning='medium', max_tokens=100, timeout=1, cell_w=128)
-    assert harness.run_batch([ep], out, max_spend=.31, **args) == 0
+    assert harness.run_batch([ep], out, max_spend=.31, **args) == 1
     cache = out / '.evidence' / (ep.name + '.json.inspection.json')
     paused = json.loads(cache.read_text())
     assert paused['pause_reason'] == 'spend_cap'
@@ -39,7 +39,7 @@ def test_partial_inspection_budget_resume_finishes_without_rebilling(tmp_path, m
     if legacy_pause:
         paused.pop('pause_reason')
         cache.write_text(json.dumps(paused))
-    assert harness.run_batch([ep], out, max_spend=.01, **args) == 0
+    assert harness.run_batch([ep], out, max_spend=.01, **args) == 1
     assert sent == ['selection']
     assert json.loads(cache.read_text())['pause_reason'] == 'spend_cap'
     assert harness.run_batch([ep], out, max_spend=1., **args) == 0

@@ -16,6 +16,7 @@ reference run's recorded answer for each task text, so every model sees the same
 from __future__ import annotations
 
 import json
+import copy
 import fcntl
 import hashlib
 import threading
@@ -156,8 +157,14 @@ def _paid_route(ep, api_key, call_model, timeout, receipt_path, identity, reserv
         hit.update(cost_usd=bound if cost is None else cost, usage=usage, cost_source=source,
                    generation_id=resp.get('id'), dispatch_outcome='received',
                    cost_is_conservative_estimate=cost is None)
+        hit['response'] = copy.deepcopy(resp)
         try:
-            msg = resp['choices'][0]['message']['content']
+            choice = (resp.get('choices') or [{}])[0]
+            hit.update(response_text=(choice.get('message') or {}).get('content'),
+                       finish_reason=choice.get('finish_reason') or choice.get('native_finish_reason'))
+            if hit['finish_reason'] == 'length':
+                raise ValueError('routing reply cut off; using wide cells')
+            msg = choice['message']['content']
             ans = json.loads(msg[msg.find('{'):msg.rfind('}') + 1])
             fine = ans.get('fine_detail')
             hit.update(fine_detail=fine if isinstance(fine, bool) else None,

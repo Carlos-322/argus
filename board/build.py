@@ -487,7 +487,8 @@ def add_context(d: dict, ctx: dict, ep_dir: Path, result: dict | None = None) ->
     from board.clips import UNSHOWN_NOT_DECODABLE, unshown_views
     uncut = {x.get("camera") for x in ctx.get("reader_issues") or []
              if isinstance(x, dict) and x.get("kind") == UNSHOWN_NOT_DECODABLE}
-    unshown = [{"view": v, "name": str(e.get("name") or v), "why": str(e.get("why") or "")}
+    unshown = [{"view": v, "name": str(e.get("name") or v), "why": str(e.get("why") or ""),
+                **{key: e[key] for key in ('clock_alignment', 'presentation_clock') if key in e}}
                for v, e in unshown_views(ctx) if v not in uncut]
     if unshown:
         d["unshown_cameras"] = unshown
@@ -580,33 +581,41 @@ def add_contacts(d: dict, ctx: dict, result: dict | None = None) -> None:
     (label/episode.py build_request, label/pieces.py write_pieces) and its result holds them, so those are used."""
     recorded = ctx.get("contacts") or (result or {}).get("contacts") or []
     from label import contacts as lc
+    from prepare.signal_alignment import recorder_arrival, RECORDER_ARRIVAL, RECORDER_ARRIVAL_LIMITATION
     from label.dictionary_context import field_interpretation
     meta = {s['name']: {**s, 'dictionary': field_interpretation(ctx, s['name'])}
             for s in ctx.get('signals') or [] if isinstance(s, dict) and s.get('name')}
+    if recorder_arrival(ctx):
+        meta = {name: {'aligned_by': RECORDER_ARRIVAL, **value} for name, value in meta.items()}
     covered = {} if ctx.get('state_unaligned') else lc.coverage(meta)
     d.pop('contact_sensor_coverage', None)
     if covered:
         d['contact_sensor_coverage'] = covered
     missing = d.get('contacts_missing') or []
     if missing:
+        def covered_hand(row):
+            hand = row.get('hand')
+            return isinstance(hand, str) and hand.strip().lower() in covered
         d['contacts_missing'] = [{**m, 'withheld_from_final': True,
-                                 'withheld_reason': 'Instrumentation coverage is unknown for the reported hand.'}
-                                if isinstance(m, dict) and m.get('hand') not in covered else m for m in missing]
+                                 'withheld_reason': ('Instrumentation coverage is unknown for the reported hand.'
+                                    if not covered_hand(m) else RECORDER_ARRIVAL_LIMITATION)}
+                                if isinstance(m, dict) and (not covered_hand(m) or recorder_arrival(ctx))
+                                else m for m in missing]
     if not recorded and not missing:
         for k in ("contacts_model", "contact_views"):
             d.pop(k, None)
         return
     from checks import contacts as cc
     # a contact timed by a signal placed from both starts says so, also one found before contacts carried it
-    recorded = lc.mark_aligned(recorded, {s["name"]: s for s in ctx.get("signals") or []
-                                          if isinstance(s, dict) and s.get("name")})
+    recorded = lc.mark_aligned(recorded, meta)
     seen = {c.get("id"): c for c in d.pop("contacts_model", None) or []}
     views = d.pop("contact_views", None) or {}
     shown = set(views.get("shown") or [])
     d["contacts"] = [{**c, **({"seen": seen[c["id"]]} if c["id"] in seen else {}), "shown": c["id"] in shown}
                      for c in recorded]
     res = cc.check({"contacts": list(seen.values()), "contacts_missing": d.get("contacts_missing") or []}, recorded,
-                   views.get("strips") or {}, float(ctx.get("fps") or 30), instrumented_hands=set(covered))
+                   views.get("strips") or {}, float(ctx.get("fps") or 30), instrumented_hands=set(covered),
+                   timing_context=ctx)
     if res is not None:
         d["dataset_checks"] = d.get("dataset_checks") or {}
         d["dataset_checks"]["contact_checks"] = res
@@ -693,7 +702,7 @@ def build_comparisons(board: Path, manifest: dict, qa_new: Path, board_src: dict
             if r["status"] == "pending":
                 continue
             if r["status"] == "parsed":
-                d = convert(json.loads(r["path"].read_text()), bd.get("dataset"))
+                d = convert(r['_record'], bd.get("dataset"))
                 d.update(ctx)
                 d["_meta"] = {**(d.get("_meta") or {}), **meta}
             else:
@@ -703,6 +712,9 @@ def build_comparisons(board: Path, manifest: dict, qa_new: Path, board_src: dict
                                    "completion_tokens": r.get("out_tokens")}
             info = {"key": m["key"], "name": m["episode_name"], "status": r["status"], "model": m["model"],
                     "example": m["example"]}
+            if 'cost_complete' in r:
+                d.setdefault('_usage', {}).update({key: r[key] for key in
+                    ('billed_usd', 'reserved_usd', 'cost_complete')})
             if r["status"] == "unparsed":
                 info.update({"parse_error": r.get("error"), "raw_head": (r.get("raw") or "")[:3000],
                              "raw_chars": len(r.get("raw") or "")})

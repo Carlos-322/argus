@@ -125,12 +125,15 @@ def test_robomimics_joint_positions_stay_a_signal_and_its_rate_is_kept(landed):
     assert "45 values per frame" in board["reader_notes"]["state_note"]
 
 
-def test_mixed_mcap_camera_clocks_keep_arm_readings_without_inferred_alignment(landed):
+def test_mixed_mcap_native_clocks_keep_readings_on_explicit_recorder_log_axis(landed):
     ctx, prompt, board = landed["mcap_json_mobile_manip"]
-    assert ctx["state_kind"] == "none" and ctx["state_why"] == "assumed_clock"
-    assert ctx["source"]["camera_clock"] == "mixed capture and arrival stamps"
+    assert ctx["state_kind"] == "none" and ctx["state_why"] == "layout"
+    assert ctx["source"]["camera_clock"] == "arrival"
+    assert ctx['source']['presentation_clock']['basis'] == 'mcap_log_time'
+    assert ctx['source']['presentation_clock']['physical_synchronization_verified'] is False
+    assert 'Transport delays and physical event synchronization are unverified' in prompt
     assert "RECORDED MOTION" not in prompt
-    assert "Precise arm alignment was not inferred" in ctx["state_note"]
+    assert 'six named joints and a gripper' in ctx['state_note']
     assert board["reader_notes"]["state_note"] == ctx["state_note"]
     ep = landed.episodes["mcap_json_mobile_manip"]
     records = {r["topic"]: r for r in ctx["mcap_field_inventory"]}
@@ -143,6 +146,12 @@ def test_mixed_mcap_camera_clocks_keep_arm_readings_without_inferred_alignment(l
         assert arrays[records["/rl/step"]["fields"][""]].shape == (92, 6)
     with np.load(ep / ctx["recorded_camera_ns"]) as clocks:
         assert np.array_equal(clocks["exo"], np.zeros(90, dtype=np.int64))
+    with np.load(ep / ctx['recorded_camera_clocks']) as clocks:
+        expected = np.asarray([int(rec.T0_NS + k / rec.FPS * 1e9) for k in range(90)], dtype=np.int64)
+        np.testing.assert_array_equal(clocks['exo_log_ns'], expected)
+        np.testing.assert_array_equal(clocks['right_log_ns'], expected)
+        with np.load(ep / 'times.npz') as times:
+            np.testing.assert_allclose(times['exo'], (expected - expected[0]) / 1e9, atol=1e-9)
 
 
 def test_a_franka_of_seven_named_joints_is_no_state_and_its_gripper_is_no_longer_dropped(landed):
@@ -185,5 +194,11 @@ def test_an_intervention_flag_is_never_a_contact_and_keeps_its_original_rows(lan
     with np.load(ep / ctx["recorded_mcap_fields"]) as arrays:
         original = arrays[record["fields"][""]]
         assert original.shape == (92, 1) and set(np.unique(original)) == {0.0, 1.0}
-    assert "    /teleop/intervention active: " not in prompt
-    assert ctx["state_why"] == "assumed_clock"
+    assert "    /teleop/intervention active: " in prompt
+    assert ctx["state_why"] == "layout"
+    loaded = me.load(ep)
+    signal = next(s for s in ctx['signals'] if s['name'] == '/teleop/intervention')
+    # Values follow the independently recorded log clock, whose origin is the first camera log stamp.
+    expected = np.asarray([1.0 <= k / rec.FPS < 1.8 for k in range(90)], dtype=float)
+    values = loaded['signals'][signal['name']]
+    np.testing.assert_array_equal(np.asarray(values).reshape(-1), expected)

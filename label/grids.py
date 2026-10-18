@@ -26,7 +26,7 @@ def fingerprint(value) -> str:
     return digest(json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode())
 
 
-def receipt(content: list, record: dict) -> dict:
+def receipt(content: list, record: dict, *, reference_recipe: dict | None = None) -> dict:
     """An ordered final-image receipt, without storing images or prompt prose."""
     from PIL import Image
     images, grids, parts = [], [], []
@@ -67,6 +67,8 @@ def receipt(content: list, record: dict) -> dict:
               'views': cfg.get('views'), 'cam_labels': cfg.get('cam_labels'),
               'input_identity': copy.deepcopy(identity),
               'renderer_sha256': digest(Path(mf.__file__).read_bytes() + mf.GRID_FONT.read_bytes())}
+    if reference_recipe is not None:
+        recipe = copy.deepcopy(reference_recipe)
     proof = fingerprint({'parts': parts, 'recipe': recipe})
     return {'version': 1, 'fingerprint': proof, 'images': images, 'grid_images': grids,
             'supplemental_images': len(images) - len(grids), 'dispatch_status': 'intended',

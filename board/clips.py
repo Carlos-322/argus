@@ -725,7 +725,7 @@ def episode_jobs(ep_dir: Path, mp4_dir: Path, force: bool, prefix: str = ""):
     dictionary = for_episode(ep_dir, owner)
     effective_ctx = {**ctx, **({"data_dictionary": dictionary} if dictionary is not None else {})}
     presentation = camera_presentation(effective_ctx)
-    candidates = [*cams, *(view for view, _ in unshown_views(ctx))]
+    candidates = [*cams, *(view for view, entry in unshown_views(ctx) if entry.get('clock_alignment') != 'unverified')]
     big = next((view for view in candidates if (presentation.get(view) or {}).get("role") == "scene"), clock_cam)
     offsets = start_offsets(ep_dir, sources, fps)
     times = clip_times(ep_dir, sources, fps)
@@ -752,9 +752,15 @@ def episode_jobs(ep_dir: Path, mp4_dir: Path, force: bool, prefix: str = ""):
         if force or not (o.exists() and o.stat().st_size > 0 and clip_frames(o) > 0):
             f = float(e.get("fps") or fps)
             from prepare.camera_clock import unshown_times
-            own_clock = unshown_times(ep_dir, e, float(ctx.get("clock_zero_s") or 0.0))
+            unpaired = e.get('clock_alignment') == 'unverified'
+            own_clock = unshown_times(ep_dir, e, 0.0 if unpaired else float(ctx.get("clock_zero_s") or 0.0))
             if own_clock is not None:
                 ts, pts = own_clock
+                if unpaired:
+                    ts = ts - ts[0] if len(ts) else ts
+                    jobs.append((str(e['packed']), float(e.get('base_s') or 0), len(ts), o, f, view == big,
+                                 0.0, 0, ts, None, None, pts, e.get('last_frame_interval_s'), ep_dir.name, view))
+                    continue
                 skip = int(np.searchsorted(ts, -0.5 / f, side="left"))
                 if skip >= len(ts):
                     continue
@@ -764,7 +770,7 @@ def episode_jobs(ep_dir: Path, mp4_dir: Path, force: bool, prefix: str = ""):
                 jobs.append((str(e["packed"]), float(e.get("base_s") or 0.0), len(ts), o, f, view == big,
                              off, skip, ts, query, km, pts, e.get("last_frame_interval_s"), ep_dir.name, view))
                 continue
-            start = float(e.get("start_s") or 0.0) - float(ctx.get("clock_zero_s") or 0.0)
+            start = 0.0 if unpaired else float(e.get("start_s") or 0.0) - float(ctx.get("clock_zero_s") or 0.0)
             skip = int(round(-start * f)) if start < 0 else 0
             jobs.append((str(e["packed"]), float(e.get("base_s") or 0.0), int(e["n_frames"]), o, f, view == big,
                          max(0.0, start + skip / f), skip, None, None, None, None, None, ep_dir.name, view))
@@ -1116,6 +1122,8 @@ def reanchor(ep_dir: Path, ctx: dict, src: dict, t: dict, old: str, new: str, ol
     shift = 0.0 if keep_clock else min(first.values()) - zero
     if shift:
         for entry in ctx.get("unshown_cameras") or []:
+            if entry.get('clock_alignment') == 'unverified':
+                continue
             if entry.get("camera_times"):
                 entry["camera_clock_offset_s"] = float(entry.get("camera_clock_offset_s") or 0.0) + shift
                 entry["start_s"] = float(entry.get("start_s") or 0.0) - shift
@@ -1139,6 +1147,8 @@ def reanchor(ep_dir: Path, ctx: dict, src: dict, t: dict, old: str, new: str, ol
             ctx["clock_start_s"] = round(float(ctx["clock_start_s"]) + shift, 6)
         for key, fields in CLOCK_TIME_KEYS.items():
             for x in ctx.get(key) or []:
+                if key == 'unshown_cameras' and isinstance(x, dict) and x.get('clock_alignment') == 'unverified':
+                    continue
                 for f in fields:
                     if isinstance(x, dict) and isinstance(x.get(f), (int, float)):
                         x[f] = round(float(x[f]) - shift, 3)

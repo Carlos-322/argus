@@ -72,7 +72,11 @@ def run_step(job: Path, step: str, cmd: list[str], env: dict, ok_codes=(0,)) -> 
     log.parent.mkdir(parents=True, exist_ok=True)
     print(f"== {step}", flush=True)
     with open(log, "a") as fh:
-        rc = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT, env=env, cwd=job).returncode
+        # The child keeps the job lock if this wrapper is killed mid-request.
+        inherited = tuple(int(env[name]) for name in ('ARGUS_REVIEW_LOCK_FD', 'ARGUS_REVIEW_OUTPUT_LOCK_FD')
+                          if env.get(name) is not None)
+        rc = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT, env=env, cwd=job,
+                            pass_fds=inherited).returncode
     if rc not in ok_codes:
         tail = log.read_text().strip().splitlines()[-6:]
         raise SystemExit(f"{step} exited {rc} (log {log}): " + " | ".join(tail))
@@ -196,6 +200,18 @@ def preparation_checkpoint(job: Path, receipt: dict) -> None:
     write_atomic(job / 'preparation_receipt.json', receipt)
 
 
+def unverified_preparation_artifacts(job: Path) -> bool:
+    """A newly acquired execution lease is not a saved preparation artifact."""
+    if any((job / name).exists() for name in ('episodes', 'episodes_unclipped', 'report.json',
+                                             'dictionary.json', 'dictionary.claim')):
+        return True
+    run = job / 'run'
+    if run.exists() and not run.is_dir():
+        return True
+    return any(path.relative_to(run).as_posix() not in ('out', 'out/.execution.lock')
+               for path in run.rglob('*'))
+
+
 def verified_preparation(job: Path, data: Path, args, dataset: str, overrides: dict) -> tuple[dict, dict]:
     """Reuse a proven preparation or require a new job, retaining every old artifact."""
     from prepare import formats
@@ -208,7 +224,7 @@ def verified_preparation(job: Path, data: Path, args, dataset: str, overrides: d
     if receipt_path.exists():
         try:
             saved = json.loads(receipt_path.read_text())
-            if any(saved.get(key) != value for key, value in current.items()):
+            if any(saved.get(key) != value for key, value in current.items() if key != 'producer'):
                 raise ValueError('source, settings or producer changed')
             if saved['prepared'] != prepared_identity(job) or saved['report'] != file_identity(job / 'report.json'):
                 raise ValueError('prepared artifacts or report changed')
@@ -227,8 +243,7 @@ def verified_preparation(job: Path, data: Path, args, dataset: str, overrides: d
             raise SystemExit(refuse) from error
         print('== convert (verified preparation reused)', flush=True)
         return rep, saved
-    if any((job / name).exists() for name in ('episodes', 'episodes_unclipped', 'report.json', 'run',
-                                             'dictionary.json', 'dictionary.claim')):
+    if unverified_preparation_artifacts(job):
         raise SystemExit(refuse)
     print('== convert', flush=True)
     rep = formats.convert(data, args.rig, job / 'episodes', dataset,
@@ -270,6 +285,7 @@ def main() -> int:
                     help="seconds per labeling request (default: the harness's 600 seconds)")
     ap.add_argument('--retry-received', action='append', default=[], metavar='EPISODE',
                     help='retry only this unit with a received unusable reply; repeat for additional units')
+    ap.add_argument('--force', action='store_true', help='explicitly refresh paid units, retaining prior charges and replies')
     ap.add_argument('--max-tokens', type=int, default=None, help='completion limit for new label requests')
     ap.add_argument("--max-minutes", type=float, default=0, help="read at most this much footage (default: all)")
     ap.add_argument("--grouping", type=json.loads, default={},
@@ -287,6 +303,16 @@ def main() -> int:
     overrides = {key: getattr(a, key) for key in ("model", "reasoning", "sample_fps", "task_mode", "dataset_note")}
     policy.resolve({"profile": a.rig}, **overrides)
 
+    if a.force and a.retry_received:
+        ap.error('--force and --retry-received cannot be combined')
+    from label.harness import execution_lock
+    job = a.out.resolve()
+    job.mkdir(parents=True, exist_ok=True)
+    with execution_lock(job) as lock_fd, execution_lock(job / 'run' / 'out') as output_lock_fd:
+        return review_job(a, overrides, lock_fd, output_lock_fd)
+
+
+def review_job(a, overrides, lock_fd, output_lock_fd) -> int:
     from board import clips as board_clips
     from checks import EXIT_PARTIAL, timebase
     from label import pieces, dictionary_stage
@@ -303,8 +329,7 @@ def main() -> int:
                 raise ValueError('input resource changed')
         except (OSError, ValueError, AttributeError) as error:
             raise SystemExit(refuse) from error
-    elif any((job / name).exists() for name in ('episodes', 'episodes_unclipped', 'report.json', 'run',
-                                               'dictionary.json', 'dictionary.claim')):
+    elif unverified_preparation_artifacts(job):
         raise SystemExit(refuse)
     data = fetch(a.data, job, allow_download=not receipt_path.exists())
     if data == job:
@@ -312,7 +337,10 @@ def main() -> int:
     dataset = a.dataset or data.stem
     eps = job / "episodes"
     jobs = str(max(1, a.jobs))
-    env = repo_env()
+    lease_env = {'ARGUS_REVIEW_LOCK_FD': str(lock_fd),
+                 'ARGUS_REVIEW_OUTPUT_LOCK_FD': str(output_lock_fd),
+                 'ARGUS_REVIEW_OUTPUT_LOCK_PATH': str(job / 'run' / 'out' / '.execution.lock')}
+    env = repo_env(**lease_env)
 
     rep, preparation = verified_preparation(job, data, a, dataset, overrides)
     if not rep["episodes"]:
@@ -361,14 +389,18 @@ def main() -> int:
     if rc != 0:
         raise SystemExit(f"clips exited {rc} with episodes still to put on the board (log {job / 'logs' / 'clips.log'})")
 
-    long_eps = pieces.write_units(job, eps)
+    long_eps = pieces.write_units(job, eps, refresh_unpaid_interpretation=True)
     timeout_args = ["--timeout", str(a.timeout)] if a.timeout is not None else []
     if a.max_tokens is not None:
         timeout_args += ['--max-tokens', str(a.max_tokens)]
-    retry_args = [value for name in a.retry_received for value in ('--retry-received', name)]
-    env = repo_env(RDA_DECODE_CONCURRENCY=os.environ.get("RDA_DECODE_CONCURRENCY") or str(2 * int(jobs)))
+    retry_args = (['--force'] if a.force else []) + [value for name in a.retry_received for value in ('--retry-received', name)]
+    env = repo_env(**lease_env, RDA_DECODE_CONCURRENCY=os.environ.get("RDA_DECODE_CONCURRENCY") or str(2 * int(jobs)))
     run_step(job, "dry_run", [PY, "-m", "label.harness", "--episodes-root", str(job / "units"), "--out-dir",
-                              str(job / "dry"), "--concurrency", jobs, "--dry-run", *timeout_args], env)
+                              str(job / "dry"), "--concurrency", jobs, "--dry-run", "--force", *timeout_args], env)
+    unknown = set(a.retry_received) - {p.name for p in (job / 'units').glob('episode_*')}
+    if unknown:
+        raise SystemExit('--retry-received names unknown units: ' + ', '.join(sorted(unknown)) +
+                         '; available units: ' + ', '.join(p.name for p in sorted((job / 'units').glob('episode_*'))))
     if a.free:
         print(f"free run: requests built in {job / 'dry'}, model not called", flush=True)
         return 0
@@ -382,6 +414,8 @@ def main() -> int:
     info = {**prior_run, "run_id": job.name, "kind": "review", "dataset": dataset, "slice": str(eps),
             "code": f"argus@{commit()}", "started_at": prior_run.get('started_at') or now(), "cap_usd": a.cap, "status": "running",
             "annotation_policy": selected}
+    info.pop('error', None)
+    info.pop('finished_at', None)
     if a.retry_received:
         info.setdefault('received_retries', []).append({'at': now(), 'episodes': a.retry_received,
                                                        'max_tokens': a.max_tokens, 'cap_usd': a.cap})
@@ -394,6 +428,7 @@ def main() -> int:
                                     str(run_dir / "out"), "--concurrency", str(a.concurrency),
                                     "--max-spend", str(remaining), *timeout_args, *retry_args], env, ok_codes=(0, 1))
         else:
+            label_rc = int(a.force or bool(a.retry_received))
             print('label budget exhausted by prior spending or outstanding reservations', flush=True)
             from label.harness import record_budget_refusal
             for dry in sorted((job / 'dry').glob('episode_*.json')):
@@ -408,6 +443,7 @@ def main() -> int:
                     cost_complete=complete)
         write_atomic(run_dir / "run.json", info, indent=1)
         st = build_review_board(job, eps, long_eps, info, dataset, a.rig, rep.get('packaging'))
+        label_rc = label_rc or bool(st['incomplete'] or st['unlabelled'])
         info.update(status='failed' if label_rc else 'done', finished_at=now())
         write_atomic(run_dir / 'run.json', info, indent=1)
         write_atomic(job / 'run_final/run.json', info, indent=1)

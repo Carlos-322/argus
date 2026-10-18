@@ -111,7 +111,11 @@ def test_protobuf_capture_clock_and_split_gripper_state_match_public_converter(t
     with np.load(old_ep / 'times.npz') as a, np.load(new_ep / 'times.npz') as b:
         for key in a.files:
             assert key in b.files and a[key].dtype == b[key].dtype
-            assert np.array_equal(a[key], b[key]), key
+            if key.endswith('_pts'):
+                # Encoded PTS are storage addresses; native clocks and owned pictures establish parity.
+                assert len(b[key]) == proof['n'] and np.all(np.diff(b[key]) > 0), key
+            else:
+                assert np.array_equal(a[key], b[key]), key
             clocks[key] = {'dtype': str(b[key].dtype), 'values': b[key].tolist()}
     assert new['instruction'] == old['instruction'] == 'align fabric'
     for topic, facts in old['stream_checks']['streams'].items():
@@ -182,9 +186,27 @@ def test_incomplete_or_ambiguous_split_state_retains_every_native_field(tmp_path
     root.mkdir()
     capture_mcap(root / 'episode.mcap', **kwargs)
     ep, ctx = converted(root, tmp_path / 'generic', monkeypatch, legacy=False)
-    assert ctx['state_kind'] == 'none'
-    assert not (ep / 'state.npz').exists()
-    assert ctx.get('state_note')
+    if kwargs.get('omit'):
+        assert ctx['state_kind'] == 'none'
+        assert not (ep / 'state.npz').exists()
+        assert ctx.get('state_note')
+    else:
+        assert ctx['state_kind'] == 'joints'
+        assert ctx['source']['presentation_clock']['basis'] == 'mcap_log_time'
+        assert ctx['source']['presentation_clock']['physical_synchronization_verified'] is False
+        assert any(issue['kind'] == 'recorder_arrival_timing' for issue in ctx['reader_issues'])
+        with np.load(ep / ctx['recorded_mcap_fields']) as native, np.load(ep / 'state.npz') as placed:
+            fields = {row['topic']: row['fields'] for row in ctx['mcap_field_inventory']}
+            expected = np.column_stack([native[fields[topic]['position']] for topic in
+                ['/left-arm-state', '/left-ee-state', '/right-arm-state', '/right-ee-state']])
+            source_t = .710 + np.arange(6) * .061
+            camera_t = .700 + np.arange(6) * .061
+            expected = np.column_stack([np.interp(camera_t, source_t, expected[:, k]) for k in range(14)])
+            np.testing.assert_allclose(placed['state'], expected, atol=1e-7)
+        with np.load(ep / ctx['recorded_camera_clocks']) as clocks, np.load(ep / 'times.npz') as times:
+            expected_log = 1_700_000_000_700_000_000 + np.arange(6, dtype=np.int64) * 61_000_000
+            np.testing.assert_array_equal(clocks['exo_log_ns'], expected_log)
+            np.testing.assert_allclose(times['exo'], (expected_log - expected_log[0]) / 1e9, atol=1e-9)
     assert ctx.get('recorded_mcap_fields')
     if kwargs.get('bad_header'):
         row = next(row for row in ctx['mcap_field_inventory'] if row['topic'] == kwargs['bad_header'])
@@ -228,13 +250,20 @@ def test_split_gripper_gaps_and_competing_sources_are_not_interpolated_as_state(
 
 
 def test_metadata_goal_and_owned_same_clock_sensor_samples_remain_complete(tmp_path, monkeypatch):
-    from test_formats import _json_mcap
+    from mcap.writer import Writer as McapWriter
     root = tmp_path / 'owned'
     root.mkdir()
     capture_mcap(root / 'episode.mcap', instruction=False)
     values = np.arange(6, dtype=np.float64)
-    _json_mcap(root / 'sensor.mcap', {'/force': [(i * .033, {'force': [float(i), float(i + 1)]}) for i in range(6)]},
-               t0=1_700_000_000)
+    with (root / 'sensor.mcap').open('wb') as target:
+        writer = McapWriter(target); writer.start()
+        channel = writer.register_channel('/force', 'json', writer.register_schema('Force', 'jsonschema', b'{}'))
+        for i in range(6):
+            stamp = 1_700_000_000_000_000_000 + i * 33_000_000
+            body = {'force': [float(i), float(i + 1)],
+                    'timestamp': {'seconds': stamp // 10**9, 'nanos': stamp % 10**9}}
+            writer.add_message(channel, stamp, json.dumps(body).encode(), stamp)
+        writer.finish()
     originals = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in root.iterdir()}
     ep, ctx = converted(root, tmp_path / 'generic', monkeypatch, legacy=False)
     assert ctx['instruction'] == 'align fabric'

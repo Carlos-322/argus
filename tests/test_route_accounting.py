@@ -311,7 +311,7 @@ def test_route_respects_batch_budget_before_dispatch(tmp_path, monkeypatch):
     assert calls == []
 
 
-@pytest.mark.parametrize('choices', [[], [{'message': {'content': None}}]])
+@pytest.mark.parametrize('choices', [[], [{'message': {'content': None}}], ['wrong type'], [{'message': 'wrong type'}]])
 def test_malformed_route_retains_verified_invoice_and_falls_back(tmp_path, monkeypatch, choices):
     ep = episode(tmp_path)
     job = tmp_path / 'job'
@@ -692,14 +692,14 @@ def test_forced_refresh_preserves_prior_bills_and_remaining_cap(tmp_path, monkey
     options = dict(batch, force=True, max_spend=.00001)
     options.update({'cell_w': 128} if refresh == 'explicit' else {'max_tokens': 120} if refresh == 'max_tokens' else {})
     monkeypatch.setattr(route, '_CACHE', {})
-    assert harness.run_batch([ep], out, **options) == 0
+    assert harness.run_batch([ep], out, **options) == 1
     assert len(calls) == 2
     assert label_spend(job) == pytest.approx(.014)
     retry_cap = 1
     if refresh == 'max_tokens':
         tokens, bound = reservations[-1]
         assert tokens == 120 and bound > 0
-        assert harness.run_batch([ep], out, **dict(options, max_spend=bound - .000001)) == 0
+        assert harness.run_batch([ep], out, **dict(options, max_spend=bound - .000001)) == 1
         assert len(calls) == 2 and label_spend(job) == pytest.approx(.014)
         refused = json.loads((out / f'noreply_{ep.name}.json').read_text())
         assert refused['final_dispatch_outcome'] == 'not dispatched'
@@ -735,7 +735,7 @@ def test_forced_legacy_unknown_final_retains_reservation_before_routing(tmp_path
     monkeypatch.setattr(route, '_CACHE', {})
     monkeypatch.setattr(harness, 'call_model', provider)
     batch = dict(keys=['sk-or-fixture'], concurrency=1, force=True, max_spend=.00001, **args())
-    assert harness.run_batch([ep], out, **batch) == 0
+    assert harness.run_batch([ep], out, **batch) == 1
     assert not calls
     assert label_spend(job) == pytest.approx(3.204)
     assert label_spend_complete(job) is False

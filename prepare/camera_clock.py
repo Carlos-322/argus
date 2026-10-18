@@ -107,7 +107,8 @@ def unshown_times(ep_dir: Path, entry: dict, zero_s: float = 0.0) -> tuple[np.nd
         return None
     with np.load(Path(ep_dir) / entry["camera_times"]) as z:
         a, b = entry.get("frame_span") or (0, len(z["presentation"]))
-        offset = float(entry.get("camera_clock_offset_s") or 0.0) + zero_s
+        offset = (0.0 if entry.get('clock_alignment') == 'unverified' else
+                  float(entry.get("camera_clock_offset_s") or 0.0) + zero_s)
         return z["presentation"][a:b] - offset, z["pts"][a:b]
 
 
@@ -117,6 +118,13 @@ def unshown_span(ep_dir: Path, entries: list, t0: float, t1: float, zero_s: floa
     timestamp. A part shifts that interval to its own zero; a trim keeps the current clock."""
     out = []
     for entry in entries:
+        if entry.get('clock_alignment') == 'unverified':
+            # An episode interval cannot select rows of an unrelated source clock.
+            retained = dict(entry)
+            if retained.get('camera_times'):
+                retained['camera_times'] = str((Path(ep_dir) / retained['camera_times']).resolve())
+            out.append(retained)
+            continue
         clocks = unshown_times(ep_dir, entry, zero_s)
         if clocks is None:
             out.append(entry)
