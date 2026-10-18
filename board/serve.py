@@ -77,7 +77,7 @@ from board.families import Families
 from board.public_export import project as public_json
 from board.to_board import dumps, finite
 from compare.metrics import model_names, reasoning_effort
-from label.atomic import write_atomic
+from label.atomic import file_version, remove_if, small_file, sweep_removals, write_atomic
 
 
 def _find_ffmpeg() -> str | None:
@@ -109,16 +109,30 @@ _FFMPEG_SEM = threading.Semaphore(int(os.environ.get("BOARD_FFMPEG_CONCURRENCY",
 _FRAME_DIR = Path(os.environ["BOARD_FRAME_DIR"]) if os.environ.get("BOARD_FRAME_DIR") else None
 
 
+# Per-process memos of what ffprobe read from a clip, keyed by the clip's stat. A clip can be replaced while it is read,
+# so a result is kept only when the clip still has the stat it was keyed by once the read is over (_clip_key):
+# it then stands for exactly that version, and a later version is a different key.
 _CLIP_TIMES: dict = {}
 _CLIP_HALFWAY: dict = {}
+
+
+def _clip_key(mp4: Path) -> tuple:
+    st = mp4.stat()
+    return str(mp4), st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino
+
+
+def _still_clip(mp4: Path, key: tuple) -> bool:
+    try:
+        return _clip_key(mp4) == tuple(key[:5])
+    except OSError:
+        return False
 
 
 def _clip_times(mp4: Path) -> list:
     """The clip's frame times on the episode clock (sorted presentation times), read once per clip
     version; [] when they cannot be read."""
     try:
-        st = mp4.stat()
-        key = (str(mp4), st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino)
+        key = _clip_key(mp4)
     except OSError:
         return []
     hit = _CLIP_TIMES.get(key)
@@ -133,9 +147,10 @@ def _clip_times(mp4: Path) -> list:
                     if a not in ("", "N/A") and "D" not in "".join(f))
     except (OSError, subprocess.SubprocessError, ValueError):
         ts = []
-    if len(_CLIP_TIMES) > 2048:
-        _CLIP_TIMES.clear()
-    _CLIP_TIMES[key] = ts
+    if _still_clip(mp4, key):
+        if len(_CLIP_TIMES) > 2048:
+            _CLIP_TIMES.clear()
+        _CLIP_TIMES[key] = ts
     return ts
 
 
@@ -144,8 +159,7 @@ def _shown_from_halfway(mp4: Path) -> bool:
     sets HALFWAY_TAG as the clip's comment), so the frame a time shows is the one on screen then."""
     from board.clips import HALFWAY_TAG
     try:
-        st = mp4.stat()
-        key = (str(mp4), st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino)
+        key = _clip_key(mp4)
     except OSError:
         return False
     if key in _CLIP_HALFWAY:
@@ -158,9 +172,10 @@ def _shown_from_halfway(mp4: Path) -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     hit = r.stdout.strip() == HALFWAY_TAG
-    if len(_CLIP_HALFWAY) > 2048:
-        _CLIP_HALFWAY.clear()
-    _CLIP_HALFWAY[key] = hit
+    if _still_clip(mp4, key):
+        if len(_CLIP_HALFWAY) > 2048:
+            _CLIP_HALFWAY.clear()
+        _CLIP_HALFWAY[key] = hit
     return hit
 
 
@@ -202,11 +217,15 @@ _FOOTAGE_DISK_FILES = int(os.environ.get('BOARD_FOOTAGE_DISK_FILES', 128))
 
 def _trim_disk_cache(folder: Path, suffix: str, *, max_bytes: int, max_files: int, protect=None, last=()):
     """Remove the least recently used cache files until the folder is within its budgets. Files in `protect` (a path or
-    a collection of them) are never removed, and files in `last` only once nothing else is left to remove."""
+    a collection of them) are never removed, and files in `last` only once nothing else is left to remove.
+
+    Other server processes can share the folder, so the listing is only a plan: each file is removed through
+    remove_if, only while it is still the version listed and nothing has used it since."""
     protect = {protect} if isinstance(protect, Path) else set(protect or ())
     last = set(last)
     with _DISK_CACHE_LOCK:
         entries = []
+        sweep_removals(folder)
         temporary = re.compile(r'(?:[a-f0-9]{40}\.[0-9]+\.[0-9]+\.part|'
                                r'[a-f0-9]{20}\.[0-9]+\.[0-9]+(?:\.[a-f0-9]{32})?\.part(?:\.len)?\.mp4)')
         for path in folder.glob('*.part*'):
@@ -223,7 +242,7 @@ def _trim_disk_cache(folder: Path, suffix: str, *, max_bytes: int, max_files: in
                         except CacheBusy:
                             continue
                     else:
-                        path.unlink(missing_ok=True)
+                        remove_if(path, lambda version: version[1] < time.time_ns() - 600 * 10**9)
             except OSError:
                 continue
         if suffix == '.mp4':
@@ -248,25 +267,27 @@ def _trim_disk_cache(folder: Path, suffix: str, *, max_bytes: int, max_files: in
             if not owned.fullmatch(path.name):
                 continue
             try:
-                st = path.stat()
-                age = st.st_mtime_ns
-                if suffix == '.mp4':
-                    age = _footage_recency(path, age)
-                entries.append((age, path, st.st_size))
+                version = file_version(path)
+                entries.append((_cache_recency(path, suffix, version), path, version))
             except OSError:
                 continue
-        total, count = sum(x[2] for x in entries), len(entries)
-        for _, path, size in sorted(entries, key=lambda entry: (entry[1] in last, entry[0])):
+        total, count = sum(x[2][0] for x in entries), len(entries)
+        for age, path, version in sorted(entries, key=lambda entry: (entry[1] in last, entry[0])):
             if total <= max_bytes and count <= max_files:
                 break
             if path in protect:
                 continue
             try:
-                path.unlink(missing_ok=True)
-                total -= size
-                count -= 1
+                if remove_if(path, lambda now, listed=version, age=age, path=path:
+                             now == listed and _cache_recency(path, suffix, now) <= age):
+                    total -= version[0]
+                    count -= 1
             except OSError:
                 continue
+
+
+def _cache_recency(path, suffix, version):
+    return _footage_recency(path, version) if suffix == '.mp4' else version[1]
 
 
 _FRAME_WORK_SEM = threading.BoundedSemaphore(max(1, int(os.environ.get('BOARD_FFMPEG_CONCURRENCY', 4))))
@@ -293,8 +314,7 @@ def extract_frame(mp4: Path, t: float, max_w: int = 640, *, _wait=False) -> byte
     if not math.isfinite(t) or not 0 <= t <= 604800 or not 1 <= max_w <= 1920:
         raise ValueError('Frame time must be between 0 and 604800 seconds, and width between 1 and 1920')
     try:
-        st = mp4.stat()
-        key = (str(mp4), st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino, float(t), int(max_w))
+        key = (*_clip_key(mp4), float(t), int(max_w))
     except OSError:
         return None
     disk = _FRAME_DIR / (hashlib.sha1(repr(key).encode()).hexdigest() + '.jpg') if _FRAME_DIR else None
@@ -348,6 +368,8 @@ def _extract_uncached_frame(mp4, t, max_w, key, disk):
         out = r.stdout if (r.returncode == 0 and r.stdout) else None
         if out:
             break
+    if out and not _still_clip(mp4, key):
+        return out                # cut from a clip replaced meanwhile: right for this request, kept for no other
     if out:
         _remember_frame(key, out)
         if disk is not None:
@@ -432,10 +454,12 @@ _FOOTAGE_LOCKS: dict = {}
 _FOOTAGE_LOCKS_LOCK = threading.Lock()
 
 
+# label file name -> (its trusted version, the episode ID it held then). Labels are rewritten by other processes (a
+# labelling run, a rebuild), so an entry stands only for the version it was read from: every lookup checks each file's
+# version, reads again only the files that changed, and reads the file it picks once more before using it.
 _LABEL_INDEX_LOCK = threading.Lock()
 _LABEL_INDEX = {}
 _LABEL_INDEX_ROOT = None
-_LABEL_INDEX_CHECKED = 0.0
 
 
 @contextmanager
@@ -454,8 +478,9 @@ def _footage_lock(key):
 
 
 def footage_label(eid: str) -> dict:
-    """Index episode IDs once and read only labels changed since the previous scan."""
-    global _LABEL_INDEX_ROOT, _LABEL_INDEX_CHECKED
+    """The current label of an episode: the file named after it, else the one whose episode ID it is, found through an
+    index that reads only the labels whose version changed since this process last read them."""
+    global _LABEL_INDEX_ROOT
     direct = HERE / f'{eid}.json'
     if _under(HERE, direct) and direct.is_file():
         try:
@@ -465,24 +490,23 @@ def footage_label(eid: str) -> dict:
         except (OSError, ValueError, TypeError, AttributeError, RecursionError):
             pass
     with _LABEL_INDEX_LOCK:
-        if _LABEL_INDEX_ROOT != HERE or time.monotonic() - _LABEL_INDEX_CHECKED >= 1:
-            previous = dict(_LABEL_INDEX) if _LABEL_INDEX_ROOT == HERE else {}
-            _LABEL_INDEX.clear()
-            for path in sorted(HERE.glob('*.json')):
-                if not _under(HERE, path):
+        previous = dict(_LABEL_INDEX) if _LABEL_INDEX_ROOT == HERE else {}
+        _LABEL_INDEX.clear()
+        for path in sorted(HERE.glob('*.json')):
+            if not _under(HERE, path):
+                continue
+            try:
+                sig = _label_identity(path)
+                old = previous.get(path.name)
+                if old is not None and old[0] == sig:
+                    _LABEL_INDEX[path.name] = old
                     continue
-                try:
-                    sig = _label_identity(path)
-                    old = previous.get(path.name)
-                    if old is not None and old[0] == sig:
-                        _LABEL_INDEX[path.name] = old
-                        continue
-                    label = json.loads(path.read_text())
-                    identity = ((label.get('_meta') or {}).get('episode_id') or path.stem) if isinstance(label, dict) else None
-                    _LABEL_INDEX[path.name] = (sig, identity)
-                except (OSError, ValueError, TypeError, AttributeError, RecursionError):
-                    continue
-            _LABEL_INDEX_ROOT, _LABEL_INDEX_CHECKED = HERE, time.monotonic()
+                label = json.loads(path.read_text())
+                identity = ((label.get('_meta') or {}).get('episode_id') or path.stem) if isinstance(label, dict) else None
+                _LABEL_INDEX[path.name] = (sig, identity)
+            except (OSError, ValueError, TypeError, AttributeError, RecursionError):
+                continue
+        _LABEL_INDEX_ROOT = HERE
         path = next((HERE / name for name, (_, identity) in _LABEL_INDEX.items() if identity == eid), None)
     if path is not None:
         try:
@@ -755,20 +779,27 @@ def _maintenance_error(error):
     logging.getLogger(__name__).warning('Footage cache bookkeeping deferred: %s', error)
 
 
-def _footage_recency(out, default):
+def _footage_recency(out, version):
+    """When the movie at `out`, at `version` (file_version), was last used: its own modification time, the shared
+    receipt's (which every server touches on use, _touch_footage) and this process's own record of using that version,
+    never of an earlier version at the same name."""
     with _FOOTAGE_MEMORY_LOCK:
-        age = _FOOTAGE_ACCESS.get(str(out), default)
+        age = _FOOTAGE_ACCESS.get((str(out), tuple(version)), version[1])
     try:
         age = max(age, (FOOTAGE_DIR / '.ready' / f'{out.stem}.json').stat().st_mtime_ns)
     except OSError:
         pass
-    return max(age, default)
+    return max(age, version[1])
 
 
 def _touch_footage(out):
+    try:
+        key = (str(out), file_version(out))
+    except OSError:
+        return
     with _FOOTAGE_MEMORY_LOCK:
-        _FOOTAGE_ACCESS[str(out)] = time.time_ns()
-        _FOOTAGE_ACCESS.move_to_end(str(out))
+        _FOOTAGE_ACCESS[key] = time.time_ns()
+        _FOOTAGE_ACCESS.move_to_end(key)
         while len(_FOOTAGE_ACCESS) > max(128, _FOOTAGE_DISK_FILES):
             _FOOTAGE_ACCESS.popitem(last=False)
     try:
@@ -959,36 +990,64 @@ def _ready_footage(request: str) -> tuple | None:
         return None
 
 
+def _snapshot_record(snapshot) -> dict | None:
+    """The JSON object a receipt holds, from small_file's read of it, or None when it holds none (a symbolic link, a
+    file over 4096 bytes, or anything but a JSON object)."""
+    try:
+        record = json.loads(snapshot[2]) if snapshot[2] is not None else None
+    except (ValueError, RecursionError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+_read_receipt_snapshot = small_file(4096)
+
+
+def _receipt_lapsed(snapshot, expire=False) -> bool:
+    """Whether a receipt or alias, as just read, no longer stands: it names no prepared movie that is there, or, for a
+    ticket (`expire`), its expiry has passed."""
+    record = _snapshot_record(snapshot)
+    filename = record.get('file') if record else None
+    if record and record.get('format') == 'argus-footage-alias/1':
+        filename = str(record.get('key')) + '.mp4'
+    if not (isinstance(filename, str) and re.fullmatch(r'[a-f0-9]{20}\.mp4', filename)
+            and (FOOTAGE_DIR / filename).is_file()):
+        return True
+    return expire and _ticket_lapsed(snapshot)
+
+
+def _remove_receipt(path, holds) -> bool:
+    """Remove a receipt, alias or ticket only when `holds` is true for it as it is now, under the lock its writers hold
+    (_write_footage_record), so a version another server wrote since this one read it is never the one removed."""
+    return remove_if(path, holds, read=_read_receipt_snapshot, lock=lambda: _file_lock(_receipt_guard(path)))
+
+
 def _trim_footage_receipts(folder: Path, pattern: str, *, expire=False):
     _trim_receipt_temps(folder)
+    sweep_removals(folder)
     retained = []
     for path in folder.glob('*.json'):
         if not re.fullmatch(pattern, path.name):
             continue
         try:
-            record = _read_footage_receipt(path)
-            filename = record.get('file') if record else None
-            if record and record.get('format') == 'argus-footage-alias/1':
-                filename = str(record.get('key')) + '.mp4'
-            expiry = record.get('expires_at') if expire and record else None
-            valid = (isinstance(filename, str) and re.fullmatch(r'[a-f0-9]{20}\.mp4', filename)
-                     and (FOOTAGE_DIR / filename).is_file())
-            if expire:
-                valid = valid and type(expiry) in (int, float) and math.isfinite(expiry) and expiry >= time.time()
-            if not valid:
-                path.unlink(missing_ok=True)
+            snapshot = _read_receipt_snapshot(path)
+            if _receipt_lapsed(snapshot, expire):
+                _remove_receipt(path, lambda now: _receipt_lapsed(now, expire))
             elif not expire and len(path.stem) == 40:
-                retained.append((path.stat().st_mtime_ns, path))
+                retained.append((snapshot[1], path, snapshot))
         except FileNotFoundError:
             pass
         except OSError as error:
             _maintenance_error(error)
-        except (ValueError, TypeError, KeyError):
-            path.unlink(missing_ok=True)
     # Canonical records follow movie lifetime and request aliases have a finite bound. Tickets are bounded when they
-    # are issued, per client (prepare_footage_ticket), so no other client's load trims a live one here.
-    for _, path in sorted(retained, reverse=True)[max(128, 2 * _FOOTAGE_DISK_FILES):]:
-        path.unlink(missing_ok=True)
+    # are issued, per client (prepare_footage_ticket), so no other client's load trims a live one here. An alias is
+    # trimmed as one of the oldest only while it is still the version judged old: one rewritten since is in use.
+    retained.sort(key=lambda entry: entry[0], reverse=True)
+    for _, path, snapshot in retained[max(128, 2 * _FOOTAGE_DISK_FILES):]:
+        try:
+            _remove_receipt(path, lambda now, seen=snapshot: now == seen)
+        except OSError as error:
+            _maintenance_error(error)
 
 
 def _remember_ready_footage(request: str, result: tuple, record=None) -> None:
@@ -1010,7 +1069,11 @@ def _remember_ready_footage(request: str, result: tuple, record=None) -> None:
 
 _TICKET_CLIENT_MAX = 8      # live download tickets one client holds; another withdraws that client's oldest
 _TICKET_MAX = 4096          # live tickets of all clients; past this a prepare is refused, never another's withdrawn
-_TICKETS = {}               # FOOTAGE_DIR -> {token: (owner, file, version, expires_at, issued_at)}, each file read once
+# FOOTAGE_DIR -> {token: (owner, file, version, expires_at, issued_at, stamp)}. Other server processes renew, withdraw
+# and expire the same ticket files, so an entry stands only for the file at `stamp` (size, modification time and inode,
+# taken before it was read): a file whose stamp differs is read again, and an expiry is acted on only through
+# _remove_receipt, which reads the file again and keeps it when it was renewed.
+_TICKETS = {}
 
 
 def _ticket_owner(client) -> str:
@@ -1018,41 +1081,71 @@ def _ticket_owner(client) -> str:
     return hashlib.sha256(str(client).encode()).hexdigest()[:16] if client else ''
 
 
+def _ticket_fields(record) -> tuple:
+    """(owner, file, version, expires_at, issued_at) of a ticket record; an unreadable one expires at 0, so it is
+    removed like an expired one."""
+    expiry = record.get('expires_at') if record else None
+    if type(expiry) not in (int, float) or not math.isfinite(expiry) or not isinstance(record.get('file'), str):
+        return '', '', None, 0.0, 0.0
+    issued = record.get('issued_at')
+    return (str(record.get('owner') or ''), record['file'], record.get('version'), float(expiry),
+            float(issued) if type(issued) in (int, float) else float(expiry) - _FOOTAGE_TICKET_SECONDS)
+
+
+def _ticket_lapsed(snapshot) -> bool:
+    return _ticket_fields(_snapshot_record(snapshot))[3] < time.time()
+
+
+def _ticket_stamp(st) -> tuple:
+    return st.st_size, st.st_mtime_ns, st.st_ino
+
+
+def _read_ticket(index, folder, token, stamp=None) -> None:
+    """Read one ticket file into the index as it is now (or drop it when it is gone). The stamp is taken before the
+    read, so a write in between costs one more read later and never leaves an entry newer than its stamp says."""
+    path = folder / f'{token}.json'
+    try:
+        stamp = stamp or _ticket_stamp(os.lstat(path))
+        index[token] = (*_ticket_fields(_snapshot_record(_read_receipt_snapshot(path))), stamp)
+    except FileNotFoundError:
+        index.pop(token, None)
+    except OSError as error:
+        _maintenance_error(error)
+        index.pop(token, None)
+
+
 def _ticket_index() -> dict:
-    """The live tickets in FOOTAGE_DIR/.tickets (with _FOOTAGE_READY_LOCK held). Each ticket file is read once, when it
-    first appears; a listing of names finds the ones other server processes wrote or removed, and expired ones are
-    removed here."""
+    """The live tickets in FOOTAGE_DIR/.tickets (with _FOOTAGE_READY_LOCK held). A ticket file is read again whenever
+    its stamp changed since this process read it, so a renewal by another server is seen; expired ones are removed
+    here, each only when it is still expired on a fresh read."""
     folder = FOOTAGE_DIR / '.tickets'
     index = _TICKETS.setdefault(str(FOOTAGE_DIR), {})
+    stamps = {}
     try:
-        names = {entry.name[:-5] for entry in os.scandir(folder)
-                 if re.fullmatch(r'[a-f0-9]{32}\.json', entry.name)}
+        entries = list(os.scandir(folder))
     except OSError:
-        names = set()
-    for token in set(index) - names:
+        entries = []
+    for entry in entries:
+        if re.fullmatch(r'[a-f0-9]{32}\.json', entry.name):
+            try:
+                stamps[entry.name[:-5]] = _ticket_stamp(entry.stat(follow_symlinks=False))
+            except OSError:
+                continue
+    for token in set(index) - set(stamps):
         del index[token]
-    for token in names - set(index):
-        try:
-            record = _read_footage_receipt(folder / f'{token}.json')
-            expiry = record.get('expires_at') if record else None
-            if type(expiry) not in (int, float) or not math.isfinite(expiry) or not isinstance(record.get('file'), str):
-                raise ValueError('Invalid ticket')
-            issued = record.get('issued_at')
-            index[token] = (str(record.get('owner') or ''), record['file'], record.get('version'), float(expiry),
-                            float(issued) if type(issued) in (int, float) else float(expiry) - _FOOTAGE_TICKET_SECONDS)
-        except FileNotFoundError:
-            continue
-        except (OSError, ValueError, TypeError, AttributeError):
-            index[token] = ('', '', None, 0.0, 0.0)    # unreadable: removed below like an expired ticket
+    for token, stamp in stamps.items():
+        if token not in index or index[token][5] != stamp:
+            _read_ticket(index, folder, token, stamp)
     now = time.time()
     for token, entry in list(index.items()):
         if entry[3] < now:
             try:
-                (folder / f'{token}.json').unlink(missing_ok=True)
+                if _remove_receipt(folder / f'{token}.json', _ticket_lapsed):
+                    del index[token]
+                else:
+                    _read_ticket(index, folder, token)      # renewed since it was read: keep its new expiry
             except OSError as error:
                 _maintenance_error(error)
-                continue
-            del index[token]
     return index
 
 
@@ -1060,8 +1153,8 @@ def _ticketed_footage() -> dict:
     """{video file name: owners of the live tickets that name it}."""
     held = {}
     with _FOOTAGE_READY_LOCK:
-        for owner, name, _, _, _ in _ticket_index().values():
-            held.setdefault(name, set()).add(owner)
+        for entry in _ticket_index().values():
+            held.setdefault(entry[1], set()).add(entry[0])
     return held
 
 
@@ -1103,14 +1196,23 @@ def _issue_footage_ticket(result, record, owner, version, now, reuse):
                       and entry[1] == result[0].name and entry[2] == list(version)), None)
         if token is None:
             mine = sorted((entry[4], token) for token, entry in index.items() if entry[0] == owner)
-            for _, old in mine[:max(0, len(mine) - _TICKET_CLIENT_MAX + 1)]:
-                (folder / f'{old}.json').unlink(missing_ok=True)
-                del index[old]
+            excess = len(mine) - _TICKET_CLIENT_MAX + 1
+            for issued, old in mine:
+                if excess <= 0:
+                    break
+                # withdrawn only while it is still the ticket judged oldest: one renewed since is not, and stays
+                if not _remove_receipt(folder / f'{old}.json',
+                                       lambda now, issued=issued: _ticket_fields(_snapshot_record(now))[4] == issued):
+                    _read_ticket(index, folder, old)
+                    if old in index:
+                        continue
+                index.pop(old, None)
+                excess -= 1
             if len(index) >= _TICKET_MAX:
                 raise CacheBusy('Too many downloads are prepared at once; try again later.')
             token = uuid.uuid4().hex
         _write_footage_record(folder / f'{token}.json', record)
-        index[token] = (owner, result[0].name, list(version), record['expires_at'], now)
+        _read_ticket(index, folder, token)
         _trim_receipt_temps(folder)
     return token
 
@@ -1119,14 +1221,17 @@ def _ticket_record(token: str) -> dict | None:
     if not re.fullmatch(r'[a-f0-9]{32}', token):
         return None
     receipt = FOOTAGE_DIR / '.tickets' / f'{token}.json'
-    record = _read_footage_receipt(receipt)
-    if record is None:
-        return None
-    expiry = record.get('expires_at')
-    if type(expiry) not in (int, float) or not math.isfinite(expiry) or expiry < time.time():
-        receipt.unlink(missing_ok=True)
-        return None
-    return record
+    for _ in range(2):
+        record = _read_footage_receipt(receipt)
+        if record is None:
+            return None
+        expiry = record.get('expires_at')
+        if type(expiry) in (int, float) and math.isfinite(expiry) and expiry >= time.time():
+            return record
+        # expired as read: removed only if it is still expired now, and read again when another server renewed it
+        if _remove_receipt(receipt, _ticket_lapsed):
+            return None
+    return None
 
 
 def ticket_footage(token: str) -> tuple | None:
@@ -1139,11 +1244,21 @@ def ticket_footage(token: str) -> tuple | None:
 
 @contextmanager
 def _ticket_reader(token):
-    # Validate and send the same open file so a path replacement cannot switch
-    # bytes between identity checking and Range delivery.
-    reader, result = None, None
     try:
         record = _ticket_record(token)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        record = None
+    with _footage_reader(record) as opened:
+        yield opened
+
+
+@contextmanager
+def _footage_reader(record):
+    """(verified movie, open file) for a receipt, or (None, None). The file is opened first and its open descriptor is
+    checked against the receipt, then the same descriptor is sent, so another server evicting or replacing the movie
+    after it was verified can neither switch the bytes nor make this send a file the receipt does not name."""
+    reader, result = None, None
+    try:
         if record and re.fullmatch(r'[a-f0-9]{20}\.mp4', record.get('file', '')):
             reader = (FOOTAGE_DIR / record['file']).open('rb')
             result = _receipt_footage(record, reader=reader)
@@ -2314,8 +2429,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return self._send(409, {'error': 'Prepared video changed; prepare it again.'})
                 self._send(200, {"bytes": size, "name": name, "ticket": ticket})
                 return
-            self._send_file(out, "video/mp4", name)
-            return
+            with _footage_reader(getattr(got, 'receipt', None)) as (verified, reader):
+                if verified is None:
+                    return self._send(503, {'error': 'Prepared video changed; prepare it again.', 'retryable': True})
+                return self._send_file(out, "video/mp4", name, source=reader)
         if parsed.path == "/api/frame":
             q = urllib.parse.parse_qs(parsed.query)
             mp4 = clip_path(MP4_DIR, (q.get("id") or [""])[0], (q.get("cam") or ["exo"])[0])
