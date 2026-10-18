@@ -2476,7 +2476,9 @@ function mediaKey(cam) {
 }
 // web copy of one camera's clip; cam is the value the page asks /api/video for (left, right, or the top camera)
 function videoSrc(eidEnc, cam) {
-  if (!STATIC) return 'api/video?id=' + eidEnc + '&cam=' + cam + '&v=' + encodeURIComponent(BOARD._mediaLoadVersion || '');
+  // stable URLs: the server tags each clip and revalidates it, so a replaced clip is fetched again and an
+  // unchanged one is not
+  if (!STATIC) return 'api/video?id=' + eidEnc + '&cam=' + cam;
   const rec = ALL_EPS.find(e => e.file === _activeFile) || {};
   return BOARD.media + ((rec._media || {})[mediaKey(cam)] || '');
 }
@@ -2503,7 +2505,7 @@ function markTallGoalFrames() {
 }
 function frameSrc(eidEnc, cam, t) { return frameSrcOf(_activeFile, eidEnc, cam, t); }
 function frameSrcOf(file, eidEnc, cam, t) {
-  if (!STATIC) return `api/frame?id=${eidEnc}&cam=${encodeURIComponent(cam)}&t=${encodeURIComponent(t)}&w=640&v=${encodeURIComponent(BOARD._mediaLoadVersion || '')}`;
+  if (!STATIC) return `api/frame?id=${eidEnc}&cam=${encodeURIComponent(cam)}&t=${encodeURIComponent(t)}&w=640`;
   const rec = ALL_EPS.find(e => e.file === file) || {};
   return BOARD.media + ((rec._frames || {})[mediaKey(cam) + '|'
     + Math.round(Number(t) * 1000)] || '');
@@ -6108,10 +6110,6 @@ function renderEp(d, opts) {
       + `${tickLabel(t)}</div>`;
   }
 
-  if (!STATIC && !keep) {
-    BOARD._mediaLoadCounter = (BOARD._mediaLoadCounter || 0) + 1;
-    BOARD._mediaLoadVersion = Date.now().toString(36) + '-' + BOARD._mediaLoadCounter;
-  }
   const eidEnc = encodeURIComponent(meta.episode_id || '');
   // cameras this episode actually has (FastUMI: grippers only, no top camera). The main player shows
   // the top camera when there is one, else the first gripper camera; side cells show the rest.
