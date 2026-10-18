@@ -1,4 +1,4 @@
-"""Per-client download tickets of the live board."""
+"""Per-client download tickets and Host checks of the live board."""
 import json
 import os
 import urllib.error
@@ -84,3 +84,31 @@ def test_tickets_of_other_clients_filling_the_cache_refuse_new_work_instead_of_e
             prepare(base, (.1, .3), '10.0.0.3')
         assert error.value.code == 503 and json.loads(error.value.read())['retryable'] is True
         assert all(get(base + 'api/footage?ticket=' + token) for token in held)
+
+
+@pytest.mark.parametrize('bound, host, allowed', [
+    ('127.0.0.1', 'localhost', True), ('127.0.0.1', '127.0.0.1', True), ('127.0.0.1', '192.168.1.5', False),
+    ('127.0.0.1', 'evil.example', False), ('127.0.0.1', 'box.tail1234.ts.net', False),
+    ('0.0.0.0', 'evil.example', False), ('0.0.0.0', '192.168.1.5', True), ('0.0.0.0', 'localhost', True),
+    ('192.168.1.5', 'rebind.attacker.example', False), ('192.168.1.5', '192.168.1.5', True),
+    ('::', '::1', True), ('::', 'fe80::1', True), ('0.0.0.0', 'board.lan', False),
+])
+def test_host_check_on_loopback_and_network_boards(bound, host, allowed):
+    assert serve.host_allowed(host, bound) is allowed
+    assert serve.host_allowed(host.upper() + '.', bound, (host,))   # --allow-host admits any name, in any case
+
+
+def test_network_board_answers_to_this_machines_name():
+    assert all(serve.host_allowed(name, '0.0.0.0') for name in serve.machine_names())
+    assert not serve.host_allowed(next(iter(serve.machine_names())), '127.0.0.1')
+
+
+def test_refused_host_names_the_host_and_the_flag(tmp_path, monkeypatch):
+    monkeypatch.setattr(serve, 'HERE', tmp_path)
+    with serving() as base:
+        code, _, body = status(urllib.request.Request(base + 'api/episodes', headers={'Host': 'box.tail1234.ts.net'}))
+        assert code == 403
+        message = json.loads(body)['error']
+        assert 'box.tail1234.ts.net' in message and '--allow-host box.tail1234.ts.net' in message
+        code, _, body = status(urllib.request.Request(base + 'api/episodes', headers={'Host': '<b>x'}))
+        assert code == 403 and b'<' not in body

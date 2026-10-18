@@ -1677,6 +1677,40 @@ def render_index(title: str, board: dict, name: str = "", header: str | None = N
             .replace("__FAMILIES__", _js({**FAMILIES.catalog(), **capture_catalog()})))
 
 
+@lru_cache(maxsize=1)
+def machine_names() -> frozenset:
+    """This machine's own host names, with and without their domain and as .local, which a board on a network address
+    answers to."""
+    names = set()
+    for name in (socket.gethostname(), socket.getfqdn()):
+        name = (name or '').lower().rstrip('.')
+        if name:
+            short = name.split('.')[0]
+            names.update((name, short, short + '.local'))
+    return frozenset(names)
+
+
+def host_allowed(host: str, bound: str, allowed=()) -> bool:
+    """Whether a board listening on `bound` answers to a request whose Host is `host`. Every board answers to localhost,
+    the loopback addresses and the names given with --allow-host. A board on a network address also answers to any IP
+    address, which DNS rebinding cannot forge since it needs a name, and to this machine's own names (machine_names); a
+    loopback board answers to nothing else, since only a proxy on this machine forwards other names to it."""
+    import ipaddress
+    host = host.lower().rstrip('.')
+    if host in ('localhost', '127.0.0.1', '::1') or host in {str(h).lower().rstrip('.') for h in allowed}:
+        return True
+    try:
+        if ipaddress.ip_address(str(bound).split('%')[0]).is_loopback:
+            return False
+    except ValueError:
+        pass
+    try:
+        ipaddress.ip_address(host.split('%')[0])
+        return True
+    except ValueError:
+        return host in machine_names()
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     # keep-alive: a page asks for its labels, posters and three videos at once, and a proxy in front (or a browser
     # that talks to the board directly) reuses one connection for them instead of opening one per request; an idle
@@ -1889,27 +1923,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
             raise ValueError('Unsupported request body framing')
         return int(lengths[0])
 
-    def _browser_origin_allowed(self):
+    def _browser_refusal(self) -> str | None:
+        """Why a browser's request is refused, or None: another site's page asking (Sec-Fetch-Site), or a Host header
+        this board does not answer to (host_allowed), which is how DNS rebinding reaches a board."""
         if self.headers.get('Sec-Fetch-Site') == 'cross-site':
-            return False
+            return 'Cross-site requests are disabled.'
         server = getattr(self, 'server', None)
         if server is None:
-            return True
+            return None
+        raw = self.headers.get('Host') or ''
         try:
-            host = urllib.parse.urlsplit('http://' + (self.headers.get('Host') or '')).hostname
+            host = urllib.parse.urlsplit('http://' + raw).hostname
         except ValueError:
-            return False
-        if server.server_address[0] in ('127.0.0.1', '::1'):
-            allowed = {'localhost', '127.0.0.1', '::1'}
-            allowed.update(getattr(server, 'allowed_hosts', ()))
-            return host in allowed
-        return bool(host)
+            host = None
+        if host and host_allowed(host, server.server_address[0], getattr(server, 'allowed_hosts', ())):
+            return None
+        shown = re.sub(r'[^A-Za-z0-9.:\[\]_-]', '', host or raw)[:100]
+        if not shown:
+            return 'The request names no host this board answers to.'
+        return (f'This board does not answer to the host name {shown}. If it is reached by that name, for example '
+                f'through a reverse proxy such as tailscale serve or Caddy, start it with --allow-host {shown}.')
 
     def do_POST(self):
         """Export unique episodes through a bounded spool before sending headers."""
-        if not self._browser_origin_allowed():
+        refusal = self._browser_refusal()
+        if refusal:
             self.close_connection = True
-            return self._send(403, {'error': 'Cross-site requests are disabled.'})
+            return self._send(403, {'error': refusal})
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path not in ('/api/export', '/api/dictionary'):
             self.close_connection = True
@@ -1986,9 +2026,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._stop_read_deadline()
-        if not self._browser_origin_allowed():
+        refusal = self._browser_refusal()
+        if refusal:
             self.close_connection = True
-            return self._send(403, {'error': 'Cross-site requests are disabled.'})
+            return self._send(403, {'error': refusal})
         try:
             return self._get()
         except (RecursionError, json.JSONDecodeError, UnicodeDecodeError):
@@ -2682,7 +2723,11 @@ def main(argv=None) -> int:
                                                         f"(default {PAGE_TITLE!r})")
     ap.add_argument("--header", type=Path, help="an HTML file with a site's own header, shown in place of the page's "
                                                 "title bar (its <style> blocks go into the page's head)")
-    ap.add_argument('--allow-host', action='append', default=[], help='additional hostname accepted on a loopback listener')
+    ap.add_argument('--allow-host', action='append', default=[],
+                    help="another host name the board answers to, such as the name a reverse proxy that keeps the "
+                         "visitor's Host header (tailscale serve, Caddy) or a LAN DNS name gives it; repeatable. "
+                         "Without it the board answers to localhost and, when --host is a network address, to IP "
+                         "addresses and this machine's own names")
     ap.add_argument('--publish-uploader-values', action='store_true',
                     help="show and export the uploader's own metadata values (file attributes, sidecar fields) to "
                          "everyone who can reach the board; by default only a loopback board with no --allow-host "
@@ -2724,6 +2769,7 @@ def main(argv=None) -> int:
     publish_uploader_values(a.publish_uploader_values or (bind in ('127.0.0.1', 'localhost', '::1') and not a.allow_host))
     with BoardHTTPServer((bind, PORT), Handler) as httpd:
         httpd.allowed_hosts = a.allow_host
+        machine_names()      # resolve this machine's names once, before the first request waits on it
         if not list_episodes():
             print('No episodes are available. A free review stops before board generation; build a board with labels.', file=sys.stderr, flush=True)
         print(f"board at http://localhost:{PORT} ({len(list_episodes())} episodes from {HERE}, clips from {MP4_DIR})",
