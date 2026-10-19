@@ -292,3 +292,36 @@ def test_an_archive_the_filesystem_cannot_hold_costs_only_itself(tmp_path):
     assert any('healthy' in e['episode_id'] for e in report['episodes']), report
     said = ' '.join(str(n) for n in report['used'] + report['missing'])
     assert 'could not be' in said, said
+
+
+def test_metadata_that_contradicts_itself_in_an_archive_kept_apart_costs_that_archive_alone(tmp_path):
+    """Review of 2ab6857: a recovered archive whose own metadata declared both a session and an episode task scope
+    raised out of the conversion and cost the healthy recording beside it. Whatever stops a member kept apart from being
+    planned costs that member alone and is named."""
+    inner = zipped({'take/front.mp4': movie(30, frames=45), 'take/info.json': json.dumps({'task_mode': 'session'}),
+                    'take/dataset.json': json.dumps({'task_mode': 'episode'})})
+    raw = rename_first_local(zipped({'takeA/first.zip': inner, 'healthy/front.mp4': movie(200, frames=45)}),
+                             'takeA/first.zip', 'takeB/first.zip')
+    path = tmp_path / 'outer.zip'
+    path.write_bytes(raw)
+    report = formats.convert(path, 'ego_head', tmp_path / 'out', 'scope conflict', 900)
+    assert [e['episode_id'] for e in report['episodes']] == ['episode_healthy_front'], report
+    assert any('read on its own' in str(note) for note in report['missing']), report['missing']
+
+
+def test_a_member_kept_apart_that_cannot_be_written_never_takes_another_ones_folder(tmp_path):
+    """Review of 2ab6857: a member kept apart whose file could not be written left its folder behind without counting
+    it, so the next archive's member was given the same folder and lost. Every folder made is counted."""
+    upload = tmp_path / 'upload'
+    long_name = 'f.' + 'x' * 250
+    for name, first, data in (('a', long_name, b'not a recording'), ('b', 'takeA/first.mp4', movie(200))):
+        (upload / name).mkdir(parents=True)
+        replaced = ('g' + first[1:]) if first == long_name else 'takeB/first.mp4'
+        raw = rename_first_local(zipped({first: data, 'control/front.mp4': movie(80 if name == 'a' else 140)}),
+                                 first, replaced)
+        (upload / name / 'recordings.zip').write_bytes(raw)
+    out = tmp_path / 'out'
+    report = formats.convert(upload, 'ego_head', out, 'apart slots', 900)
+    levels = sorted(mean_level(out, e['episode_id']) for e in report['episodes'])
+    assert len(levels) == 3 and abs(levels[0] - 80) < 8 and abs(levels[1] - 140) < 8 and abs(levels[2] - 200) < 8, \
+        (levels, report)

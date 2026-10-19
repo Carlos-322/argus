@@ -562,14 +562,16 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
     archive produced are recorded in its done marker, so a later run finds them from that record, never from a name."""
     import tempfile
     root = Path(root)
-    apart, apart_root = [], []
+    apart, apart_root, allocated = [], [], []
 
     def apart_folder(label: str) -> Path:
         if not apart_root:
             tree = Path(dest) if root.is_file() else root
             tree.parent.mkdir(parents=True, exist_ok=True)
             apart_root.append(Path(tempfile.mkdtemp(prefix='.apart-', dir=tree.parent)))
-        folder = apart_root[0] / private_name(label, f"{len(apart):03d}-")
+        # numbered by every folder made, including one whose member then failed, so no two members share one
+        folder = apart_root[0] / private_name(label, f"{len(allocated):03d}-")
+        allocated.append(folder)
         folder.mkdir()
         return folder
 
@@ -12817,13 +12819,18 @@ def _convert_upload(root, rig, out, dataset, max_seconds, grouping, ownership_co
     from prepare.annotations import source_context, merge_source_contexts
     alone, alone_notes = [], []
     for folder in apart:
+        # a member read on its own is an upload of its own, so whatever stops it being planned (no recording, metadata
+        # that contradicts itself) costs that member alone and is named, never the upload it was recovered from
         try:
             folder_det, folder_items = plan(folder)
+            declared = source_context(folder, rig)
         except UploadInputError as error:
             alone_notes.append(f"{folder.name}, read on its own, holds no recording: {error}.")
             continue
-        source = {"tables": folder_det.get("annotation_tables", []), "declared": source_context(folder, rig),
-                  "metadata_root": folder}
+        except Exception as error:
+            alone_notes.append(f"{folder.name}, read on its own, was left out: {error}")
+            continue
+        source = {"tables": folder_det.get("annotation_tables", []), "declared": declared, "metadata_root": folder}
         for it in folder_items:
             it["name"] = f"name_unverified/{folder.name}/{it['name']}"
             it.pop("output_name", None)
