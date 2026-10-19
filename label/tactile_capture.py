@@ -68,7 +68,40 @@ def _scan(ep, view, pl, gate, scan_limit, image_limit):
     from label import episode as me, frames as mf
     source = ep['sources'][view]
     count = int(source['n_frames'])
-    ids = np.unique(np.rint(np.linspace(0, count - 1, min(count, scan_limit))).astype(int)).tolist() if count else []
+    candidates = None
+    clocks = ep.get('times')
+    own = (ep.get('recorded_times') or {}).get(view)
+    if own is None:
+        own = (clocks or {}).get(view)
+    notes = ep['context'].get('camera_clock') or {}
+    anchor = me.anchor(ep)
+    if not (notes.get(view) or notes.get(anchor)) and (own is not None or clocks is None):
+        # Side cameras can extend before or after the scene. Rank only captures
+        # in its actual frame window, including the final frame's exposure period.
+        # A retained duration claim does not extend the available scene footage.
+        n = int(pl['n'])
+        anchor_times = (clocks or {}).get(anchor)
+        start, end = 0., n / me.ep_fps(ep)
+        if anchor_times is not None:
+            anchor_times = np.asarray(anchor_times, dtype=float)
+            start = max(0., float(anchor_times[0]))
+            if n < len(anchor_times):
+                end = float(anchor_times[n])
+            else:
+                steps = np.diff(anchor_times[:n])
+                interval = float(np.median(steps[steps > 0])) if np.any(steps > 0) else 1 / me.ep_fps(ep)
+                interval = float(ep['sources'][anchor].get('last_frame_interval_s', interval))
+                end = float(anchor_times[n - 1]) + interval
+        if own is None:
+            first = max(0, int(np.ceil(start * me.ep_fps(ep))))
+            stop = min(count, int(np.ceil(end * me.ep_fps(ep))))
+            candidates = range(first, stop)
+        else:
+            capture_times = np.asarray(own, dtype=float)[:count]
+            candidates = np.flatnonzero(np.isfinite(capture_times) & (capture_times >= start) & (capture_times < end))
+    candidates = range(count) if candidates is None else candidates
+    ids = [int(candidates[i]) for i in np.unique(np.rint(np.linspace(
+        0, len(candidates) - 1, min(len(candidates), scan_limit))).astype(int))] if len(candidates) else []
     held = set()
     mapping = (ep.get('kmap') or {}).get(view)
     for start, end in (ep['context'].get('placeholder_frames') or {}).get(view) or []:

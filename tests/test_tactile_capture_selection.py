@@ -82,6 +82,55 @@ def test_native_side_captures_between_every_anchor_mapping_remain_available(tmp_
     assert any(12 <= capture['source_frame'] < 15 for capture in sensor['native_captures'])
 
 
+@pytest.mark.parametrize('irregular', [False, True])
+def test_native_tactile_selection_stays_inside_anchor_recording_window(tmp_path, irregular):
+    from label import sensor_evidence
+    from prepare.formats import nearest
+    folder = recording(tmp_path, frames=181, pulses=((108, 111), (132, 135)))
+    scene = folder / 'scene.mp4'
+    _packed_mp4(scene, 4)
+    anchor = np.array([0., .7, 2.1, 3.2]) if irregular else np.arange(4.)
+    tactile_times = np.arange(181) / 30 - .2
+    # Keep the first pulse in the final anchor-frame interval. The second pulse
+    # is outside the scene, even though the independent tactile stream continues.
+    tactile_times[108:111] = [3.6, 3.65, 3.7]
+    tactile_times[111:114] = [3.75, 3.8, 3.85]
+    tactile_times[114:] = np.linspace(4., 6., 67)
+    ctx = {'episode_id': 'episode_pad', 'profile': 'teleop_arms', 'state_kind': 'none', 'fps': 1,
+           'real_times': 'times.npz', 'duration_s': 9.,
+           'cameras': {'exo': {'name': 'scene'}, 'extra1': {'name': 'gelsight'}}}
+    (folder / 'context.json').write_text(json.dumps(ctx))
+    (folder / 'sources.json').write_text(json.dumps({
+        'exo': {'packed': str(scene), 'base_s': 0., 'n_frames': 4,
+                'last_frame_interval_s': .8 if irregular else 1.},
+        'extra1': {'packed': str(folder / 'tactile.mp4'), 'base_s': 0., 'n_frames': 181, 'kmap': 'map.npy'}}))
+    np.save(folder / 'map.npy', nearest(tactile_times, anchor))
+    np.savez(folder / 'times.npz', exo=anchor, extra1=tactile_times,
+             exo_pts=probe(scene)['pts'], extra1_pts=probe(folder / 'tactile.mp4')['pts'])
+    request = me.build_request(folder, cell_w=224)
+    doc = request['sensor_evidence']
+    sensor = doc['sensors'][0]
+    captures = sensor['native_captures']
+    assert all(0 <= capture['source_time_s'] < 4. for capture in captures)
+    assert any(3.6 <= capture['source_time_s'] <= 3.7 for capture in captures)
+    assert all(6 <= row < 114 for row in sensor['capture_selection']['selected_source_frames'])
+    assert all(0 <= time < 4. for time in sensor['times'])
+    finding = {'start_s': float(tactile_times[132]), 'end_s': float(tactile_times[134]),
+        'headline': 'The pad moves after the scene ends', 'claim_type': 'image_deformation',
+        'adds_beyond_video': True, 'evidence': [{'sensor_id': sensor['id'],
+            'time_s': [float(tactile_times[132]), float(tactile_times[134])]}]}
+    assert sensor_evidence.bind(doc, [finding])['unbound_findings']
+    # An explicitly unaligned source clock cannot define an episode crop. Keep
+    # its source captures available, without making synchronized event claims.
+    ctx['camera_clock'] = {'extra1': {'method': 'source clock origin unknown',
+                                    'what': 'The tactile clock origin is not aligned with the scene.'}}
+    (folder / 'context.json').write_text(json.dumps(ctx))
+    unaligned = me.build_request(folder, cell_w=224)['sensor_evidence']
+    assert unaligned['sensors'][0]['episode_alignment_verified'] is False
+    assert any(capture['source_time_s'] >= 4. for capture in unaligned['sensors'][0]['native_captures'])
+    assert sensor_evidence.bind(unaligned, [finding])['unbound_findings']
+
+
 def test_capture_image_budget_withholds_unsupplied_native_citations(tmp_path, monkeypatch):
     from label import tactile_capture
     monkeypatch.setattr(tactile_capture, 'MAX_IMAGE_BYTES', 1)
