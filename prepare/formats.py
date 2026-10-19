@@ -2241,6 +2241,53 @@ def physical_state_layout(dims: int, rig: str, names=None, *, metadata=None, val
     return kind, None
 
 
+DEGREE_UNITS = {"deg", "degree", "degrees"}
+DEGREE_EVIDENCE_JOINTS = 3     # of an arm's six joints that must read past one turn in radians
+
+
+def joint_degrees(readings, names, roles, units, rig) -> dict | None:
+    """The joint columns of a joint state (state_layout "joints") that hold degrees, and why: declared as degrees by the
+    column metadata, or declared in no unit with readings only degrees explain. Radians are never more than one turn
+    for most of an arm's joints, so at least DEGREE_EVIDENCE_JOINTS of each arm's six joints reading beyond 2 pi, with
+    every joint within two turns of degrees (720), tells degrees from radians; readings that do not, a radian or other
+    declared unit, conflicting units, or names that carry their own unit leave the state as it was (None)."""
+    if readings is None or getattr(readings, "ndim", 0) != 2:
+        return None
+    dims = readings.shape[1]
+    if not names or len(names) != dims or state_layout(dims, rig, names, value_roles=roles)[0] != "joints":
+        return None
+    columns = [offset + i for offset in range(0, dims, 7) for i in range(6)]
+    if any(state_units({}, [names[c]], 1)[0] is not None for c in columns):
+        return None                    # the name says its unit; a converted value would contradict it
+    declared = [units[c] for c in columns]
+    if all(unit in DEGREE_UNITS for unit in declared):
+        return {"from": "deg", "to": "rad", "columns": columns, "basis": "declared"}
+    if any(unit is not None for unit in declared):
+        return None
+    values = np.abs(np.asarray(readings, dtype=float)[:, columns])
+    values[~np.isfinite(values)] = np.nan
+    if np.isnan(values).all(axis=0).any():
+        return None
+    peak = np.nanmax(values, axis=0)
+    beyond = []
+    for offset in range(0, len(columns), 6):
+        arm = peak[offset:offset + 6]
+        if int(np.sum(arm > 2 * np.pi)) < DEGREE_EVIDENCE_JOINTS or bool(np.any(arm > 720)):
+            return None
+        beyond.append(int(np.sum(arm > 2 * np.pi)))
+    return {"from": "deg", "to": "rad", "columns": columns, "basis": "readings", "joints_beyond_one_turn": beyond}
+
+
+def in_radians(readings, units, degrees):
+    """The readings and units with the joint columns joint_degrees found in degrees converted to radians."""
+    if degrees is None:
+        return readings, units
+    readings = np.array(readings, dtype=np.result_type(readings, np.float32), copy=True)
+    readings[:, degrees["columns"]] = np.deg2rad(readings[:, degrees["columns"]])
+    converted = set(degrees["columns"])
+    return readings, ["rad" if i in converted else unit for i, unit in enumerate(units)]
+
+
 def lerobot_state_units(features: dict, columns=(), prefix="observation.state") -> dict:
     """Read units from the exact vector or split columns that supply canonical state."""
     if not columns:
@@ -2255,25 +2302,30 @@ def lerobot_state_units(features: dict, columns=(), prefix="observation.state") 
 
 
 def qualified_lerobot_action(action, features, columns, rig, kind):
-    """Commands join physical state checks only when their own layout and units agree."""
+    """Commands join physical state checks only when their own layout and units agree. Returns the action, with joints
+    recorded in degrees converted to radians (joint_degrees), its units and the conversion, or (None, None, None)."""
     if action is None or kind == "none":
-        return None
+        return None, None, None
     names, roles = [], []
     for column in columns or ["action"]:
         feature = features.get(column) or {}
         dims = int(np.prod(feature.get("shape") or []))
         named = value_names(feature.get("names"), dims)
         if named is None:
-            return None
+            return None, None, None
         names.extend(named)
         roles.extend(["gripper" if dims == 1 and column.endswith("_gripper") else None] * dims)
-    action_kind, _ = physical_state_layout(action.shape[1], rig, names, value_roles=roles,
-                                           metadata=lerobot_state_units(features, columns, "action"))
-    return action if action_kind == kind else None
+    units = state_units(lerobot_state_units(features, columns, "action"), names, action.shape[1])
+    degrees = joint_degrees(action, names, roles, units, rig)
+    action, units = in_radians(action, units, degrees)
+    action_kind, _ = physical_state_layout(action.shape[1], rig, names, value_roles=roles, metadata={"units": units})
+    return (action, units, degrees) if action_kind == kind else (None, None, None)
 
 
-def lerobot_preparation_contract(kind, names, roles, features, columns, action, action_columns):
-    """Persist the exact generic state facts checked before source columns leave the signal inventory."""
+def lerobot_preparation_contract(kind, names, roles, features, columns, action, action_columns, units=None,
+                                 action_units=None, degrees=None, action_degrees=None):
+    """Persist the exact generic state facts checked before source columns leave the signal inventory: the units of
+    the prepared columns, and how any were converted from degrees (joint_degrees) and on what evidence."""
     from prepare.state_contract import declared_contract, source_action_semantics
     command = None
     if action is not None:
@@ -2284,14 +2336,21 @@ def lerobot_preparation_contract(kind, names, roles, features, columns, action, 
             action_names.extend(value_names(feature.get("names"), dims))
             action_roles.extend(["gripper" if dims == 1 and column.endswith("_gripper") else None] * dims)
         command = declared_contract("prepare.formats:lerobot", kind, action_names,
+                                    action_units if action_units is not None else
                                     state_units(lerobot_state_units(features, action_columns, "action"),
                                                 action_names, len(action_names)), action_roles)
+        if action_degrees is not None:
+            command["unit_conversion"] = action_degrees
         semantics = [source_action_semantics(features.get(column), 'prepare.formats:lerobot')
                      for column in action_columns or ['action']]
         if semantics and semantics[0] is not None and all(item == semantics[0] for item in semantics):
             command['action_semantics'] = semantics[0]
-    return declared_contract("prepare.formats:lerobot", kind, names,
-                             state_units(lerobot_state_units(features, columns), names, len(names)), roles, command)
+    contract = declared_contract("prepare.formats:lerobot", kind, names,
+                                 units if units is not None else
+                                 state_units(lerobot_state_units(features, columns), names, len(names)), roles, command)
+    if degrees is not None:
+        contract["unit_conversion"] = degrees
+    return contract
 
 
 
@@ -2304,15 +2363,20 @@ def lerobot_physical_state(state, action, rig, names, roles, features, columns, 
             raise ValueError("Unsupported native LeRobot preparation contract")
         from prepare.state_contract import native_contract
         if state is None or state.ndim != 2 or state.shape[1] != 14:
-            return "none", "The native HABIT state does not have its supported two-arm layout.", None, None
+            return "none", "The native HABIT state does not have its supported two-arm layout.", state, None, None
         action = action if action is not None and action.shape == state.shape else None
-        return "ee_pose", None, action, native_contract("habit", "ee_pose", features.get('action'))
-    kind, note = physical_state_layout(state.shape[1] if state is not None else 0, rig, names,
-                                       value_roles=roles, metadata=lerobot_state_units(features, columns))
-    action = qualified_lerobot_action(action, features, action_columns, rig, kind)
-    proof = lerobot_preparation_contract(kind, names, roles, features, columns, action, action_columns) \
-        if kind != "none" else None
-    return kind, note, action, proof
+        return "ee_pose", None, state, action, native_contract("habit", "ee_pose", features.get('action'))
+    dims = state.shape[1] if state is not None else 0
+    units = state_units(lerobot_state_units(features, columns), names, dims)
+    degrees = joint_degrees(state, names, roles, units, rig)
+    state, units = in_radians(state, units, degrees)
+    kind, note = physical_state_layout(dims, rig, names, value_roles=roles, metadata={"units": units})
+    if kind == "none":
+        degrees = None
+    action, action_units, action_degrees = qualified_lerobot_action(action, features, action_columns, rig, kind)
+    proof = lerobot_preparation_contract(kind, names, roles, features, columns, action, action_columns, units,
+                                         action_units, degrees, action_degrees) if kind != "none" else None
+    return kind, note, state, action, proof
 
 def state_value_names(feats: dict, state) -> list[str] | None:
     """The names a LeRobot dataset gives observation.state's values in meta/info.json, one per value, for
@@ -6170,7 +6234,7 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
     kind, note, proof = "none", None, None
     with part(parts, "the recorded state's layout") as layout:
         skip_when_cameras_only()
-        kind, note, action, proof = lerobot_physical_state(
+        kind, note, state, action, proof = lerobot_physical_state(
             state, action, rig, state_names, value_roles, feats, state_columns, action_columns, native_adapter)
     if layout.failed is not None:
         state = action = None
@@ -6979,7 +7043,7 @@ def _convert_image_episode(item, rig, ep, dataset, df, fps, state, action, extra
                               {v: "timestamp" for v, key in vmap.items() if key in written},
                               {"timestamp": {"source": "parquet timestamp column", **metadata,
                                              "units": metadata.get("units", metadata.get("unit"))}})
-    kind, note, action, proof = lerobot_physical_state(
+    kind, note, state, action, proof = lerobot_physical_state(
         state, action, rig, state_names if state_names is not None else state_value_names(r["features"], state),
         extra.get("state_value_roles"), r["features"], state_columns, action_columns, native_adapter)
     if proof is not None:
