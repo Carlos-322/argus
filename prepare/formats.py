@@ -145,7 +145,8 @@ from pathlib import Path
 
 import numpy as np
 
-from label.atomic import cached_while_unchanged, write_atomic
+from label.atomic import cached_while_unchanged, derived_name, write_atomic
+from label.presented import presented, presented_pts
 from prepare.hdf_metadata import open_hdf5
 from prepare.camera_clock import UNKNOWN_CAMERA_FPS, camera_issue_kind, coarse_rows, presentation_clock
 from prepare.state_notes import STATE_WHY
@@ -380,7 +381,7 @@ def _archive_members(path: Path):
                 # two indexes disagree the member is returned apart from the archive's tree, to be read as an upload
                 # of its own (open_archives), so no file of the upload can describe it, whatever it is named.
                 first, second = entry['conflicting_names']
-                ext = Path(first).suffix if Path(first).suffix == Path(second).suffix else ''
+                ext = ''.join(_common_suffixes(first, second))
                 label = f"{path.stem}-byte_{entry['offset']}"
                 unverified.append((label, f"member{ext}", entry['size'], member_opener(path, entry, bad)))
                 bad.append(ArchiveNote(f"the member at byte {entry['offset']:,} is named {first} by the ZIP directory "
@@ -476,6 +477,16 @@ def _archive_members(path: Path):
     return out, skipped, tf, bad, unverified
 
 
+def _common_suffixes(first: str, second: str) -> list[str]:
+    """The extensions (at most two, as in .tar.gz) that both names of a member end with, so a member whose name cannot be
+    verified is still read as the kind of file both names say it is."""
+    a, b, common = Path(first).suffixes, Path(second).suffixes, []
+    while a and b and a[-1].lower() == b[-1].lower() and len(common) < 2:
+        common.insert(0, a.pop())
+        b.pop()
+    return common
+
+
 def open_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path]]:
     """Direct archives get an owned immutable input and a fresh extraction tree per conversion. Returns the upload's
     root, what was done, and the folders of members whose owner the archive does not prove, each outside the root
@@ -532,12 +543,23 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
     UNPACK_MAX_BYTES unpacked, counted from what each member really yields, so an archive whose members hold
     more than they declare stops at the limit.
 
-    A member whose owner the archive does not prove (_archive_members) is written outside the upload's tree, beside
-    dest, one folder each, and returned apart, so the upload's own files and names can never reach it."""
+    A member whose owner the archive does not prove (_archive_members) is written outside the upload's tree, one
+    folder each, and returned apart, so the upload's own files and names can never reach it. It is an upload of its
+    own in every way: its folder is made fresh beside the tree this call unpacks, which this conversion alone owns, so no
+    other conversion can compute it, and an archive it holds joins the same queue, on the same budget. The folders an
+    archive produced are recorded in its done marker, so a later run finds them from that record, never from a name."""
     import tempfile
     root = Path(root)
-    apart_root = Path(dest).parent / (Path(dest).name + '-apart')
-    apart = []
+    apart, apart_root = [], []
+
+    def apart_folder(label: str) -> Path:
+        if not apart_root:
+            tree = Path(dest) if root.is_file() else root
+            tree.parent.mkdir(parents=True, exist_ok=True)
+            apart_root.append(Path(tempfile.mkdtemp(prefix='.apart-', dir=tree.parent)))
+        folder = apart_root[0] / derived_name(label, f"{len(apart):03d}-")
+        folder.mkdir()
+        return folder
     if root.is_file():
         if not ARCHIVE_RE.search(root.name):
             return root, [], apart
@@ -547,10 +569,14 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
         base_of = {a: a.parent for a in archives}
     notes, total, count, depth = [], 0, 0, {a: 0 for a in archives}
     for a in archives:                          # grows as archives inside archives are unpacked
-        done = base_of[a] / f".{a.name}.unpacked"
+        done = base_of[a] / derived_name(a.name, '.', '.unpacked')
         if done.exists():
-            # unpacked by an earlier run: its members kept apart are still read apart
-            apart += sorted(p for p in apart_root.glob(f"*-{a.stem}-byte_*") if p.is_dir())
+            # unpacked by an earlier run: the members it kept apart, as its done marker records them, are still apart
+            try:
+                recorded = json.loads(done.read_text() or '[]')
+            except ValueError:
+                recorded = []
+            apart += [Path(p) for p in recorded if isinstance(p, str) and Path(p).is_dir()]
             continue
         try:
             members, skipped, handle, bad, unverified = _archive_members(a)
@@ -570,15 +596,15 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
             base = base_of[a] if len(tops) == 1 and "" not in tops else base_of[a] / ARCHIVE_RE.sub("", a.name)
             base.mkdir(parents=True, exist_ok=True)
             broot = base.resolve()
-            wrote = 0
+            wrote, made = 0, []
             for label, filename, size, opener in unverified:
                 if count >= UNPACK_MAX_FILES or total + size > UNPACK_MAX_BYTES:
                     raise UnpackLimit(f"{a.name} holds more than one upload can: at most {UNPACK_MAX_FILES:,} files "
                                      f"and {UNPACK_MAX_BYTES / 1e9:.0f} GB unpacked")
-                folder = apart_root / f"{len(apart):03d}-{label}"
-                folder.mkdir(parents=True, exist_ok=True)
+                folder = apart_folder(label)
+                target = folder / filename
                 try:
-                    with opener() as src, (folder / filename).open('wb') as dst:
+                    with opener() as src, target.open('xb') as dst:
                         got = 0
                         while buf := src.read(1 << 20):
                             got += len(buf)
@@ -593,6 +619,10 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
                 total += got
                 count += 1
                 apart.append(folder)
+                made.append(str(folder))
+                if ARCHIVE_RE.search(target.name) and target not in depth:
+                    archives.append(target)
+                    base_of[target], depth[target] = folder, depth[a] + 1
             for parts, size, opener in members:
                 if count >= UNPACK_MAX_FILES or total + size > UNPACK_MAX_BYTES:
                     raise UnpackLimit(f"{a.name} holds more than one upload can: at most {UNPACK_MAX_FILES:,} files "
@@ -640,7 +670,7 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
                 tmp.replace(target)
                 count += 1
                 wrote += 1
-        done.write_text("")
+        done.write_text(json.dumps(made))
         # bad holds members left out (counted below) and ArchiveNotes, whose kind says what else each is: a member
         # kept with a caveat, damage of the archive as a whole, or an archive that ends early. Never read from text.
         kind = lambda b: getattr(b, 'kind', None)
@@ -841,7 +871,7 @@ def probe(path: Path) -> dict:
         st = video_stream(c, path)
         if st.codec_context is None:
             raise ValueError('the recorded video stream has no decodable codec context')
-        pts = sorted(p.pts for p in c.demux(st) if p.size and p.pts is not None and not p.is_discard)
+        pts = presented_pts(c, st)
         rate = st.average_rate or st.guessed_rate
         w, h, tb, codec = st.codec_context.width, st.codec_context.height, st.time_base, st.codec_context.name
     geom = display.geometry(str(path))
@@ -3113,7 +3143,7 @@ def probe_depth(path: Path) -> dict:
     """A depth video's frame pts, time base and pixel format (gray16le for a 16-bit depth stream)."""
     with open_checked(path) as c:
         st = video_stream(c, path)
-        pts = sorted(p.pts for p in c.demux(st) if p.size and p.pts is not None and not p.is_discard)
+        pts = presented_pts(c, st)
         return {"pts": np.asarray(pts, dtype=np.int64), "time_base": st.time_base, "width": st.codec_context.width,
                 "height": st.codec_context.height, "pix_fmt": st.codec_context.pix_fmt}
 
@@ -3566,7 +3596,7 @@ def _duration(p: Path) -> float:
 def _frame_count(p: Path) -> int:
     with open_video(p) as c:
         st = c.streams.video[0]
-        return sum(1 for pk in c.demux(st) if pk.size and pk.pts is not None and not pk.is_discard)
+        return sum(1 for _ in presented(c, st))
 
 
 # ---------------------------------------------------------------- plain video
@@ -11132,10 +11162,12 @@ def decoded_damage(path: Path) -> set[int]:
 
     Damage is named by which picture it is, never by when the decoder reports it: on several threads an error surfaces
     packets after the one that caused it, so the packet in hand is the wrong picture. A picture is refused when the
-    file holds its packet and the decoder never delivers it, and the pictures predicted from damage follow in the
-    file's own decode order, up to the next key packet that decodes clean."""
+    file presents it (label/presented.py: a discarded preroll packet is decoded as a reference but never shown) and
+    the decoder never delivers it, and the pictures predicted from damage follow in the file's own decode order, up to
+    the next key packet that decodes clean."""
     import av
-    order: list[tuple[int, bool]] = []          # (pts, key packet) of every picture the file holds, in decode order
+    from label.presented import presents
+    order: list[tuple[int, bool]] = []          # (pts, key packet) of every picture the file presents, in decode order
     delivered: dict[int, bool] = {}             # pts -> whether the decoder marked the picture corrupt
     with av.open(str(path)) as container:
         stream = container.streams.video[0]
@@ -11143,7 +11175,7 @@ def decoded_damage(path: Path) -> set[int]:
         for packet in container.demux(stream):
             # the last packet demux yields carries no data and drains the decoder, whose threads still hold the last
             # pictures; it is decoded like any other, so those pictures are checked too
-            if packet.size and packet.pts is not None:
+            if presents(packet):
                 order.append((int(packet.pts), bool(packet.is_keyframe)))
             try:
                 pictures = packet.decode()
@@ -12739,21 +12771,24 @@ def convert(root: Path, rig: str, out: Path, dataset: str, max_seconds: float, g
 
 def _convert_upload(root, rig, out, dataset, max_seconds, grouping, ownership_context, selected_file, opened,
                     apart=()):
-    """Plan and read only the files belonging to the staged upload, and each member whose owner the archive does not
-    prove (apart) as an upload of its own: planned alone, so no file, folder or table of the upload describes it."""
+    """Plan and read the staged upload, and each member whose owner the archive does not prove (apart) as an upload of
+    its own. Every item is paired with the upload it belongs to, its source (its root, its tables, its declared
+    metadata), and everything joined to an episode after it is read comes from that source alone, so no file, folder or
+    table of one upload describes a recording of another."""
     from prepare.annotations import source_context, merge_source_contexts
-    declared_context = source_context(selected_file or root, rig)
     alone, alone_notes = [], []
     for folder in apart:
         try:
-            _, folder_items = plan(folder)
+            folder_det, folder_items = plan(folder)
         except UploadInputError as error:
             alone_notes.append(f"{folder.name}, read on its own, holds no recording: {error}.")
             continue
+        source = {"tables": folder_det.get("annotation_tables", []), "declared": source_context(folder, rig),
+                  "metadata_root": folder}
         for it in folder_items:
             it["name"] = f"name_unverified/{folder.name}/{it['name']}"
             it.pop("output_name", None)
-        alone += folder_items
+            alone.append((it, source))
     try:
         det, items = plan(root, grouping, ownership_context)
     except UploadInputError as e:
@@ -12766,7 +12801,9 @@ def _convert_upload(root, rig, out, dataset, max_seconds, grouping, ownership_co
             raise UploadInputError("nothing in the upload could be unpacked: " + " ".join(opened)) from e
         else:
             raise UploadInputError(f"{e}. {' '.join(opened)}") from e
-    items = items + alone
+    upload = {"tables": det.get("annotation_tables", []), "declared": source_context(selected_file or root, rig),
+              "metadata_root": selected_file.parent if selected_file else root.parent if root.is_file() else root}
+    pairs = [(it, upload) for it in items] + alone
     det.setdefault("missing", []).extend(alone_notes)
     out.mkdir(parents=True, exist_ok=True)
     total = 0.0
@@ -12777,10 +12814,9 @@ def _convert_upload(root, rig, out, dataset, max_seconds, grouping, ownership_co
         report["packaging"] = det["packaging"]
     archive_damage = [note for note in opened if getattr(note, 'kind', None) == 'damage']
     report['missing'].extend(archive_damage)
-    tables = det.get("annotation_tables", [])
     past = f"past the first {max_seconds / 60:g} minutes"
     full = False
-    for it in items:
+    for it, source in pairs:
         known = it["seconds"] if it["seconds"] is not None else 0.0      # unknown until converted; measured below
         first = not report["episodes"]
         if full or (total + known > max_seconds + 1 and not first):
@@ -12796,7 +12832,7 @@ def _convert_upload(root, rig, out, dataset, max_seconds, grouping, ownership_co
                 own_issues = []
                 with part(own_issues, "the recording's folder metadata"):
                     own_context = source_context(Path(item_root), rig)
-            scope = merge_source_contexts(rig, declared_context, own_context)
+            scope = merge_source_contexts(rig, source["declared"], own_context)
             ctx = read_episode(it, rig, out, dataset, scope)
         except Exception as e:
             # Every optional part of an episode has its own boundary (part), so what reaches here is an episode
@@ -12826,9 +12862,8 @@ def _convert_upload(root, rig, out, dataset, max_seconds, grouping, ownership_co
             ctx['collection_note'] = '\n'.join(notes)
         if len(scope) > 1:
             from prepare.annotations import represented_scope
-            it['scope_metadata_read'] = represented_scope(ctx, [selected_file.parent if selected_file else
-                                    root.parent if root.is_file() else root,
-                                    *([Path(item_root)] if item_root else [])])
+            it['scope_metadata_read'] = represented_scope(ctx, [source["metadata_root"],
+                                                                *([Path(item_root)] if item_root else [])])
             write_atomic(out / ctx['episode_id'] / 'context.json', ctx, indent=1, default=str)
         if it.get("side_notes"):
             ctx = add_side_notes(out / ctx["episode_id"], ctx, it["side_notes"])
@@ -12839,8 +12874,8 @@ def _convert_upload(root, rig, out, dataset, max_seconds, grouping, ownership_co
                 if issue["text"] not in report["missing"]:
                     report["missing"].append(issue["text"])
             write_atomic(out / ctx["episode_id"] / "context.json", ctx, indent=1, default=str)
-        if tables:
-            ctx = add_table_notes(out / ctx["episode_id"], ctx, table_rows_for(tables, it))
+        if source["tables"]:
+            ctx = add_table_notes(out / ctx["episode_id"], ctx, table_rows_for(source["tables"], it))
         secs = float(ctx.get("duration_s") or ctx["n_state_frames"] / float(ctx["fps"]))
         if first and secs > max_seconds + 1:
             # one recording longer than the whole limit: its first max_seconds are labelled, never nothing

@@ -32,6 +32,7 @@ from prepare import formats
 from prepare import hub
 from prepare.mcap_source import decoded_messages
 from prepare.remux import RemuxSourceError, remux  # each frame's recorded time as its pts (shared with ABC-130k, RealOmni)
+from label.presented import presented_pts
 
 REPO = "genrobot2025/Gen-HumanEgo"
 CAMERA_TOPIC = "/robot0/sensor/camera2/compressed"
@@ -190,7 +191,7 @@ def write_sidecar(raw: Path, dst: Path) -> dict:
     camera_file = selected.get("file", "cam2.mp4")
     with av.open(str(raw / camera_file)) as c:
         st = c.streams.video[0]
-        pts = sorted(p.pts for p in c.demux(st) if p.pts is not None and not p.is_discard)
+        pts = presented_pts(c, st)
         w, h = st.codec_context.width, st.codec_context.height
     n = len(pts)
     times_file = raw / selected.get("times", TIMES)

@@ -32,7 +32,7 @@ from pathlib import Path
 
 import numpy as np
 
-from label.atomic import write_atomic
+from label.atomic import derived_name, write_atomic
 from label import policy
 
 # the longest recording the published board labels in one request is 443 s (OpenAoE); a recording longer than
@@ -416,7 +416,7 @@ def _write_or_reuse(d: Path, proot: Path, *, refresh_unpaid_interpretation=False
     from label.evidence_access import same_source_proof, source_proof
     ctx = json.loads((d / "context.json").read_text())
     names = (ctx.get("pieces") or {}).get("parts") or []
-    proof_path = proot / f".{d.name}.source_proof.json"
+    proof_path = proot / derived_name(d.name, '.', '.source_proof.json')
     if names and not proof_path.exists() and not any((proot / n).exists() for n in names):
         # A different job may have cut this source before. This job has no saved parts or paid replies to reuse.
         parts = write_pieces(d, proot)

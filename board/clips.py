@@ -58,7 +58,8 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from label.atomic import temporary_path, write_atomic
+from label.atomic import derived_path, temporary_path, write_atomic
+from label.presented import presented, presented_pts
 
 CAMS = ("exo", "left", "right")
 
@@ -255,7 +256,7 @@ def extract_one(packed: str, base_s: float, n_frames: int, out_mp4: Path,
             if dense:
                 # Microsecond packet separation retains tied captures, but an accurate seek can discard the whole
                 # short stream. Select its exact display indices from original PTS instead.
-                packets = sorted(p.pts for p in source.demux(video=0) if p.size and p.pts is not None)
+                packets = presented_pts(source, source.streams.video[0])
                 first = packets.index(int(source_pts[0]))
         # Truncate the seek to microseconds so decimal rounding cannot put it after the wanted packet.
         seek = ["-seek_timestamp", "1", "-ss", f"{math.floor(start * 1_000_000) / 1_000_000:.6f}"]
@@ -360,7 +361,7 @@ def retime(mp4: Path, capture_s, fps: float = 30.0, main: bool = True, query_s=N
     from fractions import Fraction
 
     new, stop = display_ticks(capture_s, fps, main, query_s, query_map, last_frame_interval_s)
-    tmp = mp4.with_name(mp4.stem + ".time.mp4")
+    tmp = derived_path(mp4.with_suffix(""), suffix=".time.mp4")
     try:
         with av.open(str(mp4)) as src:
             ist = src.streams.video[0]
@@ -623,7 +624,7 @@ def frame_lengths(mp4: Path) -> bool:
         return False
     pts = sorted(p for p, _ in meta)
     step = {p: (pts[i + 1] - p if i + 1 < len(pts) else (p - pts[i - 1] if i else 0)) for i, p in enumerate(pts)}
-    tmp = mp4.with_name(mp4.stem + ".len.mp4")
+    tmp = derived_path(mp4.with_suffix(""), suffix=".len.mp4")
     try:
         with av.open(str(mp4)) as src, av.open(str(tmp), "w", format="mp4", options={"movflags": "+faststart"}) as dst:
             if tag == HALFWAY_TAG:
@@ -653,7 +654,7 @@ def clip_frames(mp4: Path) -> int:
     try:
         import av
         with av.open(str(mp4)) as c:
-            return sum(1 for p in c.demux(c.streams.video[0]) if p.size and not p.is_discard)
+            return sum(1 for _ in presented(c, c.streams.video[0]))
     except Exception:
         return 0
 

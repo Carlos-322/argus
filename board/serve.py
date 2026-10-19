@@ -77,7 +77,7 @@ from board.families import Families
 from board.public_export import project as public_json
 from board.to_board import dumps, finite
 from compare.metrics import model_names, reasoning_effort
-from label.atomic import (cached_while_unchanged, file_version, remove_if, small_file, sweep_removals,
+from label.atomic import (cached_while_unchanged, derived_path, file_version, remove_if, small_file, sweep_removals,
                           write_atomic)
 
 
@@ -614,8 +614,8 @@ def _probe_uncached(p: Path) -> tuple:
     s = j["streams"][0]
     import av
     with av.open(str(p)) as c:
-        pk = [(float(x.pts * x.time_base), float(x.duration * x.time_base))
-              for x in c.demux(c.streams.video[0]) if x.size and x.pts is not None]
+        from label.presented import presented
+        pk = [(float(x.pts * x.time_base), float(x.duration * x.time_base)) for x in presented(c, c.streams.video[0])]
     # Some FFprobe builds omit packet lengths and stop their container duration at the final frame's start.
     dur = max(t + d for t, d in pk) if pk else float(j["format"]["duration"])
     num, _, den = str(s.get("avg_frame_rate") or "0/1").partition("/")
@@ -884,7 +884,7 @@ def _trim_receipt_temps(folder):
 
 
 def _temporary_guard(path):
-    return path.with_name(path.name.replace('.part.len.mp4', '.part.mp4') + '.lock')
+    return derived_path(path.with_name(path.name.replace('.part.len.mp4', '.part.mp4')), suffix='.lock')
 
 
 def _footage_receipt(result: tuple) -> dict:
