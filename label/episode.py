@@ -2471,6 +2471,9 @@ def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int 
     ep["lens"] = {v: lens.circular_image(imgs[v]) for v in order_views(imgs)}
     pl["sensor_evidence"] = se.build(ep, pl, shown={v: [k for k in pl["ks"] if k in im and recording_at(ep, v, k)]
                                                   for v, im in imgs.items()}, images=imgs)
+    array_parts = se.image_parts(pl['sensor_evidence'])
+    array_bytes = sum(len(base64.b64decode(p['image_url']['url'].split(',', 1)[1]))
+                      for p in array_parts if p['type'] == 'image_url')
     # depth at the detail instants, and one colour scale per camera from its readings at the sampled instants
     depth_at = _depth_frames(ep, pl)
     if len(views(ep)) == 1:
@@ -2479,7 +2482,7 @@ def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int 
     cam_labels = [cam_name(ep, v) for v in order_views(imgs)]
     contact = [(k, vs, fullres_stack(ep, imgs, k, "just after a sharp gripper change", frame_time(ep, k), vs))
                for k, vs in ((k, [v for v in vs if recording_at(ep, v, k)]) for k, vs in contact_views(ep, pl)) if vs]
-    budget = (IMAGE_LIMIT_BYTES / IMAGE_SIZE_INFLATION - DETAIL_VIEW_BYTES_MAX
+    budget = (IMAGE_LIMIT_BYTES / IMAGE_SIZE_INFLATION - DETAIL_VIEW_BYTES_MAX - array_bytes
               - sum(len(j) for _, _, j in contact))
     # the blocks follow from the episode and its plan, never from the cell width: found once, for every width and the
     # record
@@ -2493,7 +2496,8 @@ def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int 
         if grid_bytes <= budget:
             break
     prompt = fixed + episode
-    extra_bytes = 0
+    content.extend(array_parts)
+    extra_bytes = array_bytes
     # the first frame, the contact views in time order, then the last frame
     views_sent = []
     for k, name in ((pl["ks"][0], "first frame"), (pl["ks"][-1], "last frame")):
@@ -2543,7 +2547,7 @@ def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int 
     return {**({"evidence_access": access} if inspect_evidence else {}), "sensor_evidence": pl["sensor_evidence"],
             "content": content, "prompt": prompt, "plan": pl, "n_grids": n_grids,
             **({"jaw_evidence": ep["jaw_evidence"]} if ep.get("jaw_evidence") else {}),
-            "n_images": n_grids + len(views_sent) + len(depth_sent) + len(contacts_sent),
+            "n_images": n_grids + len(views_sent) + len(depth_sent) + len(contacts_sent) + len(array_parts) // 2,
             "image_bytes": grid_bytes + extra_bytes,
             "contact_s": [round(frame_time(ep, k), 3) for k in pl["contact"]],
             "given_prompt": (ep["context"].get("instruction") or "").strip() or None,

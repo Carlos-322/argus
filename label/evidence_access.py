@@ -35,7 +35,7 @@ SOURCE_HASH_LIMIT = 16 * 1024 * 1024
 IMPLEMENTATION_SHA256 = hashlib.sha256(b''.join(path.read_bytes() for path in (
     Path(__file__), Path(__file__).with_name('depth.py'),
     Path(__file__).with_name('dictionary_context.py'), Path(__file__).with_name('sensor_evidence.py'),
-    Path(__file__).with_name('optical_motion.py'),
+    Path(__file__).with_name('optical_motion.py'), Path(__file__).with_name('tactile_arrays.py'),
     Path(__file__).parent.parent / 'prepare' / 'hdf_metadata.py',
     Path(__file__).parent.parent / 'prepare' / 'mcap_fields.py',
     Path(__file__).parent.parent / 'prepare' / 'state_contract.py',
@@ -753,13 +753,27 @@ class Access:
         window = recording_window_note(self.ep)
         if window:
             description['request_window'] = window.strip()
-        description['already_supplied_sensor_evidence'] = bounded(self.supplied, 16000)
+        supplied = se._array_projection(self.supplied)
+        for row in supplied.get('series') or []:
+            times = row.pop('times', [])
+            row.pop('values', None)
+            row['samples'] = len(times)
+            row['time_range_s'] = [min(times), max(times)] if times else None
+        description['already_supplied_sensor_evidence'] = bounded(supplied, 16000)
         parts = [{'type': 'text', 'text': 'RECORDING CONTEXT\n' + packed(description)}]
         images = [i for i, part in enumerate(content) if part.get('type') == 'image_url']
         if not images:
             parts.extend(p for p in content if p.get('type') == 'text' and len(p.get('text', '')) < 4000)
-        for position in indices(len(images), 4):
-            i = images[position]
+        selected = {images[position] for position in indices(len(images), 4)}
+        array_images = {i for i in images if i and content[i-1].get('type') == 'text'
+                        and content[i-1].get('text', '').startswith('TACTILE ARRAY SNAPSHOTS |')}
+        if array_images:
+            # Keep every bounded array comparison plus scene context. Uniformly
+            # choosing four image parts can otherwise skip the only sensor map.
+            required = array_images | {images[0], images[-1]}
+            limit = max(4, len(required))
+            selected = required | set(sorted(selected - required)[:max(0, limit - len(required))])
+        for i in sorted(selected):
             if i and content[i-1].get('type') == 'text':
                 parts.append({'type': 'text', 'text': content[i-1]['text'][-2000:]})
             parts.append(content[i])
@@ -1422,6 +1436,7 @@ The inventory includes recorded schema names and field counts across the complet
 '''
 
 FINAL = '''Additional inspected evidence follows. Produce the normal episode annotation and optional "evidence_findings": [{"start_s":number,"end_s":number,"headline":"plain English","detail":"what this adds","overlay_detail":"short explanation for the video overlay","observation":"actual readings or images","claim":"interpretation with uncertainty","alternative":"other plausible explanation","confidence":"high|medium|low","adds_beyond_video":true,"evidence":[{"evidence_id":"exact inspection id","time_s":[exact supplied times],"columns":[supplied component indices, for numeric data]}]}]. Empty findings are valid. Cite only aligned inspected samples/images. The finding interval must be covered by the cited inspection windows together, with no uncovered gap. Use separate findings for distinct brief events. Do not span disconnected spikes or attempts with one continuous event interval. Keep headlines short and describe the specific added observation or supported interpretation in plain language. Saying only that a signal changes is not informative. Omit a finding if neither a concrete added observation nor a useful supported implication can be stated. If physical meaning is unresolved, describe the concrete observed pattern. Supply overlay_detail as one short sentence explaining what this adds and essential uncertainty. These two fields appear together on video; avoid repeating the headline or filling the card with technical measurements. Preserve the concrete added information across headline and overlay_detail, including any supported comparison, temporal pattern or contrast with recorded state. A generic sensor phenomenon coinciding with an already-visible action is not a sufficient summary. Do not invent a comparison or physical explanation to make a finding sound informative. Compare repeated phases when their measurements differ. A stable sampled response can be informative when it distinguishes phases; do not infer continuous stability between samples or manufacture a finding for every repetition. Sparse readings do not establish that a signal remained elevated between samples. Contextual images can cover a shorter interval than the supporting measurements. For useful native data without verified episode alignment, use null start_s and end_s and cite "rows": [exact inspected source-row indices] instead of time_s. For useful original metadata, also use null start_s/end_s and cite {"evidence_id":"exact inspection id","pointer":"exact inspected JSON pointer"}. Metadata findings must reason about an implication or discrepancy, not merely repeat a field. Untimed findings are recording-level information, never synchronized events. Do not repeat existing sensor findings. Do not infer calibrated physical quantities, world directions, object identity or slip from an unexplained measurement. No more evidence requests.
+Apply measurement limits to the headline and video overlay, not only to the alternative explanation. Without a verified physical layout, describe cells or channel groups rather than different physical parts of the grip or a redistribution of contact. Compare the whole supplied trajectory: differing minima, a net change, and the first onset of recovery are different observations. Earlier rebounds followed by another dip do not establish delayed recovery. Discrete endpoints alone cannot establish which response began first or whether a change persisted between samples.
 Measurements can add useful scale to a change already visible in RGB. A task-relevant change in finger response, camera-relative surface depth or measured effort can add information even when the visual action already has a subgoal. Explain what the measurement establishes and what it cannot establish. For depth, verify the marked regions cover the intended surfaces; distinguish region medians from tracked-point displacement or world-space clearance. Do not turn arbitrary region statistics into an annotation without a useful interpretation.
 '''
 
