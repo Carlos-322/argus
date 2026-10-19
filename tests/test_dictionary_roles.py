@@ -272,5 +272,9 @@ def test_saved_contact_veto_filters_named_signals_without_removing_unattributed_
     ep['context']['contacts'] = [unbound, mixed]
     reviewed = bind(ep, record, {'field0': {'role': ''}})
     before = copy.deepcopy(reviewed['context'])
-    assert lc.of_episode(reviewed) == [unbound, {**mixed, 'signals': ['left_pressure']}]
+    kept = lc.of_episode(reviewed)
+    assert kept[0] == unbound
+    assert {key: kept[1][key] for key in mixed} == {**mixed, 'signals': ['left_pressure']}
+    assert kept[1]['evidence_kind'] == 'response_activity'
+    assert kept[1]['reference_kind'] == 'inferred'
     assert reviewed['context'] == before

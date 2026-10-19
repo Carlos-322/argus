@@ -25,9 +25,19 @@ const lanePct = t => 10 * t;                    // a 10 s timeline
 const chev = () => '<svg></svg>';
 const count = (s, re) => (s.match(re) || []).length;
 const contact = (id, hand, s0, s1, extra = {}) => ({id, hand, signals: ['right_pressure'], start_s: s0, peak_s: (s0 + s1) / 2,
-  end_s: s1, from_start: false, to_end: false, peak_strength: 2, regions: {}, dips_s: [], shown: true, ...extra});
+  end_s: s1, from_start: false, to_end: false, peak_strength: 2, regions: {}, dips_s: [], shown: true,
+  evidence_kind: 'recorded_contact_state', ...extra});
 const seen = (touch, more = {}) => ({seen: {touch_seen: touch, hand: 'right', object: 'mug', grip: 'pinch',
   action: 'lifts it', slip: 'no', notes: null, ...more}});
+const activityCard = T.tcCardHtml(contact('a1', 'right', 0, 1, {from_start: true, to_end: true,
+  evidence_kind: 'response_activity', reference_note: 'An inferred reference is not a verified unloaded baseline.'}), 0, 'unshown');
+check(activityCard.includes('Already active at the start') && activityCard.includes('still active at the end')
+  && activityCard.includes('not a verified unloaded baseline') && !activityCard.includes('Already touching'),
+  'response activity is not rendered as confirmed physical contact');
+const activityLane = T.touchLaneHtml(T.tcData({contacts: [contact('a1', 'right', 0, 1,
+  {evidence_kind: 'response_activity'})]}), lanePct, chev);
+check(activityLane.includes('Sensor activity') && !activityLane.includes('Recorded touch'),
+  'response-activity lane uses sensor terminology');
 
 // an episode with no contacts draws nothing new
 check(T.touchLaneHtml(T.tcData({}), lanePct, chev) === '' && T.tcCardsHtml(T.tcData({})) === '',
@@ -65,7 +75,7 @@ check(T.tcData({contacts: [contact('c1', 'right', 0, 1)], contacts_missing: [{t_
   === 'left,right', 'a hand only a grasp names gets a row');
 const single = T.touchLaneHtml(T.tcData({contacts:[contact('c1','right',0,1,seen('yes'))],contacts_missing:[{t_s:0,hand:'left',object:'bowl'}]}),lanePct,chev);
 check(!single.includes('class="tc-hand">Left hand') && single.includes('Left hand takes hold of bowl'), 'no empty left sensor row for a video observation');
-check(single.includes('Touch seen in sampled frames') && single.includes('No covering contact recorded for this hand'), 'sensor and video evidence are labeled');
+check(single.includes('Touch seen in sampled frames') && single.includes('No covering sensor interval supplied for this hand'), 'sensor and video evidence are labeled');
 check(!single.includes('Previous contact') && !single.includes('class="tc-key"'), 'one contact needs no stepper or legend');
 const one = T.tcData({contacts: [contact('c1', null, 0, 1, seen('yes'))], contacts_missing: [{t_s: 2, hand: 'left'}]});
 const oneLane = T.touchLaneHtml(one, lanePct, chev);
@@ -92,7 +102,7 @@ check(c0.includes('Right hand, contact c1') && c0.includes('Already touching at 
   && c0.includes('ends <span data-t="4.25">4.3s</span>'), 'the card\'s hand and times');
 check(c0.includes('The frames show the left hand, and the signal&#39;s name says right'), 'a hand the frames disagree on');
 check(!c0.includes('>Notes<'), 'a null note is left out');
-check(c0.includes('1.2s and 3.0s: its strength falls under half its peak and comes back'), 'the dips');
+check(c0.includes('1.2s and 3.0s response falls under half its peak and comes back'), 'the dips');
 const c3 = T.tcCardHtml(contact('c3', 'right', 0, 1, {shown: false, to_end: true}), 2, 'unshown');
 check(c3.includes('The model was not shown this contact') && c3.includes('still touching at the end')
   && !c3.includes('>Object<'), 'a contact the model was not shown says so');

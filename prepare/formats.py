@@ -2402,13 +2402,36 @@ def summary_issue(name: str, values: int) -> dict:
 
 
 SIGNAL_METADATA_KEYS = ('unit', 'units', 'response_direction', 'calibration', 'coordinate_frame',
-                        'sensor_type', 'description', 'action_semantics')
+                        'sensor_type', 'description', 'action_semantics', 'sensor_semantics')
+
+
+def signal_metadata(metadata) -> dict:
+    """Preserve explicitly supplied field metadata, including a JSON-encoded sensor descriptor."""
+    metadata = metadata or {}
+    info = metadata.get('info')
+    combined = {**(info if isinstance(info, dict) else {}), **metadata}
+    out = {k: v for k, v in combined.items() if k in SIGNAL_METADATA_KEYS}
+    value = out.get('sensor_semantics')
+    if isinstance(value, list) and len(value) == 1 and isinstance(value[0], (str, bytes)):
+        value = value[0]
+    if isinstance(value, bytes):
+        value = value.decode('utf-8', 'replace')
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (ValueError, RecursionError):
+            pass
+    if 'sensor_semantics' in out:
+        # Validation belongs to consumers. Unknown versions and invalid source declarations stay auditable.
+        out['sensor_semantics'] = value
+    return out
 
 
 def summary_metadata(metadata: dict) -> dict:
     """Pooled values retain common units and source notes, without original channel semantics."""
     return {k: v for k, v in metadata.items()
-            if k not in ('shape', 'response_direction', 'calibration', 'coordinate_frame')
+            if k not in ('shape', 'response_direction', 'calibration', 'coordinate_frame', 'sensor_semantics',
+                         'regions', 'valid_indices', 'positions', 'normalization_pair', 'chains', 'geometry')
             and (k not in ('unit', 'units') or isinstance(v, str))}
 
 
@@ -2468,7 +2491,7 @@ class Signals(dict):
         super().__delitem__(name)
 
     def add(self, name: str, a: np.ndarray, shape=None, names=None, source: str | None = None, metadata=None) -> None:
-        m = {k: v for k, v in (metadata or {}).items() if k in SIGNAL_METADATA_KEYS}
+        m = signal_metadata(metadata)
         if shape is not None and tuple(int(x) for x in shape) != (a.shape[1],):
             m["shape"] = [int(x) for x in shape]
         if names is not None and len(names) == a.shape[1]:
@@ -2655,7 +2678,8 @@ def recorded_signals(df, used, n: int, features: dict | None = None) -> Signals:
         words = tokens(str(c))
         counter_name = bool(words) and (words[-1] in {'seq', 'sequence', 'counter'}
                                       or words[-2:] in [['sequence', 'number'], ['frame', 'id'], ['sample', 'id'], ['message', 'id']])
-        declared = any(key in f for key in ('unit', 'units', 'response_direction', 'calibration', 'coordinate_frame')) \
+        declared = any(key in signal_metadata(f) for key in
+                       ('unit', 'units', 'response_direction', 'calibration', 'coordinate_frame', 'sensor_semantics')) \
             or sensor_representation(f) == 'signal'
         raw = df[c].to_numpy()
         counter_values = raw if raw.dtype.kind in 'iu' else a[:, 0]
@@ -3024,6 +3048,7 @@ def write_signals(ep: Path, ctx: dict, signals: dict | None, t: np.ndarray | Non
             a = a[:, selected]
             arrays[key] = a
             m.pop("shape", None)
+            m.pop('sensor_semantics', None)  # Original indices do not describe the filtered component order.
             if names:
                 m["names"] = [names[c] for c in selected]
             for unit_key in ("unit", "units"):
@@ -6555,9 +6580,7 @@ def lerobot_depth(ep: Path, r: dict, row: dict, vmap: dict, fps: float, n: int, 
         td = pr.get('episode_times', pr['pts'].astype(np.float64) * float(pr['time_base']) -
                     (base if base is not None else float(pr['pts'][0] * pr['time_base'])))
         td = td - clock_zero_s
-        info = (r["features"].get(key) or {}).get("info") or {}
-        scale = next((float(x) for k, x in info.items() if DEPTH_SCALE_KEY.search(str(k).split(".")[-1])
-                      and isinstance(x, (int, float)) and 0 < x < 10), None)
+        scale = depth_scale_metadata(r["features"].get(key) or {})
         e, t = depth_entry(ep, v, Path(path), td, ta, pr["pts"], scale, source, ctx, (cams or vmap)[camera])
         e.update(width=pr["width"], height=pr["height"], pix_fmt=pr["pix_fmt"], source_key=key,
                  paired_camera=camera if v == camera and source == key else None)
@@ -7831,7 +7854,7 @@ def h5_signal_metadata(ds, summarised=False) -> dict:
             return [value(y) for y in x]
         return x
     from prepare.hdf_metadata import attribute_values
-    metadata = {k: value(v) for k, v in attribute_values(ds, SIGNAL_METADATA_KEYS)}
+    metadata = signal_metadata({k: value(v) for k, v in attribute_values(ds, SIGNAL_METADATA_KEYS)})
     if summarised:
         metadata = summary_metadata(metadata)
     return metadata
@@ -7845,6 +7868,8 @@ def h5_signals(f, streams: dict, q_abs: np.ndarray, fps: float | None, n_anchor:
     frame when it has as many rows as the anchor has frames. A value that is not finite is NaN (not_finite)."""
     out = Signals()
     out.issues.extend(streams.get('clock_issues') or [])
+    from prepare.publisher_schemas import hdf5_candidates, with_candidate
+    publisher_candidates = hdf5_candidates(f, streams)
     recorded_q = np.asarray(q_abs, dtype=np.float64)
     q, camera_note = presentation_clock(recorded_q, fps)
     if presentation_q is not None:
@@ -7865,6 +7890,8 @@ def h5_signals(f, streams: dict, q_abs: np.ndarray, fps: float | None, n_anchor:
         else:
             a = float_rows(readable[()])
         metadata = h5_signal_metadata(ds, bool(summarised))
+        if not summarised:
+            metadata = with_candidate(metadata, publisher_candidates.get(s['path']), shape)
         a = a.reshape(len(a), -1) if a.ndim > 1 else a[:, None]
         if not a.shape[1]:
             continue
@@ -8660,7 +8687,7 @@ def h5_file_signals(paths: list[Path], q_abs: np.ndarray, n_anchor: int, fps: fl
 # modules of prepare/ that are the reader and its tools, not dataset adapters
 NOT_ADAPTERS = {"__main__", "archive_recovery", "ros2_recovery", "cli", "display", "folder", "formats", "hub", "lerobot", "lerobot_labels", "mcap_claims",
                 "mcap_fields", "mcap_pose", "mcap_registration", "mcap_source", "hdf_metadata", "remux",
-                "signal_alignment", "state_notes", "state_contract", "videos", "camera_clock", "jaws"}
+                "signal_alignment", "sensor_semantics", "publisher_schemas", "state_notes", "state_contract", "videos", "camera_clock", "jaws"}
 
 
 def upload_adapters(kind: str) -> list:

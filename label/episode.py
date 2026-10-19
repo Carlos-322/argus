@@ -291,6 +291,36 @@ def frame_time(ep: dict, k: int) -> float:
     return k / ep_fps(ep)
 
 
+def camera_sample(ep: dict, view: str, k: int, *, source_frame: int | None = None) -> dict | None:
+    """One displayed RGB cell's source capture, separately from its anchor placement."""
+    mapping = (ep.get('kmap') or {}).get(view)
+    if k < 0 or (source_frame is None and mapping is not None and k >= len(mapping)):
+        return None
+    if source_frame is None:
+        source_frame = int(mapping[k]) if mapping is not None else int(k)
+    clocks = ep.get('times')
+    recorded = (ep.get('recorded_times') or {}).get(view)
+    own = (clocks or {}).get(view) if recorded is None else recorded
+    count = (ep.get('sources') or {}).get(view, {}).get('n_frames')
+    if source_frame < 0 or (count is not None and source_frame >= int(count)):
+        return None
+    capture = None
+    if own is not None and source_frame < len(own):
+        value = float(own[source_frame])
+        capture = value if math.isfinite(value) else None
+    elif clocks is None:
+        capture = source_frame / ep_fps(ep)
+    display = frame_time(ep, k)
+    notes = ep['context'].get('camera_clock') or {}
+    sample = {'row': int(k), 'source_frame': source_frame, 'display_time_s': display,
+              'source_time_s': capture, 'capture_offset_s': capture - display if capture is not None else None,
+              'episode_alignment_verified': capture is not None and not (notes.get(view) or notes.get(anchor(ep)))}
+    pts = (clocks or {}).get(view + '_pts')
+    if pts is not None and source_frame < len(pts):
+        sample['source_pts'] = int(pts[source_frame])
+    return sample
+
+
 def seconds(t: float) -> str:
     """A time as the prompt says it, to the hundredth of a second. A recorder's clock can put a frame a hair before
     the episode's zero, and that instant is said as 0.00 s, never as -0.00 s, which reads as a time before the
@@ -981,11 +1011,12 @@ def contact_image(ep: dict, c: dict, gate=None) -> tuple[bytes, dict] | None:
     begin, end = contact_strips(c)
     # a contact placed from both starts says so on its picture: its begin and end are the placement's, not recorded
     by = ", " + contact_placement(c) if c.get("aligned_by") else ""
+    event = 'touch' if c.get('evidence_kind') == 'recorded_contact_state' else 'signal activity'
     if begin:
-        strips.append((f"touch begins by the recording{by}",
+        strips.append((f"{event} begins by the recording{by}",
                        [min(max(c["start_s"] + o, 0.0), t_end) for o in STRIP_OFFSETS_S]))
     if end:
-        strips.append((f"touch ends by the recording{by}",
+        strips.append((f"{event} ends by the recording{by}",
                        [min(max(c["end_s"] + o, 0.0), t_end) for o in END_OFFSETS_S]))
     kp = _frame_at(ep, c["peak_s"])
     ks = sorted({_frame_at(ep, t) for _, ts in strips for t in ts} | {kp})
@@ -1029,7 +1060,7 @@ def contact_image(ep: dict, c: dict, gate=None) -> tuple[bytes, dict] | None:
         tile = _map_tile(ep, nm, kp)
         if tile is not None:
             peak.append((nm, tile))
-    blocks.append(("strongest", [("", peak)]))
+    blocks.append(("largest recorded response", [("", peak)]))
     widths = [sum(im.width for _, im in cells) + pad * max(len(cells) - 1, 0)
               for _, rows in blocks for _, cells in rows]
     w = max(widths + [640]) + 2 * pad
@@ -1066,7 +1097,13 @@ def _map_tile(ep: dict, name: str, k: int):
     if len(shape) != 2 or name not in (ep.get("signals") or {}):
         return None
     a = ep["signals"][name]
-    d, swing = sg.distance_at(a, min(k, len(a) - 1), m.get("rest"), m.get("swing"))
+    reference = sg.declared_zero_reference(m, a.shape[1])
+    if reference is None:
+        d, swing = sg.distance_at(a, min(k, len(a) - 1), m.get("rest"), m.get("swing"))
+    else:
+        level, sign = reference
+        d = np.maximum(sign * (a[min(k, len(a) - 1)] - level), 0)
+        swing = sg.swing_of(a, level)
     row = d.reshape(int(shape[0]), int(shape[1]))
     g = np.where(np.isfinite(row), np.clip(row / swing, 0, 1) if swing > 0 else 0.0, 0.0)
     cell = max(1, MAP_TILE_PX // max(int(shape[0]), int(shape[1])))
@@ -1383,9 +1420,11 @@ def _contact_timing(c: dict) -> str:
 
 def _contact_line(c: dict) -> str:
     hand = f"{c['hand']} hand" if c.get("hand") else "hand not named by the recording"
-    when = (f"{c['start_s']:.2f} s" + (" (already touching at the first frame)" if c.get("from_start") else "")
-            + f" to {c['end_s']:.2f} s" + (" (still touching at the last frame)" if c.get("to_end") else "")
-            + f", strongest at {c['peak_s']:.2f} s"
+    physical = c.get('evidence_kind') == 'recorded_contact_state'
+    state = 'touching' if physical else 'active'
+    when = (f"{c['start_s']:.2f} s" + (f" (already {state} at the first frame)" if c.get("from_start") else "")
+            + f" to {c['end_s']:.2f} s" + (f" (still {state} at the last frame)" if c.get("to_end") else "")
+            + f", largest response at {c['peak_s']:.2f} s"
             + _contact_timing(c))
     where = []
     for nm, r in (c.get("regions") or {}).items():
@@ -1397,9 +1436,11 @@ def _contact_line(c: dict) -> str:
     if act:
         where.append("active: " + ", ".join(act))
     return (f"  {c['id']}: {hand}, from {', '.join(c['signals'])}, {when}"
-            + (f"; at its strongest {'; '.join(where)}" if where else "")
+            + (f"; at its largest response {'; '.join(where)}" if where else "")
             + (f"; it weakens and comes back at {', '.join(f'{x:.2f}' for x in c['dips_s'])} s"
-               if c.get("dips_s") else ""))
+               if c.get("dips_s") else "")
+            + (f". {c['reference_note']}" if c.get('reference_note') else
+               '. Response activity has no verified unloaded reference or physical-contact interpretation.' if not physical else ''))
 
 
 def touch_verdicts(ep: dict, n: int) -> frozenset:
@@ -1420,6 +1461,11 @@ def touch_verdicts(ep: dict, n: int) -> frozenset:
         role = field_interpretation(ep["context"], name).get("role")
         permission = sg.touch_cache_permission(name, role, m.get("touch_role"))
         if permission is False:
+            continue
+        from prepare.formats import names_touch
+        if (sg.declared_zero_reference(m, a.shape[1]) is not None and
+                (names_touch(name) or sg._role(role) in ('touch', 'tactile', 'pressure', 'normal_force', 'shear_force', 'force_torque'))):
+            out.add(name)
             continue
         # read as stored (a float32 skin is never copied whole as float64, label/signals.py CHUNK_VALUES)
         stored = "touch" in m and (permission is None or m.get("touch_role") == "touch")
@@ -1458,7 +1504,7 @@ def contacts_block(ep: dict, pl: dict) -> str:
     """Recorded contacts and instrumented-hand coverage, including quiet touch streams."""
     covered = _contact_coverage(ep)
     missing = ('  "contacts_missing": [{"t_s": <float>, "hand": "left" | "right", "object": "<name>"}], '
-               'only a visible grasp or press on an instrumented hand that no recorded contact covers. '
+               'only a visible grasp or press on an instrumented hand that no supplied sensor-activity interval covers. '
                'An uninstrumented hand or an unknown hand cannot establish a missing tactile response. '
                'A discrepancy is a review candidate, not proof of a failed sensor or no physical contact; '
                'sensor placement, contact detection and timing can limit the comparison.\n')
@@ -1472,8 +1518,11 @@ def contacts_block(ep: dict, pl: dict) -> str:
                    'Return an empty contacts_missing list.\n')
     shown = touch_contacts(ep, pl, ep.get("contacts_shown"))
     if not shown:
-        return instruments + '  "contacts": [], no detected contacts were supplied.\n' + missing if covered else ""
+        return instruments + '  "contacts": [], no sensor-activity intervals were supplied.\n' + missing if covered else ""
     rest = [c for c in touch_contacts(ep, pl, ep.get("contacts")) if c["id"] not in {x["id"] for x in shown}]
+    physical = all(c.get('evidence_kind') == 'recorded_contact_state' for c in shown)
+    event = 'touch' if physical else 'signal activity'
+    state = 'touching' if physical else 'active'
     depth = any(_contact_views(ep, c)[2] for c in shown)
     # each strip is described, and its frame asked for, only for the contacts whose picture has it (contact_strips)
     begin = [c["id"] for c in shown if contact_strips(c)[0]]
@@ -1481,22 +1530,24 @@ def contacts_block(ep: dict, pl: dict) -> str:
     lacking = lambda have, why: ("" if len(have) == len(shown) else
                                  f" (not for {_and_list([c['id'] for c in shown if c['id'] not in have])}, {why})")
     only = lambda have: "" if len(have) == len(shown) else f"for {_and_list(have)} only, "
-    picture = ((["five frames around the time the signal says the touch begins, numbered 1 to 5"
-                 + lacking(begin, "already touching at the first frame")] if begin else [])
-               + ([f"three{'' if begin else ' frames'} around the time {'it' if begin else 'the signal'} says the "
-                   "touch ends, numbered 1 to 3" + lacking(end, "still touching at the last frame")] if end else []))
+    picture = (([f"five frames around the time {event} begins, numbered 1 to 5"
+                 + lacking(begin, f"already {state} at the first frame")] if begin else [])
+               + ([f"three{'' if begin else ' frames'} around the time {event} ends, numbered 1 to 3"
+                   + lacking(end, f"still {state} at the last frame")] if end else []))
     claim = ("The following spans describe recorded touch-signal activity in recorder-arrival coordinates. "
              "Describe the pictured frames independently. Their visual touch and hand observations do not "
              "establish tactile event timing, a sensor fault or swapped sensors.\n" if arrival else
-             "The recording's touch signals say a hand is touching something in these spans. They are the "
-             "recording's claims, to check against the frames:\n")
+             "Recorded contact-state channels report touch in these spans; check their states against the frames:\n" if physical else
+             "These spans describe sensor response activity, not confirmed physical contact. An inferred response reference "
+             "is not a verified unloaded baseline. Even a declared calibration zero does not independently verify touch. "
+             "Describe visible touch from the pictured frames independently; sensor activity boundaries do not establish touch onset or release.\n")
     return (instruments + claim + "\n".join(_contact_line(c) for c in shown) + "\n"
-            + (("  The signals record more contacts that are not shown: "
+            + (("  More sensor-activity intervals are not shown: "
                 + "; ".join(f"{c['id']} {c['start_s']:.2f}-{c['end_s']:.2f} s"
                             + (" " + contact_placement(c) if c.get("aligned_by") else "") for c in rest)
                 + ".\n") if rest else "")
             + "After the detail views, each contact above has one picture: " + "".join(p + ", " for p in picture)
-            + ("and " if picture else "") + "the moment it is strongest"
+            + ("and " if picture else "") + "the moment of its largest recorded response"
             + (" with that camera's depth" if depth else "")
             + " and the touch sensor's reading, each frame with its time. Return, beside the other fields:\n"
             '  "contacts": [{"id": "<c1, ...>", "touch_seen": "yes" | "no" | "unclear", '
@@ -2282,7 +2333,7 @@ def _intro_head(ep: dict) -> str:
             "or preparation boundaries are described below.\n")
 
 
-def _frames_head(ep: dict, cell_w: int, cell_h: int, native: tuple) -> str:
+def _frames_head(ep: dict, cell_w: int, cell_h: int, native: tuple, *, capture_mapped=False) -> str:
     names = ", ".join(cam_name(ep, v) for v in views(ep))
     ends = "first and last available instant" if ep.get("unavailable_instants") else "first and last instant"
     # A retained parent zero may precede its first capture. Name that zero rather than claim the headings start
@@ -2293,9 +2344,12 @@ def _frames_head(ep: dict, cell_w: int, cell_h: int, native: tuple) -> str:
     assumed = ep["context"].get("camera_clock") or {}
     precision = ("The column times are assumed presentation instants, not measured capture times. "
                  "Use these times for this presentation. " if anchor(ep) in assumed else
+                 "Column times give the anchor camera's display placements. Other cameras can reuse captures "
+                 "or have different capture times; use the capture mapping below for image citations and "
+                 "comparisons with recorded measurements. " if capture_mapped else
                  "The times are exact: use them, do not invent your own. ")
     qualification = "".join(f"{cam_name(ep, v)}. {note['what']} " for v, note in assumed.items() if v in views(ep))
-    time_word = "assumed presentation time" if anchor(ep) in assumed else "exact time"
+    time_word = "assumed presentation time" if anchor(ep) in assumed else "anchor time" if capture_mapped else "exact time"
     return (
         f"\nFRAMES. You receive the episode as grid images: ROWS are the cameras ({names}, top to "
         f"bottom), COLUMNS are instants left to right, and each column is headed with its {time_word} in "
@@ -2304,6 +2358,32 @@ def _frames_head(ep: dict, cell_w: int, cell_h: int, native: tuple) -> str:
         f"downscaled to {_cell_sizes(ep, cell_w, cell_h)}. After the grids, the episode's {ends} are "
         f"repeated larger, at {_detail_desc(native)}; use them for the start and end state and any "
         "small detail (lettering, a display, fine alignment)." + _excluded_camera_clock_notes(ep))
+
+
+def _camera_capture_text(ep: dict, pl: dict) -> str:
+    """Expose nonidentity cell timing without repeating clocks shared by every row."""
+    mapping = {}
+    for view in views(ep):
+        rows = []
+        for k in pl.get('ks') or []:
+            if not recording_at(ep, view, k):
+                continue
+            sample = camera_sample(ep, view, k)
+            if sample is None:
+                continue
+            delta = sample['capture_offset_s']
+            if delta is None or abs(delta) > 1e-6:
+                rows.append([sample['display_time_s'], sample['source_frame'], sample['source_time_s'], delta])
+        if rows:
+            mapping[view] = rows
+    if not mapping:
+        return ''
+    return ('\nCAMERA CAPTURE MAPPING\n'
+            'Each row is [anchor display seconds, source frame, capture seconds, capture minus display seconds]. '
+            'Only differing or unavailable capture times are listed. Null capture times cannot establish synchronized '
+            'events. Camera clock qualifications still apply. Reused source frames are one capture, not separate '
+            'observations. A change between captures is bounded by those capture times; their gap does not establish '
+            'when within it the change happened or continuous movement.\n' + json.dumps(mapping, separators=(',', ':')))
 
 
 def _excluded_camera_clock_notes(ep: dict) -> str:
@@ -2410,9 +2490,11 @@ def episode_text(ep: dict, pl: dict, cell_w: int, cell_h: int, native: tuple,
         pl = {**pl, "readout": _signal_readout(ep, pl)}
     for b in blocks:
         got[b.slot] += b.text(ep, pl)
+    capture_text = _camera_capture_text(ep, pl)
     return (EPISODE_HEADER + _intro_head(ep) + got["intro"] + "\n" + camera_desc(ep, is_recorded(ep, pl, blocks))
             + "\n"
-            + _frames_head(ep, cell_w, cell_h, native) + got["frames_detail"] + "\n" + _instants_line(ep, pl)
+            + _frames_head(ep, cell_w, cell_h, native, capture_mapped=bool(capture_text))
+            + capture_text + got["frames_detail"] + "\n" + _instants_line(ep, pl)
             + got["frames"] + got["state"] + got["signals"] + BETWEEN_INSTANTS + got["after_frames"] + "\n"
             + task_block(ep) + got["after_task"])
 
@@ -2464,13 +2546,21 @@ def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int 
         pl["contact"] = []   # wide cells already show contact in detail
     # full size is kept only where a detail view shows it: the first and last instant and the contact instants
     imgs = frames(ep, pl, gate, widths=widths, detail_ks={pl["ks"][0], pl["ks"][-1], *(pl.get("contact") or [])})
+    from label import tactile_capture
+    native_images, capture_selection = tactile_capture.collect(ep, pl, gate)
+    native_images, native_parts, native_bytes = tactile_capture.bounded_parts(ep, native_images, detail=detail)
+    for view, receipt in capture_selection.items():
+        supplied = sorted(native_images.get(view) or {})
+        receipt['withheld_by_image_budget'] = len(receipt['selected_source_frames']) - len(supplied)
+        receipt['selected_source_frames'] = supplied
     pl['camera_observation_views'] = [v for v in order_views(imgs)
                                     if any(k in imgs[v] and recording_at(ep, v, k) for k in pl['ks'])]
     any_img = next(im[pl["ks"][0]] for im in imgs.values() if pl["ks"][0] in im)
     # A circular area with dark corners is an image observation, not a lens-type or calibration fact.
     ep["lens"] = {v: lens.circular_image(imgs[v]) for v in order_views(imgs)}
     pl["sensor_evidence"] = se.build(ep, pl, shown={v: [k for k in pl["ks"] if k in im and recording_at(ep, v, k)]
-                                                  for v, im in imgs.items()}, images=imgs)
+                                                  for v, im in imgs.items()}, images=imgs,
+                                   native_images=native_images, capture_selection=capture_selection)
     array_parts = se.image_parts(pl['sensor_evidence'])
     array_bytes = sum(len(base64.b64decode(p['image_url']['url'].split(',', 1)[1]))
                       for p in array_parts if p['type'] == 'image_url')
@@ -2482,7 +2572,7 @@ def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int 
     cam_labels = [cam_name(ep, v) for v in order_views(imgs)]
     contact = [(k, vs, fullres_stack(ep, imgs, k, "just after a sharp gripper change", frame_time(ep, k), vs))
                for k, vs in ((k, [v for v in vs if recording_at(ep, v, k)]) for k, vs in contact_views(ep, pl)) if vs]
-    budget = (IMAGE_LIMIT_BYTES / IMAGE_SIZE_INFLATION - DETAIL_VIEW_BYTES_MAX - array_bytes
+    budget = (IMAGE_LIMIT_BYTES / IMAGE_SIZE_INFLATION - DETAIL_VIEW_BYTES_MAX - array_bytes - native_bytes
               - sum(len(j) for _, _, j in contact))
     # the blocks follow from the episode and its plan, never from the cell width: found once, for every width and the
     # record
@@ -2497,7 +2587,8 @@ def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int 
             break
     prompt = fixed + episode
     content.extend(array_parts)
-    extra_bytes = array_bytes
+    content.extend(native_parts)
+    extra_bytes = array_bytes + native_bytes
     # the first frame, the contact views in time order, then the last frame
     views_sent = []
     for k, name in ((pl["ks"][0], "first frame"), (pl["ks"][-1], "last frame")):
@@ -2545,9 +2636,10 @@ def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int 
     from label.evidence_access import Access, needs_inspection
     access = Access(ep, pl['sensor_evidence'], plan=pl) if inspect_evidence and needs_inspection(ep, pl['sensor_evidence']) else None
     return {**({"evidence_access": access} if inspect_evidence else {}), "sensor_evidence": pl["sensor_evidence"],
-            "content": content, "prompt": prompt, "plan": pl, "n_grids": n_grids,
+            "content": content, "prompt": prompt, "plan": pl, "n_grids": n_grids + len(native_parts) // 2,
+            'native_tactile_frames': sum(len(frames) for frames in native_images.values()),
             **({"jaw_evidence": ep["jaw_evidence"]} if ep.get("jaw_evidence") else {}),
-            "n_images": n_grids + len(views_sent) + len(depth_sent) + len(contacts_sent) + len(array_parts) // 2,
+            "n_images": n_grids + len(views_sent) + len(depth_sent) + len(contacts_sent) + len(array_parts) // 2 + len(native_parts) // 2,
             "image_bytes": grid_bytes + extra_bytes,
             "contact_s": [round(frame_time(ep, k), 3) for k in pl["contact"]],
             "given_prompt": (ep["context"].get("instruction") or "").strip() or None,

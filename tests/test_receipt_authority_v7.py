@@ -276,7 +276,8 @@ def test_only_complete_first_dispatch_quota_proof_can_release_charge(monkeypatch
 def test_offline_rebind_preserves_human_rejection_of_same_finding():
     from test_tactile_contract import episode
     from label import sensor_evidence as se
-    ep = episode({'contact': np.array([[0], [1], [1], [0], [0]])}, [{'name': 'contact', 'shape': [1]}])
+    ep = episode({'contact': np.array([[0], [1], [1], [0], [0]])}, [{'name': 'contact', 'shape': [1]}],
+                 {'contact': {'role': 'contact_state'}})
     doc = se.build(ep, {'n': 5, 'ks': [0, 2, 4]})
     finding = {'start_s': .1, 'end_s': .3, 'headline': 'Contact ends', 'claim_type': 'contact_change',
                'evidence': [{'sensor_id': doc['sensors'][0]['id'], 'series_id': doc['series'][0]['id'], 'time_s': [.2, .3]}]}

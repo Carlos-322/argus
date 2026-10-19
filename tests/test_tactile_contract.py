@@ -83,7 +83,7 @@ def episode(signals, metadata, entries=None, cameras=None):
             interpretations[ident] = entries[meta['name']]
     ctx['data_dictionary'] = {'episode_id': 'episode_test', 'fields': fields, 'entries': interpretations}
     return {'context': ctx, 'signals': signals, 'signal_meta': {m['name']: m for m in metadata},
-            'times': {'exo': np.arange(n) / 10}, 'state': np.zeros((n, 1))}
+            'times': {view: np.arange(n) / 10 for view in ctx['cameras']}, 'state': np.zeros((n, 1))}
 
 
 def test_force_axes_and_contact_flags_keep_their_meaning_without_fingers():
@@ -113,9 +113,9 @@ def test_unknown_grid_keeps_signed_raw_readings_gaps_and_declared_groups():
     doc = se.build(ep, {'n': 5, 'ks': [0, 2, 4]})
     assert ep['context'] == before
     assert doc['sensors'][0]['quantity'] == 'sensor_response'
-    assert [r['label'] for r in doc['series']] == ['Upper pad', 'Lower pad']
-    assert doc['series'][0]['values'][0] == 5
-    assert doc['series'][1]['values'][1] is None
+    assert [r['label'] for r in doc['series']] == ['Cell 0,0', 'Cell 0,1', 'Cell 1,0', 'Cell 1,1']
+    assert doc['series'][0]['values'][0] == 0
+    assert doc['series'][2]['values'][1] is None
     assert all(r['unit'] is None for r in doc['series'])
     assert 'ADC' not in se.prompt(doc)
     assert 'not a verified unloaded baseline' in se.prompt(doc)
@@ -182,7 +182,8 @@ def test_large_arrays_and_long_recordings_have_explicit_bounded_coverage():
 
 
 def test_piece_evidence_keeps_clock_offsets_and_independent_sensor_ids():
-    ep = episode({'contact': np.array([[0], [1], [1], [0], [0]])}, [{'name': 'contact', 'shape': [1]}])
+    ep = episode({'contact': np.array([[0], [1], [1], [0], [0]])}, [{'name': 'contact', 'shape': [1]}],
+                 {'contact': {'role': 'contact_state'}})
     doc = se.build(ep, {'n': 5, 'ks': [0, 2, 4]})
     finding = {'start_s': .1, 'end_s': .3, 'inspect_s': .2, 'headline': 'Contact ends',
                'claim_type': 'contact_change', 'evidence': [{'sensor_id': doc['sensors'][0]['id'],
@@ -218,7 +219,7 @@ def test_merged_piece_finding_follows_its_piece_source(tmp_path, parts_folder):
         (directory / 'camera.bin').write_bytes(b'encoded first frames')
         np.savez(directory / 'signals.npz', contact=np.array([[0], [1], [1], [0], [0]]))
     ep = episode({'contact': np.array([[0], [1], [1], [0], [0]])},
-                 [{'name': 'contact', 'shape': [1]}])
+                 [{'name': 'contact', 'shape': [1]}], {'contact': {'role': 'contact_state'}})
     ctx = ep['context']
     ctx['state_kind'] = 'none'
     doc = se.build(ep, {'n': 5, 'ks': [0, 2, 4]})
@@ -260,7 +261,7 @@ def test_normal_request_and_reply_use_shared_contract(tmp_path, monkeypatch):
     evidence = request['sensor_evidence']
     sensor, row = evidence['sensors'][0], evidence['series'][0]
     finding = {'start_s': .1, 'end_s': .3, 'headline': 'Contact remains active during the hidden movement',
-               'claim_type': 'contact_change', 'evidence': [{'sensor_id': sensor['id'], 'series_id': row['id'],
+               'claim_type': 'response_change', 'evidence': [{'sensor_id': sensor['id'], 'series_id': row['id'],
                                                            'time_s': [row['times'][4], row['times'][8]]}]}
     def provider_reply(*args, **kwargs):
         return {'choices': [{'finish_reason': 'stop', 'message': {'content': json.dumps({'sensor_findings': [finding]})}}]}

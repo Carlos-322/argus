@@ -392,7 +392,15 @@ def _remember_frame(key, jpg: bytes) -> None:
 
 # any other camera the recording has, and a camera the model is not shown (board/clips.py clip_path, unshown_views)
 EXTRA_CAM = re.compile(r"(?:extra|unshown)\d{1,2}")
-DEPTH_CAM = re.compile(r"depth_(exo|left|right|extra\d{1,2})")   # a camera's depth clip (board/clips.py depth_clip)
+DEPTH_CAM = re.compile(r"depth_(exo|left|right|extra\d{1,2}|depth_stream\d{1,6})")
+
+
+def depth_clips(clips: Path, eid: str) -> dict:
+    """Available paired and independent depth clips, keyed by their prepared stream view."""
+    if not clips.is_dir():
+        return {}
+    return {folder.name[6:]: folder / f'{eid}.mp4' for folder in sorted(clips.iterdir())
+            if folder.is_dir() and DEPTH_CAM.fullmatch(folder.name) and (folder / f'{eid}.mp4').is_file()}
 
 
 def clip_path(clips: Path, eid: str, cam: str) -> Path:

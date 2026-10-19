@@ -36,6 +36,7 @@ A signal is read by how its numbers behave, and only whether it measures touch a
 """
 from __future__ import annotations
 
+import json
 import re
 import warnings
 
@@ -449,6 +450,54 @@ def activity(a: np.ndarray, rest=None, swing=None) -> np.ndarray:
     return m
 
 
+def declared_zero_reference(meta: dict, width: int | None = None):
+    """Only a literal finite calibration zero and explicit polarity establish this reference."""
+    calibration = meta.get('calibration')
+    if isinstance(calibration, str) and len(calibration) <= 65536:
+        try:
+            calibration = json.loads(calibration)
+        except (ValueError, RecursionError):
+            return None
+    direction = meta.get('response_direction')
+    if not isinstance(calibration, dict) or direction not in ('up', 'down'):
+        return None
+    zero = calibration.get('zero')
+    if isinstance(zero, bool):
+        return None
+    try:
+        if np.asarray(zero).dtype.kind not in 'iuf':
+            return None
+        level = np.asarray(zero, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if width is None:
+        width = level.size if level.ndim == 1 else 1
+    if level.ndim == 0:
+        level = np.full(width, float(level))
+    if not width or level.shape != (width,) or not np.isfinite(level).all():
+        return None
+    return level, 1 if direction == 'up' else -1
+
+
+def declared_zero_activity(a: np.ndarray, meta: dict):
+    """Positive recorded response from a declared zero; missing rows stay missing.
+
+    No episode-relative threshold or inferred resting endpoint changes the
+    declared zero. This response does not by itself verify physical contact.
+    """
+    reference = declared_zero_reference(meta, a.shape[1])
+    if reference is None:
+        return None
+    level, sign = reference
+    result = np.zeros(len(a))
+    for start, block in _rows64(a):
+        valid = np.isfinite(block)
+        response = np.where(valid, np.maximum(sign * (block - level), 0), 0)
+        result[start:start + len(block)] = response.sum(axis=1)
+        result[start:start + len(block)][~valid.any(axis=1)] = np.nan
+    return result
+
+
 def has_rest(a: np.ndarray, rest=None, swing=None) -> bool:
     """Whether a signal holds one level: of its readings at rest (within REST_FRACTION of its swing from rest, at least
     MIN_ACTIVE of them), HOLD_SHARE lie within HOLD_BAND of it. Counted among the readings at rest rather than all of
@@ -567,10 +616,14 @@ def is_touch(name: str, a: np.ndarray, rest=None, swing=None, role=None) -> bool
 def active_spans(a: np.ndarray, t: np.ndarray, rest=None, swing=None) -> list[tuple[float, float]]:
     """[(start s, end s)] where the signal is away from rest (activity at least REST_FRACTION of its peak), from every
     frame; spans closer than MERGE_GAP_S are one, and a single-frame flicker is not a span."""
-    m = activity(a, rest, swing)
+    return response_spans(activity(a, rest, swing), t)
+
+
+def response_spans(m: np.ndarray, t: np.ndarray, *, declared_zero=False) -> list[tuple[float, float]]:
+    """Response intervals; a declared zero uses positive response rather than an inferred relative threshold."""
     if not np.isfinite(m).any() or not np.nanmax(m) > 0:
         return []
-    on = np.nan_to_num(m) >= REST_FRACTION * np.nanmax(m)
+    on = np.isfinite(m) & (m > 0 if declared_zero else m >= REST_FRACTION * np.nanmax(m))
     spans, i, n = [], 0, len(on)
     while i < n:
         if not on[i]:
