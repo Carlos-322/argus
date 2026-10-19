@@ -27,42 +27,42 @@ def write_atomic(out_path: Path, result, indent: int | None = 2, default=None, s
     write_bytes_atomic(out_path, text.encode('utf-8'))
 
 
-# A file name may be up to NAME_MAX bytes, and a name derived from it (a temporary file, a receipt, a claim, a lock) adds
-# a prefix and a suffix of at most DERIVED_RESERVE bytes. So every derived name is built on derived_base, which is the
-# name itself when it leaves that room, and otherwise its start and a digest of the whole name: a valid name always
-# yields valid derived names, two names never share one, and every derivation of one name shares one base, so a
-# reader finds by glob what a writer derived.
+# A file name may be up to NAME_MAX bytes. A private name (a temporary file, a file set aside, a folder found from a
+# record rather than by its name) only has to be unique and valid, so it is built on bounded_base, which is the source
+# name itself when that leaves room for the prefix and suffix, and otherwise its start and a digest of the whole name. A
+# shared name (an output, a receipt, a claim, a lock, a proof) is a contract between its writer and every reader, so it
+# keeps its one exact format and is never built here: changing it for some names would change it for one party only.
 NAME_MAX = 255
-DERIVED_RESERVE = 64
+PRIVATE_RESERVE = 64
 
 
-def derived_base(name: str) -> str:
-    """The part of every name derived from `name` that stands for it (see NAME_MAX)."""
+def bounded_base(name: str) -> str:
+    """The part of a private name that stands for `name` (see NAME_MAX)."""
     raw = name.encode('utf-8', 'surrogateescape')
-    if len(raw) <= NAME_MAX - DERIVED_RESERVE:
+    if len(raw) <= NAME_MAX - PRIVATE_RESERVE:
         return name
     import hashlib
-    head = raw[:NAME_MAX - DERIVED_RESERVE - 13].decode('utf-8', 'ignore')
+    head = raw[:NAME_MAX - PRIVATE_RESERVE - 13].decode('utf-8', 'ignore')
     return f"{head}~{hashlib.sha256(raw).hexdigest()[:12]}"
 
 
-def derived_name(name: str, prefix: str = '', suffix: str = '') -> str:
-    """prefix + derived_base(name) + suffix, a valid file name whenever `name` is one."""
-    if len((prefix + suffix).encode('utf-8', 'surrogateescape')) > DERIVED_RESERVE:
-        raise ValueError(f'a derived name may add at most {DERIVED_RESERVE} bytes: {prefix!r} {suffix!r}')
-    return prefix + derived_base(name) + suffix
+def private_name(name: str, prefix: str = '', suffix: str = '') -> str:
+    """prefix + bounded_base(name) + suffix: a valid name, unique to `name`, for a file nothing finds by its name."""
+    if len((prefix + suffix).encode('utf-8', 'surrogateescape')) > PRIVATE_RESERVE:
+        raise ValueError(f'a private name may add at most {PRIVATE_RESERVE} bytes: {prefix!r} {suffix!r}')
+    return prefix + bounded_base(name) + suffix
 
 
-def derived_path(path, prefix: str = '', suffix: str = '') -> Path:
-    """The file beside `path` named derived_name(path.name, prefix, suffix)."""
+def private_path(path, prefix: str = '', suffix: str = '') -> Path:
+    """The file beside `path` named private_name(path.name, prefix, suffix)."""
     path = Path(path)
-    return path.with_name(derived_name(path.name, prefix, suffix))
+    return path.with_name(private_name(path.name, prefix, suffix))
 
 
 def temporary_path(out_path, suffix: str = '') -> Path:
     """A name beside out_path that no other writer, in this process or another, uses: .<name>.<random>.tmp<suffix>.
     `suffix` keeps an extension a tool chooses its format by (.mp4)."""
-    return derived_path(out_path, '.', f'.{uuid.uuid4().hex}.tmp{suffix}')
+    return private_path(out_path, '.', f'.{uuid.uuid4().hex}.tmp{suffix}')
 
 
 def write_bytes_atomic(out_path, data: bytes) -> None:
@@ -172,7 +172,7 @@ def remove_if(path, holds, *, read=file_version, lock=None) -> bool:
             return False
         if not holds(seen):
             return False
-        private = derived_path(path, '.', f'.{os.getpid()}.{uuid.uuid4().hex}{REMOVING}')
+        private = private_path(path, '.', f'.{os.getpid()}.{uuid.uuid4().hex}{REMOVING}')
         try:
             os.rename(path, private)
         except FileNotFoundError:

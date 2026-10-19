@@ -77,7 +77,7 @@ from board.families import Families
 from board.public_export import project as public_json
 from board.to_board import dumps, finite
 from compare.metrics import model_names, reasoning_effort
-from label.atomic import (cached_while_unchanged, derived_path, file_version, remove_if, small_file, sweep_removals,
+from label.atomic import (cached_while_unchanged, file_version, remove_if, small_file, sweep_removals,
                           write_atomic)
 
 
@@ -884,7 +884,7 @@ def _trim_receipt_temps(folder):
 
 
 def _temporary_guard(path):
-    return derived_path(path.with_name(path.name.replace('.part.len.mp4', '.part.mp4')), suffix='.lock')
+    return path.with_name(path.name.replace('.part.len.mp4', '.part.mp4') + '.lock')
 
 
 def _footage_receipt(result: tuple) -> dict:

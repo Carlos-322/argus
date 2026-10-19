@@ -16,7 +16,7 @@ from pathlib import Path
 
 import numpy as np
 
-from label.atomic import derived_name, derived_path, write_atomic
+from label.atomic import write_atomic
 from label.dictionary_context import _public_source, field_interpretation, native_field_name, prepared_interpretation
 from label import sensor_evidence as se
 from prepare.mcap_fields import SAMPLE_RATE_KEY
@@ -1617,10 +1617,9 @@ def discover(access, base_content, call, cache_path, *, rounds=2, reserve_cost=0
     if force_refresh and path.exists() and not already_refreshed:
         # Keep the original durable receipt and its claim files for accounting and inspection.
         refresh = uuid.uuid4().hex
-        path.rename(derived_path(path, suffix='.previous.' + refresh))
-        for claim in path.parent.glob(glob.escape(derived_name(path.name)) + '.round*.claim'):
-            claim.rename(derived_path(path, suffix=claim.name[len(derived_name(path.name)):]
-                                      + '.previous.' + refresh))
+        path.rename(path.with_name(path.name + '.previous.' + refresh))
+        for claim in path.parent.glob(glob.escape(path.name) + '.round*.claim'):
+            claim.rename(claim.with_name(claim.name + '.previous.' + refresh))
         doc.update(input_digest=digest, digest=hashlib.sha256((digest + refresh).encode()).hexdigest())
     if force_refresh and refresh_id is not None:
         doc['refresh_id'] = refresh_id
@@ -1636,7 +1635,7 @@ def discover(access, base_content, call, cache_path, *, rounds=2, reserve_cost=0
         if doc.get('input_digest', doc.get('digest')) != digest:
             if (not doc.get('rounds') and doc.get('cost_usd') == 0
                     and not doc.get('cost_is_conservative_estimate')
-                    and not any(path.parent.glob(glob.escape(derived_name(path.name)) + '.round*.claim'))):
+                    and not any(path.parent.glob(glob.escape(path.name) + '.round*.claim'))):
                 # A refused, undispatched selection has no paid inputs to reuse.
                 doc = {'version': 1, 'digest': digest, 'status': 'complete', 'rounds': [],
                        'cost_usd': 0.0, 'limitations': []}
@@ -1695,7 +1694,7 @@ def discover(access, base_content, call, cache_path, *, rounds=2, reserve_cost=0
                 doc['limitations'].append('Inspection selection exceeds the remaining batch spend cap.')
                 break
             attempt = f'.retry{len(rejected_attempts)}' if rejected_attempts else ''
-            claim = derived_path(path, suffix=f'.round{index}{attempt}.claim')
+            claim = path.with_name(path.name + f'.round{index}{attempt}.claim')
             claim.parent.mkdir(parents=True, exist_ok=True)
             try:
                 with claim.open('x') as stream:

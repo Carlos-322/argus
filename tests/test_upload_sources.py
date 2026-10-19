@@ -1,8 +1,9 @@
 """A member whose owner an archive does not prove is an upload of its own in every way (prepare/formats.py
 _unpack_archives, _convert_upload): its storage belongs to the conversion that read it, an archive it holds is opened
 on the same budget, and nothing of another upload (a table, a task, folder metadata) is joined to its recordings.
-Every name derived from another (label/atomic.py derived_name) is valid whenever its source is. Every count and list of
-the pictures a video shows reads one definition (label/presented.py)."""
+A private name (label/atomic.py private_name) is valid whenever its source is, and a shared name (an output, its
+receipts, a proof) keeps its one exact format, so every reader finds what the writer wrote, at any length the base
+format holds. Every count and list of the pictures a video shows reads one definition (label/presented.py)."""
 from __future__ import annotations
 
 import io
@@ -171,18 +172,123 @@ def test_a_cut_with_preroll_has_no_damaged_frames_and_every_count_agrees(tmp_pat
 
 
 @pytest.mark.parametrize('length', [1, 150, 191, 192, 220, 255])
-def test_every_name_derived_from_a_valid_name_is_valid_and_its_own(tmp_path, length):
+def test_every_private_name_is_valid_and_its_own(tmp_path, length):
     name = 'x' * (length - 5) + '.json' if length > 5 else 'x' * length
     other = 'y' + name[1:]
-    for prefix, suffix in (('.', f'.{"0" * 32}.tmp.mp4'), ('noreply_', ''), ('failed_', ''), ('.', '.route.lock'),
-                           ('', '.round12.retry3.claim'), ('.', '.unpacked'), ('.noreply_', '.route.lock')):
-        derived = atomic.derived_name(name, prefix, suffix)
-        assert len(derived.encode()) <= atomic.NAME_MAX, (prefix, suffix, len(derived))
-        assert derived != atomic.derived_name(other, prefix, suffix)
-        assert derived.startswith(prefix) and derived.endswith(suffix)
-        if len(name.encode()) <= atomic.NAME_MAX - atomic.DERIVED_RESERVE:
-            assert derived == prefix + name + suffix          # a name that leaves room is kept as it is
+    for prefix, suffix in (('.', f'.{"0" * 32}.tmp.mp4'), ('.', f'.{"0" * 7}.{"0" * 32}.removing'), ('.', '.unpacked'),
+                           ('000-', '')):
+        private = atomic.private_name(name, prefix, suffix)
+        assert len(private.encode()) <= atomic.NAME_MAX, (prefix, suffix, len(private))
+        assert private != atomic.private_name(other, prefix, suffix)
+        assert private.startswith(prefix) and private.endswith(suffix)
+        if len(name.encode()) <= atomic.NAME_MAX - atomic.PRIVATE_RESERVE:
+            assert private == prefix + name + suffix          # a name that leaves room is kept as it is
     target = tmp_path / name
     atomic.write_atomic(target, {'ok': True})                  # its temporary file fits too
     assert json.loads(target.read_text()) == {'ok': True}
     assert sorted(p.name for p in tmp_path.iterdir()) == [name]
+
+
+@pytest.mark.parametrize('name', ['episode_short', 'episode_' + 'a' * 187])
+def test_a_dispatch_left_unresolved_blocks_a_plain_resume_at_any_name_length(tmp_path, monkeypatch, name):
+    """Review of 2514ce5: for a 195-byte output name the claim of a dispatch whose reply was lost was written under a
+    shortened name its readers never looked for, so a plain resume paid again and its reservation left the ledger. The
+    claim's name is the base format exactly, so the resume finds it, sends nothing and the ledger keeps it."""
+    from label import harness
+    from label.dictionary_stage import output_spend, output_spend_complete
+    calls = []
+
+    def provider(*args, **kwargs):
+        calls.append('dispatched')
+        raise TimeoutError('the reply was lost after dispatch')
+    identity = {'version': 2, 'source_proof': [], 'settings': {'cell_w': 0, 'max_tokens': 100,
+                                                               'annotation_policy': {'task_mode': 'observe'}}}
+    monkeypatch.setattr(harness, 'call_model_once', provider)
+    monkeypatch.setattr(harness, '_release_memory', lambda: None)
+    monkeypatch.setattr(harness, 'input_identity', lambda *a, **kw: identity)
+
+    def label(ep, out, **kw):
+        return harness._call_and_record(ep, out, [{'type': 'text', 'text': 'fixture'}], 0, {'input_identity': identity},
+                                        model=harness.DEFAULT_MODEL, reasoning='low', api_key='fixture', max_tokens=100,
+                                        timeout=1, reserve_final=kw['reserve_final'],
+                                        require_known_pricing=kw['require_known_pricing'])
+    monkeypatch.setattr(harness, 'label_episode', label)
+    ep = tmp_path / 'eps' / name
+    ep.mkdir(parents=True)
+    out = tmp_path / 'run' / 'out'
+    for run in (1, 2):
+        harness._run_batch([ep], out, keys=['fixture'], concurrency=1, force=False, max_spend=1,
+                           model=harness.DEFAULT_MODEL, reasoning='low', max_tokens=100)
+        assert len(calls) == 1, (run, calls)                   # the resume sends nothing
+        claim = out / f'noreply_{name}.json'
+        assert claim.exists(), sorted(p.name for p in out.iterdir())
+        assert output_spend(out) > 0 and not output_spend_complete(out)
+        assert harness.billing_record(out, f'{name}.json') is not None
+
+
+def test_pieces_of_a_long_recording_stitch_from_the_proof_their_cutter_wrote(tmp_path, monkeypatch):
+    """Review of 2514ce5: the cutter wrote a 192-byte recording's source proof under a shortened name and the stitcher
+    read the exact one, so paid part replies could not be put together. Both use the one exact name."""
+    from label import pieces
+    from label.evidence_access import source_proof
+    from test_formats import recorder_folder
+    from test_pieces import _part_result
+    upload = tmp_path / 'upload'
+    recorder_folder(upload, n=90, duplicate_stamps=False)
+    report = formats.convert(upload, 'teleop_arms', tmp_path / 'eps', 'test', 900)
+    source = tmp_path / 'eps' / report['episodes'][0]['episode_id']
+    long_source = source.with_name('episode_' + 'a' * 184)
+    source.rename(long_source)
+    monkeypatch.setattr(pieces, 'piece_max', lambda ctx: 1.0)
+    job = tmp_path / 'job'
+    parts = pieces._write_or_reuse(long_source, job / 'pieces')
+    assert len(parts) > 1
+    out = job / 'run' / 'out'
+    out.mkdir(parents=True)
+    for part in parts:
+        record = _part_result(part, 'reach')
+        ctx = json.loads((part / 'context.json').read_text())
+        record['input_identity'] = {'version': 2, 'source_proof': source_proof(ctx, part)}
+        (out / (part.name + '.json')).write_text(json.dumps(record))
+    stitched = pieces.stitch_run(job, long_source.parent, {long_source.name: [p.name for p in parts]}, tmp_path / 'final')
+    assert stitched, stitched
+
+
+def test_an_archive_kept_apart_keeps_the_metadata_it_holds(tmp_path):
+    """Review of 2514ce5: a recovered archive was read from a folder that also held its own bytes, so the dataset root
+    inside it was not found and its info.json (a session task mode, a collection description) was lost. It is now held
+    outside the folder it unpacks to, exactly as a direct archive upload is, and reads as that upload would."""
+    inner = zipped({'take/front.mp4': movie(30, frames=45),
+                    'take/info.json': json.dumps({'task_mode': 'session',
+                                                  'description': 'Continuous recording of repeated different tasks'})})
+    (tmp_path / 'inner.zip').write_bytes(inner)
+    raw = rename_first_local(zipped({'takeA/first.zip': inner, 'healthy/front.mp4': movie(200, frames=45)}),
+                             'takeA/first.zip', 'takeB/first.zip')
+    (tmp_path / 'outer.zip').write_bytes(raw)
+    direct = formats.convert(tmp_path / 'inner.zip', 'ego_head', tmp_path / 'direct', 'direct', 900)
+    nested = formats.convert(tmp_path / 'outer.zip', 'ego_head', tmp_path / 'nested', 'nested', 900)
+    want = contexts(tmp_path / 'direct', direct)
+    got = contexts(tmp_path / 'nested', nested)
+    apart = [c for eid, c in got.items() if 'name_unverified' in eid]
+    healthy = [c for eid, c in got.items() if 'name_unverified' not in eid]
+    assert len(want) == 1 and len(apart) == 1 and len(healthy) == 1, (direct, nested)
+    (want,) = want.values()
+    assert want.get('task_mode') == 'session' and want.get('collection_note')
+    assert apart[0].get('task_mode') == want['task_mode'] and apart[0].get('collection_note') == want['collection_note']
+    assert healthy[0].get('task_mode') != 'session' and not healthy[0].get('collection_note')
+
+
+def test_an_archive_the_filesystem_cannot_hold_costs_only_itself(tmp_path):
+    """Review of 2514ce5: a chain of archives whose unpacked folders grew past the filesystem's path limit raised out of
+    the conversion and cost the healthy recording beside it. Every filesystem step of an archive or a member is inside
+    its own boundary, so the chain is left out where the filesystem refuses it and named, and the rest is read."""
+    data, name = movie(100), 'front.mp4'
+    for level in range(32):
+        data = zipped({name: data})
+        name = f'level{level:02d}_' + 'x' * 180 + '.zip'
+    path = tmp_path / 'source.zip'
+    path.write_bytes(zipped({'healthy/front.mp4': movie(100), name: data}))
+    report = formats.convert(path, 'ego_head', tmp_path / 'out', 'deep', 900)
+    assert any('healthy' in e['episode_id'] for e in report['episodes']), report
+    said = ' '.join(str(n) for n in report['used'] + report['missing'])
+    assert 'could not be' in said, said

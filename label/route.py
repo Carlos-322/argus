@@ -24,7 +24,6 @@ from contextlib import nullcontext
 from pathlib import Path
 
 from label import episode as me
-from label.atomic import derived_path
 
 ROUTE_MODEL = "openai/gpt-6-sol"
 ROUTE_REASONING = "low"
@@ -89,10 +88,10 @@ def _paid_route(ep, api_key, call_model, timeout, out_path, identity, reserve_di
                         'rig': me.rig(ep), 'model': ROUTE_MODEL, 'reasoning': ROUTE_REASONING,
                         'max_tokens': ROUTE_MAX_TOKENS}
     # the output the receipts belong to is given, never recovered from a receipt's name
-    receipt_path = derived_path(out_path, 'noreply_') if out_path is not None else None
+    receipt_path = out_path.with_name('noreply_' + out_path.name) if out_path is not None else None
     if out_path is not None:
         mismatched = False
-        for previous_path in (out_path, derived_path(out_path, 'failed_'), receipt_path):
+        for previous_path in (out_path, out_path.with_name('failed_' + out_path.name), receipt_path):
             if not previous_path.exists():
                 continue
             previous = json.loads(previous_path.read_text())
@@ -207,7 +206,7 @@ def route_width(ep_dir: Path, api_key: str | None, call_model, timeout: int = 12
     if out_path is not None:
         out_path.parent.mkdir(parents=True, exist_ok=True)
     # A process restart reuses the durable claim, including an ambiguous dispatch.
-    with task_lock, (derived_path(out_path, '.noreply_', '.route.lock').open('a')
+    with task_lock, (out_path.with_name('.noreply_' + out_path.name + '.route.lock').open('a')
                      if out_path is not None else nullcontext()) as lock:
         if lock is not None:
             fcntl.flock(lock, fcntl.LOCK_EX)

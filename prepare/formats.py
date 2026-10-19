@@ -145,7 +145,7 @@ from pathlib import Path
 
 import numpy as np
 
-from label.atomic import cached_while_unchanged, derived_name, write_atomic
+from label.atomic import cached_while_unchanged, private_name, write_atomic
 from label.presented import presented, presented_pts
 from prepare.hdf_metadata import open_hdf5
 from prepare.camera_clock import UNKNOWN_CAMERA_FPS, camera_issue_kind, coarse_rows, presentation_clock
@@ -477,6 +477,18 @@ def _archive_members(path: Path):
     return out, skipped, tf, bad, unverified
 
 
+def _written_why(error: OSError) -> str:
+    """Why the filesystem refused a path, in words ("File name too long")."""
+    return error.strerror or type(error).__name__
+
+
+def _member_why(error: Exception) -> str:
+    """Why a member was left out: the filesystem refusing where it would be written, or its own bytes."""
+    if isinstance(error, OSError) and error.errno is not None:
+        return f"could not be written: {_written_why(error)}"
+    return "cut short or damaged"
+
+
 def _common_suffixes(first: str, second: str) -> list[str]:
     """The extensions (at most two, as in .tar.gz) that both names of a member end with, so a member whose name cannot be
     verified is still read as the kind of file both names say it is."""
@@ -557,9 +569,14 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
             tree = Path(dest) if root.is_file() else root
             tree.parent.mkdir(parents=True, exist_ok=True)
             apart_root.append(Path(tempfile.mkdtemp(prefix='.apart-', dir=tree.parent)))
-        folder = apart_root[0] / derived_name(label, f"{len(apart):03d}-")
+        folder = apart_root[0] / private_name(label, f"{len(apart):03d}-")
         folder.mkdir()
         return folder
+
+    def apart_input(folder: Path) -> Path:
+        held = apart_root[0] / '.input' / folder.name
+        held.mkdir(parents=True)
+        return held
     if root.is_file():
         if not ARCHIVE_RE.search(root.name):
             return root, [], apart
@@ -569,12 +586,20 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
         base_of = {a: a.parent for a in archives}
     notes, total, count, depth = [], 0, 0, {a: 0 for a in archives}
     for a in archives:                          # grows as archives inside archives are unpacked
-        done = base_of[a] / derived_name(a.name, '.', '.unpacked')
-        if done.exists():
+        # Everything an archive does on the filesystem is inside its own boundary, and everything a member does inside
+        # the member's, so a path the filesystem refuses (too long for it, not writable) costs that archive or member
+        # alone, never the members beside it or the rest of the upload.
+        try:
+            done = base_of[a] / private_name(a.name, '.', '.unpacked')
+            finished = done.exists()
+        except OSError as error:
+            notes.append(f"{a.name} could not be unpacked where it lies ({_written_why(error)}), so it was left out.")
+            continue
+        if finished:
             # unpacked by an earlier run: the members it kept apart, as its done marker records them, are still apart
             try:
                 recorded = json.loads(done.read_text() or '[]')
-            except ValueError:
+            except (OSError, ValueError):
                 recorded = []
             apart += [Path(p) for p in recorded if isinstance(p, str) and Path(p).is_dir()]
             continue
@@ -594,18 +619,27 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
             members = [m for m in members if not any(hidden_part(x) for x in m[0])]
             tops = {m[0][0] if len(m[0]) > 1 else "" for m in members}
             base = base_of[a] if len(tops) == 1 and "" not in tops else base_of[a] / ARCHIVE_RE.sub("", a.name)
-            base.mkdir(parents=True, exist_ok=True)
-            broot = base.resolve()
+            try:
+                base.mkdir(parents=True, exist_ok=True)
+                broot = base.resolve()
+            except OSError as error:
+                notes.append(f"{a.name} could not be unpacked where it lies ({_written_why(error)}), so it was left "
+                             "out.")
+                continue
             wrote, made = 0, []
             for label, filename, size, opener in unverified:
                 if count >= UNPACK_MAX_FILES or total + size > UNPACK_MAX_BYTES:
                     raise UnpackLimit(f"{a.name} holds more than one upload can: at most {UNPACK_MAX_FILES:,} files "
                                      f"and {UNPACK_MAX_BYTES / 1e9:.0f} GB unpacked")
-                folder = apart_folder(label)
-                target = folder / filename
+                # A member kept apart is an upload of its own exactly as a direct upload is. An archive among them is
+                # held outside the folder it unpacks to, as open_archives holds a direct archive outside its tree, so
+                # the folder holds only what the archive holds and is read from its own dataset root.
+                is_archive = bool(ARCHIVE_RE.search(filename))
+                got = 0
                 try:
+                    folder = apart_folder(label)
+                    target = (apart_input(folder) / filename) if is_archive else folder / filename
                     with opener() as src, target.open('xb') as dst:
-                        got = 0
                         while buf := src.read(1 << 20):
                             got += len(buf)
                             if total + got > UNPACK_MAX_BYTES:
@@ -613,14 +647,14 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
                             dst.write(buf)
                 except UnpackLimit:
                     raise
-                except Exception:
-                    bad.append(f"{label} (cut short or damaged)")
+                except Exception as error:
+                    bad.append(f"{label} ({_member_why(error)})")
                     continue
                 total += got
                 count += 1
                 apart.append(folder)
                 made.append(str(folder))
-                if ARCHIVE_RE.search(target.name) and target not in depth:
+                if is_archive and target not in depth:
                     archives.append(target)
                     base_of[target], depth[target] = folder, depth[a] + 1
             for parts, size, opener in members:
@@ -628,49 +662,54 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
                     raise UnpackLimit(f"{a.name} holds more than one upload can: at most {UNPACK_MAX_FILES:,} files "
                                      f"and {UNPACK_MAX_BYTES / 1e9:.0f} GB unpacked")
                 target = base.joinpath(*parts)
-                if broot not in target.resolve().parents:
-                    skipped += 1
+                tmp = None
+                got = 0
+                try:
+                    if broot not in target.resolve().parents:
+                        skipped += 1
+                        continue
+                    existed = target.exists()          # unpacked by an earlier run that stopped part way
+                    if not existed:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with opener() as src, tempfile.NamedTemporaryFile(
+                                dir=target.parent, prefix='.unpack-', suffix='.part', delete=False) as dst:
+                            tmp = Path(dst.name)
+                            while True:
+                                buf = src.read(1 << 20)
+                                if not buf:
+                                    break
+                                got += len(buf)
+                                if total + got > UNPACK_MAX_BYTES:
+                                    raise UnpackLimit(f"{a.name} unpacks to more than {UNPACK_MAX_BYTES / 1e9:.0f} GB")
+                                dst.write(buf)
+                        tmp.replace(target)
+                        tmp = None
+                except UnpackLimit:
+                    if tmp is not None:
+                        tmp.unlink(missing_ok=True)
+                    raise
+                except Exception as error:
+                    # a member cut short or damaged (a tar cut inside it, a zip member that fails its check), or one the
+                    # filesystem will not hold, is left out by itself and named; the members before and after it are
+                    # unpacked
+                    if tmp is not None:
+                        tmp.unlink(missing_ok=True)
+                    bad.append(f"{'/'.join(parts)} ({_member_why(error)})")
                     continue
                 # an archive inside an archive is opened at any depth: every level it unpacks spends the same file
                 # and byte budget (UNPACK_MAX_FILES, UNPACK_MAX_BYTES), which is what bounds an archive built to
                 # unpack forever, so a fixed depth would only drop readable recordings
-                inner = ARCHIVE_RE.search(target.name)
-                if inner and target not in depth:
+                if ARCHIVE_RE.search(target.name) and target not in depth:
                     archives.append(target)
                     base_of[target], depth[target] = target.parent, depth[a] + 1
-                if target.exists():            # unpacked by an earlier run that stopped part way
-                    continue
-                target.parent.mkdir(parents=True, exist_ok=True)
-                tmp = None
-                got = 0
-                try:
-                    with opener() as src, tempfile.NamedTemporaryFile(
-                            dir=target.parent, prefix='.unpack-', suffix='.part', delete=False) as dst:
-                        tmp = Path(dst.name)
-                        while True:
-                            buf = src.read(1 << 20)
-                            if not buf:
-                                break
-                            got += len(buf)
-                            if total + got > UNPACK_MAX_BYTES:
-                                dst.close()
-                                tmp.unlink()
-                                raise UnpackLimit(f"{a.name} unpacks to more than {UNPACK_MAX_BYTES / 1e9:.0f} GB")
-                            dst.write(buf)
-                except UnpackLimit:
-                    raise
-                except Exception:
-                    # a member cut short or damaged (a tar cut inside it, a zip member that fails its check) is left
-                    # out by itself and named; the members before and after it are unpacked
-                    if tmp is not None:
-                        tmp.unlink(missing_ok=True)
-                    bad.append(f"{'/'.join(parts)} (cut short or damaged)")
-                    continue
-                total += got
-                tmp.replace(target)
-                count += 1
-                wrote += 1
-        done.write_text(json.dumps(made))
+                if not existed:
+                    total += got
+                    count += 1
+                    wrote += 1
+        try:
+            done.write_text(json.dumps(made))
+        except OSError:
+            pass                                # the marker only spares a later run the work; its absence costs nothing
         # bad holds members left out (counted below) and ArchiveNotes, whose kind says what else each is: a member
         # kept with a caveat, damage of the archive as a whole, or an archive that ends early. Never read from text.
         kind = lambda b: getattr(b, 'kind', None)

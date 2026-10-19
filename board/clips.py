@@ -58,7 +58,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from label.atomic import derived_path, temporary_path, write_atomic
+from label.atomic import temporary_path, write_atomic
 from label.presented import presented, presented_pts
 
 CAMS = ("exo", "left", "right")
@@ -361,7 +361,7 @@ def retime(mp4: Path, capture_s, fps: float = 30.0, main: bool = True, query_s=N
     from fractions import Fraction
 
     new, stop = display_ticks(capture_s, fps, main, query_s, query_map, last_frame_interval_s)
-    tmp = derived_path(mp4.with_suffix(""), suffix=".time.mp4")
+    tmp = mp4.with_name(mp4.stem + ".time.mp4")
     try:
         with av.open(str(mp4)) as src:
             ist = src.streams.video[0]
@@ -624,7 +624,7 @@ def frame_lengths(mp4: Path) -> bool:
         return False
     pts = sorted(p for p, _ in meta)
     step = {p: (pts[i + 1] - p if i + 1 < len(pts) else (p - pts[i - 1] if i else 0)) for i, p in enumerate(pts)}
-    tmp = derived_path(mp4.with_suffix(""), suffix=".len.mp4")
+    tmp = mp4.with_name(mp4.stem + ".len.mp4")
     try:
         with av.open(str(mp4)) as src, av.open(str(tmp), "w", format="mp4", options={"movflags": "+faststart"}) as dst:
             if tag == HALFWAY_TAG:

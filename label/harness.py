@@ -57,7 +57,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from label import episode as me, policy
-from label.atomic import derived_name, derived_path, write_atomic
+from label.atomic import write_atomic
 from label.errors import DispatchError, KeyExhausted, SpendCap, Truncated
 from label.route import route_width
 
@@ -659,7 +659,7 @@ def _billing_fields(out_path: Path) -> dict:
                             ('inspection', record.get('evidence_inspection') or {})):
             cost = auxiliary_cost(value, routing=kind == 'route')
             retain(kind, value, cost)
-    cache = Path(out_path).parent / '.evidence' / derived_name(Path(out_path).name, suffix='.inspection.json')
+    cache = Path(out_path).parent / '.evidence' / (Path(out_path).name + '.inspection.json')
     if cache.exists():
         from label.evidence_access import recover_selection_reservations
         inspection = json.loads(cache.read_text())
@@ -757,7 +757,7 @@ def record_budget_refusal(path: Path, request: dict) -> bool:
         raise ValueError('a budget refusal needs the verified dry request')
     fields = {key: request[key] for key in ('episode_dir', 'model', 'reasoning_effort',
               'input_identity', 'annotation_policy') if key in request}
-    write_atomic(derived_path(path, 'noreply_'), {
+    write_atomic(path.with_name('noreply_' + path.name), {
         **fields, **_billing_fields(path), 'parse_ok': False,
         'final_dispatch_outcome': 'not dispatched', 'final_reserved_usd': 0.0,
         'no_reply_kind': 'spend_cap', 'no_reply': 'No remaining spend allowance for the final annotation.'})
@@ -1187,7 +1187,7 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
             valid = False
         if not valid:
             reason = 'Request inputs changed during assembly or inspection; no final annotation was dispatched.'
-            write_atomic(derived_path(out_path, 'noreply_'), {
+            write_atomic(Path(out_path).with_name(f'noreply_{Path(out_path).name}'), {
                 'episode_dir': str(ep_dir), 'model': model, 'reasoning_effort': reasoning, **fields,
                 'parse_ok': False, 'no_reply': reason, 'final_dispatch_outcome': 'not dispatched',
                 'final_reserved_usd': 0.0})
@@ -1213,9 +1213,9 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
                 return final_cost_bound(parts, ea.MAX_SELECTION_TOKENS, model=model,
                                         require_known_pricing=require_known_pricing,
                                         **({'pricing_quote': pricing_quote} if pricing_quote is not None else {}))
-            cache = Path(out_path).parent / '.evidence' / derived_name(Path(out_path).name, suffix='.inspection.json')
+            cache = Path(out_path).parent / '.evidence' / (Path(out_path).name + '.inspection.json')
             if force_refresh and cache.exists():
-                persist_final_claim(derived_path(out_path, 'noreply_'), {
+                persist_final_claim(Path(out_path).with_name(f'noreply_{Path(out_path).name}'), {
                     'episode_dir': str(ep_dir), 'model': model, 'reasoning_effort': reasoning, **fields,
                     'parse_ok': False, 'final_dispatch_outcome': 'not dispatched', 'final_reserved_usd': 0.0,
                     'no_reply': 'Inspection refresh requested; earlier receipts retained in billing history.'})
@@ -1254,14 +1254,14 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
                 failed = {'episode_dir': str(ep_dir), 'model': model, 'reasoning_effort': reasoning,
                           **fields, 'parse_ok': False, 'no_reply': f'{type(error).__name__}: {error}',
                           'final_dispatch_outcome': 'not dispatched'}
-                write_atomic(derived_path(out_path, 'noreply_'), failed)
+                write_atomic(Path(out_path).with_name(f'noreply_{Path(out_path).name}'), failed)
                 raise
             doc['previously_billed_usd'] = inspection_billed(fields, doc.get('digest'))
             auxiliary_cost(doc)
             fields['evidence_inspection'] = doc
             if doc.get('pause_reason') == 'spend_cap':
                 reason = 'Inspection selection exceeds the remaining batch spend cap; final annotation deferred.'
-                write_atomic(derived_path(out_path, 'noreply_'), {
+                write_atomic(Path(out_path).with_name(f'noreply_{Path(out_path).name}'), {
                     'episode_dir': str(ep_dir), 'model': model, 'reasoning_effort': reasoning, **fields,
                     'parse_ok': False, 'no_reply': reason, 'no_reply_kind': 'spend_cap',
                     'final_dispatch_outcome': 'not dispatched', 'final_reserved_usd': 0.0})
@@ -1302,7 +1302,7 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
         return result
     bound = final_cost_bound(content, max_tokens, model=model, require_known_pricing=require_known_pricing,
                              **({'pricing_quote': pricing_quote} if pricing_quote is not None else {}))
-    claim_path = derived_path(out_path, 'noreply_')
+    claim_path = Path(out_path).with_name(f'noreply_{Path(out_path).name}')
     fields['config']['request_images']['dispatch_status'] = 'dispatch_claimed'
     claim = {"episode_dir": str(ep_dir), "model": model, "reasoning_effort": reasoning, **fields,
              "parse_ok": False, "no_reply": "final model call has no verified response",
@@ -1359,7 +1359,7 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
                 'finish_reason': finish, **_served(resp), 'usage': received_usage,
                 'final_dispatch_outcome': 'received' if received_cost is not None else 'unverified'}
     received.pop('no_reply', None)
-    received_path = derived_path(out_path, 'failed_') if finish == 'length' else Path(out_path)
+    received_path = Path(out_path).with_name(f'failed_{Path(out_path).name}') if finish == 'length' else Path(out_path)
     persist_final_claim(received_path, received)
     claim_path.unlink(missing_ok=True)
     if finish == "length":
@@ -1379,7 +1379,7 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
         if cost is None:
             failed.update(final_dispatch_outcome="unverified", final_reserved_usd=bound,
                           usage_reported=raw_usage)
-        write_atomic(derived_path(out_path, 'failed_'), failed)
+        write_atomic(Path(out_path).with_name(f"failed_{Path(out_path).name}"), failed)
         claim_path.unlink(missing_ok=True)
         raise Truncated(f"response truncated (finish_reason=length) at max_tokens={max_tokens}", episode_cost(failed))
     # an unparseable reply is recorded as it came, never repaired or retried
@@ -1830,7 +1830,7 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                 return ("invalid" if r.get("parse_ok") is False and not r.get("dry_run") else "ok", ep, c)
             except KeyExhausted as e:
                 if not e.verified_unpaid:
-                    failure = derived_path(out_for(ep), 'noreply_')
+                    failure = out_for(ep).with_name(f'noreply_{out_for(ep).name}')
                     if failure.exists() and not reserved[0]:
                         with spend_lock:
                             spent['usd'] += episode_cost(json.loads(failure.read_text())) - selection_accounted[0] - prior_cost
@@ -1844,7 +1844,7 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                 continue
             except DispatchError as e:
                 if not e.verified_unpaid:
-                    failure = derived_path(out_for(ep), 'noreply_')
+                    failure = out_for(ep).with_name(f'noreply_{out_for(ep).name}')
                     if failure.exists() and not reserved[0]:
                         with spend_lock:
                             spent['usd'] += episode_cost(json.loads(failure.read_text())) - selection_accounted[0] - prior_cost
@@ -1864,7 +1864,7 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
             except SpendCap as e:
                 return ("skip", ep, str(e))
             except Exception as e:
-                failure = derived_path(out_for(ep), 'noreply_')
+                failure = out_for(ep).with_name(f"noreply_{out_for(ep).name}")
                 if failure.exists() and not reserved[0]:
                     with spend_lock:
                         spent['usd'] += episode_cost(json.loads(failure.read_text())) - selection_accounted[0] - prior_cost
@@ -1884,7 +1884,7 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
         """noreply_<episode>.json beside the outputs: why the episode got no reply (the spend cap reached, every key out
         of credit, a request that could not be built or a call that failed), so the board shows the episode and says
         why (board/to_board.py label_outputs). Removed once the episode has a reply; a dry run writes none."""
-        p = derived_path(out_for(ep), 'noreply_')
+        p = out_for(ep).with_name(f"noreply_{out_for(ep).name}")
         if dry:
             return
         if why is None:
@@ -1932,7 +1932,7 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                 skipped += 1
                 cap_refused += 1
                 try:
-                    total_cost += episode_cost(json.loads(derived_path(out_for(ep), 'noreply_').read_text()))
+                    total_cost += episode_cost(json.loads(out_for(ep).with_name(f"noreply_{out_for(ep).name}").read_text()))
                 except (OSError, ValueError, TypeError, AttributeError):
                     pass
                 print(f"SKIP {ep.name}: {info}", file=sys.stderr, flush=True)
@@ -2015,7 +2015,7 @@ def main() -> int:
                     sample_fps=args.sample_fps, task_mode=args.task_mode, dataset_note=args.dataset_note)
     if args.episode_dir:
         target = args.out or (args.episode_dir / 'labels.json')
-        claim = derived_path(target, 'noreply_')
+        claim = target.with_name(f'noreply_{target.name}')
         if claim.exists() and not args.force and args.episode_dir.name not in args.retry_received:
             print(f'{claim}: existing no-reply claim cannot authorize a new call; use --force explicitly',
                   file=sys.stderr)

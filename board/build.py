@@ -109,7 +109,7 @@ from pathlib import Path
 from board.to_board import (and_list, convert, dumps, field_words, label_failed, label_outputs, off_schema_text,
                             typed)
 from checks import label_consistency
-from label.atomic import derived_name, write_atomic
+from label.atomic import write_atomic
 
 SEVERITIES = ["low", "medium", "high"]
 # the deterministic checks copied from context.json into the episode's dataset_checks
@@ -883,8 +883,7 @@ def _discard_publication(root: Path) -> None:
 
 def recover_publications(board: Path, name: str | None = None) -> None:
     """Restore interrupted installs; retain unrecognized backups for inspection."""
-    pattern = glob.escape(derived_name(name, '.', '.rollback-')) + '*' if name else '.*.rollback-*'
-    for root in sorted(board.glob(pattern)):
+    for root in sorted(board.glob(f'.{glob.escape(name)}.rollback-*' if name else '.*.rollback-*')):
         if not root.is_dir():
             continue
         marker = root / 'publication.json'
@@ -963,7 +962,7 @@ def publish_directory(old: Path, new: Path) -> None:
     # Derived outputs contain regular files. Reject links before touching live data.
     if any(p.is_symlink() for root in (old, new) for p in [root, *root.rglob('*')]):
         raise OSError(errno.ENOTSUP, 'Portable directory publication requires regular files')
-    backup_root = Path(tempfile.mkdtemp(prefix=derived_name(old.name, '.', '.rollback-'), dir=old.parent))
+    backup_root = Path(tempfile.mkdtemp(prefix=f'.{old.name}.rollback-', dir=old.parent))
     backup = backup_root / 'previous'
     marker = backup_root / 'publication.json'
     state = {'format': 'argus-publication/1', 'target': old.name, 'phase': 'copying'}
