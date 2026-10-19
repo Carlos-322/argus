@@ -206,6 +206,7 @@ def test_prompt_budget_preserves_small_optical_comparisons_and_quality_limits():
     _, doc = evidence({0: pad(), 4: pad(2)})
     template = doc['sensors'][0]
     doc['sensors'] = []
+    doc['episode_window_s'] = [0., 48.]
     for channel in range(4):
         sensor = copy.deepcopy(template)
         sensor['id'] = f'camera:extra{channel + 1}'
