@@ -35,7 +35,7 @@ SOURCE_HASH_LIMIT = 16 * 1024 * 1024
 IMPLEMENTATION_SHA256 = hashlib.sha256(b''.join(path.read_bytes() for path in (
     Path(__file__), Path(__file__).with_name('depth.py'),
     Path(__file__).with_name('dictionary_context.py'), Path(__file__).with_name('sensor_evidence.py'),
-    Path(__file__).with_name('optical_motion.py'),
+    Path(__file__).with_name('optical_motion.py'), Path(__file__).with_name('tactile_arrays.py'),
     Path(__file__).parent.parent / 'prepare' / 'hdf_metadata.py',
     Path(__file__).parent.parent / 'prepare' / 'mcap_fields.py',
     Path(__file__).parent.parent / 'prepare' / 'state_contract.py',
@@ -753,13 +753,27 @@ class Access:
         window = recording_window_note(self.ep)
         if window:
             description['request_window'] = window.strip()
-        description['already_supplied_sensor_evidence'] = bounded(self.supplied, 16000)
+        supplied = se._array_projection(self.supplied)
+        for row in supplied.get('series') or []:
+            times = row.pop('times', [])
+            row.pop('values', None)
+            row['samples'] = len(times)
+            row['time_range_s'] = [min(times), max(times)] if times else None
+        description['already_supplied_sensor_evidence'] = bounded(supplied, 16000)
         parts = [{'type': 'text', 'text': 'RECORDING CONTEXT\n' + packed(description)}]
         images = [i for i, part in enumerate(content) if part.get('type') == 'image_url']
         if not images:
             parts.extend(p for p in content if p.get('type') == 'text' and len(p.get('text', '')) < 4000)
-        for position in indices(len(images), 4):
-            i = images[position]
+        selected = {images[position] for position in indices(len(images), 4)}
+        array_images = {i for i in images if i and content[i-1].get('type') == 'text'
+                        and content[i-1].get('text', '').startswith('TACTILE ARRAY SNAPSHOTS |')}
+        if array_images:
+            # Keep every bounded array comparison plus scene context. Uniformly
+            # choosing four image parts can otherwise skip the only sensor map.
+            required = array_images | {images[0], images[-1]}
+            limit = max(4, len(required))
+            selected = required | set(sorted(selected - required)[:max(0, limit - len(required))])
+        for i in sorted(selected):
             if i and content[i-1].get('type') == 'text':
                 parts.append({'type': 'text', 'text': content[i-1]['text'][-2000:]})
             parts.append(content[i])
