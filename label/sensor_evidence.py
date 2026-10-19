@@ -566,15 +566,13 @@ def bind(doc, findings):
                         for k in ('aligned_by', 'camera_aligned_by', 'clock_problem', 'method')):
                     reason = 'cited sensor has no verified episode alignment'; break
                 supports = f.get('claim_type') in s['capabilities']
-                supports_claim |= supports
                 if supports and f.get('claim_type') == 'marker_motion':
                     pairs = (s.get('marker_motion') or {}).get('pairs') or []
-                    supported = any(type(p.get('p95_px')) in (int, float) and math.isfinite(p['p95_px'])
-                                    and all(any(type(t) in (int, float) and abs(t-p[key]) < .0001 for t in ts)
-                                            for key in ('from_s', 'to_s'))
-                                    for p in pairs) if isinstance(ts, list) else False
-                    if not supported:
-                        reason = 'marker movement lacks a valid cited comparison'; break
+                    supports = any(type(p.get('p95_px')) in (int, float) and math.isfinite(p['p95_px'])
+                                   and all(any(type(t) in (int, float) and abs(t-p[key]) < .0001 for t in ts)
+                                           for key in ('from_s', 'to_s'))
+                                   for p in pairs) if isinstance(ts, list) else False
+                supports_claim |= supports
                 supplied = r['times'] if r else s.get('times') or []
                 available = {t for i, t in enumerate(supplied) if r is None or r['values'][i] is not None}
                 if array:
@@ -588,7 +586,8 @@ def bind(doc, findings):
                 if reason is None and (start < min(supplied) - 1e-6 or end > max(supplied) + 1e-6):
                     reason = 'finding exceeds the evidence clock'; break
             if reason is None and not supports_claim:
-                reason = 'claim type unsupported by cited sensors'
+                reason = ('marker movement lacks a valid cited comparison' if f.get('claim_type') == 'marker_motion'
+                          else 'claim type unsupported by cited sensors')
             # Samples may supply event evidence, or bracket it for a context comparison.
             # An event interval need not end exactly at its discrete sample instants.
             if reason is None and (not cited or max(cited) < start - .0001 or min(cited) > end + .0001):

@@ -175,3 +175,26 @@ def test_optical_algorithm_changes_invalidate_receipts_without_changing_rgb_payl
             assert me.build_request(folder, cell_w=128)['content'] == request['content']
     finally:
         importlib.reload(ea)
+
+
+def test_marker_comparison_can_use_other_supplied_pad_images_as_context():
+    _, doc = evidence({0: pad(), 4: pad(2)})
+    context = copy.deepcopy(doc['sensors'][0])
+    context['id'] = 'camera:extra2'
+    context['marker_motion']['pairs'][0]['p95_px'] = None
+    doc['sensors'].append(context)
+    finding = {'start_s': 0, 'end_s': .4, 'headline': 'The pads respond differently during the grasp',
+               'claim_type': 'marker_motion', 'adds_beyond_video': True,
+               'evidence': [{'sensor_id': 'camera:extra1', 'time_s': [0, .4]},
+                            {'sensor_id': 'camera:extra2', 'time_s': [0, .4]}]}
+    assert se.bind(doc, [finding])['findings'] == [finding]
+    missing = copy.deepcopy(doc)
+    missing['sensors'][0]['marker_motion']['pairs'][0]['p95_px'] = None
+    assert not se.bind(missing, [finding])['findings']
+    for change in ('unshown', 'unaligned'):
+        invalid = copy.deepcopy(doc)
+        if change == 'unshown':
+            invalid['sensors'][1]['times'] = [0]
+        else:
+            invalid['sensors'][1]['episode_alignment_verified'] = False
+        assert not se.bind(invalid, [finding])['findings']
