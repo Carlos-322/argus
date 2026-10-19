@@ -511,7 +511,9 @@ def bind(doc, findings):
                         or not any(abs(t - known) < .0001 for known in available) for t in ts)):
                     reason = 'citation is not an available supplied sample'; break
                 cited.extend(ts)
-                if reason is None and (start < min(supplied) or end > max(supplied)):
+                # Replies serialize seconds to microsecond precision. Do not reject
+                # a boundary solely because its source clock retains extra digits.
+                if reason is None and (start < min(supplied) - 1e-6 or end > max(supplied) + 1e-6):
                     reason = 'finding exceeds the evidence clock'; break
             # Samples may supply event evidence, or bracket it for a context comparison.
             # An event interval need not end exactly at its discrete sample instants.

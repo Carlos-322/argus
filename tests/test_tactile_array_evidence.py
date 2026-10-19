@@ -144,3 +144,18 @@ def test_inspection_sees_array_images_and_a_complete_supplied_field_summary():
     assert not summary.get('truncated')
     assert {r['id'] for r in summary['series']} == {r['id'] for r in doc['series']}
     assert all('values' not in r for r in summary['series'])
+
+
+def test_sensor_clock_accepts_timestamp_rounding_but_rejects_real_overrun():
+    ep = episode({'pressure': np.arange(80).reshape(5, 4, 4)},
+                 [{'name': 'pressure', 'shape': [4, 4]}])
+    ep['times']['exo'] = np.linspace(0, 4.4992719999999995, 5)
+    doc = se.build(ep, {'n': 5, 'ks': [0, 2, 4]})
+    finding = {'start_s': 0, 'end_s': 4.499272, 'headline': 'Cell readings fluctuate',
+               'claim_type': 'response_change', 'adds_beyond_video': True,
+               'evidence': [{'sensor_id': 'signal:pressure', 'time_s': [0, 4.499272]}]}
+    assert se.bind(doc, [finding])['findings'] == [finding]
+    for interval in ({'start_s': -0.001}, {'end_s': 4.500272}):
+        rejected = se.bind(doc, [{**finding, **interval}])
+        assert not rejected['findings']
+        assert rejected['unbound_findings'][0]['reason'] == 'finding exceeds the evidence clock'
