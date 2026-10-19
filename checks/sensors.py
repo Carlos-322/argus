@@ -5,6 +5,7 @@
 EPISODES are folders of prepared episode_* folders. For each episode this reads signals.npz and depth.json (written by
 prepare/formats.py) and writes context["sensor_checks"]; `python -m board build` copies it into the episode's
 dataset_checks, and the board lists it under Checks. None of it goes into the prompt.
+Failed and obsolete assessments are retried; exit 3 indicates recorded partial failure.
 
 Like the signals the model is shown (label/signals.py), nothing here knows what a sensor is called. Each check reads
 how the numbers behave:
@@ -44,6 +45,7 @@ from label import depth as dp
 from label import episode as me
 from label import signals as sg
 from label.atomic import write_atomic
+from checks import EXIT_PARTIAL
 
 NO_READING_SHARE = 0.2
 PINNED_SHARE = 0.1
@@ -51,6 +53,7 @@ DEPTH_INVALID_SHARE = 0.5
 DEPTH_OFFSET_FRAMES = 2.0
 DEPTH_SAMPLES = 24
 CLOCK_OFFSET_FRAMES = 1.0
+VERSION = 3
 
 NAMES = {"no_reading": "Signal has no reading at many frames", "partial_reading": "Signal has partial readings",
          "constant": "Signal never changes",
@@ -122,7 +125,9 @@ def _signal_findings(ep: dict, name: str, a, skipped: dict) -> list[dict]:
         if sg.has_rest(ok):
             way = sg.direction(ok)
             if way:
-                edge = np.nanmax(ok) if way == "up" else np.nanmin(ok)
+                # the far end of its finite readings: an infinite value is no reading, never the top of the range
+                edge = np.max(ok, where=np.isfinite(ok), initial=-np.inf) if way == "up" else \
+                    np.min(ok, where=np.isfinite(ok), initial=np.inf)
                 pinned = (ok == edge).mean(axis=0)
                 many = np.flatnonzero(pinned > PINNED_SHARE)
                 if len(many):
@@ -162,7 +167,9 @@ def depth_findings(ep: dict) -> list[dict]:
     pick = [ks[int(i)] for i in np.linspace(0, len(ks) - 1, min(DEPTH_SAMPLES, len(ks)))]
     imgs = None
     for v, e in d.items():
-        name = me.cam_name(ep, v)
+        name = me.depth_label(ep, v)
+        # Explicitly unpaired depth cannot be compared to a different camera that shares its display slot.
+        paired = e.get('paired_camera', v if v in ep['sources'] else None)
         got = dp.at_anchor(ep, d, v, pick)
         if not got:
             continue
@@ -172,19 +179,19 @@ def depth_findings(ep: dict) -> list[dict]:
                         "evidence": f"on average {inv:.0%} of the pixels of {name}'s depth pictures hold no reading"})
         same = [(a, b) for a, b in zip(pick, pick[1:]) if a in got and b in got and np.array_equal(got[a], got[b])
                 and int(e["km"][a]) != int(e["km"][b])]
-        if same:
+        if same and paired in ep['sources']:
             if imgs is None:
                 imgs = me.frames(ep, {"ks": pick})
-            moved = [(a, b) for a, b in same if a in imgs[v] and b in imgs[v]
-                     and float(np.abs(np.asarray(imgs[v][a].convert("L"), dtype=np.float32)
-                                     - np.asarray(imgs[v][b].convert("L"), dtype=np.float32)).mean()) > 2.0]
+            moved = [(a, b) for a, b in same if a in imgs[paired] and b in imgs[paired]
+                     and float(np.abs(np.asarray(imgs[paired][a].convert("L"), dtype=np.float32)
+                                     - np.asarray(imgs[paired][b].convert("L"), dtype=np.float32)).mean()) > 2.0]
             if moved:
                 out.append({"check": "depth_frozen", "camera": name, "t_s": round(me.frame_time(ep, moved[0][0]), 2),
                             "evidence": f"{name}'s depth picture is identical between {len(moved)} pairs of sampled "
                                         f"instants while its colour frames change (first at "
                                         f"{me.frame_time(ep, moved[0][0]):.2f} s)"})
         td = e.get("t") if e.get("t") is not None else (ep.get("times") or {}).get(f"depth_{v}")
-        if td is not None:
+        if td is not None and paired in ep['sources']:
             n = int(pl["n"])
             ta = np.array([me.frame_time(ep, k) for k in range(n)])
             step = float(np.median(np.diff(ta))) if n > 1 else 1 / me.ep_fps(ep)
@@ -260,8 +267,13 @@ def run_episode(ep_dir: Path) -> dict | None:
         applies |= set(SIGNAL_CHECKS)
     if len(ep["context"].get("clocks") or []) >= 2:
         applies.add("clock_offset")
-    if ep.get("depth"):
-        applies |= {"depth_invalid", "depth_frozen", "depth_offset"}
+    depth = ep.get('depth') or {}
+    unpaired_depth = [me.depth_label(ep, view) for view, entry in depth.items()
+                      if entry.get('paired_camera', view if view in ep['sources'] else None) not in ep['sources']]
+    if depth:
+        applies.add('depth_invalid')
+        if len(unpaired_depth) < len(depth):
+            applies |= {'depth_frozen', 'depth_offset'}
     fired = {f["check"] for f in found}
     ran_on = {(f["check"], f.get("signal")) for f in found}     # a check with a finding on a signal ran on it
 
@@ -269,6 +281,9 @@ def run_episode(ep_dir: Path) -> dict | None:
         if c in errored:
             return {"check": c, "name": NAMES[c], "status": "errored", "error": errored[c]}
         row = {"check": c, "name": NAMES[c], "status": "fired" if c in fired else "clear" if c in applies else "na"}
+        if c in ('depth_frozen', 'depth_offset') and unpaired_depth:
+            why = ', '.join(unpaired_depth) + ': no available paired colour camera'
+            row['why' if row['status'] == 'na' else 'not_run_on'] = why
         # a signal check names the signals it was not run on; one run on no signal is not assessed, never clear
         left = {nm: why for nm, why in skipped.items() if (c, nm) not in ran_on} if c in SIGNAL_CHECKS else {}
         if left and row["status"] != "na":
@@ -300,6 +315,25 @@ def _safe(d: str):
                    "checks": [{"check": c, "name": NAMES[c], "status": "errored", "error": err} for c in NAMES]}, None
 
 
+def needs_check(ctx: dict) -> bool:
+    versions = ctx.get('check_versions')
+    if (not isinstance(versions, dict) or type(versions.get('sensor_checks')) is not int
+            or versions['sensor_checks'] != VERSION or 'sensor_checks' not in ctx):
+        return True
+    result = ctx['sensor_checks']
+    if result is None:
+        return False
+    if not isinstance(result, dict) or result.get('error'):
+        return True
+    checks = result.get('checks')
+    if not isinstance(checks, list) or not all(isinstance(row, dict) for row in checks):
+        return True
+    names = [row.get('check') for row in checks]
+    return (not all(isinstance(name, str) for name in names) or len(names) != len(set(names))
+            or set(names) != set(NAMES)
+            or any(row.get('status') not in ('clear', 'fired', 'na') for row in checks))
+
+
 def main():
     ap = argparse.ArgumentParser(prog="python -m checks.sensors", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -311,7 +345,7 @@ def main():
     for root in a.roots:
         for d in sorted(root.glob("episode_*")):
             ctx_path = d / "context.json"
-            if ctx_path.exists() and (a.force or "sensor_checks" not in json.loads(ctx_path.read_text())):
+            if ctx_path.exists() and (a.force or needs_check(json.loads(ctx_path.read_text()))):
                 eps.append(str(d))
     print(f"episodes to check: {len(eps)}", flush=True)
     done = fired = failed = 0
@@ -332,22 +366,23 @@ def main():
                     if c["check"] == "dead_values":
                         c["status"] = "fired"
             done += 1
-            if err:
+            errors = [check for check in (r or {}).get('checks', []) if check.get('status') == 'errored']
+            if err or (r and r.get('error')) or errors:
                 failed += 1
-                print(f"FAILED {Path(d).name}: {err}", flush=True)
-                continue
-            if r and r.get("error"):
-                failed += 1
-                print(f"ERRORED {Path(d).name}: {r['error']}", flush=True)
+                reason = err or r.get('error') or errors[0].get('error', 'sensor checks could not finish')
+                print(f"ERRORED {Path(d).name}: {reason}", flush=True)
             p = Path(d) / "context.json"
             ctx = json.loads(p.read_text())
             ctx["sensor_checks"] = r
+            versions = ctx.get('check_versions')
+            ctx['check_versions'] = {**(versions if isinstance(versions, dict) else {}), 'sensor_checks': VERSION}
             write_atomic(p, ctx, indent=1)
             if r and r["notes"]:
                 fired += 1
                 print(f"SENSORS {Path(d).name}: " + "; ".join(n["evidence"] for n in r["notes"][:4]), flush=True)
     print(f"done {done} with_notes={fired} failed={failed}", flush=True)
+    return EXIT_PARTIAL if failed else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

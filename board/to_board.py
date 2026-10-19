@@ -61,6 +61,7 @@ def label_failed(result: dict) -> dict | None:
     that could not be built; label/harness.py run_batch), or a reply the board could not read although it parsed
     (not_shown, with the error and the start of the reply; board/build.py). None for any other output, a reply that
     parsed or one written without parse_ok (by hand, or by an older harness), which is its labels."""
+    from label.harness import reply_truncated
     if result.get("unreadable"):
         return {"status": "unreadable", "error": str(result["unreadable"])[:RAW_HEAD]}
     if result.get("no_reply"):
@@ -83,7 +84,7 @@ def label_failed(result: dict) -> dict | None:
             **({'no_reply_kind': 'spend_cap'} if g.get('no_reply_kind') == 'spend_cap'
                and g.get('final_dispatch_outcome') == 'not dispatched' else {})}
             for g in st["missing"] if isinstance(g, dict)]}
-    if result.get("finish_reason") == "length" and "labels" not in result:
+    if reply_truncated(result):
         return {"status": "cut_off", "out_tokens": (result.get("usage") or {}).get("completion_tokens"),
                 "tail": (result.get("content_tail") or "")[-TAIL:]}
     if result.get("parse_ok") is not False:
@@ -98,9 +99,8 @@ def typed(result: dict) -> tuple[dict, list[dict]]:
     """(labels, dropped): a parsed reply's labels with every field of the type the output format gives it
     (label/harness.py typed_labels, which a reply parsed before it was written never went through), and what was left
     out for breaking the format ({"field", "row"?, "why"} per field or row). The run's own output is unchanged."""
-    from label.harness import typed_labels
-    labels = typed_labels(copy.deepcopy(result.get("labels") if isinstance(result.get("labels"), dict) else {}))
-    return labels, [x for x in labels.pop("_dropped", None) or [] if isinstance(x, dict)]
+    from board.label_projection import project
+    return project(result.get("labels") if isinstance(result.get("labels"), dict) else {}, result.get("config"))
 
 
 # the fields of the output format whose plain words are plural (the key events are, the timeline is), and the fields
@@ -158,6 +158,8 @@ def convert(result: dict, dataset: str | None = None) -> dict:
     off = {}
     for x in dropped:
         off[str(x.get("field"))] = off.get(str(x.get("field")), 0) + 1
+    from board.label_projection import diagnostics
+    violations = list(diagnostics(labels, dropped).values())
     scene = labels.get("scene") if isinstance(labels.get("scene"), dict) else {}
     timeline = labels.get("timeline") or []
     eid = Path(result.get("episode_dir", "")).name
@@ -213,6 +215,7 @@ def convert(result: dict, dataset: str | None = None) -> dict:
         completion["task_completed"], completion["failure_kind"] = "failure", "partial"
     # head-camera clips have no single completion: they carry a `tasks` list of activities, each with its
     # own outcome and goal frame, which the board shows as a Tasks panel
+    from board.label_projection import effective_outcome
     tasks = []
     for t in labels.get("tasks") or []:
         oc = str(t.get("outcome") or "").lower()
@@ -221,7 +224,7 @@ def convert(result: dict, dataset: str | None = None) -> dict:
             "task": t.get("task") or "",
             "objects": t.get("objects") or [],
             # a task partly done is a failure of that task, of the kind partial (as the episode's outcome above)
-            "outcome": "failure" if oc == "partial" else oc,
+            "outcome": effective_outcome(oc),
             **({"failure_kind": "partial"} if oc == "partial" else {}),
             "success_predicate": t.get("success_predicate") or "",
             "completed_at_s": t.get("completed_at_s"),
@@ -310,6 +313,7 @@ def convert(result: dict, dataset: str | None = None) -> dict:
         },
         "_usage": result.get("usage"),
         **({"_off_schema": off} if off else {}),
+        **({"_schema_violations": violations} if violations else {}),
         **({"_label_failed": failed} if failed else {}),
     }
 
@@ -359,27 +363,29 @@ def label_outputs(in_dir: Path) -> tuple[dict, list[str]]:
         except (OSError, ValueError) as e:
             r = {"no_reply": f"{f.name} does not read ({type(e).__name__}: {e})"}
         outs.setdefault(name, (f, {**r, "parse_ok": False, "no_reply": r.get("no_reply") or "no reason recorded"}))
-    from label.harness import billing_record
+    from label.harness import annotation_record
     represented = {path.stem.removeprefix('failed_').removeprefix('noreply_') for path, _ in outs.values()}
     candidates = list(outs.items()) + [(name, (path, record)) for name, (path, record) in dry_outputs
         if path.stem not in represented]
     for name, (path, record) in candidates:
         canonical = path.name.removeprefix('failed_').removeprefix('noreply_')
         try:
-            latest = billing_record(in_dir, canonical)
+            latest = annotation_record(in_dir, canonical)
         except (OSError, ValueError, TypeError):
             if not record.get('unreadable'):
                 outs[name] = (path, {'parse_ok': False,
                     'unreadable': name + '.json: saved billing receipts could not be verified'})
             continue
-        if latest is None or latest[1].get('final_attempt_index', 0) <= record.get('final_attempt_index', 0):
+        if latest is None:
             continue
         selected_path, selected = latest
         if record.get('dry_run') and not selected.get('dry_run'):
             skipped = [line for line in skipped if line != path.name + ': dry run']
         if selected.get('dry_run'):
             outs.pop(name, None)
-            skipped.append(selected_path.name + ': dry run')
+            line = selected_path.name + ': dry run'
+            if line not in skipped:
+                skipped.append(line)
         elif selected_path.name.startswith('noreply_'):
             outs[name] = (selected_path, {**selected, 'parse_ok': False,
                 'no_reply': selected.get('no_reply') or 'no reason recorded'})

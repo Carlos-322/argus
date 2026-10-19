@@ -39,7 +39,7 @@ class DamagedFrame(FrameError):
 
 
 def frame_pts_step(time_base: Fraction, fps: float = FPS) -> int:
-    step = Fraction(1) / Fraction(fps).limit_denominator(1000) / time_base
+    step = Fraction(1) / Fraction(fps).limit_denominator(1_000_000) / time_base
     if step.denominator != 1:
         raise FrameError(f"time base {time_base} does not put {fps} fps frames on integer pts")
     return int(step)
@@ -76,7 +76,7 @@ def extract_frames(packed: str | Path, base_s: float, n_frames: int, ks: list[in
         raise FrameError(f"requested frames {ks[0]}..{ks[-1]} outside the episode's 0..{n_frames - 1}")
     if pts is not None and len(pts) != n_frames:
         raise FrameError(f"{len(pts)} pts given for {n_frames} frames ({packed})")
-    b0 = base_frame(base_s, fps)
+    b0 = base_frame(base_s, fps) if pts is None else None
     from prepare import display
     geom = display.geometry(str(packed))
     out = {}
@@ -87,6 +87,7 @@ def extract_frames(packed: str | Path, base_s: float, n_frames: int, ks: list[in
         s.codec_context.thread_count = 1
         step = frame_pts_step(s.time_base, fps) if pts is None else None
         dec, last_k, seek_cost = None, None, []
+        reference_damaged = False
         for k in ks:
             target = int(pts[k]) if pts is not None else (b0 + k) * step
             # Seek to the keyframe at or before the target, then decode forward to the frame whose
@@ -97,14 +98,20 @@ def extract_frames(packed: str | Path, base_s: float, n_frames: int, ks: list[in
             if not forward:
                 c.seek(target, stream=s, backward=True, any_frame=False)
                 dec = c.decode(s)
+                reference_damaged = False
             n = 0
             for fr in dec:
                 n += 1
+                # Inspect every decoded dependency, including pictures preceding the requested target.
+                if fr.key_frame:
+                    reference_damaged = False
+                if fr.is_corrupt:
+                    reference_damaged = True
                 if fr.pts is None or fr.pts < target:
                     continue
                 if fr.pts != target:
                     raise FrameError(f"frame {k}: expected pts {target}, decoder gave {fr.pts} ({packed})")
-                if fr.is_corrupt:
+                if reference_damaged:
                     raise DamagedFrame(f"frame {k}: the decoder marks it damaged ({packed})")
                 im = upright(fr, geom)
                 out[k] = keep(k, im) if keep is not None else im

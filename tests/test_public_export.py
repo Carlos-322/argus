@@ -1,10 +1,58 @@
 """Privacy belongs at every JSON boundary, after source/freshness interpretation."""
 import copy
 import json
+import base64
 
 import pytest
 
-from board.public_export import project, public_build_manifest
+from board.public_export import UPLOADER_VALUE_WITHHELD, project, public_build_manifest
+
+
+def test_credential_values_and_access_attributes_do_not_escape_under_native_names():
+    def segment(value):
+        return base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip('=')
+    jwt = '.'.join((segment({'alg': 'HS256', 'typ': 'JWT'}), segment({'sub': 'fixture'}), 'signature'))
+    secrets = [jwt, '-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----',
+               'AKIA' + 'A' * 16, 'ghp_' + 'a' * 36, 'sk-ant-' + 'a' * 40,
+               'xoxb-' + '1' * 12 + '-' + '2' * 12 + '-' + 'a' * 24,
+               'Bearer unusable-fixture', 'Authorization: Token unusable-fixture',
+               'Connect with Authorization: Bearer unusable-fixture, then inspect the image.',
+               'https://discord.com/api/webhooks/123456789/' + 'a' * 60,
+               'camera.example-tailnet.ts.net/path', 'operator@100.101.7.9']
+    secrets.append('Basic ' + base64.b64encode(b'fixture:unusable').decode())
+    names = ('jwt', 'csrf', 'sentry_dsn', 'connection_string', 'otp_seed', 'pass', 'pwd',
+             'privateKeyPem', 'secret_key_base', 'api_keys', 'secrets', 'tokens')
+    native = {'session_id': 'session-17', 'session': 4, 'signature': [0.1, 0.2], 'sig': 3,
+              'eos_token': '</s>', 'pad_token': '<pad>', 'stop_token': '<end>',
+              **{key + '_key': '/observations/' + key for key in
+                 ('task', 'image', 'video', 'language', 'episode', 'primary')},
+              'firmware_version': '10.3.0.17', 'token_ids': [1, 7],
+              'key': 'a' * 32,
+              'task_name': 'Basic calibration', 'episode_prompt': 'Basic grasp',
+              'citation': 'https://example.org/paper',
+              'text': 'The gripper does not close. Type api_key on the panel.'}
+    raw = {'native': native, 'unknown': secrets,
+           'credentials': {name: 'unusable-fixture' for name in names},
+           'attributes': {name: 'unusable-fixture' for name in names},
+           'service': {'kaggle': {'key': 'a' * 32}},
+           'metadata': {'fields': {'eos_token': '</s>', 'api_key': 'unusable-fixture'}},
+           'sentence': 'Read https://example.org/paper. Authorization: Token unusable-fixture'}
+    before = copy.deepcopy(raw)
+    public = project(raw)
+    assert public['native'] == native
+    assert public['unknown'] == [None] * len(secrets)
+    assert public['attributes'] == {} and public['service'] == {'kaggle': {}}
+    assert public['metadata'] == {'fields': {'eos_token': '</s>'}}
+    assert 'sentence' not in public
+    assert raw == before and project(public) == public
+    from board.build import uploader_groups
+    note = {'kaggle': {'key': 'a' * 32}}
+    flattened = project({'uploader_notes': uploader_groups(note, None, 10)})
+    assert 'a' * 32 not in json.dumps(flattened)
+    field = {'id': 'service-key', 'bindings': [{'context_path': 'uploader_notes/kaggle/key'}],
+             'summary': {'preview': 'a' * 32}}
+    dictionary = project({'fields': [field], 'entries': {'service-key': {'meaning': 'a' * 32}}})
+    assert 'a' * 32 not in json.dumps(dictionary)
 
 
 @pytest.mark.parametrize('outcome,kind,heading,reason', [
@@ -188,7 +236,54 @@ def test_public_build_manifest_contains_counts_and_no_operational_locations():
     assert build == before
 
 
-def test_flattened_source_note_owners_are_private_but_native_fields_and_prose_survive(tmp_path):
+def test_uploader_metadata_values_are_not_published_by_default():
+    # A pattern filter cannot recognise every secret an uploader writes, so public outputs name the uploader's own
+    # metadata without its values unless the operator publishes them.
+    leaks = ['{"token": "PLANTEDWANDB' + 'TOK0007"}', '/Users/someone/Desktop/raw', 'password is hunter2-like',
+             'f3a9c1d2e4b5a6978877665544332211']
+    groups = [{'title': 'Notes in the files', 'kind': 'notes', 'items': [
+        {'name': 'file attribute wandb', 'value': leaks[0]}, {'name': 'raw_dir', 'value': leaks[1]},
+        {'name': 'notes', 'value': leaks[2]}, {'name': 'fields / secret', 'value': leaks[3],
+                                                 '_uploader_field_path': ['info.json', 'fields', 'secret']}]}]
+    shown = project({'uploader_notes': groups, 'recorded_metadata': {'/srv/x/info.json': {'secret': leaks[3]}},
+                     'evidence_inspection': {'inspections': [
+                         {'id': 'inspection:1', 'mode': 'metadata', 'value': leaks[2], 'preview': leaks[1],
+                          'descriptor': {'kind': 'metadata', 'name': 'uploader_notes'}}]}})
+    text = json.dumps(shown)
+    assert not any(leak in text for leak in leaks)
+    assert [item['name'] for item in shown['uploader_notes'][0]['items']][:3] == ['file attribute wandb', 'raw_dir', 'notes']
+    assert '/srv/x' not in text
+    published = [item.get('value') for group in project({'uploader_notes': groups}, uploader_values=True)['uploader_notes']
+                 for item in group['items']]
+    assert leaks[0] in published and leaks[2] in published
+
+
+def test_a_withheld_metadata_receipt_keeps_no_copy_of_its_value():
+    # exact_metadata_values keeps an integer above 2**53 digit for digit beside the value; any key that is not a
+    # description of the request is a possible copy and is left out
+    secret = 987654321098765432109876543210
+    receipt = {'field_id': 'asset.json', 'mode': 'metadata', 'reason': 'customer reference', 'pointer': '/fields/ref',
+               'value': secret, 'preview': str(secret), 'id': 'inspection:abc',
+               'exact_metadata_values': [{'pointer': '/fields/ref', 'decimal': str(secret)}],
+               'some_future_copy': {'digits': str(secret)}}
+    shown = project({'evidence_inspection': {'rounds': [{'receipts': [receipt]}]}})
+    assert str(secret) not in json.dumps(shown)
+    kept = shown['evidence_inspection']['rounds'][0]['receipts'][0]
+    assert kept['value'] == kept['preview'] == UPLOADER_VALUE_WITHHELD and kept['reason'] == 'customer reference'
+    published = project({'evidence_inspection': {'rounds': [{'receipts': [receipt]}]}}, uploader_values=True)
+    assert str(secret) in json.dumps(published)
+
+
+def test_request_shaping_keeps_uploader_values():
+    from board.public_export import reader_context_field
+    groups = [{'title': 'Notes in the files', 'kind': 'notes', 'items': [{'name': 'operator', 'value': 'Ada'}]}]
+    assert reader_context_field('uploader_notes', groups)[0]['items'][0]['value'] == 'Ada'
+
+
+def test_flattened_source_note_owners_are_private_but_native_fields_and_prose_survive(tmp_path, monkeypatch):
+    # what an operator who publishes uploader metadata still gets scrubbed
+    from board import public_export
+    monkeypatch.setattr(public_export, '_PUBLISH_DEFAULT', True)
     from board.build import uploader_groups
     from prepare.formats import h5_text
     import h5py
@@ -315,7 +410,7 @@ def test_flattened_source_note_owners_are_private_but_native_fields_and_prose_su
     for group in uri_public['uploader_notes']:
         for item in group['items']:
             if item['name'] == 'publisher_note':
-                assert item['value'] == uri_notes['publisher_note']
+                assert item['value'] == 'withheld'
             else:
                 assert upper_signed not in item['value'] and citation in item['value']
                 if item['name'].endswith(('asset_urls', 'primitive_values', 'protocol_relative')):
@@ -609,3 +704,20 @@ def test_actual_hdf_dictionary_credentials_keep_descriptors_and_native_signal_va
     assert any(field['name'] == 'credentials' and field['summary']['mean'] == 9
                for field in project(private_views[1])['fields'])
     assert hashlib.sha256(source.read_bytes()).hexdigest() == original
+
+
+@pytest.mark.parametrize('value, secret', [
+    ('sk-learn_preprocessing_pipeline_v2', False),
+    ('HF_LeRobot_dataset_v21_conversion', False),
+    ('token: see-the-tokenizer-config', False),
+    ('Cookie: none-observed-in-this-frame', False),
+    ('sk-or-v1-' + '0123456789abcdef' * 4, True),
+    ('hf_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789', True),
+    ('sk-proj-Xy7Qw9Lk2Jh5Gf8Ds3Ap6Zx1Cv4Bn7Mm', True),
+    ('token: 4f9a8b7c' + '6d5e4f3a2b1c', True),
+    ('Cookie: sessionid=3f9a8b7c6d5e4f3a2b1c0d9e', True),
+    ('password: correcthorsebatterystaple', True),
+])
+def test_names_built_from_words_are_not_taken_for_keys(value, secret):
+    from board.public_export import _credential_value
+    assert _credential_value(value) is secret

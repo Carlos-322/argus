@@ -1,6 +1,7 @@
 """Exercise real public serializers using synthetic private access descriptors."""
 import io
 import json
+from email.message import Message
 import shutil
 import subprocess
 from pathlib import Path
@@ -19,10 +20,13 @@ CITATION = 'https://example.org/public-dataset'
 class Request(serve.Handler):
     def __init__(self, path, body=None, headers=None):
         self.path = path
-        encoded = json.dumps(body or {}).encode()
-        self.headers = {'Content-Length': str(len(encoded)), **(headers or {})}
+        encoded = b'' if body is None else json.dumps(body).encode()
+        self.headers = Message()
+        for key, value in {'Content-Length': str(len(encoded)), **(headers or {})}.items():
+            self.headers[key] = value
         self.rfile, self.wfile = io.BytesIO(encoded), io.BytesIO()
         self.status = None
+        self.close_connection = False
 
     def send_response(self, status):
         self.status = status
@@ -160,6 +164,10 @@ def test_projection_does_not_enable_remote_dictionary_writes(public_sources, mon
 
 
 def test_static_json_boundaries(public_sources, tmp_path, monkeypatch):
+    # the operator published uploader metadata (static site --publish-uploader-values); private paths still never go
+    from board import public_export
+    monkeypatch.setattr(public_export, '_PUBLISH_DEFAULT', True)
+    monkeypatch.setattr(serve, 'EXPORT_UPLOADER_VALUES', True)       # board serve --publish-uploader-values
     monkeypatch.setattr(static, 'plan', lambda *a, **k: [
         {'rec': {'file': 'ep.json', 'episode_id': 'ep', 'duration_s': 1},
          'ds': 'synthetic', 'media': {}, 'frames': {}}])

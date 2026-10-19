@@ -60,10 +60,25 @@ def test_native_image_frames_keep_original_clocks_when_capture_stamps_repeat_or_
     for i, pixels_i in enumerate(pixels):
         x = int(10 + 98 * i / max(n - 1, 1))
         assert pixels_i[35:45, x + 5:x + 15].mean(axis=(0, 1)) == pytest.approx([220, 40, 40], abs=8)
-    assert ctx["source"]["camera_clock"] == ("capture" if clock == "zero" else "arrival" if clock == "absent"
-                                               else "mixed capture and arrival stamps")
+    assert ctx["source"]["camera_clock"] == ("capture" if clock == "zero" else "arrival")
+    assert ctx['source']['presentation_clock']['basis'] == ('capture' if clock == 'zero' else 'mcap_log_time')
+    assert ctx['source']['presentation_clock']['physical_synchronization_verified'] is False
     with np.load(ep / ctx["recorded_camera_ns"]) as recorded:
         assert recorded["exo"].tobytes() == stamps.tobytes()
+    with np.load(ep / ctx['recorded_camera_clocks']) as clocks:
+        np.testing.assert_array_equal(clocks['exo_log_ns'], arrival)
+        np.testing.assert_array_equal(clocks['exo_capture_present'], valid)
+        np.testing.assert_array_equal(clocks['exo_capture_ns'], np.where(valid, capture, 0))
+    if clock != 'zero':
+        loaded = episode.load(ep)
+        expected = (arrival - arrival[0]) / 1e9
+        np.testing.assert_allclose([episode.frame_time(loaded, k) for k in range(n)], expected, atol=1e-9)
+        decoded = episode._decode_view(loaded, 'exo', list(range(n)))
+        assert len(decoded) == n
+        for k, picture in decoded.items():
+            np.testing.assert_array_equal(np.asarray(picture), pixels[k])
+    else:
+        assert any(issue['kind'] == 'camera_timestamp_repeated' for issue in ctx['reader_issues'])
     row = next(row for row in ctx["mcap_field_inventory"] if row["topic"] == "/camera/front/image")
     with np.load(ep / ctx["recorded_mcap_fields"]) as archive:
         assert archive[row["log_ns"]].tobytes() == arrival.tobytes()

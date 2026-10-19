@@ -2,6 +2,14 @@
  "_about": "The families of flagged issues, read by the board's problem filter through board/families.py, which states how an issue is matched to a family and which issues count. An issue belongs to the first family below whose tags, names (the plain names in tag_names.json) or text it matches, else to a family named after its tag. Order matters only where two families could claim the same issue (a blur patch the model filed as a camera fault is privacy blur). checks names deterministic check flags that raise the family, reader_issues the kinds of problem an episode was kept and flagged with (context.json reader_issues) that raise it, completion the outcomes that raise it, and datasets limits a family to those datasets. list is data for a fault in the recording, the scene or the label, mistake for an operator mistake, labelling for a model reply that gave no labels and handling for a limit of how we read or showed the recording or a property of the recording that is not a fault in it (a camera that is not colour); the last two are shown on the episode and never counted. Every reader_issues kind written by the readers and board has one explicit entry here. Unknown kinds from older saved jobs remain visible through the fallback family.",
  "families": [
   {
+   "slug": "external-source-unread",
+   "list": "handling",
+   "name": "External HDF5 storage was not included in the upload",
+   "reader_issues": [
+    "external_source_unread"
+   ]
+  },
+  {
    "slug": "privacy-blur",
    "list": "data",
    "name": "Privacy blur hides task objects",
@@ -90,6 +98,7 @@
     "camera_not_decodable",
     "camera_decode_failed",
     "frames_not_decodable",
+    "frames_damaged",
     "unshown_camera_not_decodable"
    ]
   },
@@ -99,7 +108,8 @@
    "name": "Camera video does not cover the episode",
    "reader_issues": [
     "clip_frame_count",
-    "camera_short"
+    "camera_short",
+    "packed_partial_coverage"
    ]
   },
   {
@@ -136,6 +146,30 @@
    "reader_issues": [
     "mcap_file_damaged",
     "sensor_file_cut"
+   ]
+  },
+  {
+   "slug": "sensor-message-unreadable",
+   "list": "data",
+   "name": "Sensor message payloads could not be decoded",
+   "reader_issues": [
+    "mcap_message_unreadable"
+   ]
+  },
+  {
+   "slug": "publisher-text-clock",
+   "list": "handling",
+   "name": "Publisher text timing is unverified",
+   "reader_issues": [
+    "text_clock_unverified"
+   ]
+  },
+  {
+   "slug": "publisher-text-span",
+   "list": "handling",
+   "name": "Publisher text extends outside the footage",
+   "reader_issues": [
+    "publisher_text_outside_footage"
    ]
   },
   {

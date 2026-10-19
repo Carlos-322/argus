@@ -460,7 +460,8 @@ def test_resume_source_identity_skips_same_input_and_stops_changed_input(tmp_pat
 
     def fake_label(path, target, *, api_key, **kw):
         calls.append(path)
-        result = {'parse_ok': True, 'input_identity': harness.input_identity(path, model='m', reasoning='medium',
+        result = {'parse_ok': True, 'labels': {'task_summary': 'Wait beside the visible workspace.'},
+                  'input_identity': harness.input_identity(path, model='m', reasoning='medium',
                   max_tokens=100, cell_w=0, example_dir=None)}
         target.write_text(json.dumps(result))
         return result
@@ -483,7 +484,7 @@ def test_resume_legacy_reply_is_marked_unverified_without_a_paid_call(tmp_path, 
     (ep / 'context.json').write_text(json.dumps({'profile': 'teleop_arms', 'state_kind': 'none'}))
     out = tmp_path / 'out'
     out.mkdir()
-    (out / f'{ep.name}.json').write_text(json.dumps({'parse_ok': True}))
+    (out / f'{ep.name}.json').write_text(json.dumps({'parse_ok': True, 'labels': {'task_summary': 'Wait beside the visible workspace.'}}))
     monkeypatch.setattr(harness, 'label_episode', lambda *args, **kwargs: pytest.fail('unexpected paid call'))
     assert harness.run_batch([ep], out, keys=['sk-or-test'], concurrency=1, force=False,
                              model='m', reasoning='medium', max_tokens=100, timeout=30) == 0
@@ -548,12 +549,12 @@ def test_spend_cap_stops_new_episodes(tmp_path, monkeypatch):
     def provider(*args, **kwargs):
         calls.append(1)
         return {'usage': {'cost': .01}, 'choices': [{'finish_reason': 'stop',
-                'message': {'content': '{"timeline": []}'}}]}
+                'message': {'content': '{"timeline": [], "task_summary": "Wait beside the visible workspace."}'}}]}
     monkeypatch.setattr(harness, 'call_model', provider)
     out = tmp_path / 'out'
     assert harness.run_batch(episodes, out, keys=['sk-or-a'], concurrency=1, force=False,
         max_spend=cap, model=harness.DEFAULT_MODEL, reasoning='medium', max_tokens=100,
-        timeout=1, cell_w=128) == 0
+        timeout=1, cell_w=128) == 1
     assert len(calls) == len(list(out.glob('episode_*.json'))) == 3
     left = sorted(out.glob('noreply_episode_*.json'))
     assert len(left) == 7
@@ -571,7 +572,8 @@ def test_an_episode_that_got_no_reply_says_why_until_it_gets_one(tmp_path, monke
     def fake_label(ep, out, *, api_key, **kw):
         if state["fail"] and ep.name.endswith("1"):
             raise ValueError("the request could not be built")
-        out.write_text(json.dumps({"parse_ok": True, "usage": {"est_cost_usd": 0.1}}))
+        out.write_text(json.dumps({"parse_ok": True, "labels": {"task_summary": "Wait beside the visible workspace."},
+                                  "usage": {"est_cost_usd": 0.1}}))
         return {"usage": {"est_cost_usd": 0.1}}
 
     monkeypatch.setattr(harness, "label_episode", fake_label)
@@ -833,7 +835,13 @@ def test_final_timeout_claim_survives_resume_without_second_dispatch(tmp_path, m
     assert receipt['final_dispatch_outcome'] == 'unverified'
     assert receipt['final_reserved_usd'] > 0
     assert harness.episode_cost(receipt) == pytest.approx(receipt['final_reserved_usd'] + .004)
-    assert harness.run_batch([ep], out, **args) == 0
+    receipt_path = out / f'noreply_{ep.name}.json'
+    before_resume = receipt_path.read_bytes()
+    # An unresolved charge is a non-successful resume, while its paid request remains held.
+    assert harness.run_batch([ep], out, **args) == 1
+    assert receipt_path.read_bytes() == before_resume
+    marker = json.loads((out / f'stale_{ep.name}.json').read_text())
+    assert marker['status'] == 'unverified' and 'unresolved charge' in marker['reason']
     assert calls == [('selection', 1), ('final', 1)]
 
 
@@ -847,7 +855,7 @@ def test_successful_reply_without_verifiable_usage_keeps_final_reservation(tmp_p
     calls = []
     def provider(*args, **kwargs):
         calls.append(1)
-        return {'choices': [{'finish_reason': 'stop', 'message': {'content': '{}'}}],
+        return {'choices': [{'finish_reason': 'stop', 'message': {'content': '{"timeline": [], "task_summary": "Wait beside the visible workspace."}'}}],
                 **({'usage': usage} if usage is not None else {})}
     monkeypatch.setattr(harness, 'call_model', provider)
     result = harness._call_and_record(tmp_path, out, [{'type': 'text', 'text': 'test'}], 0, {},
@@ -885,7 +893,7 @@ def test_run_batch_does_not_replay_successful_reply_with_missing_usage(tmp_path,
         calls.append(('selection' if selection is not None else 'final', kwargs.get('attempts')))
         if selection is not None:
             return selection
-        return {'choices': [{'finish_reason': 'stop', 'message': {'content': '{}'}}]}
+        return {'choices': [{'finish_reason': 'stop', 'message': {'content': '{"timeline": [], "task_summary": "Wait beside the visible workspace."}'}}]}
     monkeypatch.setattr(harness, 'call_model', provider)
     out = tmp_path / 'job' / 'run' / 'out'
     args = dict(keys=['sk-or-fixture'], concurrency=1, force=False, model='openai/gpt-6-astra',
@@ -898,7 +906,14 @@ def test_run_batch_does_not_replay_successful_reply_with_missing_usage(tmp_path,
     _assert_verified_selection_charge(receipt)
     assert label_spend(tmp_path / 'job') == pytest.approx(receipt['final_reserved_usd'] + .004)
     assert label_spend_complete(tmp_path / 'job') is False
-    assert harness.run_batch([ep], out, **args) == 0
+    receipt_path = out / f'{ep.name}.json'
+    assert harness.annotation_complete(receipt)
+    before_resume = receipt_path.read_bytes()
+    # An unresolved charge is a non-successful resume, while its paid request remains held.
+    assert harness.run_batch([ep], out, **args) == 1
+    assert receipt_path.read_bytes() == before_resume
+    marker = json.loads((out / f'stale_{ep.name}.json').read_text())
+    assert marker['status'] == 'unverified' and 'unresolved charge' in marker['reason']
     assert calls == [('selection', 1), ('final', 1)]
     assert label_spend(tmp_path / 'job') == pytest.approx(receipt['final_reserved_usd'] + .004)
 
@@ -916,17 +931,22 @@ def test_final_claim_survives_worker_crash_and_budget_refusal_has_no_dispatch(tm
     args = dict(keys=['sk-or-fixture'], concurrency=1, force=False, model='openai/gpt-6-astra',
                 reasoning='medium', max_tokens=2000, timeout=1, cell_w=128)
     refused = tmp_path / 'refused'
-    assert harness.run_batch([ep], refused, max_spend=.001, **args) == 0
+    assert harness.run_batch([ep], refused, max_spend=.001, **args) == 1
     assert calls == []
     out = tmp_path / 'crashed'
-    with pytest.raises(KeyboardInterrupt):
-        harness.run_batch([ep], out, max_spend=20, **args)
+    assert harness.run_batch([ep], out, max_spend=20, **args) == 130
     receipt = json.loads((out / f'noreply_{ep.name}.json').read_text())
     assert receipt['final_dispatch_outcome'] == 'claimed'
     _assert_verified_selection_charge(receipt)
     assert harness.episode_cost(receipt) == pytest.approx(receipt['final_reserved_usd'] + .004)
     assert calls == [('selection', 1), ('final', 1)]
-    assert harness.run_batch([ep], out, max_spend=20, **args) == 0
+    receipt_path = out / f'noreply_{ep.name}.json'
+    before_resume = receipt_path.read_bytes()
+    # An unresolved charge is a non-successful resume, while its paid request remains held.
+    assert harness.run_batch([ep], out, max_spend=20, **args) == 1
+    assert receipt_path.read_bytes() == before_resume
+    marker = json.loads((out / f'stale_{ep.name}.json').read_text())
+    assert marker['status'] == 'unverified' and 'unresolved charge' in marker['reason']
     assert calls == [('selection', 1), ('final', 1)]
 
 
@@ -1129,7 +1149,7 @@ def test_dry_run_from_the_command_line(tmp_path, monkeypatch, capsys):
 def test_timeline_rows_convert_and_malformed_rows_fail():
     rows = {"timeline_columns": harness.TIMELINE_COLUMNS,
             "timeline": [[0.0, 1.5, "left", "reach", "cup", None, None, "advancing", 0.1, None],
-                         [1.5, 2.0, "right", "grasp", "cup", None, "in gripper", "advancing", 0.2]]}
+                         [1.5, 2.0, "right", "grasp", "cup", None, "in gripper", "advancing", 0.2, None]]}
     out = harness.normalize_timeline(rows)
     assert "timeline_columns" not in out
     assert out["timeline"][1] == {"start_s": 1.5, "end_s": 2.0, "arm": "right", "action": "grasp", "object": "cup",
@@ -1212,7 +1232,8 @@ def _fake_harness(monkeypatch, calls, cost=0.5, rc=0):
         calls.append({"cmd": cmd, "env": env, "cwd": cwd})
         out = Path(cwd) / "out"
         out.mkdir(exist_ok=True)
-        (out / "episode_a.json").write_text(json.dumps({"parse_ok": True, "usage": {"est_cost_usd": cost}}))
+        (out / "episode_a.json").write_text(json.dumps({"parse_ok": True, "labels": {"task_summary": "Wait beside the visible workspace."},
+                                                                      "usage": {"est_cost_usd": cost}}))
         stdout.write(f"done=1 failed=0 skipped=0 total_cost=${cost:.2f} out_dir={out} retired_keys=0\n")
         return subprocess.CompletedProcess(cmd, rc)
     monkeypatch.setattr(lrun.subprocess, "run", fake_run)
@@ -1250,7 +1271,7 @@ def test_run_folder_name_and_record(tmp_path, monkeypatch, capsys):
     assert (info["status"], info["cost_usd"], info["episodes_done"], info["episodes_failed"]) == ("done", 0.5, 1, 0)
     assert info["footage_hours"] == round(120 / 3600, 3) and info["usd_per_hour"] == 15.0      # $0.50 over 2 minutes
     cmd = calls[0]["cmd"]
-    assert cmd[1:3] == ["-m", "label.harness"] and cmd[cmd.index("--max-spend") + 1] == "2.00"
+    assert cmd[1:3] == ["-m", "label.harness"] and float(cmd[cmd.index("--max-spend") + 1]) == 2.0
     assert cmd[-2:] == ["--model", "m/x"] and "--" not in cmd and "--dry-run" not in cmd
     assert calls[0]["env"]["OPENROUTER_API_KEYS"] == "sk-or-a"                   # only OpenRouter keys are passed
     assert "done=1" in (run / "log.txt").read_text() and '"status": "done"' in capsys.readouterr().out
@@ -1321,7 +1342,7 @@ def test_resume_finishes_the_run_within_what_is_left_of_its_cap(tmp_path, monkey
     _argv(monkeypatch, "--dataset", "d", "--episodes", sl, "--kind", "smoke", "--resume", run, "--why", "rebooted")
     lrun.main()
     cmd = calls[0]["cmd"]
-    assert cmd[cmd.index("--max-spend") + 1] == "0.60" and Path(calls[0]["cwd"]) == run.resolve()
+    assert float(cmd[cmd.index("--max-spend") + 1]) == .6 and Path(calls[0]["cwd"]) == run.resolve()
     info = json.loads((run / "run.json").read_text())
     assert info["resumes"][0]["why"] == "rebooted" and info["resumes"][0]["spent_before"] == 0.4
     assert info["status"] == "done" and info["run_id"] == run.name

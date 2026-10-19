@@ -223,8 +223,19 @@ def test_raw_clock_checks_remain_fired_for_a_qualified_display_clock(tmp_path):
     from checks import capture_qc
     ep = tied_recording(tmp_path, 'all')
     result = capture_qc.assess(capture_qc.extract(ep))
-    assert result['episode']['clock'] == 'assumed camera presentation'
+    assert result['episode']['clock'] == 'recorder arrival times'
+    context = json.loads((ep / 'context.json').read_text())
+    assert context['source']['presentation_clock']['basis'] == 'mcap_log_time'
+    assert context['source']['presentation_clock']['physical_synchronization_verified'] is False
+    with np.load(ep / context['recorded_camera_clocks']) as native, np.load(ep / 'times.npz') as raw, \
+            np.load(ep / context['presentation_times']) as display:
+        for view in context['cameras']:
+            np.testing.assert_array_equal(native[view + '_log_ns'], np.full(60, 1790000000000000000, np.int64))
+            assert not native[view + '_capture_present'].any()
+            np.testing.assert_array_equal(raw[view], np.zeros(60))
+            np.testing.assert_allclose(display[view], np.arange(60) / 30, atol=1e-9)
     assert result['checks']['state_time_non_monotonic_or_duplicate']['status'] == 'fired'
+    assert len(result['checks']['state_time_non_monotonic_or_duplicate']['events']) == len(context['cameras'])
     assert all(result['checks'][k]['status'] == 'not_assessed' for k in capture_qc.CAMERA_MOTION_CHECKS)
 
 

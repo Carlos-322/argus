@@ -15,6 +15,8 @@ the run folders and the episodes they name; nothing is repaired. Per rig:
   served from the provider's prompt cache. In a real run each episode is sent once, so only the rig's shared
   instructions are ever read from the cache. The cold cost reprices every cache read beyond them (the smallest
   nonzero read of the rig in these runs) at the cache-write price, which is the cost of a first send.
+  Unreceived or unverified calls do not become cost samples. Verified charges and unresolved reservations
+  remain separate; incomplete invoice knowledge withholds the cost rate.
 """
 from __future__ import annotations
 
@@ -26,17 +28,20 @@ from pathlib import Path
 
 import numpy as np
 
+from board.label_projection import SEVERITY_RANK
 from checks import label_consistency
-from label.harness import PRICE_IN, episode_cost
+from label.harness import PRICE_IN, DEFAULT_MODEL, annotation_record, billing_view
+from label.receipts import billing_summary
 
 HERE = Path(__file__).resolve().parent
 RIGS = ("teleop", "handheld", "ego")
-SEV = {"low": 1, "medium": 2, "high": 3}
+SEV = SEVERITY_RANK
 # the provider's prompt cache: a read costs a tenth of the input price, a write 1.25 times it
 CACHE_READ, CACHE_WRITE = 0.1 * PRICE_IN, 1.25 * PRICE_IN
-# a sentence that names a word in order to deny it ("rather than chopsticks", "the instruction says chopsticks")
-DENIAL = re.compile(r"\b(not|no|rather than|instead of|instruction|instructed|asked|given|named|called|says|mentions)\b",
-                    re.I)
+def literal_pattern(term: str, *, plural=False):
+    """Literal words/phrases, with an explicit optional regular s plural for held objects."""
+    suffix = 's?' if plural and not term.lower().endswith('s') else ''
+    return re.compile(r'(?<!\w)' + re.escape(term) + suffix + r'(?!\w)', re.I)
 
 
 def load_cases() -> dict:
@@ -94,15 +99,20 @@ FACTS = {"outcome", "not_outcome", "align", "issue", "sev", "mistake", "named", 
 
 
 def judge(case: dict, labels: dict) -> tuple[bool, list[str]]:
-    """(the label meets every fact of the case, why not)."""
+    """(the label meets every fact of the case, why not). Every fact is read from the label's projection
+    (board/label_projection.py), the same values the board shows: its effective outcome, its issues and their
+    severity tiers. A reason starting "needs review:" can come with a met case; it marks what the label leaves open."""
+    from board.label_projection import effective_outcome, issues, max_severity, project, severity
+    from board.polarity import asserted
+    labels, _ = project(labels)
     unknown = set(case) - FACTS
     if unknown:
         raise ValueError(f"gate case states facts the scorer does not judge: {sorted(unknown)}")
     ok, why = [], []
     comp = labels.get("completion") or {}
-    outcome = comp.get("task_completed")
+    outcome = effective_outcome(comp.get("task_completed"))
     if labels.get("tasks") and not outcome:
-        outcome = "tasks:" + ",".join(sorted({str(t.get("outcome")) for t in labels["tasks"]}))
+        outcome = "tasks:" + ",".join(sorted({str(effective_outcome(t.get("outcome"))) for t in labels["tasks"]}))
     if "outcome" in case:
         ok.append(outcome in case["outcome"])
         ok[-1] or why.append(f"outcome {outcome}")
@@ -114,31 +124,60 @@ def judge(case: dict, labels: dict) -> tuple[bool, list[str]]:
         ok.append(rel in case["align"])
         ok[-1] or why.append(f"alignment {rel}")
     if "issue" in case:
-        sevs = [i.get("severity") for i in _matches(labels.get("data_issues"), case["issue"])]
-        need = SEV[case.get("sev", "low")]
-        ok.append(any(SEV.get(s, 0) >= need for s in sevs))
-        ok[-1] or why.append("issue missing" if not sevs else f"issue at {sevs}")
+        matches = _matches(issues(labels, 'data_issues'), case['issue'])
+        sevs = [severity(i) for i in matches]
+        meets = bool(matches)
+        if 'sev' in case:
+            meets = any(SEV.get(tier, 0) >= SEV[case['sev']] for tier in sevs)
+        ok.append(meets)
+        meets or why.append('issue missing' if not matches else f'issue at {sevs}')
     if "mistake" in case:
-        ok.append(bool(_matches(labels.get("operator_mistakes"), case["mistake"])))
+        ok.append(bool(_matches(issues(labels, 'operator_mistakes'), case["mistake"])))
         ok[-1] or why.append("mistake missing")
     if "named" in case:
-        text = " ".join(texts_handled(labels)).lower()
-        miss = [w for w in case["named"] if w not in text]
+        # a word names what was handled only where its own text asserts it: "does not sew" and "never sews the
+        # cloth" name no sewing (board/polarity.py, the reading the problem families use)
+        texts = texts_handled(labels)
+        groups = [[term] if isinstance(term, str) else term for term in case["named"]]
+        if not all(isinstance(group, list) and group and all(isinstance(w, str) and w for w in group)
+                   for group in groups):
+            raise ValueError('named facts require words, phrases or explicit alternatives')
+        miss = [' / '.join(group) for group in groups
+                if not any(asserted(literal_pattern(w), text) for w in group for text in texts)]
         ok.append(not miss)
         miss and why.append(f"never names {miss}")
     if "max_issue_sev" in case:
-        over = [(i.get("category"), i.get("severity")) for i in labels.get("data_issues") or [] if isinstance(i, dict)
-                and SEV.get(i.get("severity"), 0) > SEV[case["max_issue_sev"]]]
-        ok.append(not over)
+        # the bound is on the highest rated severity, as the board counts it; an unrated issue has no tier, so it
+        # cannot break the bound and is reported for review instead
+        shown = issues(labels, 'data_issues')
+        top = max_severity(shown)
+        over = [(item.get('category'), severity(item)) for item in shown
+                if severity(item) and SEV[severity(item)] > SEV[case['max_issue_sev']]]
+        ok.append(top is None or SEV[top] <= SEV[case['max_issue_sev']])
         over and why.append(f"issues above {case['max_issue_sev']}: {over}")
+        unrated = [item.get('category') for item in shown if severity(item) is None]
+        unrated and why.append(f'needs review: {len(unrated)} unrated issues have no severity to bound: {unrated}')
     if "held" in case:
         texts = texts_handled(labels)
-        wrong, right = case["held"]["not_named"], case["held"]["named"]
-        claimed = [t for t in texts if wrong in t.lower() and not DENIAL.search(t)]
-        named = any(re.search(rf"\b{right}s?\b", t, re.I) for t in texts)
-        ok.append(not claimed and named)
-        claimed and why.append(f"claims {wrong}: {claimed[0][:80]}")
-        named or why.append(f"never names a {right}")
+        wrong, right = case['held']['not_named'], case['held']['named']
+        wrong_pattern, right_pattern = literal_pattern(wrong, plural=True), literal_pattern(right, plural=True)
+        # The prompt defines timeline.object as the object acted on. Other prose
+        # can quote instructions or deny a claim; its meaning requires review.
+        objects = [step['object'] for step in labels.get('timeline') or []
+                   if isinstance(step, dict) and isinstance(step.get('object'), str)]
+        claimed = [text for text in objects if wrong_pattern.search(text)]
+        references = [text for text in texts if wrong_pattern.search(text)]
+        named = any(right_pattern.search(text) for text in objects)
+        ok.append(not references and named)
+        if claimed:
+            why.append(f'claims {wrong} in timeline.object: {claimed[0][:80]}')
+        elif references:
+            why.append(f'needs review: {wrong} appears in prose; handling cannot be determined: {references[0][:80]}')
+        if not named:
+            if any(right_pattern.search(text) for text in texts):
+                why.append(f'needs review: no structured timeline.object claim for {right}')
+            else:
+                why.append(f'never names a {right}')
     return all(ok), why
 
 
@@ -149,40 +188,66 @@ def score(runs: list[Path]) -> dict:
 
     def rig_stats(rig):
         return per.setdefault(rig, {"cases": 0, "met": 0, "asked": 0, "parsed": 0, "flags": 0, "cost": {},
-                                    "cache_reads": [], "failures": [], "flagged": []})
+                                    "cache_reads": [], 'cold_valid': True,
+                                    "failures": [], "flagged": [], "unresolved": 0})
     seen = set()
+    selected_runs = []
+    owners = {}
     for run in runs:
+        out = Path(run) / 'out'
+        selected = []
+        names = {file.stem.removeprefix('failed_').removeprefix('noreply_')
+                 for file in out.glob('*.json') if not file.stem.startswith('stale_')}
+        for name in sorted(names & role.keys()):
+            chosen = annotation_record(out, name + '.json')
+            if chosen is None:
+                continue
+            file, record = chosen
+            if name in owners:
+                raise ValueError(f'Duplicate gate episode {name}: {owners[name]} and {file}; score the runs separately')
+            owners[name] = file
+            selected.append((name, file, record))
+        selected_runs.append((Path(run), selected))
+    for run, selected in selected_runs:
         # a setup whose run wrote no output at all still scores, every episode as "no output"
         rj = Path(run) / "run.json"
         ds = str(json.loads(rj.read_text()).get("dataset") or "") if rj.exists() else ""
         if ds.startswith("gate_") and ds[5:] in sel:
             rig_stats(ds[5:])
         out = Path(run) / "out"
-        for f in sorted(out.glob("*.json")):
-            name = f.stem.removeprefix("failed_")
-            if name not in role:
-                continue
-            if name != f.stem and (out / f"{name}.json").exists():
-                continue        # a cut-off reply asked again on a resume: the later reply is the result
+        for name, f, d in selected:
             seen.add(name)
             rig, r = role[name]
             p = rig_stats(rig)
             p["asked"] += 1
-            d = json.loads(f.read_text())
-            if not d.get("parse_ok"):
-                p["failures"].append(f"{name}: did not parse" if "labels" in d else f"{name}: reply cut off")
+            sec = duration_s(Path(d["episode_dir"]))
+            from compare.metrics import read_output
+            response = read_output(f, d)
+            if r.startswith("cost:"):
+                c = p["cost"].setdefault(r[5:], {'billed_usd': 0.0, 'reserved_usd': 0.0,
+                    'cost_complete': True, 'seconds': 0.0, 'episodes': 0, 'measured_usd': 0.0})
+                billing = billing_summary(d, f)
+                c['billed_usd'] += billing['billed_usd']
+                c['reserved_usd'] += billing['reserved_usd']
+                c['cost_complete'] &= billing['cost_complete']
+                if billing['cost_complete'] and response['status'] in ('parsed', 'unparsed', 'cut_off'):
+                    c['seconds'] += sec
+                    c['episodes'] += 1
+                    c['measured_usd'] += billing['billed_usd']
+                    p["cache_reads"].append(int((d.get("usage") or {}).get("cached_tokens") or 0))
+                    # One current usage row cannot reconstruct cache repricing
+                    # across retries or under a different model's tariff.
+                    p['cold_valid'] &= (not billing_view(d).get('final_cost_history')
+                                        and d.get('model') == DEFAULT_MODEL)
+            if response['status'] != 'parsed':
+                reason = {'unparsed': 'did not parse', 'cut_off': 'reply cut off',
+                          'no_response': 'no response', 'pending': 'pending'}[response['status']]
+                p["failures"].append(f'{name}: {reason}')
                 if case_for(name, cases):
                     p["cases"] += 1
                 continue
             p["parsed"] += 1
             labels = d.get("labels") or {}
-            sec = duration_s(Path(d["episode_dir"]))
-            if r.startswith("cost:"):
-                c = p["cost"].setdefault(r[5:], [0.0, 0.0, 0])
-                c[0] += episode_cost(d)
-                c[1] += sec
-                c[2] += 1
-                p["cache_reads"].append(int((d.get("usage") or {}).get("cached_tokens") or 0))
             flags = [x["rule"] for x in label_consistency.check(labels, sec)]
             if flags:
                 p["flags"] += 1
@@ -190,6 +255,7 @@ def score(runs: list[Path]) -> dict:
             case = case_for(name, cases)
             if case:
                 met, why = judge(case, labels)
+                p["unresolved"] += any(reason.startswith("needs review:") for reason in why)
                 p["cases"] += 1
                 p["met"] += met
                 met or p["failures"].append(f"{name}: {'; '.join(why)}")
@@ -203,20 +269,28 @@ def score(runs: list[Path]) -> dict:
                 if case_for(x["name"], cases):
                     p["cases"] += 1
     for p in per.values():
-        billed = sum(c[0] for c in p["cost"].values())
-        hours = sum(c[1] for c in p["cost"].values()) / 3600
+        billed = sum(c['billed_usd'] for c in p["cost"].values())
+        measured = sum(c['measured_usd'] for c in p['cost'].values())
+        reserved = sum(c['reserved_usd'] for c in p['cost'].values())
+        complete = all(c['cost_complete'] for c in p['cost'].values())
+        hours = sum(c['seconds'] for c in p["cost"].values()) / 3600
         reads = [x for x in p["cache_reads"] if x > 0]
         prefix = min(reads) if reads else 0
-        cold = billed + sum(max(0, x - prefix) for x in p["cache_reads"]) * (CACHE_WRITE - CACHE_READ)
-        p["cost_sample"] = {"episodes": sum(c[2] for c in p["cost"].values()), "hours": round(hours, 3),
-                            "billed_usd": round(billed, 2), "cold_usd": round(cold, 2),
-                            "billed_per_hour": round(billed / hours, 1) if hours else None,
-                            "cold_per_hour": round(cold / hours, 1) if hours else None,
+        cold = measured + sum(max(0, x - prefix) for x in p["cache_reads"]) * (CACHE_WRITE - CACHE_READ)
+        p["cost_sample"] = {"episodes": sum(c['episodes'] for c in p["cost"].values()), "hours": round(hours, 3),
+                            "billed_usd": round(billed, 6),
+                            "cold_usd": round(cold, 6) if hours and complete and p['cold_valid'] else None,
+                            'reserved_usd': reserved, 'cost_complete': complete,
+                            "billed_per_hour": round(measured / hours, 1) if hours and complete else None,
+                            "cold_per_hour": round(cold / hours, 1) if hours and complete and p['cold_valid'] else None,
                             "shared_prefix_tokens": prefix}
-        p["cost_by_dataset"] = {ds: {"episodes": c[2], "minutes": round(c[1] / 60, 1), "billed_usd": round(c[0], 2),
-                                     "billed_per_hour": round(c[0] / (c[1] / 3600), 1) if c[1] else None}
+        p["cost_by_dataset"] = {ds: {"episodes": c['episodes'], "minutes": round(c['seconds'] / 60, 1),
+                                     'billed_usd': round(c['billed_usd'], 6), 'reserved_usd': c['reserved_usd'],
+                                     'cost_complete': c['cost_complete'],
+                                     "billed_per_hour": round(c['measured_usd'] / (c['seconds'] / 3600), 1)
+                                     if c['seconds'] and c['cost_complete'] else None}
                                 for ds, c in sorted(p["cost"].items())}
-        del p["cost"], p["cache_reads"]
+        del p["cost"], p["cache_reads"], p['cold_valid']
     return per
 
 
@@ -227,15 +301,22 @@ def main() -> int:
     ap.add_argument("--json", type=Path, default=None, help="also write the full result here")
     a = ap.parse_args()
     per = score(a.runs)
+    if not per:
+        ap.error('No gate episodes found in these runs; use a gate selection to label the sample first.')
     for rig in RIGS:
         if rig not in per:
             continue
         p, c = per[rig], per[rig]["cost_sample"]
+        rate = f"${c['billed_per_hour']}/h billed" if c['billed_per_hour'] is not None else 'cost rate unavailable'
+        if c['cold_per_hour'] is not None:
+            rate += f", ${c['cold_per_hour']}/h cold estimate"
         print(f"{rig:9s} cases {p['met']}/{p['cases']}  parse {p['parsed']}/{p['asked']}  flags {p['flags']}  "
-              f"cost sample {c['episodes']} episodes, {c['hours'] * 60:.1f} min: ${c['billed_per_hour']}/h billed, "
-              f"${c['cold_per_hour']}/h cold")
+              f"needs review {p['unresolved']}  cost sample {c['episodes']} episodes, {c['hours'] * 60:.1f} min: {rate}")
+        if not c['cost_complete']:
+            print(f"    Verified charges ${c['billed_usd']:.6f}; unresolved reservations ${c['reserved_usd']:.6f}.")
         for ds, x in p["cost_by_dataset"].items():
-            print(f"    {ds:15s} {x['episodes']:3d} episodes {x['minutes']:6.1f} min  ${x['billed_per_hour']}/h billed")
+            rate = f"${x['billed_per_hour']}/h billed" if x['billed_per_hour'] is not None else 'cost rate unavailable'
+            print(f"    {ds:15s} {x['episodes']:3d} episodes {x['minutes']:6.1f} min  {rate}")
         for x in p["failures"]:
             print(f"    FAIL {x}")
         for x in p["flagged"]:

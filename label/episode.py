@@ -56,7 +56,7 @@ from label import lens
 from label import prompts, policy
 from label import sensor_evidence as se
 from label import state as ms
-from prepare.signal_alignment import ALIGNED_CAMERA, ALIGNED_ASSUMED, placement_text
+from prepare.signal_alignment import ALIGNED_CAMERA, ALIGNED_ASSUMED, recorder_arrival, placement_text
 from prepare.state_notes import ASSUMED_CLOCK, LAYOUT, NOT_RECORDED, SHORT, STATE_WHY, UNREADABLE
 
 FPS = 30
@@ -147,6 +147,9 @@ def load(ep_dir: Path) -> dict:
                              for s in ctx["signals"]}
         from label.dictionary_context import field_interpretation
         for name, meta in ep["signal_meta"].items():
+            if recorder_arrival(ctx):
+                from prepare.signal_alignment import RECORDER_ARRIVAL
+                meta.setdefault('aligned_by', RECORDER_ARRIVAL)
             interpretation = field_interpretation(ctx, name)
             if interpretation:
                 meta["dictionary"] = interpretation
@@ -368,7 +371,8 @@ def plan(ep: dict) -> dict:
         # field computed from the leader/follower joint lag, not a claim made to the model. It reads the 12 arm
         # joints of two arms (timebase.JOINTS), as measure_folder does, so a one-arm recording is not measured
         checks["timebase"] = timebase.timebase_check(ep["state"][sa:sb], ep["action"][sa:sb],
-                                               ep["context"].get("timebase_neighbour_lag_frames"), ep_fps(ep))
+                                               ep["context"].get("timebase_neighbour_lag_frames"), ep_fps(ep),
+                                               context=ep['context'])
     if kind != "none" and checks["camera_windows_match_state"]:
         spans = [(x + sa, y + sa) for x, y in ms.still_spans(ep["state"][sa:sb], fps=fps, kind=kind,
                                                             grip_range=ms.gripper_full_range(ep["context"]))]
@@ -779,11 +783,22 @@ def placeholder_instants(ep: dict, ks) -> dict:
     return out
 
 
+def camera_label(view: str, ctx: dict) -> str:
+    """A camera as the board names it: the main (or head) camera, the left or right wrist (or gripper), and any other
+    camera by the dataset's own name for it."""
+    rig = ctx.get("profile")
+    if view == "exo":
+        return "head camera" if rig == "ego_head" else "main camera"
+    if view in ("left", "right"):
+        return f"{view} gripper camera" if rig == "handheld_gripper" else f"{view} wrist camera"
+    cam = (ctx.get("cameras") or {}).get(view) or {}
+    return str(cam.get("name") or cam.get("key") or "other") + " camera"
+
+
 def decode_failures(ep: dict) -> list[dict]:
     """The stretches each camera's file could not be decoded at (frames), for the run's record and the board
     (board/build.py reader_issues): [{"camera", "t0_s", "t1_s", "what"}], on the recording's clock (a part of a long
     recording adds where it starts, label/pieces.py). Labelling never writes into the episode folder."""
-    from board.clips import camera_label
     off = float((ep["context"].get("piece") or {}).get("t0_s") or 0.0)
     out = []
     for v, ks in (ep.get("decode_failed") or {}).items():
@@ -1447,6 +1462,10 @@ def contacts_block(ep: dict, pl: dict) -> str:
                'An uninstrumented hand or an unknown hand cannot establish a missing tactile response. '
                'A discrepancy is a review candidate, not proof of a failed sensor or no physical contact; '
                'sensor placement, contact detection and timing can limit the comparison.\n')
+    arrival = recorder_arrival(ep['context'])
+    if arrival:
+        missing = ('  "contacts_missing": [], because recorder-arrival placement does not establish when a '
+                   'physical tactile response should coincide with a visible grasp.\n')
     instruments = ('\nCONTACTS: instrumented hands and their recorded touch signals: '
                    + '; '.join(f'{hand}: {", ".join(names)}' for hand, names in covered.items()) + '.\n') if covered else (
                    '\nCONTACTS: no instrumented hand is identified by the recorded touch signals. '
@@ -1466,8 +1485,12 @@ def contacts_block(ep: dict, pl: dict) -> str:
                  + lacking(begin, "already touching at the first frame")] if begin else [])
                + ([f"three{'' if begin else ' frames'} around the time {'it' if begin else 'the signal'} says the "
                    "touch ends, numbered 1 to 3" + lacking(end, "still touching at the last frame")] if end else []))
-    return (instruments + "The recording's touch signals say a hand is touching something in these spans. They are the "
-            "recording's claims, to check against the frames:\n" + "\n".join(_contact_line(c) for c in shown) + "\n"
+    claim = ("The following spans describe recorded touch-signal activity in recorder-arrival coordinates. "
+             "Describe the pictured frames independently. Their visual touch and hand observations do not "
+             "establish tactile event timing, a sensor fault or swapped sensors.\n" if arrival else
+             "The recording's touch signals say a hand is touching something in these spans. They are the "
+             "recording's claims, to check against the frames:\n")
+    return (instruments + claim + "\n".join(_contact_line(c) for c in shown) + "\n"
             + (("  The signals record more contacts that are not shown: "
                 + "; ".join(f"{c['id']} {c['start_s']:.2f}-{c['end_s']:.2f} s"
                             + (" " + contact_placement(c) if c.get("aligned_by") else "") for c in rest)
@@ -1713,14 +1736,23 @@ def _motion_table(ep: dict, pl: dict) -> str:
         what = ("Each row gives, per arm: joints moved up to (deg, the largest change of any one joint "
                 "between the two instants), largest single-frame step (deg, the biggest change of any joint "
                 "between two consecutive frames inside the interval), and the gripper value at the two "
-                "instants written start>end. Joint angles tell you whether and when an arm moved, not where "
-                "its gripper is")
+                "instants written start>end. " + ("Joint angles describe recorded configuration, not physical "
+                "event times or gripper location" if recorder_arrival(ep['context']) else
+                "Joint angles tell you whether and when an arm moved, not where its gripper is"))
         clear = ("an arm that clearly moves in the video over an interval where every joint is recorded as "
                  "near 0 deg (the recording stopped updating), or the reverse; a single-frame joint step "
                  "of many degrees with no matching jump in the video")
     step_ms = 1000.0 / ep_fps(ep)
     grip = (ep["context"].get("gripper_value") or
             "the dataset's own number (units and direction not documented)").rstrip(".")
+    if recorder_arrival(ep['context']):
+        return ("\nRECORDED MOTION, from the dataset's state in recorder-arrival presentation coordinates. "
+                + what + f"; the gripper/opening value is {grip}. "
+                "The rows describe changes between recorded samples, including any interpolation used for display. "
+                "Their times do not measure physical event times. Do not infer a physical state/video mismatch, "
+                "stopped sensor, follower delay or synchronization fault by comparing these intervals with footage. "
+                "Recorded motion and gripper changes remain evidence about the recorded channels. Read visible "
+                "actions and held objects from the frames independently.\n" + "\n".join(rows))
     return (
         f"\nRECORDED MOTION, from the dataset's state, one row per interval between consecutive instants "
         f"you receive ({step_ms:.0f} ms per recorded frame). {what}; the gripper/opening value is "
@@ -1876,7 +1908,12 @@ def _state_text(ep: dict, pl: dict) -> str:
            "recorded end-effector poses" if r == "teleop_arms" else "tracked gripper poses")
     if pl["spans"]:
         sp = ", ".join(f"{d['start_s']:.2f}-{d['end_s']:.2f}s" for d in describe_spans(ep, pl["spans"]))
-        s = (f"\nRECORDED STILL SPANS, from the dataset's {src}: {sp}. Over each span the recording says "
+        if recorder_arrival(ep['context']):
+            s = (f"\nRECORDED STILL SPANS, from the dataset's {src}: {sp}. The recorded channels remain within "
+                 "the stillness threshold over these recorder-arrival intervals. This does not establish "
+                 "physical stillness at the pictured instants; describe visual activity independently.")
+        else:
+            s = (f"\nRECORDED STILL SPANS, from the dataset's {src}: {sp}. Over each span the recording says "
              f"no {n['actor']} moved and none opened or closed. This is the recording's claim, not a "
              f"fact: check it. {'An' if n['actor'][0] in 'aeiou' else 'A'} {n['actor']} that is really still "
              "shows a steady view in its own camera"
@@ -2276,16 +2313,19 @@ def _excluded_camera_clock_notes(ep: dict) -> str:
     for entry in ctx.get("unshown_cameras") or []:
         clock = entry.get("camera_clock") or {}
         name = entry.get("name")
-        if not name or not clock.get("what"):
+        domain_reason = (entry.get('presentation_clock') or {}).get('reason')
+        clock_note = clock.get('what') or domain_reason
+        if not name or not clock_note:
             continue
         issues = [i["what"] for i in ctx.get("reader_issues") or []
                   if i.get("kind") == "camera_timestamp_repeated" and i.get("camera") == name and i.get("what")]
         reason = str(entry.get("why") or "")
-        suffix = ". " + clock["what"]
+        suffix = ". " + clock_note
         if reason.endswith(suffix):
             reason = reason[:-len(suffix)]
         omitted = f"{name} is not shown to the model" + (f" because {reason}" if reason else "") + ". "
-        notes.append(omitted + " ".join(dict.fromkeys(issues or [clock["what"]])))
+        notes.append(omitted + " ".join(dict.fromkeys([*(issues or [clock_note]),
+                                                       *([domain_reason] if domain_reason else [])])))
     return " " + " ".join(notes) if notes else ""
 
 
@@ -2400,7 +2440,7 @@ EPISODE_HEADER = "\n\nTHE EPISODE TO LABEL.\n\n"
 def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int | None = None,
                   max_cell_w: int | None = None, grid_cols: int = 4, grid_quality: int = 80,
                   example_dir=None, inspect_evidence=False, model=None, reasoning=None,
-                  sample_fps=None, task_mode=None, dataset_note=None, derived_dir=None) -> dict:
+                  sample_fps=None, task_mode=None, dataset_note=None, derived_dir=None, read_only=False) -> dict:
     """Everything the harness sends for one episode (content parts), and what it records about it. cell_w fixes
     the cell width; max_cell_w (the routed width, label/route.py) replaces the rig's default widest cell."""
     ep = load(ep_dir)
@@ -2408,7 +2448,8 @@ def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int 
         sample_fps=sample_fps, task_mode=task_mode, dataset_note=dataset_note)
     policy.require_request_window(ep['context'], request_duration(ep))
     from prepare import jaws
-    ep['jaw_evidence'] = jaws.for_episode(ep, derived_dir)
+    ep['jaw_evidence'] = (jaws.for_episode(ep, derived_dir, read_only=True) if read_only
+                          else jaws.for_episode(ep, derived_dir))
     pl = plan(ep)
     from label import contacts as lc
     ep["contacts"] = touch_contacts(ep, pl, lc.of_episode(ep, _touch(ep, pl)))

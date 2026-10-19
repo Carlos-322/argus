@@ -3,19 +3,21 @@ person or a model can check against the frames.
 
 A signal is read by how its numbers behave, and only whether it measures touch also asks its name (is_touch):
 
-- Its resting level, per value. A vector of SMALL values or fewer (a force, a flag, a position) rests at the end of
-  each value's range it sits near most of the time (its 5th or 95th percentile, when its median is within a quarter
-  of the range of that end), else at its median: a force sensor at its offset, an IMU or a position at its middle. An
-  array (a pressure map) is read as one sensor: its values pooled say which end it rests at (OpenTouch's raw glove
-  reads 3072 untouched and less when pressed, so most of its readings sit at the top), and each value rests at its own
-  extreme on that end (its 1st or 99th percentile), so a cell pressed through most of a clip still rests where it
-  reads untouched. An array whose pooled values sit in the middle (hand landmarks) rests at each value's median.
+- Its resting level, per value. A vector of SMALL values or fewer (a force, a flag, a position) that holds a level at
+  an end of its range rests at that end (its 1st or 99th percentile, so a rest held for only a few percent of the
+  recording is still inside it), else at its median: a force sensor at its offset, an IMU or a position at its middle.
+  Which end is never read from how long it sits there, since a sensor can be loaded through most of a recording: it
+  is the end the recordings start and end at unless the other end reads zero, else the end that reads zero, else the
+  one it sits at most (_rest_end). An array (a pressure map) is read as one sensor: its values pooled say which end it rests at the same
+  way (OpenTouch's raw glove reads 3072 untouched and less when pressed), and each value rests at its own extreme on
+  that end (its 1st or 99th percentile), so a cell pressed through most of a clip still rests where it reads
+  untouched. An array whose pooled values sit in the middle (hand landmarks) rests at each value's median.
 - A value is active when it is away from rest by more than REST_FRACTION of the array's typical swing (the 99th
   percentile of every value's distance from rest), so the noise of many idle cells never adds up to a contact. The
   signal's activity at a frame is the summed distance of its active values, and its peak the largest in the episode.
-- It has a rest only when it really holds one level: at least HOLD_SHARE of its readings lie within HOLD_BAND of its
-  typical swing from their resting level (an untouched cell reads 3072 frame after frame). A position or an IMU,
-  whose values drift through their range, has no rest, whatever its percentiles say.
+- It has a rest only when it really holds one level: at least HOLD_SHARE of its readings near rest lie within
+  HOLD_BAND of its typical swing from their resting level (an untouched cell reads 3072 frame after frame). A position
+  or an IMU, whose values drift through their range, has no rest, whatever its percentiles say.
 - Touch is bounded at rest: a pressure moves away from its unloaded reading one way and never reads past it except
   by noise. A hand's position can hold one level for a while and then leave it one way, but it also moves past that
   level, so it is not touch (direction). A pad read in whole numbers that only flickers by one step has measured
@@ -39,11 +41,13 @@ import warnings
 
 import numpy as np
 
-from prepare.signal_alignment import ALIGNED_ASSUMED, ALIGNED_ROWS, ALIGNED_CAMERA, COARSE_CLOCK, placement_text
+from prepare.signal_alignment import (ALIGNED_ASSUMED, ALIGNED_ROWS, ALIGNED_CAMERA, COARSE_CLOCK,
+                                      RECORDER_ARRIVAL, placement_text)
 
 REST_FRACTION = 0.1
-MIN_REST = 0.2
 MIN_ACTIVE = 0.02
+# as short a share at rest as one active counts: a sensor loaded through 95% of a recording still rests and rises
+MIN_REST = MIN_ACTIVE
 SMALL = 4
 # a signal of this many values or fewer is described value by value (each value's range, or its constant values); the
 # widest a prompt showed value by value before arrays were read as wholes, so a 14-joint action or a 9-value camera
@@ -72,6 +76,8 @@ MERGE_GAP_S = 0.15
 HOLD_BAND = 0.02
 SETTING_STATES = 3        # a signal of several values with this many distinct readings or fewer is a setting
 HOLD_SHARE = 0.3
+# the share of a recording's rows at its start and at its end read as where it starts and ends (recording_ends)
+ENDS_SHARE = 0.01
 # A signal is read in pieces of about this many values (4 MB as float64), each in float64, so a large one (a tactile
 # skin of 480 MB float32) is never copied whole and every number comes out as a whole float64 copy would give it. Only
 # a percentile over all its values (a resting end, the typical swing) holds one array of them while it is taken: float64
@@ -122,6 +128,18 @@ def _percentile(a: np.ndarray, q, pick):
     if not k:
         return None
     return np.percentile(buf[:k], q, overwrite_input=True)
+
+
+def _readings(c: np.ndarray) -> np.ndarray:
+    """c with every value that is not a finite number as NaN: an infinite value is no reading, as a NaN is."""
+    return np.where(np.isfinite(c), c, np.nan)
+
+
+def _away(d: np.ndarray, sw: float) -> np.ndarray:
+    """Which distances from rest d are away from it (over REST_FRACTION of the swing sw). A value with no finite
+    reading is never away: an infinite one would otherwise count as the largest activity of the episode."""
+    with np.errstate(invalid="ignore"):
+        return np.isfinite(d) & (d > REST_FRACTION * sw)
 
 
 def _any_finite(a: np.ndarray) -> bool:
@@ -204,21 +222,84 @@ def _num(x: float) -> str:
     return "-" if not np.isfinite(x) else f"{float(x):.3g}"
 
 
-def _pooled_end(a: np.ndarray) -> str | None:
-    """"low" or "high" when an array's values pooled sit near one end of their range (a pressure map), else None."""
+def recording_ends(arrs) -> np.ndarray:
+    """The readings at the start and at the end of each recording in arrs (frames by values each): ENDS_SHARE of its
+    rows at each end, at least one, stacked. Where a sensor reads before anything is touched and after it is let go
+    (_rest_end)."""
+    out = []
+    for x in arrs:
+        if len(x):
+            k = max(1, int(len(x) * ENDS_SHARE))
+            out += [np.asarray(x[:k], dtype=np.float64), np.asarray(x[-k:], dtype=np.float64)]
+    width = int(np.prod(np.shape(arrs[0])[1:])) if len(arrs) else 0
+    return np.concatenate(out).reshape(-1, width) if out else np.zeros((0, width))
+
+
+def _rest_end(lo, med, hi, held_lo, held_hi, ends) -> np.ndarray:
+    """Per value (or one entry for values pooled): -1 when it rests at its low end lo, 1 at its high end hi, 0 at its
+    median med. held_lo and held_hi are the shares of its readings within REST_FRACTION of its range of each end, ends
+    its readings at the starts and ends of its recordings (recording_ends, frames by values).
+
+    Which end a sensor rests at cannot be read from how much of the time it sits there: a force sensor loaded through
+    most of a recording sits mostly at its loaded level. So those shares only say whether the signal holds a level at
+    an end at all (HOLD_SHARE of its readings at one end; an IMU or a drifting position holds none and rests at its
+    median). Which end is rest then comes from evidence that does not depend on how long it is loaded, in this order:
+    - the recordings' starts and ends: most of them read what the sensor reads with nothing touched, since a
+      demonstration starts before the hand or gripper takes hold of anything and ends after it lets go;
+    - zero, when those do not agree (a recording that starts mid-grasp): the one end that reads zero within
+      REST_FRACTION of the range, since a calibrated force, a pressure or a contact flag reads zero unloaded;
+    - else the end it sits at for most of its readings, as when nothing else says.
+    The starts and ends count only when zero does not say otherwise. Ends at the far end from a zero reading are a
+    recording that starts and ends mid-grasp as often as a sensor that rests away from zero, and the two read alike,
+    so then neither is assumed and the end it sits at for most of its readings decides (zero when it sits at
+    neither)."""
+    lo, med, hi = (np.asarray(x, dtype=np.float64) for x in (lo, med, hi))
+    span = hi - lo
+    ok = span > 0
+    pos = (med - lo) / np.where(ok, span, 1.0)
+    by_share = np.where(pos <= 0.25, -1, np.where(pos >= 0.75, 1, 0))
+    held = (np.asarray(held_lo) >= HOLD_SHARE) | (np.asarray(held_hi) >= HOLD_SHARE)
+    e = np.asarray(ends, dtype=np.float64).reshape(-1, len(lo))
+    fin = np.isfinite(e)
+    with np.errstate(invalid="ignore"):
+        e_lo = ((e <= lo + 0.25 * span) & fin).sum(axis=0)
+        e_hi = ((e >= hi - 0.25 * span) & fin).sum(axis=0)
+    half = fin.sum(axis=0) / 2
+    by_ends = np.where((e_lo > e_hi) & (e_lo >= half), -1, np.where((e_hi > e_lo) & (e_hi >= half), 1, 0))
+    band = REST_FRACTION * span
+    z_lo, z_hi = np.abs(lo) <= band, np.abs(hi) <= band
+    by_zero = np.where(z_lo & ~z_hi, -1, np.where(z_hi & ~z_lo, 1, 0))
+    dwell = np.where(by_share != 0, by_share, by_zero)
+    chosen = np.where(by_ends == 0, np.where(by_zero != 0, by_zero, by_share),
+                      np.where((by_zero == 0) | (by_zero == by_ends), by_ends, dwell))
+    return np.where(ok, np.where(held, chosen, by_share), 0)
+
+
+def _pooled_end(a: np.ndarray, ends=None) -> str | None:
+    """"low" or "high" when an array's values pooled rest at one end of their range (a pressure map, _rest_end), else
+    None. ends, its readings at the starts and ends of its recordings, default to its own first and last rows."""
     got = _percentile(a, [1, 50, 99], lambda c: c[np.isfinite(c)])
     if got is None:
         return None
-    lo, med, hi = got
+    lo, med, hi = (float(x) for x in got)
     if not hi > lo:
         return None
-    pos = (med - lo) / (hi - lo)
-    return "low" if pos <= 0.25 else "high" if pos >= 0.75 else None
+    band = REST_FRACTION * (hi - lo)
+    n = n_lo = n_hi = 0
+    for _, c in _rows64(a):
+        f = c[np.isfinite(c)]
+        n += len(f)
+        n_lo += int((f <= lo + band).sum())
+        n_hi += int((f >= hi - band).sum())
+    ends = recording_ends([a]) if ends is None else np.asarray(ends, dtype=np.float64)
+    end = int(_rest_end([lo], [med], [hi], [n_lo / max(n, 1)], [n_hi / max(n, 1)], ends.reshape(-1, 1))[0])
+    return "low" if end < 0 else "high" if end > 0 else None
 
 
-def resting_level(a: np.ndarray, rest=None) -> np.ndarray:
-    """Per value, where the signal rests (module docstring); rest, the upload's own (prepare/formats.py
-    measure_signal_scales), is used as given when it has one value per value."""
+def resting_level(a: np.ndarray, rest=None, ends=None) -> np.ndarray:
+    """Per value, where the signal rests (module docstring, _rest_end); rest, the upload's own (prepare/formats.py
+    measure_signal_scales), is used as given when it has one value per value. ends are its readings at the starts and
+    ends of its recordings (recording_ends) when a joins several recordings; by default its own first and last rows."""
     if rest is not None and len(rest) == a.shape[1]:
         return np.asarray(rest, dtype=np.float64)
     if not _any_finite(a):
@@ -227,17 +308,21 @@ def resting_level(a: np.ndarray, rest=None) -> np.ndarray:
     with np.errstate(all="ignore"), warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         if a.shape[1] > SMALL:
-            end = _pooled_end(a)
+            end = _pooled_end(a, ends)
             # value by value, a few thousand values at a time
             per = (lambda c: np.nanpercentile(c, 1, axis=0)) if end == "low" else \
                 (lambda c: np.nanpercentile(c, 99, axis=0)) if end == "high" else (lambda c: np.nanmedian(c, axis=0))
-            return np.nan_to_num(np.concatenate([per(np.asarray(a[:, i:j], dtype=np.float64))
+            return np.nan_to_num(np.concatenate([per(_readings(np.asarray(a[:, i:j], dtype=np.float64)))
                                                  for i, j in _col_chunks(a)]))
-        a = np.asarray(a, dtype=np.float64)
-        lo, med, hi = np.nanpercentile(a, [5, 50, 95], axis=0)
-    span = hi - lo
-    pos = np.where(span > 0, (med - lo) / np.where(span > 0, span, 1), 0.5)
-    return np.nan_to_num(np.where(pos <= 0.25, lo, np.where(pos >= 0.75, hi, med)))
+        a = _readings(np.asarray(a, dtype=np.float64))
+        lo, med, hi = np.nanpercentile(a, [1, 50, 99], axis=0)
+        fin = np.isfinite(a)
+        n = np.maximum(fin.sum(axis=0), 1)
+        band = REST_FRACTION * (hi - lo)
+        held_lo = ((a <= lo + band) & fin).sum(axis=0) / n
+        held_hi = ((a >= hi - band) & fin).sum(axis=0) / n
+        end = _rest_end(lo, med, hi, held_lo, held_hi, recording_ends([a]) if ends is None else ends)
+    return np.nan_to_num(np.where(end < 0, lo, np.where(end > 0, hi, med)))
 
 
 def direction(a: np.ndarray, rest=None, swing=None) -> str | None:
@@ -253,7 +338,7 @@ def direction(a: np.ndarray, rest=None, swing=None) -> str | None:
     n_act = n_up = 0
     for _, c in _rows64(a):
         dev = c - level
-        act = np.nan_to_num(np.abs(dev)) > REST_FRACTION * sw
+        act = _away(np.abs(dev), sw)
         n_act += int(act.sum())
         n_up += int((dev[act] > 0).sum())
     if not n_act:
@@ -336,7 +421,7 @@ def distance_at(a: np.ndarray, k: int, rest=None, swing=None) -> tuple[np.ndarra
 def active_at(a: np.ndarray, k: int, rest=None, swing=None) -> np.ndarray:
     """_active's row k: which values are away from rest at frame k."""
     d, sw = distance_at(a, k, rest, swing)
-    return np.nan_to_num(d) > REST_FRACTION * sw if sw > 0 else np.zeros(len(d), dtype=bool)
+    return _away(d, sw) if sw > 0 else np.zeros(len(d), dtype=bool)
 
 
 def _active(a: np.ndarray, rest=None, swing=None) -> np.ndarray:
@@ -346,7 +431,7 @@ def _active(a: np.ndarray, rest=None, swing=None) -> np.ndarray:
     out = np.zeros(a.shape, dtype=bool)
     if sw > 0:
         for i, c in _rows64(a):
-            out[i:i + len(c)] = np.nan_to_num(np.abs(c - level)) > REST_FRACTION * sw
+            out[i:i + len(c)] = _away(np.abs(c - level), sw)
     return out
 
 
@@ -359,25 +444,28 @@ def activity(a: np.ndarray, rest=None, swing=None) -> np.ndarray:
     for i, c in _rows64(a):
         if sw > 0:
             d = np.abs(c - level)
-            m[i:i + len(c)] = np.nansum(np.where(np.nan_to_num(d) > REST_FRACTION * sw, d, 0.0), axis=1)
-        m[i:i + len(c)][np.isnan(c).all(axis=1)] = np.nan
+            m[i:i + len(c)] = np.where(_away(d, sw), d, 0.0).sum(axis=1)
+        m[i:i + len(c)][~np.isfinite(c).any(axis=1)] = np.nan
     return m
 
 
 def has_rest(a: np.ndarray, rest=None, swing=None) -> bool:
-    """Whether a signal holds one level: HOLD_SHARE of its readings within HOLD_BAND of its swing from rest."""
+    """Whether a signal holds one level: of its readings at rest (within REST_FRACTION of its swing from rest, at least
+    MIN_ACTIVE of them), HOLD_SHARE lie within HOLD_BAND of it. Counted among the readings at rest rather than all of
+    them, so a sensor loaded through most of the recording still holds its rest whenever it is unloaded."""
     a = _float(a)
     level = resting_level(a, rest)
     sw = _swing(a, level, swing)
     if not sw > 0:
         return False
-    n_ok = n_in = 0
+    n_ok = n_near = n_in = 0
     for _, c in _rows64(a):
         d = np.abs(c - level)
         ok = d[np.isfinite(d)]
         n_ok += len(ok)
+        n_near += int((ok <= REST_FRACTION * sw).sum())
         n_in += int((ok <= HOLD_BAND * sw).sum())
-    return n_ok > 0 and n_in / n_ok >= HOLD_SHARE
+    return n_near > 0 and n_near >= MIN_ACTIVE * n_ok and n_in / n_near >= HOLD_SHARE
 
 
 def localized(a: np.ndarray, rest=None, swing=None) -> bool:
@@ -390,7 +478,7 @@ def localized(a: np.ndarray, rest=None, swing=None) -> bool:
     sw = _swing(a, level, swing)
     shares = []
     for _, c in _rows64(a):
-        act = np.nan_to_num(np.abs(c - level)) > REST_FRACTION * sw
+        act = _away(np.abs(c - level), sw)
         shares.append(act[act.any(axis=1)].mean(axis=1))
     shares = np.concatenate(shares) if shares else np.zeros(0)
     return bool(len(shares)) and float(np.median(shares)) < 0.5
@@ -597,16 +685,17 @@ def summary_rows(name: str, a: np.ndarray, ks: list[int], shape=None, names=None
         level = resting_level(a, rest)
         sw = _swing(a, level, swing)
         dist = {k: np.abs(np.asarray(a[k], dtype=np.float64) - level) for k in ks}
-        act = {k: (np.nan_to_num(v) > REST_FRACTION * sw if sw > 0 else np.zeros(d, dtype=bool))
+        act = {k: (_away(v, sw) if sw > 0 else np.zeros(d, dtype=bool))
                for k, v in dist.items()}
-        m = {k: (np.nan if np.isnan(a[k]).all() else float(np.nansum(np.where(act[k], dist[k], 0.0)))) for k in ks}
+        unread = {k: not np.isfinite(a[k]).any() for k in ks}
+        m = {k: (np.nan if unread[k] else float(np.where(act[k], dist[k], 0.0).sum())) for k in ks}
         rows.append((f"{name} total activity", [_num(m[k]) for k in ks]))
-        rows.append((f"{name} active values", ["-" if np.isnan(a[k]).all() else str(int(act[k].sum())) for k in ks]))
+        rows.append((f"{name} active values", ["-" if unread[k] else str(int(act[k].sum())) for k in ks]))
         if shape and len(shape) == 2:
             h, w = int(shape[0]), int(shape[1])
             cells = []
             for k in ks:
-                if np.isnan(a[k]).all() or not act[k].any():
+                if unread[k] or not act[k].any():
                     cells.append("-")
                 else:
                     r, c = divmod(int(np.nanargmax(np.where(act[k], dist[k], -1))), w)
@@ -615,8 +704,11 @@ def summary_rows(name: str, a: np.ndarray, ks: list[int], shape=None, names=None
     else:
         ch = ["-"]
         for a0, b0 in zip(ks, ks[1:]):
-            x = np.abs(np.asarray(a[b0], dtype=np.float64) - np.asarray(a[a0], dtype=np.float64))
-            ch.append("-" if not np.isfinite(x).any() else _num(np.nanmax(x)))
+            # a value with no finite reading at either instant has no change (an infinite one too)
+            with np.errstate(invalid="ignore"):
+                x = np.abs(np.asarray(a[b0], dtype=np.float64) - np.asarray(a[a0], dtype=np.float64))
+            x = x[np.isfinite(x)]
+            ch.append(_num(x.max()) if len(x) else "-")
         rows.append((f"{name} largest change of any value since the instant before", ch))
     return rows
 
@@ -644,7 +736,8 @@ def describe(name: str, a: np.ndarray, shape=None, names=None, rest=None, swing=
                     + (f", {' x '.join(str(int(x)) for x in shape)} shape" if shape and len(shape) > 1 else ""))
     if rate_hz and fps and float(rate_hz) < RATE_SLOWER * float(fps):
         rate = _num(float(rate_hz))
-        what += (f", estimated at {rate} Hz from assumed placement" if aligned_by == COARSE_CLOCK or clock_problem else
+        what += (f", recorder arrivals at {rate} Hz" if aligned_by == RECORDER_ARRIVAL else
+                 f", estimated at {rate} Hz from assumed placement" if aligned_by == COARSE_CLOCK or clock_problem else
                  f", recorded at {rate} Hz")
     if aligned_by == ALIGNED_ROWS:
         if clock_problem:

@@ -341,7 +341,7 @@ def test_static_dictionary_renders_uploaded_text_without_html_or_edit_controls(t
     page = serve.render_index('Tiny', {'mode': 'static', 'data': 'data/'})
     configuration = json.loads(page.split('const BOARD = ', 1)[1].split(';', 1)[0])
     start = page.index('function dictionaryRows(data, endpoint)')
-    end = page.index('\nlet _dictionaryLoadToken = 0;', start)
+    end = page.index('\nasync function loadDictionary(', start)
     payload = {'editable': True, 'fields': [{'id': 'unsafe', 'name': '<img src=x onerror=bad()>',
                 'kind': 'signal', 'source': '<script>bad()</script>'}],
                'entries': {'unsafe': {'meaning': '<svg onload=bad()>', 'role': '', 'provenance': 'human'}},
@@ -522,8 +522,10 @@ def test_dictionary_save_invalidates_cached_episode_across_navigation(tmp_path):
     cache_start = page.index('const _epCache = new Map()')
     cache_end = page.index('// other models', cache_start)
     form_start = page.index('function dictionaryRows(data, endpoint)')
-    form_end = page.index('\nlet _dictionaryLoadToken = 0;', form_start)
+    form_end = page.index('\nasync function loadDictionary(', form_start)
     load_end = page.index('\nfunction readerNotesHtml(', form_end)
+    render_start = page.index('const renderCurrent = ')
+    render_end = page.index('\n', render_start) + 1
     script = r'''
     class Element {
       constructor(tag) { this.tag=tag; this.children=[]; this.listeners={}; this.open=false; }
@@ -548,7 +550,8 @@ def test_dictionary_save_invalidates_cached_episode_across_navigation(tmp_path):
     const document={getElementById:()=>target,createElement:tag=>new Element(tag),
       createTextNode:text=>Object.assign(new Element('text'),{textContent:text})};
     const STATIC=false, episodeUrl=file=>'api/episode?file='+file, loadSensors=()=>{};
-    let _activeFile='a.json', navToken=0, revision=0, pauseReload=false;
+    let _activeFile='a.json', _nav=0, revision=0, pauseReload=false;
+    const navBegin=()=>++_nav, navCurrent=token=>token===_nav;
     const data=name=>({revision,editable:true,fields:[{id:'shared',name,kind:'text'}],
       entries:{shared:{meaning:'shared field',role:revision>=3 ? 'annotation' : 'touch'}}});
     const deferred=()=>{let resolve;const promise=new Promise(r=>{resolve=r});return {promise,resolve};};
@@ -575,13 +578,15 @@ def test_dictionary_save_invalidates_cached_episode_across_navigation(tmp_path):
       const name=url.endsWith('a.json') ? (revision ? 'fresh A' : 'stale A') : (revision>=3 ? 'fresh B' : 'B');
       return {ok:true,json:async()=>data(name)};
     }
-    ''' + page[cache_start:cache_end] + page[form_start:load_end] + r'''
-    async function selectEp(file) {
-      const token=++navToken;
+    ''' + page[render_start:render_end] + page[cache_start:cache_end] + page[form_start:load_end] + r'''
+    // the page's selectEp, drawing only the dictionary: each draw is a render of its own, which it resolves with
+    async function selectEp(file, fromPop, nav) {
+      nav=nav || navBegin();
       _activeFile=file;
       const result=await fetchEpisode(file);
-      if (token===navToken && _activeFile===file)
-        dictionaryRows(result,'/api/dictionary?file='+file);
+      if (navCurrent(nav) && _activeFile===file) {
+        window._epAbort={}; dictionaryRows(result,'/api/dictionary?file='+file); return window._epAbort;
+      }
     }
     (async()=>{
       _epCache.set('a.json',Promise.resolve(data('stale A')));
@@ -600,8 +605,9 @@ def test_dictionary_save_invalidates_cached_episode_across_navigation(tmp_path):
       await savingAgain;
       const afterNavigation=target.names(), active=_activeFile;
       _activeFile='a.json';
-      const oldLoad=loadDictionary(data('old response'),'a.json');
-      const newLoad=loadDictionary(data('fresh response'),'a.json');
+      // each load belongs to a render of the episode (renderEp starts a new _epAbort), the later one drawn last
+      window._epAbort={}; const oldLoad=loadDictionary(data('old response'),'a.json');
+      window._epAbort={}; const newLoad=loadDictionary(data('fresh response'),'a.json');
       dictionaryGates[1].resolve(); await newLoad;
       dictionaryGates[0].resolve(); await oldLoad;
       const dictionary=target.names();

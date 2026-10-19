@@ -1,13 +1,27 @@
 """Copy JSON for public transport after private source/freshness checks.
 
-This is a typed privacy boundary, not a text scrubber or a publication-rights
-decision. Annotation prose, native field names and public citations remain intact.
+Uploader-supplied free-form metadata (file attributes, sidecar fields, publisher-native
+fields and metadata inspections of them) is published only when the operator says so
+(publish_uploader_values or project(..., uploader_values=True)). No key-name or value
+pattern can recognise every secret, private path or note an uploader writes, so a public
+output names that metadata without its values. Pipeline-produced fields are projected below.
+
+Access attributes and recognizable credential values are also withheld. This is not a
+publication-rights decision. Other prose, native fields and public citations stay intact.
+Native fields retain identifiers and measurements, including tokenizer symbols,
+QC booleans, relative working directories and declared version strings. Access
+owner objects and recognizable value syntax are checked in every scope.
+Opaque credentials without access syntax or a credential field name cannot be
+identified reliably. The scanner does not certify arbitrary metadata as public.
 Keep original inputs and operational build receipts in private storage.
 """
 from __future__ import annotations
 
 import hashlib
+import base64
+from contextvars import ContextVar
 import ipaddress
+import json
 import re
 from pathlib import PurePosixPath, PureWindowsPath
 from urllib.parse import parse_qsl, unquote, urlsplit
@@ -16,6 +30,7 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 PRIVATE_KEYS = frozenset({
     '_run', '_replaced_label', '_supplements', '_verification', '_withheld_checks', '_carried_verdicts',
     '_uploader_field_path', '_uploader_location_values', '_reader_private_error', '_reader_public_what', '_reader_public_error',
+    '_billing_receipt', '_authority_history_index',
 })
 # These are access mechanisms, not source identities or source-proof digests.
 _SECRETS = frozenset({
@@ -23,7 +38,10 @@ _SECRETS = frozenset({
     'secret', 'secretkey', 'clientsecret', 'secretaccesskey', 'accesskeyid', 'sessiontoken',
     'authorization', 'proxyauthorization', 'cookie', 'setcookie', 'credentials',
     'credential', 'privatekey', 'signedurl', 'presignedurl', 'accessurl',
-    'requestheaders', 'authheaders',
+    'requestheaders', 'authheaders', 'hftoken', 'huggingfacetoken', 'authtoken', 'apitoken',
+    'awssessiontoken', 'githubtoken', 'bearertoken', 'openrouterkey', 'openaikey', 'anthropickey',
+    'jwt', 'csrf', 'csrftoken', 'sentrydsn', 'connectionstring', 'otpseed', 'pass', 'pwd',
+    'privatekeypem', 'secretkeybase', 'apikeys', 'secrets', 'tokens',
 })
 # Source locations resolve private preparation trees before this projection runs.
 _PRIVATE_LOCATIONS = frozenset({
@@ -36,9 +54,33 @@ _LOCATIONS = frozenset({
     'archivepath', 'archive', 'url', 'urls', 'uri', 'uris', 'href', 'link', 'links',
     'publicbase', 'publiccitation', 'citation',
 })
-_URL_QUERY_SECRETS = _SECRETS | {'signature', 'sig', 'keypairid', 'policy', 'googleaccessid'}
+_URL_QUERY_SECRETS = _SECRETS | {'key', 'signature', 'sig', 'session', 'sessionid', 'code',
+                              'keypairid', 'policy', 'googleaccessid'}
 _ACCESS_URI_PREFIXES = ('file:', 's3:', 'gs:', 'az:', 'abfs:', 'ssh:', 'sftp:', 'ftp:')
 _DROP = object()
+UPLOADER_VALUE_WITHHELD = 'not published (uploader metadata)'
+# The keys of a metadata inspection receipt (label/evidence_access.py) that describe the request, not the value read
+_WITHHELD_RECEIPT_KEYS = frozenset({'field_id', 'mode', 'reason', 'descriptor', 'limitations', 'pointer', 'operation', 'id',
+                                    'presentation_clock'})
+_PUBLISH_DEFAULT = False
+_PUBLISH = ContextVar('publish_uploader_values', default=None)
+
+
+def publish_uploader_values(flag: bool) -> None:
+    """Set whether this process's public outputs carry uploader-supplied metadata values."""
+    global _PUBLISH_DEFAULT
+    _PUBLISH_DEFAULT = bool(flag)
+
+
+def _publishing() -> bool:
+    flag = _PUBLISH.get()
+    return _PUBLISH_DEFAULT if flag is None else flag
+
+
+def publication_policy() -> dict:
+    """Every setting of this module that changes what a public output contains. A build's identity includes it
+    (board/static.py cmd_site), so a build made under another policy gets another id."""
+    return {'uploader_values': _publishing()}
 
 # These reader-owned note maps use source files as their keys. Keys inside the
 # recorded fields remain native identifiers, including absolute HDF paths.
@@ -49,6 +91,9 @@ _NOTE_SOURCE_MAPS = frozenset({
 _NOTE_SOURCE_VALUES = frozenset({'recordedannotationdatasource'})
 _NOTE_CLAIMS = frozenset({'unassigneddatasetmetadataclaims'})
 _READER_CONTEXT_MAPS = _NOTE_SOURCE_MAPS | {'uploadernotes', 'recordedsensorfields'}
+# Maps that hold the uploader's own metadata values (withheld from public outputs unless published)
+_UPLOADER_VALUE_MAPS = frozenset({'recordedmetadata', 'recordedepisodemetadata', 'recordedannotationtables',
+                                  'recordedsensorfields'})
 _ATTRIBUTE_LOCATIONS = frozenset({'sourcedirectory', 'sourcelocation'})
 _METADATA_LIMIT_SUFFIX = (' and its recorded metadata exceed the prompt note limit; complete original rows '
                           'and source claims remain in the episode context and uploader notes.')
@@ -60,6 +105,169 @@ def _name(key: str) -> str:
     return re.sub('[^a-z0-9]', '', key.lower())
 
 
+def _credential_key(key: str, *, native=False, owner='') -> bool:
+    """Access attributes use semantic suffixes, not a growing provider-name list."""
+    name = _name(key)
+    translated = key.casefold().replace('_', '').replace('-', '').replace(' ', '')
+    if translated in {'contraseña', 'passwort', 'kennwort', 'motdepasse', 'senha', 'wachtwoord',
+                      'hasło', 'пароль', '密码', 'パスワード', '비밀번호', 'claveapi', 'chiaveapi',
+                      'apischlüssel', 'tokendeacceso', 'geheimnis'}:
+        return True
+    if not native and name == 'key' and _name(owner) == 'kaggle':
+        return True  # Kaggle's service credential object, not an arbitrary native key.
+    if native and name in ('pass', 'pwd', 'tokens', 'jwt', 'csrf', 'secret'):
+        return False
+    if native and name == 'token':
+        return _name(owner) in ('hf', 'huggingface', 'auth', 'github', 'openai', 'openrouter', 'slack')
+    if name in _SECRETS or name in ('auth', 'bearer', 'passphrase'):
+        return True
+    if name.endswith(('password', 'passwd', 'passphrase', 'secret', 'secretkey',
+                      'privatekey', 'apikey', 'apitoken', 'accesstoken', 'refreshtoken',
+                      'authtoken', 'bearertoken', 'sessiontoken', 'bottoken', 'accesskey',
+                      'signingkey', 'encryptionkey', 'masterkey', 'clientkey', 'licensekey')):
+        return True
+    if name.endswith('token') and (not native or name in {'npmtoken', 'mapboxtoken', 'secrettoken', 'webhooktoken', 'oauthtoken', 'privatetoken', 'xauthtoken'}) and name not in {'eostoken', 'padtoken', 'stoptoken', 'bostoken',
+                                               'unktoken', 'masktoken', 'septoken', 'clstoken'}:
+        return True
+    if name.startswith('sentrydsn') or name == 'gcpserviceaccount':
+        return True
+    if name in {'wandbkey', 'xauth', 'dbpass', 'mysqlpwd', 'pw', 'passcode', 'pincode',
+                'serviceaccountkey', 'credentialsjson'}:
+        return True
+    if name == 'key' and _name(owner) in {'api', 'openai', 'openrouter', 'anthropic', 'hf', 'wandb'}:
+        return True
+    # A session ID, signature, tokenizer symbol or field key is not proof of an
+    # access mechanism. Credential values are checked independently below.
+    return False
+
+
+_CREDENTIAL_VALUE = re.compile(
+    r'-----BEGIN (?:[A-Z0-9]+ ){0,4}PRIVATE KEY(?: BLOCK)?-----|'
+    r'(?<![A-Za-z0-9])(?:AKIA[A-Z0-9]{16}|gh[pousr]_[A-Za-z0-9]{30,}|'
+    r'github_pat_[A-Za-z0-9_]{40,}|sk-(?:or-|proj-|svcacct-|ant-)?[A-Za-z0-9_-]{20,}|'
+    r'hf_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_-]{20,}|AIza[A-Za-z0-9_-]{35}|'
+    r'npm_[A-Za-z0-9]{30,}|SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}|'
+    r'(?:sk_live_|rk_live_|whsec_)[A-Za-z0-9]{20,}|ASIA[A-Z0-9]{16}|'
+    r'dop_v1_[a-f0-9]{64}|shpat_[a-f0-9]{32}|pypi-[A-Za-z0-9_-]{40,}|'
+    r'SK[a-f0-9]{32}|AC[a-f0-9]{32}:[a-f0-9]{32}|'
+    r'xapp-1-[A-Z0-9]+-[0-9]+-[a-f0-9]{32,}|'
+    r'xox[baprs]-[A-Za-z0-9-]{20,})(?![A-Za-z0-9])|'
+    r'\b(?:Proxy-)?Authorization\s*:\s*(?:Bearer|Token|Basic|Digest|AWS4-HMAC-SHA256)\s+\S+|'
+    r'\bBearer[ \t]+[A-Za-z0-9._~+/-]{20,}=*|'
+    r'\b(?:X-Api-Key|api_key|access_token|token|AWS_SECRET_ACCESS_KEY|password|Cookie)[ \t]*[:=][ \t]*[\"\']?[^\s\"\']{12,}|'
+    r'\bAccountKey=[A-Za-z0-9+/]{20,}=*|PuTTY-User-Key-File-[23]:', re.I)
+_JWT_VALUE = re.compile(r'(?<![\w-])([A-Za-z0-9_-]{8,})\.([A-Za-z0-9_-]{2,})\.[A-Za-z0-9_-]+(?![\w-])')
+
+
+def _key_material(text: str) -> bool:
+    """Whether text holds generated key material: a run of letters and digits that separators do not split, 20 or
+    more long, or 16 or more with a digit in it. Provider keys are long unbroken runs drawn at random, while names
+    built from words (sk-learn_preprocessing_pipeline_v2, see-the-tokenizer-config) split into short pieces."""
+    return any(len(run) >= 20 or (len(run) >= 16 and re.search(r'\d', run))
+               for run in re.split(r'[-_.:/=+,;%\s"\']', text))
+
+
+def _weak_match(found: str) -> bool:
+    """Whether a match is only a shape that ordinary names share: a lowercase provider prefix such as sk- or hf_
+    (written in another case it is no provider's), or a token or Cookie label, whose value must then be key
+    material. Every other match is access syntax that is never a name."""
+    lower = found.lower()
+    if lower.startswith(('sk-', 'hf_')):
+        return True
+    return re.match(r'(?:token|cookie)\b', lower) is not None
+
+
+def _credential_value(value: str, _encoded=False) -> bool:
+    """Recognize access syntax independently of the publisher's field names."""
+    for found in _CREDENTIAL_VALUE.finditer(value):
+        text = found.group()
+        if not _weak_match(text):
+            return True
+        if text[:3] in ('sk-', 'hf_') and _key_material(text[3:]):
+            return True
+        if text[:3].lower() not in ('sk-', 'hf_') and _key_material(re.split(r'[:=]', text, maxsplit=1)[-1]):
+            return True
+    if re.fullmatch(r'\s*Bearer[ \t]+[^\s]{12,}[ \t]*', value, re.I):
+        return True
+    basic = re.fullmatch(r'\s*Basic\s+(\S+)\s*', value, re.I)
+    if basic:
+        try:
+            if b':' in base64.b64decode(basic[1], validate=True):
+                return True
+        except ValueError:
+            pass
+    for match in _JWT_VALUE.finditer(value):
+        try:
+            header, payload = (json.loads(base64.urlsafe_b64decode(part + '=' * (-len(part) % 4)))
+                               for part in match.group(1, 2))
+        except (ValueError, UnicodeError):
+            continue
+        if isinstance(header, dict) and isinstance(payload, dict) and (isinstance(header.get('alg'), str) or header.get('typ') == 'JWT'):
+            return True
+    if re.search(r'\bsv=\d{4}-\d{2}-\d{2}&', value) and re.search(r'(?:^|[?&])sig=[A-Za-z0-9%+/=_-]{20,}', value):
+        return True
+    if len(value) <= 65536 and value.lstrip().startswith('{'):
+        try:
+            config = json.loads(value)
+        except (ValueError, RecursionError):
+            config = None
+        registries = config.get('auths') if isinstance(config, dict) else None
+        if isinstance(registries, dict) and any(
+                isinstance(entry, dict) and any(isinstance(entry.get(key), str) and entry[key]
+                    for key in ('auth', 'identitytoken', 'registrytoken', 'password'))
+                for entry in registries.values()):
+            return True
+    # In free prose, private access targets retain their endpoint syntax. Do not
+    # infer a host from ordinary words or resolve publisher names through DNS.
+    if re.search(r'\.(?:ts\.net|localhost|local|internal|lan)(?=[/:)\]\s]|$)|\b(?:ssh|scp|sftp|rsync)\b', value, re.I):
+        for token in value.split():
+            endpoint = token.strip('()[]<>{},;\"\'`').rstrip('.')
+            if _private_access(endpoint):
+                return True
+    # Decode only complete, bounded base64 values. Random opaque blobs and
+    # sensor payloads have no credential meaning unless their decoded syntax does.
+    if not _encoded and 16 <= len(value) <= 65536 and re.fullmatch(r'[A-Za-z0-9+/]+={0,2}', value):
+        try:
+            decoded = base64.b64decode(value, validate=True).decode('utf-8')
+            if (_credential_value(decoded, True)
+                    or re.fullmatch(r'[A-Za-z0-9_.@-]{1,128}:[A-Za-z0-9_!@#$%+=.-]{8,128}', decoded)):
+                return True
+        except (ValueError, UnicodeError):
+            pass
+    # Public citation URLs remain intact, including citations embedded in prose.
+    return any(_private_url(match[0].rstrip('.,);]'))
+               for match in re.finditer(r'(?:https?|s3|gs|postgres(?:ql)?|redis|mongodb(?:\+srv)?|amqp|ftp)://[^\s<>"\']+', value, re.I))
+
+
+def _private_access(value: str) -> bool:
+    """Private hosts can be bare endpoints or scp-style user@host locations."""
+    if not value or any(char.isspace() for char in value):
+        return False
+    if _private_host(value):
+        return True
+    try:
+        parsed = urlsplit('//' + value)
+        return bool(parsed.hostname and _private_host(parsed.hostname))
+    except ValueError:
+        return False
+
+
+def _private_host(value: str) -> bool:
+    token = value.strip().lower().rstrip('.')
+    if not token or any(char.isspace() for char in token) or '/' in token:
+        return False
+    try:
+        return not ipaddress.ip_address(token.strip('[]')).is_global
+    except ValueError:
+        pass
+    host = token.rsplit(':', 1)[0] if re.search(r':\d+$', token) else token
+    try:
+        return not ipaddress.ip_address(host.strip('[]')).is_global
+    except ValueError:
+        pass
+    return (host == 'localhost' or host.endswith(('.localhost', '.local', '.internal', '.lan', '.ts.net')))
+
+
 def _private_url(value: str) -> bool:
     """Recognize access URLs without trying DNS or fetching any source."""
     try:
@@ -69,16 +277,22 @@ def _private_url(value: str) -> bool:
         host = (parsed.hostname or '').lower().rstrip('.')
         if not host or parsed.username is not None or parsed.password is not None:
             return True
-        if '.' not in host or host.endswith(('.localhost', '.local', '.internal', '.lan')):
+        if '.' not in host or _private_host(host):
             return True
         try:
             if not ipaddress.ip_address(host).is_global:
                 return True
         except ValueError:
             pass
-        for key, _ in parse_qsl(parsed.query, keep_blank_values=True) + parse_qsl(parsed.fragment, keep_blank_values=True):
+        if host == 'hooks.slack.com' and parsed.path.startswith('/services/'):
+            return True
+        if host in ('discord.com', 'discordapp.com') and re.match(r'/api/(?:v\d+/)?webhooks/', parsed.path):
+            return True
+        for key, query_value in parse_qsl(parsed.query, keep_blank_values=True) + (parse_qsl(parsed.fragment, keep_blank_values=True) if '=' in parsed.fragment else []):
             name = _name(key)
-            if name in _URL_QUERY_SECRETS or name.startswith(('xamz', 'xgoog')):
+            if name == 'code' and query_value.isdecimal() and len(query_value) <= 2:
+                continue
+            if _credential_key(key) or name in _URL_QUERY_SECRETS or name.startswith(('xamz', 'xgoog')):
                 return True
     except ValueError:
         return True
@@ -173,12 +387,14 @@ def _partial_coverage(value: str) -> str:
 
 
 def _source_keys(value: dict) -> dict:
-    reserved = {key for key in value if not _private_location(key)}
+    reserved = {key for key in value if not _private_location(key) and not _credential_value(key)}
     used, keys = set(), {}
     for key in sorted(value):
         public = key
-        if _private_location(key):
+        if _private_location(key) or _credential_value(key):
             base = _source_name(key) or 'source file'
+            if _credential_value(base):
+                base = 'source file'
             public = base
             if public in reserved or public in used:
                 suffix = hashlib.sha256(key.encode()).hexdigest()
@@ -195,7 +411,7 @@ def _source_keys(value: dict) -> dict:
 def reader_context_field(name: str, value):
     """Keep reader-owned source-map typing when an inspection unwraps its value."""
     if _name(name) in _READER_CONTEXT_MAPS:
-        return project({name: value}).get(name)
+        return project({name: value}, uploader_values=True).get(name)
     return value
 
 
@@ -331,7 +547,7 @@ def _inspection_record(value: dict) -> dict:
                 else:
                     # A source-owner selection retains note typing around its native members.
                     selected = {'fields': receipt['value']} if native_scope else receipt['value']
-                    selected = project({'recorded_metadata': {'selection': selected}})['recorded_metadata']['selection']
+                    selected = project({'recorded_metadata': {'selection': selected}}, uploader_values=True)['recorded_metadata']['selection']
                     receipt['value'] = selected['fields'] if native_scope else selected
                 if 'exact_metadata_values' in receipt:
                     receipt['exact_metadata_values'] = [{**item, 'pointer': pointer_alias(item.get('pointer'), relative_keys, scope)}
@@ -387,9 +603,14 @@ def _uploader_item(item: dict) -> dict:
     attributes = [_name(attribute) for i, part in enumerate(parts)
                   if not any(_name(parent) == 'fields' for parent in parts[:i])
                   and (attribute := _reader_attribute(part)) is not None]
-    if any(_name(part) in _SECRETS for part in parts) or any(a in _SECRETS for a in attributes):
-        result['value'] = 'withheld'
-        return result
+    native = False
+    for index, part in enumerate(parts):
+        native = native or _name(part) == 'fields'
+        parent = parts[index - 1] if index else ''
+        if _credential_key(_reader_attribute(part) or part, native=native,
+                           owner=_reader_attribute(parent) or parent):
+            result['value'] = 'withheld'
+            return result
     value = item.get('value')
     terminal = _name(parts[-1]) if parts else ''
     locations = item.get('_uploader_location_values')
@@ -434,14 +655,19 @@ def _uploader_item(item: dict) -> dict:
     if isinstance(value, str) and source_value and _private_location(value):
         result.pop('value', None)
         result['value'] = _source_name(value) or 'source file'
+    elif isinstance(value, str) and _credential_value(value):
+        result['value'] = 'withheld'
     return result
 
 
 def _uploader_group(value: dict) -> dict:
     if not isinstance(value.get('items'), list) or value.get('kind') not in ('notes', 'row'):
-        return value
+        return value if _publishing() else {k: v for k, v in value.items() if k in ('title', 'kind')}
     result = dict(value)
     result['items'] = [_uploader_item(item) if isinstance(item, dict) else item for item in value['items']]
+    if not _publishing():
+        result['items'] = [{key: item[key] for key in ('name',) if key in item} | {'value': UPLOADER_VALUE_WITHHELD}
+                           if isinstance(item, dict) else UPLOADER_VALUE_WITHHELD for item in result['items']]
     title = value.get('title')
     if isinstance(title, str) and title.startswith('Row of ') and _private_location(title[7:]):
         result['title'] = 'Row of ' + (_source_name(title[7:]) or 'source file')
@@ -559,10 +785,14 @@ def _credential_binding(binding: dict) -> bool:
     if not isinstance(value, str):
         return False
     parts = [part.replace('~1', '/').replace('~0', '~') for part in value.split('/')]
+    native = False
     for i, part in enumerate(parts):
+        native = native or _name(part) == 'fields'
         if i and _name(parts[i - 1]) in _NOTE_SOURCE_MAPS:
             continue
-        if _name(_reader_attribute(part) or part) in _SECRETS:
+        parent = parts[i - 1] if i else ''
+        if _credential_key(_reader_attribute(part) or part, native=native,
+                           owner=_reader_attribute(parent) or parent):
             return True
     return False
 
@@ -596,6 +826,11 @@ def _project(value, field: str = '', attribute_owner: str = '', native_fields: b
             value = _dictionary_values(value)
             if field == 'evidenceinspection':
                 value = _inspection_record(value)
+        if field in _UPLOADER_VALUE_MAPS and not native_fields and not _publishing():
+            # the uploader's own recorded metadata, keyed by its source file: the files are named, the values withheld
+            source_keys = _source_keys(value) if field in _NOTE_SOURCE_MAPS else {}
+            return {source_keys.get(key, key): UPLOADER_VALUE_WITHHELD for key in value
+                    if key not in PRIVATE_KEYS and not _credential_value(key)}
         if field == 'uploadernotes' and not native_fields:
             value = _uploader_group(value)
         elif field == 'readerissues' and not native_fields:
@@ -627,12 +862,21 @@ def _project(value, field: str = '', attribute_owner: str = '', native_fields: b
             name = _name(key)
             attribute = _reader_attribute(key) if not native_fields else None
             owner = _name(attribute) if attribute is not None else attribute_owner
-            if (key in PRIVATE_KEYS or name in _SECRETS or name in _PRIVATE_LOCATIONS
-                    or (attribute is not None and owner in _SECRETS)
-                    or name.endswith(('apikey', 'accesstoken', 'secretaccesskey'))
+            if (key in PRIVATE_KEYS or (key not in source_keys and _credential_value(key)) or _credential_key(key, native=native_fields, owner=attribute_owner or field)
+                    or name in _PRIVATE_LOCATIONS
+                    or (attribute is not None and _credential_key(attribute))
                     or (field == 'compare' and name in ('runid', 'code'))):
                 continue
             item_native, item_notes = native_fields, note_owner
+            if value.get('mode') == 'metadata' and not native_fields and not _publishing():
+                # A withheld metadata receipt keeps only what describes the request; every other key may hold the
+                # value or a copy of it (exact_metadata_values keeps large integers digit for digit), so it is left
+                # out rather than named one copy at a time.
+                if key in ('value', 'preview'):
+                    result[key] = UPLOADER_VALUE_WITHHELD
+                    continue
+                if key not in _WITHHELD_RECEIPT_KEYS:
+                    continue
             if key == 'value' and (source_name := _inspection_source_name(value)):
                 item_notes = _name(source_name)
                 # A selected metadata subtree retains its original native-field scope.
@@ -661,6 +905,9 @@ def _project(value, field: str = '', attribute_owner: str = '', native_fields: b
         # An entire URL is a typed value even in an extension field. Do not scan
         # or rewrite URL fragments embedded in publisher prose.
         stripped = value.strip()
+        version = (field.endswith(('version', 'firmware', 'fw', 'ver')) or field in ('firmware', 'fw', 'build', 'bios', 'driver', 'sdk', 'versionstring')) and bool(re.fullmatch(r'\d+(?:\.\d+)+', stripped))
+        if _credential_value(value) or (not version and _private_access(stripped)):
+            return _DROP
         if _whole_uri(stripped) and _private_location(stripped):
             return _DROP
         # Direct source/path attributes can name HDF members; nested access fields retain protection.
@@ -675,14 +922,21 @@ def _project(value, field: str = '', attribute_owner: str = '', native_fields: b
     return value
 
 
-def project(value):
+def project(value, *, uploader_values=None):
     """Return independent public JSON; omit private fields, use null in arrays.
 
     Values must already be JSON-compatible. This function does not read, resolve,
     write or mutate inputs. Run evidence freshness and human overrides first.
     Native HDF keys and JSON pointers remain meaningful public identifiers.
+    uploader_values None follows publish_uploader_values; True keeps uploader
+    metadata values (request shaping and the operator's opt-in), False withholds them.
     """
-    result = _project(value)
+    token = _PUBLISH.set(uploader_values) if uploader_values is not None else None
+    try:
+        result = _project(value)
+    finally:
+        if token is not None:
+            _PUBLISH.reset(token)
     return None if result is _DROP else result
 
 

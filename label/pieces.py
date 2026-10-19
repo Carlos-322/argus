@@ -341,9 +341,9 @@ def write_pieces(ep_dir: Path, pieces_root: Path) -> list[Path]:
             for v, e in dj.items():
                 np.save(d / e["kmap"], np.asarray(np.load(ep_dir / e["kmap"])[k0:k1]))
             write_atomic(d / "depth.json", dj, indent=1)
+            origin = float(t[k0]) + float(ctx.get("clock_zero_s") or 0.0)
             if (ep_dir / "depth_times.npz").exists():
                 with np.load(ep_dir / "depth_times.npz") as dt:
-                    origin = float(t[k0]) + float(ctx.get("clock_zero_s") or 0.0)
                     np.savez(d / "depth_times.npz", **{key: dt[key] if key.endswith("_pts") else dt[key] - origin
                                                       for key in dt.files})
             if ctx.get("depth_presentation_times"):
@@ -391,7 +391,7 @@ def write_pieces(ep_dir: Path, pieces_root: Path) -> list[Path]:
     return out
 
 
-def write_units(job: Path, eps: Path) -> dict:
+def write_units(job: Path, eps: Path, *, refresh_unpaid_interpretation=False) -> dict:
     """The requests to send for a folder of prepared episodes: short episodes as they are, long recordings as their
     parts. job/units holds one link per request so one labelling run covers both, and job/pieces the parts.
     Returns {long episode: [its part folders' names]}."""
@@ -403,7 +403,7 @@ def write_units(job: Path, eps: Path) -> dict:
     long_eps = {}
     for d in sorted(Path(eps).glob("episode_*")):
         if needs_pieces(d):
-            parts = _write_or_reuse(d, proot)
+            parts = _write_or_reuse(d, proot, refresh_unpaid_interpretation=refresh_unpaid_interpretation)
             long_eps[d.name] = [p.name for p in parts]
             for p in parts:
                 (units / p.name).symlink_to(p.resolve())
@@ -412,7 +412,7 @@ def write_units(job: Path, eps: Path) -> dict:
     return long_eps
 
 
-def _write_or_reuse(d: Path, proot: Path) -> list[Path]:
+def _write_or_reuse(d: Path, proot: Path, *, refresh_unpaid_interpretation=False) -> list[Path]:
     from label.evidence_access import same_source_proof, source_proof
     ctx = json.loads((d / "context.json").read_text())
     names = (ctx.get("pieces") or {}).get("parts") or []
@@ -429,6 +429,22 @@ def _write_or_reuse(d: Path, proot: Path) -> list[Path]:
         except (OSError, ValueError):
             raise RuntimeError(f"{d.name}: existing pieces have no verifiable source proof; use an explicit fresh job")
         if not same_source_proof(saved, ctx, d):
+            from label.harness import billing_record, has_dispatch_receipt
+            from label.evidence_access import equivalent_source_proof
+            current = source_proof(ctx, d)
+            unchanged_sources = equivalent_source_proof(
+                [row for row in saved if row['name'] != 'prepared:context.json'],
+                [row for row in current if row['name'] != 'prepared:context.json'])
+            out = proot.parent / 'run' / 'out'
+            receipts = [billing_record(out, name + '.json') for name in names]
+            if (refresh_unpaid_interpretation and unchanged_sources
+                    and not any(receipt and has_dispatch_receipt(receipt[1]) for receipt in receipts)):
+                # Review verified the preparation before applying dictionary overlays.
+                # No request used these parts, so rebuild their derived interpretation.
+                parts = write_pieces(d, proot)
+                ctx = json.loads((d / 'context.json').read_text())
+                write_atomic(proof_path, source_proof(ctx, d))
+                return parts
             raise RuntimeError(f"{d.name}: prepared source changed since pieces were cut; use an explicit fresh job")
         if not all((proot / n / "context.json").exists() for n in names):
             raise RuntimeError(f"{d.name}: a saved piece is missing; use an explicit fresh job")
@@ -456,45 +472,29 @@ def _part_reply(src: Path, name: str) -> tuple[dict | None, str | None]:
     fields of the wrong type left out, label/harness.py typed_labels), else (what came back, why it gave no labels):
     not parsing, cut off at the output limit (the harness's failed_<part>.json), an output file that does not read, or
     no reply at all, with why when the harness recorded it (noreply_<part>.json)."""
-    from label.harness import typed_labels, billing_record
-    q, f, nr = src / f"{name}.json", src / f"failed_{name}.json", src / f"noreply_{name}.json"
-    # A strictly newer durable attempt supersedes an old label. Equal-index legacy files
-    # keep their established primary, failed, no-reply precedence.
+    from label.harness import typed_labels, annotation_record, reply_truncated
     try:
-        latest = billing_record(src, name + '.json')
-    except (OSError, ValueError, TypeError):
-        present = [path for path in (q, f, nr) if path.exists()]
+        selected = annotation_record(src, name + '.json')
+    except (OSError, ValueError, TypeError, AttributeError):
+        present = [src / (prefix + name + '.json') for prefix in ('', 'failed_', 'noreply_')
+                   if (src / (prefix + name + '.json')).exists()]
         if len(present) == 1:
             _, error = _read(present[0])
             if error:
                 return None, error
         return None, 'saved billing receipts could not be verified'
-    first = next((path for path in (q, f, nr) if path.exists()), None)
-    if latest is not None and first is not None and latest[0] != first:
-        original, _ = _read(first)
-        if original and latest[1].get('final_attempt_index', 0) > original.get('final_attempt_index', 0):
-            record = latest[1]
-            if latest[0] == f:
-                return record, "the model's reply was cut off at the output limit"
-            if latest[0] == nr:
-                return record, f"the model gave no reply ({record['no_reply']})" if record.get('no_reply') else "the model gave no reply"
-    r, bad = _read(q) if q.exists() else (None, None)
-    if bad:
-        return None, bad
-    if r and r.get("parse_ok"):
-        if not isinstance(r.get("labels"), dict):
-            return r, "its labels are not a JSON object"
-        return {**r, "labels": typed_labels(copy.deepcopy(r["labels"]))}, None
-    if r:
-        return r, "the model's reply did not parse"
-    if f.exists():
-        r, bad = _read(f)
-        return r, bad or "the model's reply was cut off at the output limit"
-    if nr.exists():
-        r, _ = _read(nr)
-        if r and r.get("no_reply"):
-            return r, f"the model gave no reply ({r['no_reply']})"
-    return None, "the model gave no reply"
+    if selected is None:
+        return None, 'the model gave no reply'
+    _, record = selected
+    if reply_truncated(record):
+        return record, "the model's reply was cut off at the output limit"
+    if record.get('parse_ok'):
+        if not isinstance(record.get('labels'), dict):
+            return record, 'its labels are not a JSON object'
+        return {**record, 'labels': typed_labels(copy.deepcopy(record['labels']))}, None
+    if record.get('no_reply'):
+        return record, f"the model gave no reply ({record['no_reply']})"
+    return record, "the model's reply did not parse"
 
 
 def _raw_head(r: dict | None) -> str:
@@ -520,6 +520,63 @@ def _part_dispatch(record: dict | None) -> dict:
             **({'no_reply_kind': 'spend_cap'} if outcome == 'not dispatched'
                and record.get('no_reply_kind') == 'spend_cap'
                and record.get('parse_ok') is False and record.get('final_reserved_usd') == 0 else {})}
+
+
+def _carry_part_billing(result: dict, parts: list) -> None:
+    """Carry cumulative invoices separately from each part's current usage."""
+    from label.harness import billing_view, _history_cost, auxiliary_cost
+    if any(record and '_billing_receipt' in record for _, record in parts):
+        # Annotation authority may predate a local refusal. Preserve the complete
+        # financial ledgers as invoices instead of counting the old reply twice.
+        final, auxiliary = [], []
+        for context, annotation in parts:
+            if not annotation:
+                continue
+            record = billing_view(annotation)
+            part = (context.get('piece') or {}).get('index')
+            final.extend({**copy.deepcopy(invoice), 'part': part} for invoice in record.get('final_cost_history', []))
+            if record.get('final_dispatch_outcome') != 'not dispatched' and not record.get('dry_run'):
+                _history_cost(record)
+                final.append({**{key: copy.deepcopy(record[key]) for key in (
+                    'usage', 'final_dispatch_outcome', 'final_reserved_usd', 'final_attempt_index',
+                    'model', 'response', 'response_text') if key in record}, 'part': part})
+            auxiliary.extend({**copy.deepcopy(invoice), 'part': part}
+                             for invoice in record.get('auxiliary_cost_history', []))
+            for kind, value in (('route', (record.get('config') or {}).get('resolution_route') or {}),
+                                ('inspection', record.get('evidence_inspection') or {})):
+                cost = auxiliary_cost(value, routing=kind == 'route')
+                if cost:
+                    auxiliary.append({**copy.deepcopy(value), 'kind': kind, 'part': part,
+                                      'cost_usd': cost, 'previously_billed_usd': 0.0,
+                                      'rounds_cost_offset_usd': float(value.get('rounds_cost_offset_usd') or 0)
+                                          + max(0.0, float(value.get('cost_usd', 0)) - cost)})
+                    auxiliary[-1].pop('previously_billed', None)
+        result['final_cost_history'], result['auxiliary_cost_history'] = final, auxiliary
+        result['usage']['est_cost_usd'] = 0.0
+        for value in ((result.get('config') or {}).get('resolution_route') or {},
+                      result.get('evidence_inspection') or {}):
+            value.pop('previously_billed', None)
+            value['previously_billed_usd'] = value.get('cost_usd', 0.0)
+        return
+    final, auxiliary, routes = [], [], []
+    for context, record in parts:
+        if not record:
+            continue
+        part = (context.get('piece') or {}).get('index')
+        final.extend({**copy.deepcopy(invoice), 'part': part} for invoice in record.get('final_cost_history', []))
+        auxiliary.extend({**copy.deepcopy(invoice), 'part': part} for invoice in record.get('auxiliary_cost_history', []))
+        if record.get('final_dispatch_outcome') in ('claimed', 'unverified'):
+            final.append({key: copy.deepcopy(record[key]) for key in (
+                'model', 'generation_id', 'usage', 'final_dispatch_outcome', 'final_reserved_usd',
+                'response_text', 'response') if key in record} | {'part': part})
+        routes.append((record.get('config') or {}).get('resolution_route') or {})
+    result['final_cost_history'], result['auxiliary_cost_history'] = final, auxiliary
+    route = result['config']['resolution_route']
+    route.pop('previously_billed', None)
+    route['previously_billed_usd'] = math.fsum(float(item.get('cost_usd') or 0) if item.get('previously_billed')
+        else float(item.get('previously_billed_usd') or 0) for item in routes)
+    if any(item.get('cost_is_conservative_estimate') for item in routes):
+        route['cost_is_conservative_estimate'] = True
 
 
 def stitch_run(job: Path, eps: Path, long_eps: dict, out: Path) -> dict:
@@ -563,9 +620,18 @@ def stitch_run(job: Path, eps: Path, long_eps: dict, out: Path) -> dict:
                                'use an explicit fresh job to label changed inputs')
     out.mkdir(parents=True, exist_ok=True)
     res = {"stitched": 0, "incomplete": [], "unlabelled": []}
-    # every short episode's reply as it came, a cut-off one (failed_<episode>.json) too: the board shows each
-    for p in short_outputs:
-        shutil.copy(p, out / p.name)
+    # A short episode's files are published as the run holds them: each is copied, and one the run no longer holds
+    # is removed, so a copy left from an earlier run never stands beside the label that replaced it. Readers choose
+    # the active record from the same files in either folder (annotation_record), and a newer receipt beside an
+    # older label carries billing that choosing one file would lose.
+    held = {p.name for p in short_outputs}
+    for name in sorted({p.stem.removeprefix('failed_').removeprefix('noreply_') for p in short_outputs}):
+        for prefix in ('', 'failed_', 'noreply_'):
+            target = out / f'{prefix}{name}.json'
+            if target.name in held:
+                shutil.copy(src / target.name, target)
+            else:
+                target.unlink(missing_ok=True)
     for ep, parts in long_eps.items():
         got, missing, failed = [], [], []
         for n in parts:
@@ -595,7 +661,8 @@ def stitch_run(job: Path, eps: Path, long_eps: dict, out: Path) -> dict:
                 u = r.get('usage') or {}
                 for key in ('prompt_tokens', 'completion_tokens', 'reasoning_tokens', 'cached_tokens',
                             'cache_write_tokens', 'latency_s', 'est_cost_usd'):
-                    result['usage'][key] = round(result['usage'][key] + float(u.get(key) or 0), 4)
+                    total = result['usage'][key] + float(u.get(key) or 0)
+                    result['usage'][key] = total if key == 'est_cost_usd' else round(total, 4)
                 part_record = result['config']['pieces'][int(pc['piece']['index']) - 1]
                 part_record.update(
                     episode_dir=r.get('episode_dir'), example_dir=r.get('example_dir'),
@@ -609,9 +676,10 @@ def stitch_run(job: Path, eps: Path, long_eps: dict, out: Path) -> dict:
             routes = [((r or {}).get('config') or {}).get('resolution_route') or {}
                       for _, r in sorted(got + failed, key=lambda item: item[0]['piece']['index'])]
             result['config']['resolution_route']['parts'] = routes
-            result['config']['resolution_route']['cost_usd'] = round(
-                sum(float(route.get('cost_usd') or 0) for route in routes), 6)
+            result['config']['resolution_route']['cost_usd'] = math.fsum(
+                float(route.get('cost_usd') or 0) for route in routes)
             result['decode_failed'] += [x for _, r in failed for x in (r or {}).get('decode_failed') or []]
+            _carry_part_billing(result, got + failed)
             write_atomic(out / f"{ep}.json", result, indent=None)
             res["stitched"] += 1
             if missing:
@@ -631,7 +699,9 @@ def unlabelled(ep_dir: Path, failed: list[tuple[dict, dict | None]], missing: li
     raw = (first.get("labels") or {}).get("_raw") if isinstance(first.get("labels"), dict) else None
     raw = raw if raw is not None else first.get("content_tail") or ""
     whys = "; ".join(f"part {g['part']}: {g['why']}" for g in missing)
-    usage = {key: round(sum(float(((r or {}).get('usage') or {}).get(key) or 0) for _, r in failed), 4)
+    usage = {key: (math.fsum(float(((r or {}).get('usage') or {}).get(key) or 0) for _, r in failed)
+                   if key == 'est_cost_usd' else
+                   round(sum(float(((r or {}).get('usage') or {}).get(key) or 0) for _, r in failed), 4))
              for key in ('prompt_tokens', 'completion_tokens', 'reasoning_tokens', 'cached_tokens',
                          'cache_write_tokens', 'latency_s', 'est_cost_usd')}
     count = len(missing)
@@ -645,7 +715,7 @@ def unlabelled(ep_dir: Path, failed: list[tuple[dict, dict | None]], missing: li
     cfg = dict(first.get('config') or {})
     routes = [((r or {}).get('config') or {}).get('resolution_route') or {} for _, r in failed]
     cfg['resolution_route'] = {'parts': routes,
-                               'cost_usd': round(sum(float(route.get('cost_usd') or 0) for route in routes), 6)}
+                               'cost_usd': math.fsum(float(route.get('cost_usd') or 0) for route in routes)}
     cfg['pieces'] = [{**pc.get('piece', {}), 'episode_dir': (r or {}).get('episode_dir'),
                       'example_dir': (r or {}).get('example_dir'),
                       **_part_dispatch(r),
@@ -656,7 +726,7 @@ def unlabelled(ep_dir: Path, failed: list[tuple[dict, dict | None]], missing: li
                       'config': copy.deepcopy((r or {}).get('config') or {})}
                      for pc, r in failed]
     _combine_request_config(cfg)
-    return {"episode_dir": str(ep_dir), "model": first.get("model"), "reasoning_effort": first.get("reasoning_effort"),
+    result = {"episode_dir": str(ep_dir), "model": first.get("model"), "reasoning_effort": first.get("reasoning_effort"),
             'annotation_policy': selected, 'prompt_mode': 'session' if selected['task_mode'] == 'session' else 'inferred',
             **({'jaw_evidence': jaw_evidence} if jaw_evidence else {}),
             **({'evidence_inspection': inspection} if inspection['parts'] else {}),
@@ -665,6 +735,8 @@ def unlabelled(ep_dir: Path, failed: list[tuple[dict, dict | None]], missing: li
             "labels": {"_raw": raw, "_parse_error": f"no part of the recording returned labels that parse ({whys})"},
             "stitched": {"parts": count, "cuts_s": [g["t0_s"] for g in missing[1:]], "missing": missing},
             "decode_failed": [x for _, r in failed for x in (r or {}).get("decode_failed") or []]}
+    _carry_part_billing(result, failed)
+    return result
 
 
 # ---------------------------------------------------------------- stitching
@@ -834,7 +906,7 @@ def is_cut_artifact(iss: dict, part: int, count: int, t0: float, t1: float, cuts
 def _object_tokens(objects) -> list[frozenset]:
     """Full object-name token sets permit omitted modifiers; shared final nouns alone do not match two modifiers."""
     out = []
-    for obj in objects or []:
+    for obj in objects if isinstance(objects, list) else []:
         words = re.findall(r"[a-z0-9]+", str(obj.get("name") if isinstance(obj, dict) else obj).lower())
         words = [word[:-1] if word.endswith("s") and not word.endswith("ss") and len(word) > 3 else word
                  for word in words if word not in ("a", "an", "the")]
@@ -1060,7 +1132,9 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
     for n, (pc, r) in enumerate(parts, start=1):
         i = int(pc["piece"].get("index") or n)      # the part's own number, with a gap where a part gave no labels
         t0, t1 = float(pc["piece"]["t0_s"]), float(pc["piece"]["t1_s"])
-        lab = _shift(r.get("labels") or {}, t0)
+        from board.label_projection import project
+        projected, omitted = project(r.get('labels') or {})
+        lab = _shift(projected, t0)
         owner = {"index": i, "t0_s": t0, "t1_s": t1}
         for field in ("tasks", "key_events", "timeline"):
             lab[field] = [{**item, "source_piece": dict(owner)} for item in lab.get(field) or []]
@@ -1117,7 +1191,7 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
         # the first answer that saw a contact is kept, with its first and last touch frame from the parts whose strips
         # they count in
         for c in lab.get("contacts") or []:
-            if not isinstance(c, dict):
+            if not isinstance(c, dict) or not isinstance(c.get('id'), str):
                 continue
             m = contacts_model.setdefault(c.get("id"), {k: v for k, v in c.items() if k not in STRIP_FIELDS.values()})
             for k, field in STRIP_FIELDS.items():
@@ -1132,10 +1206,11 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
         if lab.get("tasks"):
             L["tasks"] += lab["tasks"]
         # what each part's reply broke of the output format, left out of its labels (label/harness.py typed_labels)
-        dropped += [{**x, "part": i} for x in (r.get("labels") or {}).get("_dropped") or [] if isinstance(x, dict)]
+        dropped += [{**item, 'part': i} for item in omitted]
         u = r.get("usage") or {}
         for k in usage:
-            usage[k] = round(usage[k] + float(u.get(k) or 0), 4)
+            total = usage[k] + float(u.get(k) or 0)
+            usage[k] = total if k == 'est_cost_usd' else round(total, 4)
         cfg = r.get("config") or {}
         still += _shift(r.get("arm_still_spans") or [], t0)
         part_info.append({"part": i, "t0_s": t0, "t1_s": t1, "episode_dir": r.get("episode_dir"),
@@ -1175,7 +1250,7 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
     # each part routed its own cell width; the recording's route records every part's, and its cost is theirs summed
     routes = [(r.get("config") or {}).get("resolution_route") or {} for _, r in parts]
     cfg["resolution_route"] = {**(routes[0] or {}), "parts": routes,
-                               "cost_usd": round(sum(float(x.get("cost_usd") or 0) for x in routes), 6)}
+                               "cost_usd": math.fsum(float(x.get("cost_usd") or 0) for x in routes)}
     # each part's prompt had its own blocks (a contact or depth only some parts hold); the recording's record names
     # every block, output field and implied check any part had, in the order they first appear
     for k in ("prompt_blocks", "schema_fields", "checks_implied"):
@@ -1206,7 +1281,7 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
     jaw_evidence = merge_jaws(ep_dir, parts, missing)
     camera_observations = merge_camera_observations(ep_dir, parts, missing, ep)
     selected = policy.effective(ctx)
-    return {"episode_dir": str(ep_dir), "model": first.get("model"), "reasoning_effort": first.get("reasoning_effort"),
+    result = {"episode_dir": str(ep_dir), "model": first.get("model"), "reasoning_effort": first.get("reasoning_effort"),
             'annotation_policy': selected,
             **({'camera_observations': camera_observations} if camera_observations is not None else {}),
             **({'jaw_evidence': jaw_evidence} if jaw_evidence else {}),
@@ -1225,6 +1300,8 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
             "decode_failed": [x for _, r in parts for x in r.get("decode_failed") or []],
             **({"contacts": [c for c in recorded if c.get("id") in asked], "contact_views": views}
                if views["shown"] else {})}
+    _carry_part_billing(result, parts)
+    return result
 
 
 if __name__ == "__main__":

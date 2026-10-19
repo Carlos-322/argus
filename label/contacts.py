@@ -36,7 +36,7 @@ from __future__ import annotations
 import numpy as np
 
 from label import signals as sg
-from prepare.signal_alignment import ALIGNED_CAMERA
+from prepare.signal_alignment import ALIGNED_CAMERA, RECORDER_ARRIVAL, recorder_arrival
 
 DIP_BELOW = 0.5      # a dip is a fall under this share of the contact's peak
 VARIATION_SUFFIX = " variation within each frame"   # prepare/formats.py's name for a fast signal's companion
@@ -190,6 +190,9 @@ def of_episode(ep: dict, verdicts=None) -> list[dict]:
     now from its signals, with the caller's touch verdicts when it has them (find)."""
     from label.dictionary_context import field_interpretation
     meta = {name: dict(value) for name, value in (ep.get("signal_meta") or {}).items()}
+    if recorder_arrival(ep['context']):
+        for name in ep.get('signals') or {}:
+            meta.setdefault(name, {}).setdefault('aligned_by', RECORDER_ARRIVAL)
     for name in ep.get("signals") or {}:
         entry = field_interpretation(ep["context"], name)
         if entry:

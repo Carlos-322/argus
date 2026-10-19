@@ -914,10 +914,13 @@ def test_an_mcap_depth_topic_with_no_camera_of_its_own_goes_to_the_board(tmp_pat
     access = ea.Access(ep)
     field = next(row for row in access.inventory() if row['kind'] == 'depth')
     receipt = access.inspect({'field_id': field['id'], 'mode': 'regions'})
+    from prepare.signal_alignment import RECORDER_ARRIVAL_LIMITATION
+    assert receipt['presentation_clock'] == ep['context']['source']['presentation_clock']
+    assert RECORDER_ARRIVAL_LIMITATION in receipt['limitations']
     assert receipt['values'][0] == [.9] and receipt['values'][-1] == [1.19]
     assert any('No recorded RGB camera pairing' in line for line in receipt['limitations'])
     assert ep['additional_depth'][field['name']]['paired_camera'] is None
-    # Matching-looking numbers from arrival and capture clocks do not prove synchronization.
+    # Mixed capture availability retains its native values while common recorder logs place source rows.
     other = tmp_path / 'mixed_clock'
     other.mkdir()
     def captured_depth(row):
@@ -929,9 +932,35 @@ def test_an_mcap_depth_topic_with_no_camera_of_its_own_goes_to_the_board(tmp_pat
     mixed_access = ea.Access(mixed)
     mixed_field = next(row for row in mixed_access.inventory() if row['kind'] == 'depth')
     inspected = mixed_access.inspect({'field_id': mixed_field['id'], 'mode': 'regions'})
-    assert inspected['values'][0] == [.9] and 'times_s' not in inspected
+    assert inspected['presentation_clock'] == mixed['context']['source']['presentation_clock']
+    assert RECORDER_ARRIVAL_LIMITATION in inspected['limitations']
+    assert inspected['values'][0] == [.9] and inspected['values'][-1] == [1.19]
     assert len(inspected['source_frames']) == 30
-    assert 'unverified' in mixed['context']['depth_camera_clock'][mixed_field['name']]['what']
+    assert mixed['context']['source']['presentation_clock']['basis'] == 'mcap_log_time'
+    assert mixed['context']['source']['presentation_clock']['physical_synchronization_verified'] is False
+    assert mixed['additional_depth'][mixed_field['name']]['paired_camera'] is None
+    assert any('No recorded RGB camera pairing' in line for line in inspected['limitations'])
+    from mcap.reader import make_reader
+    from label import depth as dp
+    with (other / 'run.mcap').open('rb') as stream:
+        source = list(make_reader(stream).iter_messages(topics=['/lidar/depth']))
+    with (other / 'run.mcap').open('rb') as stream:
+        origin = next(make_reader(stream).iter_messages(topics=['/front/image']))[2].log_time
+    log_ns = np.asarray([message.log_time for _, _, message in source], dtype=np.int64)
+    bodies = [json.loads(message.data) for _, _, message in source]
+    capture_ns = np.asarray([body['timestamp']['sec'] * 10**9 + body['timestamp']['nanosec'] for body in bodies],
+                            dtype=np.int64)
+    np.testing.assert_allclose(inspected['times_s'], (log_ns - origin) / 1e9, atol=1e-9)
+    assert [row['source_frame'] for row in inspected['source_frames']] == list(range(30))
+    with np.load(mixed['dir'] / mixed['context']['recorded_camera_clocks']) as clocks:
+        np.testing.assert_array_equal(clocks['depth_' + mixed_field['name'] + '_capture_ns'], capture_ns)
+        np.testing.assert_array_equal(clocks['depth_' + mixed_field['name'] + '_log_ns'], log_ns)
+    entry = mixed['additional_depth'][mixed_field['name']]
+    decoded = dp.decode(entry, entry['pts'], list(range(30)))
+    assert len(decoded) == 30
+    for row, picture in decoded.items():
+        raw = np.frombuffer(base64.b64decode(bodies[row]['data']), dtype='<u2').reshape(48, 64)
+        np.testing.assert_array_equal(picture, raw)
 
 
 # ---------------------------------------------------------------- a take of many cameras

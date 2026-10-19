@@ -218,3 +218,136 @@ def test_numbered_demo_missing_camera_is_reported_without_collapsing_recordings(
     signal = next(row for row in ctx['signals'] if row['name'].endswith('qpos'))
     with np.load(ep / 'signals.npz') as arrays:
         np.testing.assert_array_equal(arrays[signal['key']], np.zeros((6, 7)))
+
+
+def test_hdf_group_cycle_does_not_discard_owned_camera(tmp_path):
+    import subprocess
+    import sys
+    upload = tmp_path / 'upload'; upload.mkdir()
+    with h5py.File(upload / 'recording.h5', 'w') as h:
+        h.attrs['fps'] = 10
+        rgb(h)
+        h['timestamp'] = np.arange(6) / 10
+        h['cycle'] = h['/']
+    result = subprocess.run([sys.executable, '-c',
+        'import json,sys; from pathlib import Path; from prepare.formats import convert; '
+        'print(json.dumps(convert(Path(sys.argv[1]), "ego_head", Path(sys.argv[2]), "fixture", 20)))',
+        str(upload), str(tmp_path / 'out')], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout.splitlines()[-1])
+    assert len(report['episodes']) == 1 and not report['failed']
+
+
+@pytest.mark.parametrize('inside', [False, True])
+def test_hdf_external_instruction_requires_an_authorized_source_file(tmp_path, inside):
+    from label import episode
+    upload = tmp_path / 'upload'; upload.mkdir()
+    external = (upload if inside else tmp_path) / 'instructions.h5'
+    with h5py.File(external, 'w') as source:
+        source['instruction'] = 'Unshared external instruction 9284517'
+    with h5py.File(upload / 'recording.h5', 'w') as h:
+        h.attrs['fps'] = 10
+        rgb(h)
+        h['timestamp'] = np.arange(6) / 10
+        h['task'] = h5py.ExternalLink(str(external), '/instruction')
+    out = tmp_path / 'out'
+    report = formats.convert(upload, 'ego_head', out, 'fixture', 20)
+    assert len(report['episodes']) == 1
+    ep = out / report['episodes'][0]['episode_id']
+    context = json.loads((ep / 'context.json').read_text())
+    prompt = episode.build_request(ep)['prompt']
+    assert ('Unshared external instruction 9284517' in prompt) is inside
+    if not inside:
+        assert any(i['kind'] == 'external_source_unread' for i in context['reader_issues'])
+
+
+@pytest.mark.parametrize('damaged', ['depth', 'force', 'timestamp'])
+@pytest.mark.parametrize('row', [0, 2])
+def test_hdf_damaged_non_rgb_chunk_preserves_other_owned_rows(tmp_path, damaged, row):
+    upload = tmp_path / 'upload'; upload.mkdir(); source = upload / 'recording.h5'
+    with h5py.File(source, 'w') as h:
+        h.attrs['fps'] = 10
+        rgb(h)
+        h.create_dataset('timestamp', data=np.arange(6) / 10, chunks=(1,), fletcher32=True)
+        h.create_dataset('force', data=np.arange(6, dtype=float), chunks=(1,), fletcher32=True)
+        h.create_dataset('depth', data=np.stack([np.full((8, 8), 1000+i, dtype=np.uint16) for i in range(6)]),
+                         chunks=(1, 8, 8), fletcher32=True).attrs['sensor_type'] = 'depth'
+        index = (row,) + (0,) * (h[damaged].ndim - 1)
+        chunk = h[damaged].id.get_chunk_info_by_coord(index)
+    with source.open('r+b') as stream:
+        stream.seek(chunk.byte_offset + chunk.size - 1)
+        value = stream.read(1); stream.seek(-1, 1); stream.write(bytes([value[0] ^ 1]))
+    out = tmp_path / 'out'; report = formats.convert(upload, 'ego_head', out, 'fixture', 20)
+    assert len(report['episodes']) == 1 and not report['failed']
+    ep = out / report['episodes'][0]['episode_id']
+    context = json.loads((ep / 'context.json').read_text())
+    assert context['n_state_frames'] == 6
+    assert context.get('reader_issues')
+    if damaged == 'depth':
+        entries = json.loads((ep / 'depth.json').read_text())
+        mapping = np.load(ep / next(iter(entries.values()))['kmap'])
+        assert mapping[row] == -1 and all(mapping[i] >= 0 for i in range(6) if i != row)
+        from label.depth import at_anchor, load
+        restored = load(ep)
+        for index in range(6):
+            picture = at_anchor({}, restored, next(iter(restored)), [index])
+            assert bool(picture) is (index != row)
+            if picture:
+                assert np.all(next(iter(picture.values())) == 1000 + index)
+    if damaged == 'force':
+        force = next(signal for signal in context['signals'] if signal['name'] == 'force')
+        with np.load(ep / 'signals.npz') as values:
+            expected = np.arange(6, dtype=float); expected[row] = np.nan
+            np.testing.assert_allclose(values[force['key']].ravel(), expected, equal_nan=True)
+
+
+@pytest.mark.parametrize('linked_storage', ['external_link', 'virtual', 'virtual_external_link'])
+def test_single_selected_hdf_file_does_not_authorize_neighbor_files(tmp_path, linked_storage):
+    source = tmp_path / 'recording.h5'
+    private = tmp_path / 'private.h5'
+    with h5py.File(private, 'w') as h:
+        h['instruction'] = 'Private task 4829971'
+        h['force'] = np.arange(6, dtype=float) + 4829971
+    with h5py.File(source, 'w') as h:
+        rgb(h); h.attrs['fps'] = 10
+        if linked_storage == 'external_link':
+            h['task'] = h5py.ExternalLink(str(private), '/instruction')
+        else:
+            layout = h5py.VirtualLayout(shape=(6,), dtype=float)
+            if linked_storage == 'virtual_external_link':
+                h['linked_force'] = h5py.ExternalLink(str(private), '/force')
+                layout[:] = h5py.VirtualSource('.', '/linked_force', shape=(6,))
+            else:
+                layout[:] = h5py.VirtualSource(str(private), 'force', shape=(6,))
+            h.create_virtual_dataset('force', layout)
+    out = tmp_path / 'out'
+    report = formats.convert(source, 'ego_head', out, 'fixture', 20)
+    ep = out / report['episodes'][0]['episode_id']
+    from label.episode import build_request
+    prompt = build_request(ep)['prompt']
+    assert '4829971' not in prompt
+    context = json.loads((ep / 'context.json').read_text())
+    assert any(issue['kind'] == 'external_source_unread' for issue in context['reader_issues'])
+
+
+def test_unrelated_damaged_hdf_object_metadata_does_not_hide_a_readable_camera(tmp_path):
+    # Synthetic corpus mutant m0285, seed 1285: wrist object metadata fails h5o.get_info,
+    # while all 60 front-camera rows are readable. Keep the original damaged bytes.
+    import gzip
+    from pathlib import Path
+    from label import episode
+    source = tmp_path / 'recording.h5'
+    source.write_bytes(gzip.decompress((Path(__file__).parent / 'fixtures' /
+                                       'corrupt_hdf_camera_metadata.h5.gz').read_bytes()))
+    with h5py.File(source, 'r') as h:
+        expected = h['observations/images/cam_high'][()]
+    out = tmp_path / 'out'
+    report = formats.convert(source, 'teleop_arms', out, 'corrupt metadata', 20)
+    assert len(report['episodes']) == 1 and not report['failed']
+    loaded = episode.load(out / report['episodes'][0]['episode_id'])
+    assert loaded['context']['n_state_frames'] == len(expected) == 60
+    decoded = episode._decode_view(loaded, 'exo', list(range(60)))
+    assert len(decoded) == 60
+    for row, picture in decoded.items():
+        assert abs(np.asarray(picture).mean() - expected[row].mean()) < 4
+    assert loaded['context'].get('reader_issues')

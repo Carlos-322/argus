@@ -8,6 +8,7 @@ import io
 import json
 import math
 import re
+import uuid
 import zipfile
 from collections import Counter
 from pathlib import Path
@@ -18,6 +19,7 @@ from label.atomic import write_atomic
 from label.dictionary_context import _public_source, field_interpretation, native_field_name, prepared_interpretation
 from label import sensor_evidence as se
 from prepare.mcap_fields import SAMPLE_RATE_KEY
+from prepare.signal_alignment import RECORDER_ARRIVAL, RECORDER_ARRIVAL_LIMITATION, recorder_arrival
 
 MAX_COLUMNS = 8
 MAX_ROWS = 64
@@ -43,10 +45,19 @@ IMPLEMENTATION_SHA256 = hashlib.sha256(b''.join(path.read_bytes() for path in (
 PREPARED_CONTEXT = frozenset('''episode_id episode_index dataset profile robot_type state_kind state_note state_why
 state_unaligned fps duration_s n_state_frames real_times clocks clock_start_s clock_zero_s presentation_times
 cameras depth signals source instruction instruction_note task_label capture_qc sensor_checks stream_checks
-stream_pairing reader_issues contacts unshown_cameras recorded_jumps gripper_channels gripper_value piece
+stream_pairing check_versions reader_issues contacts unshown_cameras recorded_jumps gripper_channels gripper_value piece
 packaging collection_note data_dictionary retained_evidence_root recorded_camera_ns recorded_mcap_fields recorded_hdf5_metadata'''.split())
 PREPARED_CONTEXT = PREPARED_CONTEXT | {'represented_source_members', 'annotation_policy', 'task_mode', 'state_contract', 'trimmed',
                                      'recorded_table_fields', 'table_field_inventory'}
+
+
+def reader_projection_identity(ctx):
+    """Hash the reader values this episode exposes to inspection requests."""
+    from board.public_export import reader_context_field, reader_annotation_projection
+    projected = {name: reader_context_field(name, value) for name, value in ctx.items()}
+    projected['uploader_annotation'] = reader_annotation_projection(
+        ctx.get('uploader_annotation'), ctx.get('uploader_notes')) or ctx.get('uploader_annotation')
+    return hashlib.sha256(packed(projected).encode()).hexdigest()
 
 
 def needs_inspection(ep, sensor_evidence):
@@ -756,6 +767,7 @@ class Access:
     def signature(self):
         h = hashlib.sha256(packed([self.ep['context'], self.inventory()]).encode())
         h.update(IMPLEMENTATION_SHA256.encode())
+        h.update(reader_projection_identity(self.ep['context']).encode())
         h.update(packed(source_proof(self.ep['context'], self.ep['dir'])).encode())
         for field in self.fields.values():
             a = field.get('value')
@@ -869,6 +881,9 @@ class Access:
                  if type(value) is int and abs(value) > 2**53 - 1]
         if exact:
             result['exact_integer_values'] = exact
+        if result.get('times_s') and recorder_arrival(self.ep['context']):
+            result['presentation_clock'] = copy.deepcopy(self.ep['context']['source']['presentation_clock'])
+            result['limitations'].append(RECORDER_ARRIVAL_LIMITATION)
         result['limitations'] = list(dict.fromkeys(result['limitations']))
         result['id'] = 'inspection:' + hashlib.sha256(packed(result).encode()).hexdigest()[:20]
         if len(packed(result).encode()) > MAX_RESPONSE_BYTES:
@@ -894,7 +909,9 @@ class Access:
         if not limit:
             raise ValueError('one native row exceeds inspection budget')
         timing = field['descriptor']
-        unverified = any(timing.get(k) for k in ('aligned_by', 'camera_aligned_by', 'clock_problem'))
+        arrival = timing.get('aligned_by') == RECORDER_ARRIVAL and recorder_arrival(self.ep['context'])
+        unverified = (bool(timing.get('aligned_by')) and not arrival or
+                      any(timing.get(k) for k in ('camera_aligned_by', 'clock_problem')))
         from label import episode as me
         unverified = unverified or bool((self.ep['context'].get('camera_clock') or {}).get(me.anchor(self.ep)))
         ts = None if native or not self.state_usable or unverified else self.times()[:n]
@@ -1274,6 +1291,10 @@ class Access:
                       'access_field_id': field['id'], 'access_kind': field['kind'],
                       'interpretation': metadata.get('interpretation') or {},
                       'access_descriptor_digest': descriptor_signature(metadata)}
+            if r.get('presentation_clock'):
+                sensor['presentation_clock'] = copy.deepcopy(r['presentation_clock'])
+                sensor['limitations'] = list(r['limitations'])
+                doc['limitations'].extend(note for note in r['limitations'] if note not in doc['limitations'])
             if field['kind'] == 'image':
                 sensor['view'] = self.fields[r['field_id']]['view']
                 sensor['interpretation'] = prepared_interpretation(self.ep['context'], sensor['view'], 'camera')
@@ -1309,7 +1330,7 @@ class Access:
             elif finding.get('start_s') is None and finding.get('end_s') is None and isinstance(refs, list) and refs:
                 valid = finding.get('adds_beyond_video') is True
                 for ref in refs:
-                    r = known.get(ref.get('evidence_id')) if isinstance(ref, dict) else None
+                    r = known.get(ref['evidence_id']) if isinstance(ref, dict) and isinstance(ref.get('evidence_id'), str) else None
                     rows = ref.get('rows') if isinstance(ref, dict) else None
                     if r and r.get('withheld_from_final'):
                         valid = False
@@ -1334,7 +1355,7 @@ class Access:
                                 for row in rows for col in columns):
                             valid = False
                 if valid:
-                    doc['untimed_findings'].append(clean(finding))
+                    doc['untimed_findings'].append(clean(se.finding_fields(finding)))
                     continue
                 reason = 'untimed finding lacks inspected source-row or metadata citations'
             elif any(type(finding.get(k)) not in (int, float) or not math.isfinite(finding[k]) for k in ('start_s', 'end_s')):
@@ -1345,7 +1366,7 @@ class Access:
                 reason = 'missing evidence references'
             converted, windows = [], []
             for ref in refs if isinstance(refs, list) else []:
-                r = known.get(ref.get('evidence_id')) if isinstance(ref, dict) else None
+                r = known.get(ref['evidence_id']) if isinstance(ref, dict) and isinstance(ref.get('evidence_id'), str) else None
                 ts = ref.get('time_s') if isinstance(ref, dict) else None
                 supplied = (r or {}).get('times_s') or []
                 if (r or {}).get('withheld_from_final') or not supplied or not isinstance(ts, list) or not ts or any(type(t) not in (int, float)
@@ -1354,7 +1375,7 @@ class Access:
                 windows.append((min(supplied), max(supplied)))
                 cols = ref.get('columns', r.get('columns') or [])
                 if 'values' in r:
-                    if not isinstance(cols, list) or not cols or any(c not in r['columns'] for c in cols):
+                    if not isinstance(cols, list) or not cols or any(type(c) is not int or c not in r['columns'] for c in cols):
                         reason = 'citation names an uninspected component'; break
                     for col in cols:
                         position = r['columns'].index(col)
@@ -1363,6 +1384,11 @@ class Access:
                         converted.append({'sensor_id': r['id'], 'series_id': r['id'] + f':{col}', 'time_s': ts})
                 else:
                     converted.append({'sensor_id': r['id'], 'time_s': ts})
+            if reason is None:
+                cited = [t for ref in converted for t in ref['time_s']]
+                if (not cited or max(cited) < finding['start_s'] - 1e-9
+                        or min(cited) > finding['end_s'] + 1e-9):
+                    reason = 'cited samples do not overlap or bracket the finding interval'
             if reason is None:
                 # Context images can support part of an event covered by measured evidence.
                 # Require continuous inspected coverage across the cited windows, including both ends.
@@ -1381,7 +1407,7 @@ class Access:
             if reason:
                 doc['unbound_findings'].append({'finding': clean(finding), 'reason': reason})
             else:
-                doc['findings'].append({**clean(finding), 'evidence': converted, 'claim_type': 'recorded_evidence',
+                doc['findings'].append({**clean(se.finding_fields(finding)), 'evidence': converted, 'claim_type': 'recorded_evidence',
                                         'detail': finding.get('detail') or finding.get('claim') or finding.get('observation')})
         return doc
 
@@ -1419,14 +1445,20 @@ def merge(parts, ep_dir=None):
             pass
     return {'version': 1, **({'source_proof': parent_proof} if parent_proof is not None else {}),
             'cost_usd': sum(float(r['record'].get('cost_usd') or 0) for r in rows),
+            'previously_billed_usd': sum(float(r['record'].get('previously_billed_usd') or 0) for r in rows),
+            **({'cost_is_conservative_estimate': True} if any(
+                r['record'].get('cost_is_conservative_estimate') for r in rows) else {}),
             'parts': rows, 'timing': 'Inspection times are local to each part; add time_origin_s for the parent episode.'}
 
 
 def rejected_selection_proof(record):
-    """A durable unpaid rejection has explicit HTTP and numeric receipt types, never diagnostic prose."""
+    """A durable unpaid rejection has explicit receipt types, never diagnostic prose. Which failures are unpaid is
+    decided once, where the request is sent (label/harness.py _post, DispatchError.verified_unpaid): an error status,
+    or a request that never left the machine (no status). The receipt records that verdict, and this reads it back
+    rather than keeping a second, shorter list of statuses that would turn a saved unpaid failure into a charge."""
     def attempt(row):
         return (isinstance(row, dict) and row.get('state') == 'rejected unpaid'
-                and type(row.get('http_status')) is int and row['http_status'] in (401, 402)
+                and (row.get('http_status') is None or type(row.get('http_status')) is int)
                 and type(row.get('http_attempt')) is int and row['http_attempt'] == 1
                 and type(row.get('cost_usd')) in (int, float) and row['cost_usd'] == 0
                 and math.isfinite(row['cost_usd']) and row.get('verified_unpaid') is True)
@@ -1469,13 +1501,127 @@ def recover_selection_reservations(doc):
     return changed
 
 
+class InvalidSelection(ValueError):
+    """A returned selection cannot be interpreted as an evidence request list."""
+
+
+def replay_selection_round(access, saved, doc, extra, count, skipped, *, strict=False):
+    """Interpret one stored selection and read its evidence locally, without a model call."""
+    try:
+        response = saved['response']
+        choice = (response.get('choices') or [{}])[0]
+        if choice.get('finish_reason') == 'length':
+            raise ValueError('selection was truncated')
+        selection = json.loads((choice.get('message') or {}).get('content') or '')
+        requests = selection.get('requests')
+        if not isinstance(requests, list):
+            raise ValueError('selection has no request list')
+        for row in selection.get('skipped') or []:
+            if isinstance(row, dict) and row.get('field_id') in access.fields and isinstance(row.get('reason'), str):
+                skipped[row['field_id']] = row['reason'][:400]
+    except (ValueError, TypeError, AttributeError) as error:
+        raise InvalidSelection(str(error)) from error
+    for request in requests[:min(3, MAX_REQUESTS - count)]:
+        count += 1
+        try:
+            receipt = access.inspect(request)
+            extra.append({'type': 'text', 'text': 'INSPECTED EVIDENCE\n' + packed(receipt)})
+            if request.get('field_id'):
+                extra.extend(access.images.get(packed([request['field_id'], request]), []))
+        except (ValueError, OSError, KeyError, zipfile.BadZipFile) as error:
+            if strict:
+                raise ValueError('saved inspection cannot be replayed') from error
+            if doc.get('status') != 'incomplete':
+                doc['status'] = 'partial'
+            extra.append({'type': 'text', 'text': packed({'request': request, 'error': str(error)[:300]})})
+            doc['limitations'].append('Inspection request failed: ' + str(error)[:300])
+    return count, bool(requests)
+
+
+def replay_selection(access, saved):
+    """Rebuild final evidence from durable selections with no dispatch or cache writes."""
+    if (not isinstance(saved, dict) or not isinstance(saved.get('rounds'), list)
+            or not isinstance(saved.get('inspections'), list) or not saved['rounds'] or len(saved['rounds']) > 2):
+        raise ValueError('saved inspection has no complete selection proof')
+    doc = copy.deepcopy(saved)
+    doc['limitations'] = [note for note in doc.get('limitations') or []
+                          if not note.startswith('Inspection request failed: ')]
+    if doc.get('status') == 'partial':
+        doc['status'] = 'complete'
+    extra, skipped, count = [], {}, 0
+    for index, row in enumerate(doc['rounds']):
+        if row.get('state') != 'received' or not isinstance(row.get('response'), dict):
+            raise ValueError('saved selection has no returned response')
+        # The replay does exactly what the paid run did with each reply (discover), and the rebuilt request must
+        # then match the paid one byte for byte (request_attestation), which is the proof; a reply the run could not
+        # read is replayed as unread, never treated as a reason to pay again.
+        try:
+            count, requested = replay_selection_round(access, row, doc, extra, count, skipped)
+        except InvalidSelection as error:
+            if index != len(doc['rounds']) - 1:
+                raise ValueError('saved selection has unexplained trailing rounds') from error
+            doc.update(status='incomplete')
+            doc['limitations'].append(f'Invalid selection ({str(error)[:120]}); no repair call.')
+            break
+        if not requested or count >= MAX_REQUESTS:
+            if index != len(doc['rounds']) - 1:
+                raise ValueError('saved selection has unexplained trailing rounds')
+            break
+    record = access.record()
+    for row in record['coverage']:
+        if row['status'] == 'not inspected' and row['field_id'] in skipped:
+            row.update(status='not selected', reason=skipped[row['field_id']])
+    doc.update(record)
+    doc['limitations'] = list(dict.fromkeys(doc['limitations']))
+    return doc, extra
+
+
+def final_content(content, image_bytes, access, doc, extra, *, image_limit, image_bytes_limit, image_inflation):
+    """The evidence suffix shared by dispatch and offline request verification."""
+    addition = [{'type': 'text', 'text': FINAL + '\nINSPECTION COVERAGE\n' +
+                packed(Access.coverage_summary(doc))}] + extra
+    extra_images = [part for part in addition if part.get('type') == 'image_url']
+    extra_bytes = sum(len(base64.b64decode(part['image_url']['url'].split(',', 1)[1])) for part in extra_images)
+    if ((image_bytes + extra_bytes) * image_inflation > image_bytes_limit
+            or sum(part.get('type') == 'image_url' for part in content) + len(extra_images) > image_limit):
+        doc['limitations'].append('Inspected image batch exceeds final request cap; image findings withheld.')
+        for receipt in access.receipts:
+            if receipt['mode'] in ('images', 'regions'):
+                receipt['withheld_from_final'] = True
+        doc['inspections'] = clean(access.receipts)
+        addition = [part for part in addition if part.get('type') != 'image_url' and not (
+            part.get('type') == 'text' and (part.get('text', '').startswith('Inspected ') or (
+                part.get('text', '').startswith('INSPECTED EVIDENCE\n') and
+                json.loads(part['text'].split('\n', 1)[1]).get('mode') in ('images', 'regions'))))]
+        extra_bytes = 0
+    return (content + addition, image_bytes + extra_bytes,
+            '\n'.join(part['text'] for part in addition if part.get('type') == 'text'))
+
+
 def discover(access, base_content, call, cache_path, *, rounds=2, reserve_cost=0.0,
-             reserve_dispatch=None, settle_dispatch=None,
-             image_limit=500, image_bytes_limit=16_000_000):
+             reserve_dispatch=None, settle_dispatch=None, force_refresh=False,
+             image_limit=500, image_bytes_limit=16_000_000, refresh_id=None, ledger_managed=False):
     """Durable, bounded model selections. A dispatch with an uncertain outcome is never replayed."""
+    if ledger_managed and (not callable(reserve_dispatch) or not callable(settle_dispatch)):
+        raise ValueError('ledger-managed inspection requires reservation and settlement callbacks')
     digest = hashlib.sha256((access.signature() + packed(base_content)).encode()).hexdigest()
     path = Path(cache_path)
     doc = {'version': 1, 'digest': digest, 'status': 'complete', 'rounds': [], 'cost_usd': 0.0, 'limitations': []}
+    already_refreshed = False
+    if force_refresh and refresh_id is not None and path.exists():
+        try:
+            already_refreshed = json.loads(path.read_text()).get('refresh_id') == refresh_id
+        except (OSError, ValueError, AttributeError):
+            pass
+    if force_refresh and path.exists() and not already_refreshed:
+        # Keep the original durable receipt and its claim files for accounting and inspection.
+        refresh = uuid.uuid4().hex
+        path.rename(path.with_name(path.name + '.previous.' + refresh))
+        for claim in path.parent.glob(path.name + '.round*.claim'):
+            claim.rename(claim.with_name(claim.name + '.previous.' + refresh))
+        doc.update(input_digest=digest, digest=hashlib.sha256((digest + refresh).encode()).hexdigest())
+    if force_refresh and refresh_id is not None:
+        doc['refresh_id'] = refresh_id
     if path.exists():
         try:
             doc = json.loads(path.read_text())
@@ -1485,10 +1631,32 @@ def discover(access, base_content, call, cache_path, *, rounds=2, reserve_cost=0
             doc = {'version': 1, 'digest': digest, 'status': 'incomplete', 'rounds': [],
                    'cost_usd': MAX_SELECTION_COST, 'cost_is_conservative_estimate': True,
                    'limitations': ['Saved inspection receipt is unreadable; no automatic retry.']}
-        if doc.get('digest') != digest:
-            doc.update(status='incomplete', limitations=['Inspection inputs changed; no automatic paid retry.'])
-            return {**access.record(), **doc}, []
+        if doc.get('input_digest', doc.get('digest')) != digest:
+            if (not doc.get('rounds') and doc.get('cost_usd') == 0
+                    and not doc.get('cost_is_conservative_estimate')
+                    and not any(path.parent.glob(path.name + '.round*.claim'))):
+                # A refused, undispatched selection has no paid inputs to reuse.
+                doc = {'version': 1, 'digest': digest, 'status': 'complete', 'rounds': [],
+                       'cost_usd': 0.0, 'limitations': []}
+            else:
+                doc.update(status='incomplete', limitations=['Inspection inputs changed; no automatic paid retry.'])
+                return {**access.record(), **doc}, []
+        # A cap refusal is resumable only when every durable dispatch is settled or
+        # proven unpaid. Field inspection errors do not alter that billing decision.
+        # The note identifies older receipts only; current receipts carry a typed pause.
+        budget_note = 'Inspection selection exceeds the remaining batch spend cap.'
+        if ((doc.get('pause_reason') == 'spend_cap' or budget_note in doc['limitations'])
+                and not doc.get('cost_is_conservative_estimate')
+                and all(row.get('state') == 'received' or rejected_selection_proof(row)
+                        for row in doc['rounds'])):
+            doc.update(status='complete', limitations=[note for note in doc['limitations'] if note != budget_note])
+            doc.pop('pause_reason', None)
     extra = []
+    # Field reads are replayed locally from saved selections. Their old failures
+    # are diagnostic output, never durable dispatch or billing state.
+    doc['limitations'] = [note for note in doc['limitations'] if not note.startswith('Inspection request failed: ')]
+    if doc.get('status') == 'partial':
+        doc['status'] = 'complete'
     count = 0
     skipped = {}
     inventory = access.inventory()
@@ -1515,12 +1683,13 @@ def discover(access, base_content, call, cache_path, *, rounds=2, reserve_cost=0
             reserve = reserve_cost(content) if callable(reserve_cost) else reserve_cost
             if type(reserve) not in (int, float) or not math.isfinite(reserve) or reserve <= 0:
                 reserve = MAX_SELECTION_COST
-            if doc.get('status') == 'incomplete' or doc['cost_usd'] + reserve > MAX_SELECTION_COST:
+            if (doc.get('status') == 'incomplete' or doc.get('cost_is_conservative_estimate')
+                    or (not ledger_managed and doc['cost_usd'] + reserve > MAX_SELECTION_COST)):
                 doc.update(status='incomplete')
                 doc['limitations'].append('Inspection selection stopped at the cost or dispatch boundary.')
                 break
             if reserve_dispatch is not None and not reserve_dispatch(reserve):
-                doc['status'] = 'incomplete'
+                doc.update(status='incomplete', pause_reason='spend_cap')
                 doc['limitations'].append('Inspection selection exceeds the remaining batch spend cap.')
                 break
             attempt = f'.retry{len(rejected_attempts)}' if rejected_attempts else ''
@@ -1559,10 +1728,11 @@ def discover(access, base_content, call, cache_path, *, rounds=2, reserve_cost=0
                 if type(cost) in (int, float) and math.isfinite(cost) and cost >= 0 and settle_dispatch is not None:
                     settle_dispatch(reserve, cost)
             except Exception as error:
-                from label.errors import KeyExhausted
-                if isinstance(error, KeyExhausted) and error.verified_unpaid:
+                from label.errors import DispatchError
+                if isinstance(error, DispatchError) and error.verified_unpaid:
                     saved.update(state='rejected unpaid', http_status=error.http_status,
-                                 http_attempt=1, verified_unpaid=True, cost_usd=0.0)
+                                 http_attempt=1, verified_unpaid=True, cost_usd=0.0,
+                                 **({'rejection_code': error.rejection_code} if error.rejection_code else {}))
                     write_atomic(path, doc)
                     if settle_dispatch is not None:
                         settle_dispatch(reserve, 0.0)
@@ -1574,41 +1744,19 @@ def discover(access, base_content, call, cache_path, *, rounds=2, reserve_cost=0
                 doc['limitations'].append(f'Selection dispatch failed ({type(error).__name__}); no automatic retry.')
                 write_atomic(path, doc)
                 break
-        response = saved['response']
-        choice = (response.get('choices') or [{}])[0]
         try:
-            if choice.get('finish_reason') == 'length':
-                raise ValueError('selection was truncated')
-            selection = json.loads((choice.get('message') or {}).get('content') or '')
-            requests = selection.get('requests')
-            if not isinstance(requests, list):
-                raise ValueError('selection has no request list')
-            for row in selection.get('skipped') or []:
-                if isinstance(row, dict) and row.get('field_id') in access.fields and isinstance(row.get('reason'), str):
-                    skipped[row['field_id']] = row['reason'][:400]
-        except (ValueError, TypeError, AttributeError) as error:
+            count, requested = replay_selection_round(access, saved, doc, extra, count, skipped)
+        except InvalidSelection as error:
             doc.update(status='incomplete')
             doc['limitations'].append(f'Invalid selection ({str(error)[:120]}); no repair call.')
             break
-        if not requests:
-            break
-        for request in requests[:min(3, MAX_REQUESTS - count)]:
-            count += 1
-            try:
-                receipt = access.inspect(request)
-                extra.append({'type': 'text', 'text': 'INSPECTED EVIDENCE\n' + packed(receipt)})
-                if request.get('field_id'):
-                    extra.extend(access.images.get(packed([request['field_id'], request]), []))
-            except (ValueError, OSError, KeyError, zipfile.BadZipFile) as error:
-                doc['status'] = 'partial'
-                extra.append({'type': 'text', 'text': packed({'request': request, 'error': str(error)[:300]})})
-                doc['limitations'].append('Inspection request failed: ' + str(error)[:300])
-        if count >= MAX_REQUESTS:
+        if not requested or count >= MAX_REQUESTS:
             break
     record = access.record()
     for row in record['coverage']:
         if row['status'] == 'not inspected' and row['field_id'] in skipped:
             row.update(status='not selected', reason=skipped[row['field_id']])
     doc.update(record)
+    doc['limitations'] = list(dict.fromkeys(doc['limitations']))
     write_atomic(path, doc)
     return doc, extra

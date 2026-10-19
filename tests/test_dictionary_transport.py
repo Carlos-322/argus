@@ -1,4 +1,5 @@
-"""Dictionary requests get one HTTP attempt, including ambiguous transport failures."""
+"""A paid request is sent once when its outcome is unknown, and retried only when it provably cost nothing."""
+import http.client
 import io
 import json
 import urllib.error
@@ -9,22 +10,46 @@ from label import harness
 
 
 @pytest.mark.parametrize("key", ["sk-or-test", "sk-proj-test"])
-@pytest.mark.parametrize("error", ["timeout", "http"])
-def test_dictionary_client_never_retries_an_ambiguous_failure(monkeypatch, key, error):
+@pytest.mark.parametrize("error", ["read_timeout", "reset_after_send", "gateway_timeout"])
+def test_paid_client_never_retries_an_unknown_outcome(monkeypatch, key, error):
+    # urllib raises these only after the whole request was sent, so the provider may have billed it
     attempts = []
 
     def failed(request, timeout):
         attempts.append(request.full_url)
-        if error == "http":
-            raise urllib.error.HTTPError(request.full_url, 502, "unavailable", {}, io.BytesIO(b"unavailable"))
-        raise urllib.error.URLError("timeout after dispatch")
+        if error == "gateway_timeout":
+            raise urllib.error.HTTPError(request.full_url, 504, "gateway timeout", {}, io.BytesIO(b"timeout"))
+        if error == "reset_after_send":
+            raise http.client.RemoteDisconnected("Remote end closed connection without response")
+        raise TimeoutError("The read operation timed out")
 
     monkeypatch.setattr(harness.urllib.request, "urlopen", failed)
     monkeypatch.setattr(harness.time, "sleep", lambda seconds: pytest.fail("single attempt slept before a retry"))
-    with pytest.raises(RuntimeError):
+    with pytest.raises(harness.DispatchError) as raised:
         harness.call_model_once([{"type": "text", "text": "field descriptors"}], "openai/gpt-6-sol", "low",
                                 key, max_tokens=400, timeout=5)
-    assert len(attempts) == 1
+    assert len(attempts) == 1 and raised.value.verified_unpaid is False
+
+
+@pytest.mark.parametrize("key", ["sk-or-test", "sk-proj-test"])
+@pytest.mark.parametrize("error", ["refused", "http502", "http503", "http429"])
+def test_paid_client_retries_only_provably_unpaid_failures(monkeypatch, key, error):
+    # a connection refused before the request was sent, or an error status instead of a completion, cost nothing
+    attempts, slept = [], []
+
+    def failed(request, timeout):
+        attempts.append(request.full_url)
+        if error == "refused":
+            raise urllib.error.URLError(ConnectionRefusedError(61, "Connection refused"))
+        raise urllib.error.HTTPError(request.full_url, int(error[4:]), "busy", {}, io.BytesIO(b"busy"))
+
+    monkeypatch.setattr(harness.urllib.request, "urlopen", failed)
+    monkeypatch.setattr(harness.time, "sleep", slept.append)
+    with pytest.raises(harness.DispatchError) as raised:
+        harness.call_model_once([{"type": "text", "text": "field descriptors"}], "openai/gpt-6-sol", "low",
+                                key, max_tokens=400, timeout=5)
+    assert len(attempts) == harness.UNPAID_ATTEMPTS and len(slept) == harness.UNPAID_ATTEMPTS - 1
+    assert raised.value.verified_unpaid is True
 
 
 @pytest.mark.parametrize("key", ["sk-or-test", "sk-proj-test"])

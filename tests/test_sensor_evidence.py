@@ -213,7 +213,7 @@ const begin=src.indexOf('// ================= sensor evidence:');
 const end=src.indexOf('// ================= touch:',begin);
   const api=new Function('esc','fmtT',piece('episodeCams')+piece('cameraPresentation')
   +piece('supportingCameras')+piece('cameraSectionLabel')+piece('sceneFirstLayout')+piece('cameraCaption')+piece('unshownCams')+src.slice(begin,end)
-  +'return {episodeCams,supportingCameras,cameraSectionLabel,sceneFirstLayout,cameraCaption,sensorEvidence,gripFindingStripHtml};')(String,String);
+  +'return {episodeCams,supportingCameras,cameraSectionLabel,sceneFirstLayout,cameraCaption,sensorEvidence,gripFindingStripHtml,gripFindingDetailHtml};')(String,String);
 const optical=rows['audit_optical_handoff.json'];
 const original=JSON.stringify(optical);
 const support=api.supportingCameras(optical);
@@ -226,10 +226,10 @@ assert.equal(api.sensorEvidence(optical).insights.length,0,'a cropped audit row 
 const row=optical.sensor_evidence.findings[0];
 const f={...row,start:row.start_s,end:row.end_s,generic:true,kind:'insight'};
 const card=api.gripFindingStripHtml({...f,phase:'Now'});
-assert(card.includes(f.claim),'the physical interpretation must be visible, not only a changes headline');
-assert(card.includes('do not establish calibrated force or confirmed slip'), 'retain uncertainty in legacy interpretation');
-const short=api.gripFindingStripHtml({...f,phase:'Now',overlayDetail:'Contact may shift across the pads; slip is not established.'});
-assert(short.includes('Contact may shift across the pads; slip is not established.'));
+assert(!card.includes(f.claim),'the full interpretation stays out of the compact video overlay');
+assert(api.gripFindingDetailHtml(f).includes(f.claim),'the interpretation remains available in the evidence panel');
+const short=api.gripFindingStripHtml({...f,phase:'Now',overlayDetail:'The right pad changes more than the left while the object remains held.'});
+assert(short.includes('The right pad changes more than the left while the object remains held.'));
 assert(!short.includes(f.claim),'a model-authored compact explanation replaces the longer fallback');
 assert.equal(JSON.stringify(optical),original,'presentation does not alter annotations or camera identity');
 for(const name of ['audit_umi_rgb.json','audit_franka.json','audit_ego_rgb.json']) {
@@ -242,6 +242,10 @@ const roleData={camera_views:['exo','extra1','extra2'],camera_labels:['head','to
   camera_presentation:{extra1:{role:'scene'},extra2:{role:'tactile'}}};
 assert.deepEqual(api.supportingCameras(roleData).map(c=>[c.view,c.role]),[['exo','other'],['extra2','tactile']]);
 assert.equal(api.episodeCams(roleData).main,'extra1');
+const separateClock={camera_views:['exo'], unshown_cameras:[{view:'unshown1',clock_alignment:'unverified'}],
+  camera_presentation:{unshown1:{role:'scene'}}};
+assert.equal(api.episodeCams(separateClock).main,'exo','an unrelated clock must not drive the labelled timeline');
+assert.equal(api.supportingCameras(separateClock)[0].view,'unshown1','retain its independently playable camera');
 const generic={camera_views:['exo','left','right'],camera_presentation:{exo:{role:'sensor'},left:{role:'scene'},right:{role:'tactile'}}};
 assert.equal(api.episodeCams(generic).main,'left');
 assert.deepEqual(api.supportingCameras(generic).map(c=>c.role),['sensor','tactile']);

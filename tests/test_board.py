@@ -105,7 +105,8 @@ def test_convert_a_reply_that_breaks_the_schema():
     assert [(k["t_s"], k["label"]) for k in d["key_events"]] == [(None, "no number"), (2.0, "kept")]
     assert [i["issue"] for i in d["data_issues"]] == ["kept"] and d["tasks"][0]["outcome"] == ""
     assert d["objects"] == [{"name": "plate", "color": None}]
-    assert d["_off_schema"] == {"key_events": 1, "data_issues": 1, "scene.objects": 1}
+    assert d["_off_schema"] == {"key_events": 1, "data_issues": 1, "scene.objects": 1,
+                                "scene.objects.attributes": 1}
     assert "_off_schema" not in to_board.convert(_output("episode_000009"), "demo")
 
 
@@ -1466,30 +1467,31 @@ def test_the_checks_write_a_context_whole_or_not_at_all(tmp_path, monkeypatch):
     """The capture checks, stream pairing and the sensor checks rewrote context.json in place, so a write stopped part
     way (the process killed) left a file cut mid write, which then stopped everything that reads the episode. Each
     writes a temporary file beside it and replaces context.json with it, so a stopped write leaves the context as it
-    was."""
+    was. The stop is made where every writer's bytes reach the disk (the shared atomic write), so it reaches any
+    writer, whichever call it makes."""
+    import os
     import sys
     from concurrent.futures import ThreadPoolExecutor
     from checks import capture_qc, sensors, stream_pairing
+    from label import atomic
     ep = tmp_path / "eps" / "episode_000000"
     ep.mkdir(parents=True)
     before = json.dumps({"fps": 30, "profile": "teleop_arms"})
     (ep / "context.json").write_text(before)
-    real = Path.write_text
 
-    def stops(self, text, *a, **k):
-        real(self, text[: len(text) // 2], *a, **k)
+    def stops(fd):
+        os.ftruncate(fd, os.fstat(fd).st_size // 2)
         raise KeyboardInterrupt("killed mid write")
     for mod, argv in ((capture_qc, ["--force"]), (stream_pairing, ["--force"]), (stream_pairing, ["--jumps"]),
                       (sensors, ["--force"])):
         monkeypatch.setattr(mod, "ProcessPoolExecutor", ThreadPoolExecutor)
         monkeypatch.setattr(sys, "argv", ["main", *argv, str(tmp_path / "eps")])
-        monkeypatch.setattr(Path, "write_text", stops)
-        try:
-            mod.main()
-        except KeyboardInterrupt:
-            pass
-        monkeypatch.setattr(Path, "write_text", real)
+        with monkeypatch.context() as m:
+            m.setattr(atomic.os, "fsync", stops)
+            with pytest.raises(KeyboardInterrupt):
+                mod.main()
         assert (ep / "context.json").read_text() == before, mod.__name__
+        assert sorted(p.name for p in ep.iterdir()) == ["context.json"], mod.__name__
 
 
 def test_steps_past_the_episode_end_are_kept_and_flagged(tmp_path):

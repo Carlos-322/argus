@@ -41,6 +41,7 @@ import argparse
 import base64
 import copy
 import hashlib
+import http.client
 import json
 import math
 import os
@@ -50,6 +51,9 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
+from contextlib import contextmanager
+from functools import lru_cache
 
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -57,7 +61,7 @@ from pathlib import Path
 
 from label import episode as me, policy, providers
 from label.atomic import write_atomic
-from label.errors import KeyExhausted, SpendCap, Truncated
+from label.errors import DispatchError, KeyExhausted, SpendCap, Truncated
 from label.route import route_width
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -134,13 +138,13 @@ def _verified_final_cost(usage: dict, model: str) -> tuple[float | None, str]:
                 return float(value), ("peak_list_estimate" if key == "list_cost" and usage.get("price_basis") else source)
         except OverflowError:
             pass
-    if not _complete_token_usage(usage):
+    if (not _complete_token_usage(usage) or not model.startswith("openai/")
+            or model.split("/", 1)[-1] not in OPENAI_PRICES):
         return None, "unverified"
     try:
         listed = openai_list_cost(model, usage)
-        estimated = usage["prompt_tokens"] * PRICE_IN + usage["completion_tokens"] * PRICE_OUT
-        cost = max(estimated, listed) if listed is not None else estimated
-        if math.isfinite(cost) and cost >= 0:
+        cost = listed
+        if cost is not None and math.isfinite(cost) and cost >= 0:
             return cost, "estimate"
     except OverflowError:
         pass
@@ -162,8 +166,27 @@ def validate_transport(model: str, key: str) -> None:
         raise ValueError(f"{model} requires an OpenRouter key or ARGUS_PROVIDER=deepseek with DEEPSEEK_API_KEY")
 
 
+# What a request body asks besides its messages, model, reasoning effort and output limit, which input_identity
+# records on their own. usage.include asks for the billed cost (cache reads are about 1/10 price, cache writes about
+# 1.25x), so every recorded cost and spend cap uses what was actually charged.
+OPENROUTER_BODY = {"response_format": {"type": "json_object"}, "usage": {"include": True}}
+OPENAI_BODY = {"response_format": {"type": "json_object"}}
+# These bodies as every saved label so far was requested with. A body that differs is named in input_identity, so
+# a label requested with another body is never taken as current (request_attestation).
+FIRST_BODY_SHA256 = '879adaf179bcedfd6686f0ab4547e79e1862b71b439fc9815cbb789b43a0d50c'
+
+
+def request_body_sha256() -> str:
+    if providers.deepseek_enabled():
+        body = providers.request_body([], providers.DEEPSEEK_MODEL, "medium", 1)
+        return hashlib.sha256(json.dumps({'deepseek': body, 'url': providers.DEEPSEEK_URL},
+                                         sort_keys=True).encode()).hexdigest()
+    return hashlib.sha256(json.dumps({'openai': OPENAI_BODY, 'openrouter': OPENROUTER_BODY},
+                                     sort_keys=True).encode()).hexdigest()
+
+
 def call_model(content: list, model: str, reasoning: str, api_key: str, max_tokens: int, timeout: int,
-               *, attempts: int = 6) -> dict:
+               *, attempts: int = 6, pricing_quote=None) -> dict:
     if providers.deepseek_enabled():
         validate_transport(model, api_key)
         body = providers.request_body(content, model, reasoning, max_tokens)
@@ -184,17 +207,20 @@ def call_model(content: list, model: str, reasoning: str, api_key: str, max_toke
         "messages": [{"role": "user", "content": content}],
         "max_completion_tokens": max_tokens,
         "reasoning": {"effort": reasoning},
-        "response_format": {"type": "json_object"},
-        # ask for the billed cost (cache reads are about 1/10 price, cache writes about 1.25x), so every
-        # recorded cost and spend cap uses what was actually charged
-        "usage": {"include": True},
+        **OPENROUTER_BODY,
     }
+    if pricing_quote is not None:
+        if pricing_quote.get('model') != model:
+            raise ValueError('pricing quote does not match the requested model')
+        body['provider'] = {'max_price': pricing_quote['provider_max_price']}
     return _post(OPENROUTER_URL, body, api_key, timeout, attempts=attempts)
 
 
-def call_model_once(content: list, model: str, reasoning: str, api_key: str, max_tokens: int, timeout: int) -> dict:
+def call_model_once(content: list, model: str, reasoning: str, api_key: str, max_tokens: int, timeout: int,
+                    *, pricing_quote=None) -> dict:
     """One HTTP attempt for a paid call. A failed dispatch may already have been billed."""
-    return call_model(content, model, reasoning, api_key, max_tokens, timeout, attempts=1)
+    return call_model(content, model, reasoning, api_key, max_tokens, timeout, attempts=1,
+                      **({'pricing_quote': pricing_quote} if pricing_quote is not None else {}))
 
 
 def _call_openai(content: list, model: str, reasoning: str, api_key: str, max_tokens: int, timeout: int,
@@ -204,8 +230,7 @@ def _call_openai(content: list, model: str, reasoning: str, api_key: str, max_to
     if not model.startswith("openai/"):
         raise RuntimeError(f"{model} is not an OpenAI model, so it needs an OpenRouter key")
     body = {"model": model.split("/", 1)[1], "messages": [{"role": "user", "content": content}],
-            "max_completion_tokens": max_tokens, "reasoning_effort": reasoning,
-            "response_format": {"type": "json_object"}}
+            "max_completion_tokens": max_tokens, "reasoning_effort": reasoning, **OPENAI_BODY}
     resp = _post(OPENAI_URL, body, api_key, timeout, attempts=attempts)
     resp.setdefault("provider", "OpenAI")
     if isinstance(resp.get("usage"), dict):
@@ -213,55 +238,125 @@ def _call_openai(content: list, model: str, reasoning: str, api_key: str, max_to
     return resp
 
 
+# What an HTTP failure says about billing. An error status is the provider declining to produce a completion, so
+# nothing was billed, except a gateway timeout, behind which the request may still be running and billed.
+UNKNOWN_OUTCOME_STATUS = frozenset({504, 520, 521, 522, 523, 524})
+TRANSIENT_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 529})
+UNPAID_ATTEMPTS = 4          # a provably unpaid failure is retried even on a paid call: retrying it cannot pay twice
+
+
+def _retry_after(headers, attempt: int) -> float:
+    try:
+        stated = float((headers or {}).get('Retry-After'))
+        if math.isfinite(stated) and stated >= 0:
+            return min(60.0, stated)
+    except (TypeError, ValueError):
+        pass
+    return min(60.0, 4.0 * 2 ** attempt)
+
+
 def _post(url: str, body: dict, api_key: str, timeout: int, *, attempts: int = 6) -> dict:
+    """POST one request. attempts bounds retries of failures whose billing is unknown, so a paid call passes 1 and
+    is never replayed after it may have been billed. A failure that provably cost nothing (the request never fully
+    left the machine, or the provider answered with an error status) is retried up to UNPAID_ATTEMPTS times, and
+    when it persists it raises DispatchError with verified_unpaid True, so its caller releases the reservation and a
+    plain resume tries the unit again."""
     if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 1:
         raise ValueError("HTTP attempts must be a positive integer")
     req = urllib.request.Request(url, data=json.dumps(body).encode(),
                                  headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
-    last = None
-    for attempt in range(attempts):
+    unknown_left, unpaid_left = attempts, max(attempts, UNPAID_ATTEMPTS)
+    clean = True          # no earlier attempt of this call may have been billed
+    tries = 0
+    while True:
+        tries += 1
         try:
+            # urllib raises URLError only while connecting and sending the request; every error after the request
+            # was sent (waiting for or reading the response) propagates as itself
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 resp = json.loads(r.read().decode())
             if not resp.get("choices"):
                 # HTTP 200 carrying an error body and no completion: fail loudly, never record an empty parse
                 err = json.dumps(resp.get("error") or resp)[:300]
-                raise RuntimeError(f"200 response with no choices: {err}")
+                raise DispatchError(f"200 response with no choices: {err}", http_status=200, stage='unknown')
             return resp
         except urllib.error.HTTPError as e:
-            text = e.read().decode(errors="replace")[:500]
+            # Read a bounded complete envelope before shortening its display message.
+            raw_error = e.read(65537)
+            text = raw_error.decode(errors="replace")
+            complete_error = len(raw_error) <= 65536
             last = f"HTTP {e.code}: {text[:300]}"
             if is_key_exhausted(e.code, text):
-                if e.code in (401, 402) and attempt == 0:
-                    raise KeyExhausted(last, http_status=e.code, first_attempt=True)
-                raise RuntimeError(last)
-            if e.code in (429, 500, 502, 503, 504, 529):
-                if attempt + 1 == attempts:
-                    break
-                time.sleep(min(60, 4 * 2 ** attempt))
+                quota = None
+                try:
+                    quota = json.loads(text).get('error', {}).get('code') if complete_error else None
+                except (ValueError, AttributeError):
+                    pass
+                # a key rejection proves the key is spent only when no earlier attempt of this call may have been
+                # billed; after one, it is just a failure whose cost is unknown
+                if clean and (e.code in (401, 402) or (url == OPENAI_URL and e.code == 429
+                                                         and quota == 'insufficient_quota')):
+                    raise KeyExhausted(last, http_status=e.code, first_attempt=True, rejection_code=quota)
+                raise DispatchError(last, http_status=e.code, verified_unpaid=clean, stage='rejected')
+            if e.code in UNKNOWN_OUTCOME_STATUS:
+                clean = False
+                unknown_left -= 1
+                if unknown_left > 0:
+                    time.sleep(_retry_after(None, tries - 1))
+                    continue
+                raise DispatchError(f"model call failed after {tries} HTTP attempts: {last}", http_status=e.code,
+                                    stage='unknown')
+            if e.code in TRANSIENT_STATUS:
+                unpaid_left -= 1
+                if unpaid_left > 0:
+                    time.sleep(_retry_after(e.headers, tries - 1))
+                    continue
+            raise DispatchError(f"model call failed after {tries} HTTP attempts: {last}", http_status=e.code,
+                                verified_unpaid=clean, stage='rejected')
+        except urllib.error.URLError as e:
+            last = f"request not sent: {e.reason}"
+            unpaid_left -= 1
+            if unpaid_left > 0:
+                time.sleep(min(30.0, 2.0 ** (tries - 1)))
                 continue
-            raise RuntimeError(last)
-        except (urllib.error.URLError, TimeoutError) as e:
-            last = str(e)
-            if attempt + 1 == attempts:
-                break
-            time.sleep(2 ** attempt)
-    raise RuntimeError(f"model call failed after {attempts} HTTP attempts: {last}")
+            raise DispatchError(f"model call failed after {tries} HTTP attempts: {last}", verified_unpaid=clean,
+                                stage='not sent') from e
+        except DispatchError:
+            raise
+        except (OSError, http.client.HTTPException, ValueError) as e:
+            # sent, then timed out, reset or answered with an unreadable body: the outcome is unknown
+            last = f"{type(e).__name__}: {e}"
+            clean = False
+            unknown_left -= 1
+            if unknown_left > 0:
+                time.sleep(min(30.0, 2.0 ** (tries - 1)))
+                continue
+            raise DispatchError(f"model call failed after {tries} HTTP attempts: {last}", stage='unknown') from e
 
 
 def label_episode(ep_dir: Path, out_path: Path, *, model: str, reasoning: str, api_key: str, max_tokens: int,
                   timeout: int, cell_w: int = 0, example_dir: str | None = None, dry_run: bool = False,
                   reserve_final=None, reserve_selection=None, settle_selection=None, force_refresh=False,
-                  sample_fps=None, task_mode=None, dataset_note=None) -> dict:
+                  sample_fps=None, task_mode=None, dataset_note=None, require_known_pricing=False,
+                  inspection_refresh_id=None) -> dict:
     context = json.loads((Path(ep_dir) / 'context.json').read_text())
     resolved = policy.resolve(context, model=model, reasoning=reasoning, sample_fps=sample_fps,
                               task_mode=task_mode, dataset_note=dataset_note)
     model, reasoning = resolved['model'], resolved['reasoning']
     if not dry_run:
         validate_transport(model, api_key)
+    pricing_quote = None
+    if not dry_run and require_known_pricing and not providers.deepseek_enabled() and (not model.startswith('openai/')
+            or model.split('/', 1)[-1] not in OPENAI_PRICES):
+        if not is_openrouter_key(api_key):
+            raise ValueError(f'No verified pricing rates for {model}; a spend cap requires known rates')
+        from label import pricing
+        pricing_quote = pricing.quote(model, timeout)
     identity = input_identity(ep_dir, model=model, reasoning=reasoning, max_tokens=max_tokens,
                               cell_w=cell_w, example_dir=example_dir, sample_fps=sample_fps,
                               task_mode=task_mode, dataset_note=dataset_note)
+    if any(item.get('missing') for item in identity['source_proof']):
+        raise RuntimeError('Request source inputs are missing; no paid request was dispatched.')
     billing = _billing_fields(out_path)
     # an explicit cell width skips the routing; otherwise a routed rig's widest cell comes from its task text
     route_w, route = (None, {"routed": False}) if cell_w else route_width(
@@ -305,17 +400,64 @@ def label_episode(ep_dir: Path, out_path: Path, *, model: str, reasoning: str, a
                    "prompt_blocks": req["blocks"], "schema_fields": req["schema_fields"],
                    "checks_implied": req["checks_implied"]},
     }
+    if pricing_quote is not None:
+        fields['config']['pricing_quote'] = pricing_quote
     return _call_and_record(ep_dir, out_path, req["content"], req["image_bytes"], fields, model=model,
                             reasoning=reasoning, api_key=api_key, max_tokens=max_tokens, timeout=timeout,
                             dry_run=dry_run, prompt_text=req["prompt"], evidence_access=req["evidence_access"],
                             reserve_final=reserve_final, reserve_selection=reserve_selection,
-                            settle_selection=settle_selection)
+                            settle_selection=settle_selection, force_refresh=force_refresh,
+                            require_known_pricing=require_known_pricing, inspection_refresh_id=inspection_refresh_id,
+                            pricing_quote=pricing_quote)
+
+
+@lru_cache(maxsize=128)
+def _request_imports(module: str, is_package: bool, source: bytes) -> tuple[str, ...]:
+    """Cache only parsed import edges, keyed by module semantics and exact current bytes."""
+    import ast
+    names = module.split('.')
+    imports = ['.'.join(names[:size]) for size in range(1, len(names))]
+    for node in ast.walk(ast.parse(source, filename=module)):
+        if isinstance(node, ast.Import):
+            imports.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ''
+            if node.level:
+                parent = names if is_package else names[:-1]
+                base = '.'.join(parent[:len(parent) - node.level + 1] + ([base] if base else []))
+            imports.append(base)
+            imports.extend(base + '.' + alias.name for alias in node.names if alias.name != '*')
+    return tuple(imports)
+
+
+def request_implementation(repository: Path) -> dict[Path, bytes]:
+    """Follow first-party imports from the paid request and binding entry point.
+
+    Include imports inside functions and package initializers, so native evidence,
+    drawing and reader projections keep their transitive guards. Unrelated board
+    publication and server modules do not shape requests and stay outside this proof.
+    """
+    pending, sources = ['label.harness'], {}
+    packages = {'label', 'prepare', 'checks', 'board'}
+    while pending:
+        module = pending.pop()
+        if module.split('.')[0] not in packages:
+            continue
+        path = repository.joinpath(*module.split('.')).with_suffix('.py')
+        if not path.is_file():
+            path = repository.joinpath(*module.split('.'), '__init__.py')
+        if not path.is_file() or path in sources:
+            continue
+        raw = path.read_bytes()
+        sources[path] = raw
+        pending.extend(_request_imports(module, path.name == '__init__.py', raw))
+    return sources
 
 
 def input_identity(ep_dir: Path, *, model: str, reasoning: str, max_tokens: int, cell_w: int,
                    example_dir: str | None, sample_fps=None, task_mode=None, dataset_note=None) -> dict:
     """Bounded proof for source files and the settings that shape a paid annotation request."""
-    from label.evidence_access import source_proof
+    from label.evidence_access import source_proof, reader_projection_identity
     ep_dir = Path(ep_dir)
     ctx = json.loads((ep_dir / "context.json").read_text())
     from prepare.state_contract import prepared_state_problem
@@ -347,21 +489,20 @@ def input_identity(ep_dir: Path, *, model: str, reasoning: str, max_tokens: int,
             stat = path.stat()
             examples.append({"name": path.name, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns,
                              "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
-    routing_code = (Path(me.__file__).with_name('route.py').read_bytes()
-                    if not cell_w and resolved['rig'] in me.ROUTE_WIDTHS else b'')
+    repository = Path(__file__).parent.parent
+    request_sources = request_implementation(repository)
+    semantics = hashlib.sha256()
+    for path in sorted(request_sources):
+        semantics.update(str(path.relative_to(repository)).encode() + b'\0' + request_sources[path] + b'\0')
     settings = {"model": resolved["model"], "reasoning": resolved["reasoning"], "max_tokens": max_tokens, "cell_w": cell_w,
                 "detail": DETAIL, "grid_cols": GRID_COLS, "examples": examples,
                 "annotation_policy": resolved, "jaw_algorithm_sha256": jaw_algorithm,
                 "interpretation_sha256": hashlib.sha256(json.dumps(meanings, sort_keys=True,
                     separators=(',', ':'), ensure_ascii=True).encode()).hexdigest(),
-                "request_semantics_sha256": hashlib.sha256(b''.join(path.read_bytes() for path in (
-                    Path(__file__), Path(me.__file__), Path(policy.__file__),
-                    Path(me.__file__).with_name('prompts.py'), Path(me.__file__).with_name('sensor_evidence.py'),
-                    Path(me.__file__).with_name('optical_motion.py'),
-                    Path(me.__file__).with_name('errors.py'),
-                    Path(me.__file__).with_name('lens.py'),
-                    Path(me.__file__).parent.parent / 'prepare' / 'formats.py',
-                    Path(me.__file__).with_name('dictionary_context.py'))) + routing_code).hexdigest()}
+                "request_semantics_sha256": semantics.hexdigest(),
+                "reader_projection_sha256": reader_projection_identity(ctx)}
+    if request_body_sha256() != FIRST_BODY_SHA256:
+        settings["request_body_sha256"] = request_body_sha256()
     return {"version": 2, "source_proof": source_proof(ctx, ep_dir), "settings": settings}
 
 
@@ -389,21 +530,68 @@ def saved_input_problem(record: dict, ep_dir: Path) -> str | None:
     return None
 
 
-def billing_record(out_dir: Path, name: str):
-    """Select the latest durable paid attempt without discarding earlier label files."""
-    selected = None
+def _receipt_snapshot(out_dir: Path, name: str) -> list:
+    """Read and validate each candidate once for a consistent annotation and billing selection."""
+    records = []
     for path in (Path(out_dir) / name, Path(out_dir) / f'failed_{name}', Path(out_dir) / f'noreply_{name}'):
         if not path.exists():
             continue
-        record = json.loads(path.read_text())
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, ValueError) as error:
+            raise ValueError(f'{path.name}: saved billing receipt cannot be read: {error}') from error
         if not isinstance(record, dict):
-            raise ValueError('saved billing receipt is not an object')
+            raise ValueError(f'{path.name}: saved billing receipt is not an object')
         index = record.get('final_attempt_index', 0)
         if type(index) is not int or index < 0:
+            raise ValueError(f'{path.name}: saved final attempt index is invalid')
+        records.append((path, record))
+    return records
+
+
+def billing_record(out_dir: Path, name: str):
+    """Select the latest durable paid attempt without discarding earlier label files."""
+    return max(_receipt_snapshot(out_dir, name), key=lambda item: item[1].get('final_attempt_index', 0), default=None)
+
+
+def annotation_record(out_dir: Path, name: str):
+    """Select final reply authority separately from the latest cumulative financial ledger.
+
+    A local refusal cannot supersede a received reply or an unresolved dispatch. Indexed
+    histories retain authority when a later local receipt replaced that dispatch's file.
+    Equal-index files preserve primary, failed, no-reply legacy precedence.
+    """
+    records = _receipt_snapshot(out_dir, name)
+    latest = max(records, key=lambda item: item[1].get('final_attempt_index', 0), default=None)
+    if latest is None:
+        return None
+    selected = None
+    for path, record in records:
+        if record.get('final_dispatch_outcome') == 'not dispatched':
+            continue
+        if selected is None or record.get('final_attempt_index', 0) > selected[1].get('final_attempt_index', 0):
+            selected = path, record
+    for history_index, invoice in enumerate(latest[1].get('final_cost_history', [])):
+        index = invoice.get('final_attempt_index', 0)
+        if type(index) is not int or index < 0:
             raise ValueError('saved final attempt index is invalid')
+        if invoice.get('final_dispatch_outcome') == 'not dispatched':
+            continue
         if selected is None or index > selected[1].get('final_attempt_index', 0):
-            selected = (path, record)
+            prefix = ('failed_' if invoice.get('finish_reason') == 'length' else
+                      'noreply_' if invoice.get('final_dispatch_outcome') in ('claimed', 'unverified') else '')
+            selected = (Path(out_dir) / (prefix + name),
+                        {'episode_dir': latest[1].get('episode_dir'), **copy.deepcopy(invoice),
+                         '_authority_history_index': history_index})
+    selected = selected or latest
+    if selected[1] != latest[1]:
+        selected = selected[0], {**selected[1], '_billing_receipt': latest[1]}
     return selected
+
+
+def billing_view(record: dict) -> dict:
+    """The financial receipt attached to an annotation selected from an older attempt."""
+    return record.get('_billing_receipt', record)
 
 
 def _history_cost(invoice: dict) -> float:
@@ -475,10 +663,9 @@ def _final_cost_history(out_path: Path) -> list:
     if record.get('final_dispatch_outcome') == 'not dispatched' or record.get('dry_run'):
         return history
     _history_cost(record)
-    history.append({key: copy.deepcopy(record[key]) for key in (
-        'model', 'reasoning_effort', 'provider', 'provider_name', 'generation_id', 'model_served',
-        'system_fingerprint', 'usage', 'usage_reported', 'finish_reason', 'final_dispatch_outcome',
-        'final_reserved_usd', 'final_attempt_index') if key in record})
+    # Retain the full attempt for offline repair, without recursively copying its histories.
+    history.append({key: copy.deepcopy(value) for key, value in record.items()
+                    if key not in ('final_cost_history', 'auxiliary_cost_history') and not key.startswith('_')})
     return history
 
 
@@ -489,6 +676,8 @@ def _billing_fields(out_path: Path) -> dict:
     def retain(kind, value, cost):
         if cost:
             history.append({'kind': kind, 'cost_usd': cost,
+                'rounds_cost_offset_usd': float(value.get('rounds_cost_offset_usd') or 0)
+                    + max(0.0, float(value.get('cost_usd', 0)) - cost),
                 **{key: copy.deepcopy(value[key]) for key in (
                     'model', 'generation_id', 'usage', 'cost_source', 'dispatch_outcome',
                     'reserved_usd', 'digest', 'rounds', 'cost_is_conservative_estimate') if key in value}})
@@ -514,6 +703,7 @@ def _billing_fields(out_path: Path) -> dict:
 def episode_cost(result: dict) -> float:
     """What labelling one episode was billed: its model call plus, for a routed episode, the routing call made for
     it (label/route.py)."""
+    result = billing_view(result)
     route = (result.get("config") or {}).get("resolution_route") or {}
     inspection = result.get('evidence_inspection') or {}
     final = (result.get("usage") or {}).get("est_cost_usd")
@@ -523,8 +713,25 @@ def episode_cost(result: dict) -> float:
             + auxiliary_cost(route, routing=True) + auxiliary_cost(inspection))
 
 
-def final_cost_bound(content: list, max_tokens: int) -> float:
+def final_cost_bound(content: list, max_tokens: int, *, model=DEFAULT_MODEL, require_known_pricing=True,
+                     pricing_quote=None) -> float:
     """Reserve a generous input allowance and the full output limit before dispatch."""
+    if providers.deepseek_enabled():
+        text_bytes = sum(len(c.get('text', '').encode('utf-8')) for c in content if c.get('type') == 'text')
+        count = sum(p.get('type') == 'image_url' for p in content)
+        p_in, _, p_out = providers.DEEPSEEK_PRICES
+        return math.ceil(((text_bytes + count * 1024 + 1024) * p_in + max_tokens * p_out) * 1e6) / 1e6
+    if pricing_quote is not None:
+        if pricing_quote.get('model') != model:
+            raise ValueError('pricing quote does not match the requested model')
+        from label import pricing
+        return pricing.cost_bound(content, max_tokens, pricing_quote)
+    tiers = OPENAI_PRICES.get(model.split('/', 1)[-1]) if model.startswith('openai/') else None
+    if tiers is None and require_known_pricing:
+        raise ValueError(f'No verified pricing rates for {model}; a spend cap requires known rates')
+    # Uncapped custom models retain a provisional hold if their provider loses the cost receipt.
+    # This fallback is never used to authorize a capped dispatch.
+    rates = tiers or OPENAI_PRICES['gpt-6-astra']
     import io
     from PIL import Image
     text_bytes = sum(len(c.get('text', '').encode('utf-8')) for c in content if c.get('type') == 'text')
@@ -534,12 +741,15 @@ def final_cost_bound(content: list, max_tokens: int) -> float:
             raw = base64.b64decode(part['image_url']['url'].split(',', 1)[1])
             with Image.open(io.BytesIO(raw)) as image:
                 images += estimate_image_tokens(*image.size)
-    if providers.deepseek_enabled():
-        count = sum(p.get('type') == 'image_url' for p in content)
-        p_in, _, p_out = providers.DEEPSEEK_PRICES
-        return math.ceil(((text_bytes + count * 1024 + 1024) * p_in + max_tokens * p_out) * 1e6) / 1e6
-    return round((text_bytes + 4 * images + 1024) * max(PRICE_IN, 2.0e-5)
-                 + max_tokens * max(PRICE_OUT, 7.5e-5), 6)
+    # an upper bound on the prompt's tokens (a token is at least one byte, images at four times their estimate)
+    prompt_bound = text_bytes + 4 * images + 1024
+    # The long-context rates apply only from LONG_PROMPT_TOKENS prompt tokens, so a prompt bounded below that is
+    # billed at the standard rates, input and output alike. Reserving the long rates for it held half again too much.
+    if prompt_bound < LONG_PROMPT_TOKENS:
+        price_in, price_out = rates[0][0], rates[0][2]
+    else:
+        price_in, price_out = max(t[0] for t in rates), max(t[2] for t in rates)
+    return math.ceil((prompt_bound * price_in + max_tokens * price_out) * 1_000_000) / 1_000_000
 
 
 def persist_final_claim(path: Path, claim: dict) -> None:
@@ -552,6 +762,25 @@ def persist_final_claim(path: Path, claim: dict) -> None:
         os.fsync(directory)
     finally:
         os.close(directory)
+
+
+def has_dispatch_receipt(record: dict) -> bool:
+    """Whether saved interpretation is backed by a received or uncertain dispatch."""
+    if record.get('dry_run'):
+        return False
+    if record.get('final_dispatch_outcome') != 'not dispatched':
+        return True
+    if record.get('response') is not None or record.get('response_text') is not None:
+        return True
+    if record.get('final_cost_history') or record.get('auxiliary_cost_history'):
+        return True
+    route = (record.get('config') or {}).get('resolution_route') or {}
+    if route.get('dispatch_outcome') in ('claimed', 'unverified', 'received', 'cached'):
+        return True
+    inspection = record.get('evidence_inspection') or {}
+    if inspection.get('rounds') or inspection.get('cost_is_conservative_estimate'):
+        return True
+    return episode_cost(record) != 0
 
 
 def record_budget_refusal(path: Path, request: dict) -> bool:
@@ -580,6 +809,19 @@ TIMELINE_COLUMNS = ["start_s", "end_s", "arm", "action", "object", "destination"
                     "contribution", "progress", "notes"]
 
 
+def _model_diagnostics(labels: dict) -> None:
+    """Only the parser may author diagnostic provenance, including local assessments."""
+    supplied = [key for key in ('_dropped', '_schema_violations', '_schema_row_indices') if key in labels]
+    for key in supplied:
+        labels.pop(key)
+    for key in supplied:
+        _drop(labels, key, None, 'reserved parser metadata supplied in the reply')
+    assessments = labels.get('part_assessments')
+    for assessment in assessments if isinstance(assessments, list) else []:
+        if isinstance(assessment, dict):
+            _model_diagnostics(assessment)
+
+
 def parse_response(text: str) -> tuple[dict, bool]:
     """A model's reply as labels, or the raw text and the reason it could not be read. The one parser for every
     model and for re-reading stored replies (label/reparse.py). A reply that is a JSON object but breaks the output
@@ -590,7 +832,30 @@ def parse_response(text: str) -> tuple[dict, bool]:
         labels = json.loads(fenced.group(1) if fenced else text)
         if not isinstance(labels, dict):
             raise ValueError(f"the reply is {json_kind(labels)}, not an object")
-        return typed_labels(normalize_timeline(labels)), True
+        _model_diagnostics(labels)
+        had_rows = bool(labels.get('timeline'))
+        labels = typed_labels(normalize_timeline(labels))
+        completion = labels.get('completion')
+        if isinstance(completion, dict) and completion.get('task_completed') is not None and completion['task_completed'] not in (
+                'success', 'success_then_undone', 'failure', 'partial', 'unclear'):
+            outcome = completion['task_completed']
+            if isinstance(outcome, str) and outcome.strip().lower() in (
+                    'success', 'success_then_undone', 'failure', 'partial', 'unclear'):
+                completion['task_completed'] = outcome.strip().lower()
+            else:
+                _violation(labels, 'completion.task_completed has an unknown outcome')
+        for index, row in enumerate(labels.get('timeline') or []):
+            progress = row.get('progress')
+            if isinstance(progress, str) and me.number(progress) is not None:
+                progress = row['progress'] = me.number(progress)
+            if progress is not None and (type(progress) not in (int, float) or not math.isfinite(progress)
+                                         or not 0 <= progress <= 1):
+                _violation(labels, f'timeline row {index}: progress {progress!r} must be a finite number from 0 to 1')
+        if had_rows and not labels.get('timeline') and not any(labels.get(k) for k in LIST_FIELDS[1:] + DICT_FIELDS + TEXT_FIELDS):
+            raise ValueError('no usable timeline rows remain')
+        if not substantive_annotation(labels):
+            raise ValueError('the reply contains no substantive annotation content')
+        return labels, True
     except Exception as e:
         return {"_raw": text, "_parse_error": f"{type(e).__name__}: {e}"[:300]}, False
 
@@ -608,48 +873,121 @@ def _drop(labels: dict, field: str, row, why: str) -> None:
     labels.setdefault("_dropped", []).append({"field": field, **({"row": row} if row is not None else {}), "why": why})
 
 
+def _violation(labels: dict, why: str) -> None:
+    violations = labels.setdefault('_schema_violations', [])
+    if why not in violations:
+        violations.append(why)
+
+
 def normalize_timeline(labels: dict) -> dict:
     """The output format sends each timeline segment as one array in the column order of timeline_columns.
     Convert it back to one object per segment, validating every row, so everything downstream sees the usual
-    format. A time or a progress written as a number in text ("2.0") is read as that number. A row with the wrong
-    number of values, or a time or a progress that is not a number, is left out and recorded in _dropped (a shifted
-    column would silently corrupt the labels), and the other rows are kept. A value that is missing or outside a
+    format. A time or progress written as numeric text ("2.0") is read as that number. Shortened rows retain
+    only field assignments shared by every compatible column mapping; ambiguous values are preserved in
+    _dropped. Rows with unparseable times are omitted. Full-width rows retain malformed noncritical fields
+    with schema violations. A value that is missing or outside a
     field's allowed set (a progress or a contribution of null) is kept as the model wrote it and listed in
     _schema_violations, so one bad field is counted, not a reason to discard a valid answer."""
     tl = labels.get("timeline")
     if not isinstance(tl, list) or not any(isinstance(r, list) for r in tl):
         labels.pop("timeline_columns", None)
         return labels
-    cols = labels.pop("timeline_columns", None) or TIMELINE_COLUMNS
-    out = []
+    cols = labels.pop("timeline_columns", None)
+    if cols is None:
+        cols = TIMELINE_COLUMNS
+    if (not isinstance(cols, list) or not cols or any(not isinstance(c, str) or not c for c in cols)
+            or len(set(cols)) != len(cols)):
+        for i, row in enumerate(tl):
+            if isinstance(row, list):
+                _drop(labels, 'timeline', i, 'timeline columns must be unique nonempty names')
+        labels['timeline'] = [r for r in tl if isinstance(r, dict)]
+        return labels
+    out, source_rows = [], []
+    first_diagnostic = len(labels.get('_schema_violations') or [])
     for i, row in enumerate(tl):
         if isinstance(row, dict):
             out.append(row)
+            source_rows.append(i)
             continue
-        if not isinstance(row, list) or not (len(cols) - 1 <= len(row) <= len(cols)):
+        missing_notes = isinstance(row, list) and cols[-1] == 'notes' and len(row) == len(cols) - 1
+        if not isinstance(row, list) or (len(row) != len(cols) and not missing_notes):
             n = len(row) if isinstance(row, list) else "?"
             _drop(labels, "timeline", i, f"it has {n} values for {len(cols)} columns")
             continue
         seg = dict(zip(cols, row))
         bad = None
+        for key in ('arm', 'action', 'object', 'destination', 'spatial_relation', 'contribution', 'hands_wearing', 'notes'):
+            if seg.get(key) is not None and not isinstance(seg[key], str):
+                why = f'its {key} is not text ({seg[key]!r})'
+                if missing_notes:
+                    bad = why
+                    break
+                _violation(labels, f'timeline row {i}: {why}')
+        if 'hands_visible' in seg and seg['hands_visible'] is not None and type(seg['hands_visible']) is not bool:
+            why = f'its hands_visible is not true or false ({seg["hands_visible"]!r})'
+            if missing_notes:
+                bad = why
+            else:
+                _violation(labels, f'timeline row {i}: {why}')
+        if missing_notes and not bad:
+            def compatible(candidate):
+                for key, value in candidate.items():
+                    if value is None and key not in ('start_s', 'end_s'):
+                        continue
+                    if key in ('start_s', 'end_s', 'progress'):
+                        if isinstance(value, bool) or me.number(value) is None:
+                            return False
+                    elif key == 'hands_visible':
+                        if type(value) is not bool:
+                            return False
+                    elif key in ('arm', 'action', 'object', 'destination', 'spatial_relation',
+                                 'contribution', 'hands_wearing', 'notes') and not isinstance(value, str):
+                        return False
+                return True
+            supplied = {key: value for key, value in seg.items() if value is not None}
+            alternatives = [dict(zip(cols[:gap] + cols[gap + 1:], row)) for gap in range(len(cols) - 1)]
+            candidates = [seg] + [candidate for candidate in alternatives if compatible(candidate)]
+            if any({key: value for key, value in candidate.items() if value is not None} != supplied
+                   for candidate in candidates):
+                # Keep only fields proved by every compatible column mapping.
+                # Free text cannot establish whether it is handwear or a note.
+                seg = {key: value for key, value in seg.items()
+                       if all(key in candidate and candidate[key] == value for candidate in candidates)}
+                _drop(labels, 'timeline.columns', i, 'ambiguous shortened row; only unambiguous fields are shown')
+                labels['_dropped'][-1]['value'] = row[:]
         for k in ("start_s", "end_s", "progress"):
-            if k == "progress" and seg.get(k) is None:
+            if bad:
+                break
+            if k == "progress" and k in seg and seg[k] is None:
                 labels.setdefault("_schema_violations", []).append(f"timeline row {i}: progress null")
             elif k in seg and (isinstance(seg[k], bool) or not isinstance(seg[k], (int, float))):
                 v = me.number(seg[k])
                 if v is None:
+                    if k == 'progress' and not missing_notes:
+                        _violation(labels, f'timeline row {i}: progress {seg[k]!r} must be a finite number from 0 to 1')
+                        continue
                     bad = f"its {k} is not a number ({seg[k]!r})"
                     break
                 seg[k] = v
         if bad:
             _drop(labels, "timeline", i, bad)
             continue
-        if seg.get("contribution") not in ("advancing", "wasteful", "idle"):
+        if 'contribution' in seg and str(seg.get("contribution") or '').strip().lower() not in ("advancing", "wasteful", "idle"):
             labels.setdefault("_schema_violations", []).append(
                 f"timeline row {i}: contribution {seg.get('contribution')!r}")
         if seg.get("notes") in (None, ""):
             seg.pop("notes", None)
         out.append(seg)
+        source_rows.append(i)
+    if len(out) != len(tl):
+        mappings = labels.get('_schema_row_indices')
+        labels['_schema_row_indices'] = {**(mappings if isinstance(mappings, dict) else {}),
+                                         'timeline': source_rows}
+        diagnostics = labels.get('_schema_violations') or []
+        for index in range(first_diagnostic, len(diagnostics)):
+            match = re.match(r'^timeline row (\d+): (?:its )?(\w+)(.*)', diagnostics[index])
+            if match:
+                diagnostics[index] = f'timeline[{match[1]}].{match[2]}:{match[3]}'
     labels["timeline"] = out
     return labels
 
@@ -661,6 +999,59 @@ DICT_FIELDS = ("scene", "completion", "goal_alignment")
 TEXT_FIELDS = ("task_summary", "performance_review", "viewpoint")
 TIME_FIELDS = ("t_s", "start_s", "end_s", "completed_at_s", "goal_reached_at_s", "undone_at_s", "failure_t_s",
                "recovered_at_s")
+
+
+def substantive_annotation(labels: dict) -> bool:
+    """Require an observed action, task, result, description, or quality finding from a supported schema.
+
+    Partial replies remain readable. Empty containers, time-only rows, and classification metadata
+    cannot establish that an episode was annotated.
+    """
+    def text(row, key):
+        return isinstance(row, dict) and isinstance(row.get(key), str) and bool(row[key].strip())
+
+    if any(text(labels, key) for key in ('task_summary', 'performance_review')):
+        return True
+    content_fields = {'timeline': 'action', 'tasks': 'task', 'key_events': 'label',
+                      'data_issues': 'issue', 'operator_mistakes': 'issue', 'recovery': 'failure'}
+    if any(text(row, key) for field, key in content_fields.items() for row in labels.get(field) or []):
+        return True
+    completion = labels.get('completion') or {}
+    if completion.get('task_completed') in ('success', 'success_then_undone', 'failure', 'partial', 'unclear'):
+        return True
+    alignment = labels.get('goal_alignment') or {}
+    if (type(alignment.get('matches_given')) is bool
+            and alignment.get('relation') in ('aligned', 'narrower', 'broader', 'different', 'unrelated')):
+        return True
+    scene = labels.get('scene') or {}
+    if text(scene, 'setting') or any(text(row, 'name') for row in scene.get('objects') or []):
+        return True
+    if any(text(row, 'object') and text(row, 'from') and text(row, 'to')
+           for row in labels.get('state_changes') or []):
+        return True
+    if any(isinstance(row.get('relations'), list) and any(isinstance(value, str) and value.strip()
+               for value in row['relations']) for row in labels.get('scene_graph') or []):
+        return True
+    if any(text(row, 'headline') and isinstance(row.get('evidence'), list) and row['evidence']
+           for field in ('sensor_findings', 'evidence_findings') for row in labels.get(field) or []):
+        return True
+    if any(text(row, 'view') and text(row, 'evidence') and row.get('content') in ('scene', 'sensor', 'unclear')
+           for row in labels.get('camera_observations') or []):
+        return True
+    return any(text(row, 'object') for field in ('contacts', 'contacts_missing') for row in labels.get(field) or [])
+
+
+def reply_truncated(record: dict) -> bool:
+    """A syntactically parsed fragment still lacks the provider's completed reply."""
+    return record.get('finish_reason') == 'length'
+
+
+def annotation_complete(record: dict) -> bool:
+    """Revalidate saved acceptance flags using the current parser before treating a reply as complete."""
+    if (reply_truncated(record) or record.get('parse_ok') is not True
+            or not isinstance(record.get('labels'), dict)):
+        return False
+    return parse_response(json.dumps(record['labels']))[1]
 
 
 def _times(x: dict, where: str, labels: dict) -> None:
@@ -811,7 +1202,8 @@ def camera_observation_sources_match(parent, child, views) -> bool:
 def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int, fields: dict, *, model: str,
                      reasoning: str, api_key: str, max_tokens: int, timeout: int, dry_run: bool = False,
                      prompt_text: str = "", evidence_access=None, reserve_final=None,
-                     reserve_selection=None, settle_selection=None) -> dict:
+                     reserve_selection=None, settle_selection=None, force_refresh=False,
+                     require_known_pricing=False, inspection_refresh_id=None, pricing_quote=None) -> dict:
     """Send one request (or, in a dry run, record exactly what would be sent) and write the result."""
     fields = {**fields, **(_billing_fields(out_path) if 'final_cost_history' not in fields else {})}
     def verify_inputs():
@@ -844,30 +1236,43 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
         fields['evidence_inspection'] = evidence_access.record()
         if not dry_run:
             def select(parts):
-                response = call_model_once(parts, model, reasoning, api_key, ea.MAX_SELECTION_TOKENS, min(timeout, 120))
+                response = call_model_once(parts, model, reasoning, api_key, ea.MAX_SELECTION_TOKENS, min(timeout, 120),
+                    **({'pricing_quote': pricing_quote} if pricing_quote is not None else {}))
                 usage = response.get('usage') or {}
-                if any(type(usage.get(k)) in (int, float) for k in ('cost', 'list_cost')) or all(
-                        type(usage.get(k)) in (int, float) for k in ('prompt_tokens', 'completion_tokens')):
-                    response.setdefault('usage', {})['cost'] = _cost(usage)
+                cost, _ = _verified_final_cost(usage, model)
+                if cost is not None:
+                    response.setdefault('usage', {})['cost'] = cost
                 return response
             # Reserve the maximum output and a conservative input allowance before each selection dispatch.
             def reserve(parts):
-                if providers.deepseek_enabled():
-                    return final_cost_bound(parts, ea.MAX_SELECTION_TOKENS)
-                import io
-                from PIL import Image
-                text_tokens = sum(len(c.get('text', '')) for c in parts) / 3
-                image_tokens = 0
-                for part in parts:
-                    if part.get('type') == 'image_url':
-                        raw = base64.b64decode(part['image_url']['url'].split(',', 1)[1])
-                        with Image.open(io.BytesIO(raw)) as image:
-                            image_tokens += estimate_image_tokens(*image.size)
-                return (text_tokens + image_tokens) * PRICE_IN + ea.MAX_SELECTION_TOKENS * PRICE_OUT
+                return final_cost_bound(parts, ea.MAX_SELECTION_TOKENS, model=model,
+                                        require_known_pricing=require_known_pricing,
+                                        **({'pricing_quote': pricing_quote} if pricing_quote is not None else {}))
             cache = Path(out_path).parent / '.evidence' / (Path(out_path).name + '.inspection.json')
+            if force_refresh and cache.exists():
+                persist_final_claim(Path(out_path).with_name(f'noreply_{Path(out_path).name}'), {
+                    'episode_dir': str(ep_dir), 'model': model, 'reasoning_effort': reasoning, **fields,
+                    'parse_ok': False, 'final_dispatch_outcome': 'not dispatched', 'final_reserved_usd': 0.0,
+                    'no_reply': 'Inspection refresh requested; earlier receipts retained in billing history.'})
+            selection_dispatch = reserve_selection
+            if reserve_selection is not None and settle_selection is not None:
+                final_floor = final_cost_bound(content, max_tokens, model=model,
+                                               require_known_pricing=require_known_pricing,
+                                               **({'pricing_quote': pricing_quote} if pricing_quote is not None else {}))
+
+                def selection_dispatch(amount):
+                    # Evidence selection serves the final request, so it is paid only when the final request can
+                    # still be paid after it; a cap that cannot cover the final buys no selection.
+                    if not reserve_selection(amount + final_floor):
+                        return False
+                    settle_selection(final_floor, 0.0)
+                    return True
             try:
                 doc, extra = ea.discover(evidence_access, content, select, cache, reserve_cost=reserve,
-                                        reserve_dispatch=reserve_selection, settle_dispatch=settle_selection,
+                                        reserve_dispatch=selection_dispatch, settle_dispatch=settle_selection,
+                                        force_refresh=force_refresh, refresh_id=inspection_refresh_id,
+                                        ledger_managed=(pricing_quote is not None and reserve_selection is not None
+                                                        and settle_selection is not None),
                                         image_limit=MAX_IMAGES, image_bytes_limit=IMAGE_LIMIT_BYTES / IMAGE_SIZE_INFLATION)
             except Exception as error:
                 doc = evidence_access.record()
@@ -889,26 +1294,16 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
             doc['previously_billed_usd'] = inspection_billed(fields, doc.get('digest'))
             auxiliary_cost(doc)
             fields['evidence_inspection'] = doc
-            addition = [{'type': 'text', 'text': ea.FINAL + '\nINSPECTION COVERAGE\n' +
-                        ea.packed(ea.Access.coverage_summary(doc))}] + extra
-            # Extra images must fit the existing request cap. Their receipts alone cannot authorize image claims.
-            extra_images = [p for p in addition if p.get('type') == 'image_url']
-            extra_bytes = sum(len(base64.b64decode(p['image_url']['url'].split(',', 1)[1])) for p in extra_images)
-            if (img_bytes + extra_bytes) * IMAGE_SIZE_INFLATION > IMAGE_LIMIT_BYTES or (
-                    sum(p.get('type') == 'image_url' for p in content) + len(extra_images) > MAX_IMAGES):
-                fields['evidence_inspection']['limitations'].append('Inspected image batch exceeds final request cap; image findings withheld.')
-                for r in evidence_access.receipts:
-                    if r['mode'] in ('images', 'regions'):
-                        r['withheld_from_final'] = True
-                fields['evidence_inspection']['inspections'] = ea.clean(evidence_access.receipts)
-                addition = [p for p in addition if p.get('type') != 'image_url' and not (
-                    p.get('type') == 'text' and (p.get('text', '').startswith('Inspected ') or (
-                        p.get('text', '').startswith('INSPECTED EVIDENCE\n') and
-                        json.loads(p['text'].split('\n', 1)[1]).get('mode') in ('images', 'regions'))))]
-                extra_bytes = 0
-            content = content + addition
-            img_bytes += extra_bytes
-            prompt_text += '\n' + '\n'.join(p['text'] for p in addition if p.get('type') == 'text')
+            if doc.get('pause_reason') == 'spend_cap':
+                reason = 'Inspection selection exceeds the remaining batch spend cap; final annotation deferred.'
+                write_atomic(Path(out_path).with_name(f'noreply_{Path(out_path).name}'), {
+                    'episode_dir': str(ep_dir), 'model': model, 'reasoning_effort': reasoning, **fields,
+                    'parse_ok': False, 'no_reply': reason, 'no_reply_kind': 'spend_cap',
+                    'final_dispatch_outcome': 'not dispatched', 'final_reserved_usd': 0.0})
+                raise SpendCap(reason)
+            content, img_bytes, suffix = ea.final_content(content, img_bytes, evidence_access, doc, extra,
+                image_limit=MAX_IMAGES, image_bytes_limit=IMAGE_LIMIT_BYTES, image_inflation=IMAGE_SIZE_INFLATION)
+            prompt_text += '\n' + suffix
     verify_inputs()
     n_images = sum(1 for c in content if c.get("type") == "image_url")
     if n_images > MAX_IMAGES:
@@ -932,9 +1327,16 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
                   "dry_run": True, "prompt_text": prompt_text,
                   "request": {"n_parts": len(content), "n_images": n_images, "image_bytes": img_bytes,
                               "est_input_tokens": round(est_img + est_text)}}
+        if model.startswith('openai/') and model.split('/', 1)[-1] in OPENAI_PRICES:
+            # what a paid run reserves for this final call, and the least any final call can reserve (its output limit,
+            # with no prompt at all), since routing and evidence selection change the prompt; review refuses a cap up
+            # front only when it cannot cover even that, never one that routing would make fit
+            result['request']['final_cost_bound_usd'] = final_cost_bound(content, max_tokens, model=model)
+            result['request']['final_cost_floor_usd'] = final_cost_bound([], max_tokens, model=model)
         write_atomic(out_path, result)
         return result
-    bound = final_cost_bound(content, max_tokens)
+    bound = final_cost_bound(content, max_tokens, model=model, require_known_pricing=require_known_pricing,
+                             **({'pricing_quote': pricing_quote} if pricing_quote is not None else {}))
     claim_path = Path(out_path).with_name(f'noreply_{Path(out_path).name}')
     fields['config']['request_images']['dispatch_status'] = 'dispatch_claimed'
     claim = {"episode_dir": str(ep_dir), "model": model, "reasoning_effort": reasoning, **fields,
@@ -952,18 +1354,23 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
             raise
     t_start = time.time()
     try:
-        resp = call_model_once(content, model, reasoning, api_key, max_tokens, timeout)
-    except KeyExhausted as error:
+        resp = call_model_once(content, model, reasoning, api_key, max_tokens, timeout,
+            **({'pricing_quote': pricing_quote} if pricing_quote is not None else {}))
+    except DispatchError as error:
         if error.verified_unpaid:
             fields['config']['request_images']['dispatch_status'] = 'not_dispatched'
+            sent = error.stage != 'not sent'
             write_atomic(claim_path, {**claim, 'final_dispatch_outcome': 'not dispatched',
-                'final_reserved_usd': 0.0, 'no_reply': 'final request rejected before processing',
+                'final_reserved_usd': 0.0,
+                'no_reply': ('final request rejected before processing' if sent else
+                             'final request could not be sent') + f'; nothing was billed ({str(error)[:200]})',
                 'final_rejection': {'http_status': error.http_status, 'http_attempt': 1,
-                                    'state': 'rejected unpaid', 'cost_usd': 0.0}})
+                                    'state': 'rejected unpaid' if sent else 'not sent', 'cost_usd': 0.0,
+                                    **({'rejection_code': error.rejection_code} if error.rejection_code else {})}})
         else:
             fields['config']['request_images']['dispatch_status'] = 'outcome_unknown'
             write_atomic(claim_path, {**claim, 'final_dispatch_outcome': 'unverified',
-                                      'no_reply': f'KeyExhausted: {error}'})
+                                      'no_reply': f'{type(error).__name__}: {error}'})
         raise
     except Exception as error:
         fields['config']['request_images']['dispatch_status'] = 'outcome_unknown'
@@ -978,9 +1385,21 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
     finish = choice.get("finish_reason") or choice.get("native_finish_reason")
     msg = choice.get("message") or {}
     text = msg.get("content") or ""
+    raw_usage = resp.get('usage')
+    received_usage = dict(raw_usage) if isinstance(raw_usage, dict) else {}
+    received_cost, received_source = _verified_final_cost(received_usage, model)
+    received_usage.update(est_cost_usd=received_cost, cost_source=received_source)
+    received = {**claim, 'parse_ok': False, 'response': copy.deepcopy(resp), 'response_text': text,
+                'labels': {'_raw': text, '_parse_error': 'Received response awaiting parsing and evidence binding'},
+                'finish_reason': finish, **_served(resp), 'usage': received_usage,
+                'final_dispatch_outcome': 'received' if received_cost is not None else 'unverified'}
+    received.pop('no_reply', None)
+    received_path = Path(out_path).with_name(f'failed_{Path(out_path).name}') if finish == 'length' else Path(out_path)
+    persist_final_claim(received_path, received)
+    claim_path.unlink(missing_ok=True)
     if finish == "length":
         # the output hit max_tokens, so the JSON is cut off: keep what came back beside the outputs (never as an
-        # episode_*.json, so a resumed run still counts the episode as not done), then fail
+        # episode_*.json), then fail. Paid retry requires --retry-received for this episode.
         raw_usage = resp.get("usage")
         usage = dict(raw_usage) if isinstance(raw_usage, dict) else {}
         cost, source = _verified_final_cost(usage, model)
@@ -990,7 +1409,8 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
         # the cut-off reply (board/to_board.py label_failed)
         failed = {"episode_dir": str(ep_dir), "model": model, "reasoning_effort": reasoning, **fields,
                   "finish_reason": finish, **_served(resp), "usage": usage, "content_tail": text[-4000:],
-                  "reasoning_tail": (msg.get("reasoning") or "")[-8000:]}
+                  "reasoning_tail": (msg.get("reasoning") or "")[-8000:],
+                  'response': copy.deepcopy(resp), 'response_text': text}
         if cost is None:
             failed.update(final_dispatch_outcome="unverified", final_reserved_usd=bound,
                           usage_reported=raw_usage)
@@ -1019,6 +1439,7 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
         "finish_reason": finish,
         "parse_ok": parse_ok,
         "labels": labels,
+        'response': copy.deepcopy(resp), 'response_text': text,
         "usage": {"prompt_tokens": n_in, "completion_tokens": n_out,
                   "reasoning_tokens": n_reason, "est_cost_usd": cost,
                   "cost_source": cost_source,
@@ -1131,8 +1552,63 @@ def _release_memory() -> None:
         pass
 
 
-def run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurrency: int, force: bool,
-              max_spend: float = 0.0, output_path: Path | None = None, **label_kw) -> int:
+class ExecutionBusy(RuntimeError):
+    """Another process owns a folder's execution lock."""
+
+
+def cli(main) -> int:
+    """A command's main(), where a folder another process is working in is refused in one line, not a traceback."""
+    try:
+        return main()
+    except ExecutionBusy as busy:
+        raise SystemExit(f'refused, {busy}; let it finish or stop it first') from None
+
+
+@contextmanager
+def execution_lock(folder: Path, *, inherited_fd: int | None = None):
+    """One process owns execution until dispatched work settles, where flock is shared.
+
+    Cross-host writers require a filesystem with working shared locks. Client-local
+    NFS nolock/local_lock mounts do not provide that guarantee.
+    """
+    import fcntl
+    import stat
+    Path(folder).mkdir(parents=True, exist_ok=True)
+    lock_path = Path(folder) / '.execution.lock'
+    if inherited_fd is not None:
+        try:
+            held, expected = os.fstat(inherited_fd), lock_path.stat()
+            if (not stat.S_ISREG(held.st_mode)
+                    or (held.st_dev, held.st_ino) != (expected.st_dev, expected.st_ino)):
+                raise ValueError('descriptor does not identify this output lock')
+            # A different open description cannot borrow an existing flock. This
+            # succeeds for the description inherited from the owning review.
+            fcntl.flock(inherited_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (OSError, ValueError) as error:
+            raise RuntimeError(f'Invalid inherited execution lease for {folder}: {error}') from error
+        yield inherited_fd
+        return  # The encompassing review still owns the inherited description.
+    with lock_path.open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise ExecutionBusy(f'Another label execution is running in {folder}') from error
+        yield lock.fileno()
+
+
+def run_batch(episodes: list[Path], out_dir: Path, *, execution_lease_fd=None, **kwargs) -> int:
+    with execution_lock(out_dir, inherited_fd=execution_lease_fd):
+        result = _run_batch(episodes, out_dir, **kwargs)
+        # The worker owns its receipts until metadata is settled. A killed wrapper
+        # must not leave completed paid work permanently marked as running.
+        from label.run import finalize_worker
+        finalize_worker(out_dir, result)
+        return result
+
+
+def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurrency: int, force: bool,
+              max_spend: float = 0.0, output_path: Path | None = None,
+              retry_received: list[str] | None = None, **label_kw) -> int:
     """Resume verified outputs and reserve each call within this invocation's allowance."""
     if not math.isfinite(max_spend) or max_spend < 0:
         raise ValueError('spend allowance must be finite and nonnegative')
@@ -1141,6 +1617,12 @@ def run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurren
     out_dir.mkdir(parents=True, exist_ok=True)
     pool = KeyPool(keys)
     dry = bool(label_kw.get("dry_run"))
+    retry_received = set(retry_received or [])
+    if force and retry_received:
+        raise ValueError('--force and --retry-received cannot be combined')
+    unknown = retry_received - {ep.name for ep in episodes}
+    if unknown:
+        raise ValueError(f'--retry-received names unknown episodes: {sorted(unknown)}')
 
     def out_for(ep: Path) -> Path:
         return Path(output_path) if output_path is not None else out_dir / f"{ep.name}.json"
@@ -1149,30 +1631,26 @@ def run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurren
         p = out_for(ep)
         if force:
             return False
-        candidates = [p, p.with_name(f"failed_{p.name}"), p.with_name(f"noreply_{p.name}")]
-        if p.exists():
-            try:
-                primary = json.loads(p.read_text())
-                if primary.get("parse_ok") or primary.get("dry_run"):
-                    candidates = [p]
-            except (OSError, ValueError, AttributeError):
-                pass
-        existing = [q for q in candidates if q.exists() and q.stat().st_size]
-        if not existing:
+        try:
+            selected = annotation_record(out_dir, p.name)
+        except (OSError, ValueError, TypeError, AttributeError) as error:
+            stale[ep.name] = f'saved receipts cannot be verified: {error}'
+            return True
+        if selected is None:
+            if ep.name in retry_received:
+                stale[ep.name] = 'explicit received retry needs an existing received reply'
+                return True
             return False
-        records = []
-        for q in existing:
-            try:
-                record = json.loads(q.read_text())
-            except (OSError, ValueError):
-                stale[ep.name] = f"saved output {q.name} cannot be verified"
-                return True
-            if not isinstance(record, dict):
-                stale[ep.name] = f"saved output {q.name} is not a JSON object"
-                return True
-            records.append((q, record))
+        records = [selected]
+        try:
+            never_dispatched = all(not has_dispatch_receipt(record) for _, record in records)
+        except (ValueError, TypeError, AttributeError):
+            never_dispatched = False
         if len(records) == 1 and records[0][0] == p and records[0][1].get('input_identity') is None:
-            unverified[ep.name] = f"saved output {p.name} predates input proof"
+            if not dry and not annotation_complete(records[0][1]):
+                stale[ep.name] = f'saved output {p.name} has no usable annotation or input proof; use --force to refresh'
+            else:
+                unverified[ep.name] = f"saved output {p.name} predates input proof"
             return True
         if len(records) == 1 and records[0][0].name.startswith('noreply_') and (
                 records[0][1].get('input_identity') is None and
@@ -1187,51 +1665,144 @@ def run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurren
                                      sample_fps=label_kw.get('sample_fps'), task_mode=label_kw.get('task_mode'),
                                      dataset_note=label_kw.get('dataset_note'))
         except (OSError, ValueError, RuntimeError) as error:
+            if never_dispatched:
+                saved_failures.add(ep.name)
+                unverified[ep.name] = f'input cannot be verified; no paid dispatch: {error}'
+                return True
             stale[ep.name] = f"input cannot be verified: {type(error).__name__}: {error}"
             return True
+        if never_dispatched:
+            if ep.name in retry_received:
+                saved_failures.add(ep.name)
+                unverified[ep.name] = 'received retry refused: no received paid reply exists'
+                return True
+            if any(item.get('missing') for item in current['source_proof']):
+                saved_failures.add(ep.name)
+                unverified[ep.name] = 'source input is missing; no paid dispatch'
+                return True
+            if ep.name not in retry_received:
+                return False  # No paid inputs exist to reuse; assemble a fresh request.
         for q, record in records:
             saved = record.get("input_identity")
             if saved is None:
                 unverified[ep.name] = f"saved output {q.name} predates input proof"
                 return True
-            if not same_input_identity(saved, current) or any(item.get("missing") for item in current["source_proof"]):
+            comparison = current
+            if isinstance(saved, dict) and isinstance(saved.get('settings'), dict):
+                # Completion limits belong to each saved request. Changing a future
+                # request limit does not invalidate a durably received reply.
+                comparison = {**current, 'settings': {**current['settings'],
+                    'max_tokens': saved['settings'].get('max_tokens')}}
+            matches = same_input_identity(saved, comparison)
+            if not matches and not dry:
+                from label.request_attestation import matches as actual_request_matches
+                matches = actual_request_matches(record, comparison, ep, out_dir,
+                                                 example_dir=label_kw.get('example_dir'))
+                if matches:
+                    from label.reparse import refresh_received, save_annotation
+                    try:
+                        updated = refresh_received(record)
+                        if updated != record:
+                            save_annotation(out_dir, p.name, q, updated)
+                            record.clear()
+                            record.update(updated)
+                    except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError):
+                        matches = False
+            if not matches or any(item.get("missing") for item in current["source_proof"]):
                 stale[ep.name] = f"saved output {q.name} has changed or missing input; use --force to refresh"
                 return True
         if any(record.get('final_dispatch_outcome') in ('claimed', 'unverified') for _, record in records):
+            if ep.name in retry_received and not dry:
+                # The caller named this unit, accepting that its unknown charge may have been real. The unresolved
+                # attempt stays in the billing history with its reservation (_final_cost_history), so the cap still
+                # counts it, and nothing else is sent again.
+                return False
+            saved_failures.add(ep.name)
+            retryable_received.add(ep.name)
+            unverified[ep.name] = ('saved dispatch has an unresolved charge (it may have been billed); no automatic '
+                                   f'paid retry. --retry-received {ep.name} sends this unit alone again')
+            if not dry and any(record.get('parse_ok') is True and not annotation_complete(record) for _, record in records):
+                stale[ep.name] = 'saved annotation is unusable and its charge is unresolved; use --force to refresh explicitly'
             return True
-        if not p.exists():
-            return False
-        record = json.loads(p.read_text())
-        return bool(record.get("dry_run")) if dry else bool(record.get("parse_ok"))
+        for path, record in records:
+            received = (path == p or record.get('response') is not None or
+                        record.get('finish_reason') == 'length')
+            if not dry and received and not record.get('dry_run') and not annotation_complete(record):
+                try:
+                    _history_cost(record)
+                except (ValueError, TypeError):
+                    stale[ep.name] = 'saved reply billing cannot be verified; reconcile it before retrying'
+                    return True
+                if ep.name in retry_received:
+                    return False
+                saved_failures.add(ep.name)
+                retryable_received.add(ep.name)
+                unverified[ep.name] = ('saved paid reply needs reparse or explicit '
+                                       f'--retry-received {ep.name}; no automatic paid retry')
+                return True
+        record = records[0][1]
+        if dry:
+            return bool(record.get('dry_run'))
+        complete = annotation_complete(record)
+        if ep.name in retry_received and complete:
+            # nothing to retry: the unit is labelled, and naming it changes nothing (it never fails the run)
+            print(f"NOTE {ep.name}: --retry-received skipped, it already has a usable annotation", file=sys.stderr,
+                  flush=True)
+            return True
+        if ep.name in retry_received:
+            saved_failures.add(ep.name)
+            unverified[ep.name] = 'received retry refused: this episode already has a usable annotation'
+            return True
+        inspection = record.get('evidence_inspection') or {}
+        if complete and (inspection.get('pause_reason') == 'spend_cap' or
+                'Inspection selection exceeds the remaining batch spend cap.' in inspection.get('limitations', [])):
+            unverified[ep.name] = 'saved paid annotation omitted budget-blocked inspection; use --force to refresh explicitly'
+        if record.get('parse_ok') is True and not complete:
+            try:
+                _billing_fields(p)
+            except (OSError, ValueError, TypeError, AttributeError):
+                stale[ep.name] = 'saved annotation is unusable and its billing cannot be verified; reconcile it before retrying'
+                return True
+        return complete
 
-    stale, unverified = {}, {}
+    stale, unverified, saved_failures, retryable_received = {}, {}, set(), set()
     todo = [ep for ep in episodes if not is_done(ep)]
+    # a marker says what this run found; one left by an earlier run for a unit now current would say it twice
+    for name in {ep.name for ep in episodes} - set(stale) - set(unverified):
+        (out_dir / f"stale_{name}.json").unlink(missing_ok=True)
     for name, reason in {**unverified, **stale}.items():
         write_atomic(out_dir / f"stale_{name}.json", {"episode": name, "status": "stale" if name in stale else
-                     "unverified", "reason": reason, "refresh": "--force"})
+                     "unverified", "reason": reason,
+                     "refresh": f'--retry-received {name}' if name in retryable_received else '--force'})
     if stale:
         for name, reason in stale.items():
             print(f"STALE {name}: {reason}", file=sys.stderr, flush=True)
-        return 1
+        saved_failures.update(stale)
     skipped = len(episodes) - len(todo)
     print(f"episodes={len(episodes)} skipped(done)={skipped} todo={len(todo)} "
           f"keys={len(keys)} concurrency={concurrency} dry_run={dry}", flush=True)
     if not todo:
-        return 0
-    done = failed = 0
+        print(f'done=0 failed={len(saved_failures)} skipped={skipped} total_cost=$0.00 out_dir={out_dir}', flush=True)
+        return 1 if saved_failures else 0
+    done, failed, cap_refused = 0, len(saved_failures), 0
     total_cost = 0.0
     fails = []
     spent = {"usd": 0.0}
     spend_lock = threading.Condition()
     pending = {}
+    stopping = threading.Event()
 
     def allowance(ep, amount):
         # Only live dispatches can release a temporary reservation. Settled costs and
         # unknown charges from finished workers remain committed to the cap.
+        if stopping.is_set():
+            raise InterruptedError('Label execution interrupted before dispatch')
         if max_spend > 0 and amount > max_spend:
             return False, False
         waited = False
         while max_spend > 0 and spent['usd'] + amount > max_spend:
+            if stopping.is_set():
+                raise InterruptedError('Label execution interrupted before dispatch')
             if not any(value > 0 for owner, value in pending.items() if owner != ep):
                 return False, waited
             spend_lock.wait()
@@ -1240,6 +1811,7 @@ def run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurren
 
     def work_claimed(ep):
         prior_cost = episode_cost(_billing_fields(out_for(ep)))
+        inspection_refresh_id = uuid.uuid4().hex if force else None
         reserved = [0.0]
         selection_accounted = [0.0]
         def reserve_selection(amount):
@@ -1287,12 +1859,13 @@ def run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurren
             try:
                 r = label_episode(ep, out_for(ep), api_key=key, reserve_final=reserve_final,
                                   reserve_selection=reserve_selection, settle_selection=settle_selection,
-                                  force_refresh=force, **label_kw)
+                                  force_refresh=force, inspection_refresh_id=inspection_refresh_id,
+                                  require_known_pricing=max_spend > 0, **label_kw)
                 _release_memory()
                 c = episode_cost(r)
                 with spend_lock:
                     spent["usd"] += c - reserved[0] - selection_accounted[0] - prior_cost
-                return ("ok", ep, c)
+                return ("invalid" if r.get("parse_ok") is False and not r.get("dry_run") else "ok", ep, c)
             except KeyExhausted as e:
                 if not e.verified_unpaid:
                     failure = out_for(ep).with_name(f'noreply_{out_for(ep).name}')
@@ -1307,6 +1880,21 @@ def run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurren
                     spend_lock.notify_all()
                 pool.retire(key, str(e))
                 continue
+            except DispatchError as e:
+                if not e.verified_unpaid:
+                    failure = out_for(ep).with_name(f'noreply_{out_for(ep).name}')
+                    if failure.exists() and not reserved[0]:
+                        with spend_lock:
+                            spent['usd'] += episode_cost(json.loads(failure.read_text())) - selection_accounted[0] - prior_cost
+                    return ('fail', ep, f'{type(e).__name__}: {e}')
+                # the provider refused it or it never left the machine: nothing was billed, so its reservation is
+                # released and a plain resume sends it again
+                with spend_lock:
+                    spent['usd'] -= reserved[0]
+                    pending[ep] = max(0.0, pending.get(ep, 0.0) - reserved[0])
+                    reserved[0] = 0.0
+                    spend_lock.notify_all()
+                return ('fail', ep, f'not billed, a resume retries it: {e}')
             except Truncated as e:
                 with spend_lock:
                     spent["usd"] += e.cost - reserved[0] - selection_accounted[0] - prior_cost
@@ -1322,6 +1910,8 @@ def run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurren
 
     def work(ep):
         try:
+            if stopping.is_set():
+                return ('cancelled', ep, 'Label execution interrupted before work started')
             return work_claimed(ep)
         finally:
             with spend_lock:
@@ -1341,7 +1931,8 @@ def run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurren
             return
         previous = json.loads(p.read_text()) if p.exists() else {}
         current = billing_record(out_dir, out_for(ep).name)
-        if current is not None and current[0].name.startswith('failed_'):
+        if current is not None and current[1].get('final_dispatch_outcome') != 'not dispatched':
+            # Keep post-receipt processing errors on that attempt, without inventing a final dispatch.
             previous = current[1]
         if not previous:
             previous = {**_billing_fields(out_for(ep)), 'final_dispatch_outcome': 'not dispatched',
@@ -1352,7 +1943,7 @@ def run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurren
                     max_tokens=label_kw.get('max_tokens', 64000), cell_w=label_kw.get('cell_w', 0),
                     example_dir=label_kw.get('example_dir'), sample_fps=label_kw.get('sample_fps'),
                     task_mode=label_kw.get('task_mode'), dataset_note=label_kw.get('dataset_note'))
-            except (OSError, ValueError):
+            except (OSError, ValueError, RuntimeError):
                 pass
         requested_model = (previous.get('model') or
                            (previous.get('input_identity') or {}).get('settings', {}).get('model') or
@@ -1361,15 +1952,23 @@ def run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurren
                          **({'no_reply_kind': kind} if kind else {}),
                          "parse_ok": False, "no_reply": why})
 
-    with ThreadPoolExecutor(max_workers=concurrency) as ex:
-        for f in as_completed([ex.submit(work, ep) for ep in todo]):
+    ex = ThreadPoolExecutor(max_workers=concurrency)
+    futures = [ex.submit(work, ep) for ep in todo]
+    try:
+        for f in as_completed(futures):
             status, ep, info = f.result()
-            no_reply(ep, None if status == "ok" else str(info), kind='spend_cap' if status == 'skip' else None)
+            no_reply(ep, None if status in ("ok", "invalid") else str(info), kind='spend_cap' if status == 'skip' else None)
             if status == "ok":
                 done += 1
                 total_cost += float(info or 0)
+            elif status == "invalid":
+                failed += 1
+                total_cost += float(info or 0)
+                fails.append(f"FAIL {ep.name}: annotation did not parse")
+                print(f"FAIL {ep.name}: annotation did not parse", file=sys.stderr, flush=True)
             elif status == "skip":
                 skipped += 1
+                cap_refused += 1
                 try:
                     total_cost += episode_cost(json.loads(out_for(ep).with_name(f"noreply_{out_for(ep).name}").read_text()))
                 except (OSError, ValueError, TypeError, AttributeError):
@@ -1379,11 +1978,33 @@ def run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurren
                 failed += 1
                 fails.append(f"FAIL {ep.name}: {info}")
                 print(f"FAIL {ep.name}: {info}", file=sys.stderr, flush=True)
+    except KeyboardInterrupt:
+        stopping.set()
+        with spend_lock:
+            spend_lock.notify_all()
+        for future in futures:
+            future.cancel()
+        ex.shutdown(wait=True, cancel_futures=True)
+        print('Interrupted: queued episodes cancelled; dispatched replies and reservations retained.', file=sys.stderr)
+        return 130
+    finally:
+        ex.shutdown(wait=True, cancel_futures=True)
     print(f"\ndone={done} failed={failed} skipped={skipped} "
           f"total_cost=${total_cost:.2f} out_dir={out_dir} retired_keys={len(pool.dead)}", flush=True)
     if fails:
         print("failures:\n  " + "\n  ".join(fails), file=sys.stderr)
-    return 1 if failed else 0
+    return 1 if failed or cap_refused else 0
+
+
+def inherited_review_lease(folder: Path) -> int | None:
+    """Match the declared output path before validating the inherited kernel lock."""
+    lease_path = os.environ.get('ARGUS_REVIEW_OUTPUT_LOCK_PATH')
+    if not lease_path or Path(lease_path).resolve() != (Path(folder) / '.execution.lock').resolve():
+        return None
+    try:
+        return int(os.environ['ARGUS_REVIEW_OUTPUT_LOCK_FD'])
+    except (KeyError, ValueError) as error:
+        raise RuntimeError('Invalid inherited execution lease descriptor') from error
 
 
 def main() -> int:
@@ -1399,6 +2020,8 @@ def main() -> int:
     ap.add_argument("--concurrency", type=int, default=0, help="episodes in flight (default 4 per key)")
     ap.add_argument("--limit", type=int, default=0, help="label at most the first N episodes (0 = all)")
     ap.add_argument("--force", action="store_true", help="relabel episodes that already have a parsed output")
+    ap.add_argument('--retry-received', action='append', default=[], metavar='EPISODE',
+                    help='explicitly retry this received unusable or truncated reply; repeat for each episode')
     ap.add_argument("--cell-w", type=int, default=0,
                     help="grid cell width in px for every episode, with no routing; 0 keeps the per-rig width (teleop "
                          "224 or 448 by its task text, handheld 320, head camera 256), stepped down for an episode "
@@ -1434,12 +2057,14 @@ def main() -> int:
     if args.episode_dir:
         target = args.out or (args.episode_dir / 'labels.json')
         claim = target.with_name(f'noreply_{target.name}')
-        if claim.exists() and not args.force:
+        if claim.exists() and not args.force and args.episode_dir.name not in args.retry_received:
             print(f'{claim}: existing no-reply claim cannot authorize a new call; use --force explicitly',
                   file=sys.stderr)
             return 1
         return run_batch([args.episode_dir], target.parent, keys=keys, concurrency=1,
-                         force=args.force, max_spend=args.max_spend, output_path=target, **label_kw)
+                         force=args.force, max_spend=args.max_spend, output_path=target,
+                         execution_lease_fd=inherited_review_lease(target.parent),
+                         retry_received=args.retry_received, **label_kw)
     if not args.out_dir:
         print("--out-dir is required with --episodes-root", file=sys.stderr)
         return 2
@@ -1450,8 +2075,9 @@ def main() -> int:
     if args.limit > 0:
         episodes = episodes[:args.limit]
     return run_batch(episodes, args.out_dir, keys=keys, concurrency=args.concurrency or 4 * len(keys),
-                     force=args.force, max_spend=args.max_spend, **label_kw)
+                     force=args.force, max_spend=args.max_spend, retry_received=args.retry_received,
+                     execution_lease_fd=inherited_review_lease(args.out_dir), **label_kw)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(cli(main))

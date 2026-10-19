@@ -72,7 +72,8 @@ def test_timeout_does_not_retry_paid_dispatch(deepseek, monkeypatch):
     calls = []
     def fail(req, timeout):
         calls.append(req.full_url)
-        raise urllib.error.URLError("timeout after dispatch")
+        # urllib propagates response timeouts directly; URLError is a pre-dispatch connection failure.
+        raise TimeoutError("timeout after dispatch")
     monkeypatch.setattr(harness.urllib.request, "urlopen", fail)
     monkeypatch.setattr(harness.time, "sleep", lambda *a: pytest.fail("retried"))
     with pytest.raises(RuntimeError):
@@ -115,7 +116,7 @@ def test_episode_including_router_uses_only_deepseek(deepseek, monkeypatch, tmp_
         elif ea.SELECTION in texts:
             kind, reply = "inspect", {"requests":[]}
         else:
-            kind, reply = "label", {"timeline":[]}
+            kind, reply = "label", {"timeline":[], "task_summary":"Wait beside the visible workspace."}
         sent.append(kind)
         return io.BytesIO(json.dumps({"model":"deepseek-flash","choices":[{"finish_reason":"stop",
             "message":{"content":json.dumps(reply)}}],"usage":{"prompt_tokens":100,"completion_tokens":10}}).encode())
@@ -128,3 +129,34 @@ def test_episode_including_router_uses_only_deepseek(deepseek, monkeypatch, tmp_
     assert result["parse_ok"] and result["provider"] == "deepseek"
     assert result["usage"]["cost_source"] == "peak_list_estimate"
     assert "sk-ds-test" not in json.dumps(result)
+
+
+def test_deepseek_body_changes_invalidate_saved_requests(deepseek, monkeypatch, tmp_path):
+    from test_route_accounting import observed_packed_episode
+    from label.request_attestation import only_implementation_changed
+
+    ep = observed_packed_episode(tmp_path)
+    kwargs = dict(model=providers.DEEPSEEK_MODEL, reasoning="high", max_tokens=100,
+                  cell_w=128, example_dir=None)
+    saved = harness.input_identity(ep, **kwargs)
+    assert saved["settings"]["request_body_sha256"] != harness.FIRST_BODY_SHA256
+    original = providers.request_body
+    monkeypatch.setattr(providers, "request_body", lambda *a, **kw:
+                        {**original(*a, **kw), "response_format": {"type": "json_schema"}})
+    current = harness.input_identity(ep, **kwargs)
+    assert not only_implementation_changed(saved, current)
+
+
+def test_deepseek_connection_failure_retries_without_losing_billing_state(deepseek, monkeypatch):
+    from label.errors import DispatchError
+
+    sent = []
+    def fail(req, timeout):
+        sent.append(req.full_url)
+        raise urllib.error.URLError("connection refused")
+    monkeypatch.setattr(harness.urllib.request, "urlopen", fail)
+    monkeypatch.setattr(harness.time, "sleep", lambda *_: None)
+    with pytest.raises(DispatchError) as error:
+        harness.call_model_once([], providers.DEEPSEEK_MODEL, "high", "sk-ds-test", 100, 5)
+    assert error.value.verified_unpaid and error.value.stage == "not sent"
+    assert sent == [providers.DEEPSEEK_URL] * harness.UNPAID_ATTEMPTS

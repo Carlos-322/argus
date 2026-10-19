@@ -383,6 +383,14 @@ Return an additional JSON field "sensor_findings": [{"start_s": number, "end_s":
     return text + _json(payload)
 
 
+def finding_fields(finding):
+    """Only annotation fields may enter bound evidence; presentation and offsets are computed locally."""
+    return {key: copy.deepcopy(finding[key]) for key in (
+        'start_s', 'end_s', 'inspect_s', 'headline', 'detail', 'overlay_detail', 'observation',
+        'claim', 'alternative', 'confidence', 'adds_beyond_video', 'claim_type', 'evidence',
+        'review_status') if key in finding}
+
+
 def bind(doc, findings):
     """Keep unbound replies for inspection; only evidence-backed findings reach overlays."""
     result = copy.deepcopy(doc)
@@ -400,6 +408,7 @@ def bind(doc, findings):
             if (type(start) not in (float, int) or type(end) not in (float, int) or not math.isfinite(start)
                     or not math.isfinite(end) or end < start or not isinstance(f.get('headline'), str) or not f['headline'].strip()):
                 reason = 'invalid finding interval or headline'
+            cited = []
             refs = f.get('evidence')
             if not isinstance(refs, list) or not refs:
                 reason = 'no structured evidence references'
@@ -432,12 +441,17 @@ def bind(doc, findings):
                 if (not isinstance(ts, list) or not ts or any(type(t) not in (int, float) or not math.isfinite(t)
                         or not any(abs(t - known) < .0001 for known in available) for t in ts)):
                     reason = 'citation is not an available supplied sample'; break
+                cited.extend(ts)
                 if reason is None and (start < min(supplied) or end > max(supplied)):
                     reason = 'finding exceeds the evidence clock'; break
+            # Samples may supply event evidence, or bracket it for a context comparison.
+            # An event interval need not end exactly at its discrete sample instants.
+            if reason is None and (not cited or max(cited) < start - .0001 or min(cited) > end + .0001):
+                reason = 'cited samples do not overlap or bracket the finding interval'
         if reason:
             result['unbound_findings'].append({'finding': copy.deepcopy(f), 'reason': reason})
         else:
-            result['findings'].append(copy.deepcopy(f))
+            result['findings'].append(finding_fields(f))
     return result
 
 
@@ -519,10 +533,10 @@ def merge(parts, ctx, ep_dir=None):
         for finding in doc.get('findings') or []:
             stale_finding = stale or any(ref.get('sensor_id') in stale_sensors
                                         for ref in finding.get('evidence') or [])
-            finding = copy.deepcopy(finding)
+            finding = finding_fields(finding)
             if offset:
                 # Preserve the model's quoted times without silently rewriting its prose.
-                finding['quoted_time_offset_s'] = float(finding.get('quoted_time_offset_s') or 0) + offset
+                finding['quoted_time_offset_s'] = offset
             for key in ('start_s', 'end_s', 'inspect_s'):
                 if type(finding.get(key)) in (int, float):
                     finding[key] += offset

@@ -11,33 +11,45 @@ gave no labels (list "labelling") or of how we read or showed the recording (lis
 a table read every so many rows or a signal kept as its lowest, mean and highest value, or a property of the recording
 that is not a fault in it, such as a camera that is not colour) is shown on the episode and returned under
 not_counted, never in the counts or the filter. A family limited to some datasets ("datasets") is only matched on
-those. A family with "among" matches its text only on issues whose tag reads as one of those plain names, which is how
-one tag the model uses for several distinct problems
-(camera_fault: a camera turned away, a frozen image, glare) is split by what the issue says.
+those.
+
+A family's text is read only where the tag says too little: a tag the model files several distinct problems under
+(a family's "among", such as camera_fault: a camera turned away, a frozen image, glare) or a tag it coined (no entry
+in tag_names.json). A known tag keeps its own name whatever its prose mentions. A family with "among" matches its text
+only on issues whose tag reads as one of those plain names. The text claims a family only where its clause asserts the
+problem (board/polarity.py: not where it is denied, retracted, asked about or supposed), the issue sentence before
+its evidence, and a word two swapped letters away from a family's word counts as that word.
 
 What counts (Families.counts, the one statement of the rule):
   - a data issue at medium or high severity;
   - an operator mistake that changes the outcome (its tag's kind in tag_names.json is "outcome") at medium or high;
   - any operator mistake at high.
-Everything else is minor: kept and shown on the episode, left out of the counts and the filter.
+Rated issues below these thresholds are minor. Issues without a valid severity are unrated.
+Both remain visible on the episode and are excluded from severity totals.
 
     fam = Families()
-    c = fam.classify(episode)      # {"counted": {slug: [issues]}, "minor": {...}, "not_counted": {...}}
+    c = fam.classify(episode)      # {"counted": {slug: [issues]}, "minor": {...}, "unrated": {...}, "not_counted": {...}}
 """
 from __future__ import annotations
 
 import collections
 import json
 import re
+from re import _constants as _C, _parser
 from pathlib import Path
+
+from board.label_projection import severity as _sev
+from board.polarity import denied_spans
 
 HERE = Path(__file__).resolve().parent
 LISTS = {"data_issues": "data", "operator_mistakes": "mistake"}
 COUNTED_LISTS = set(LISTS.values())
-
-
-def _sev(i: dict) -> str:
-    return str(i.get("severity") or "low").lower()
+# characters around a word that spell correction reads: far wider than the longest family wording
+# ("fills much of the kitchen camera"), so a family word overlapping the word always lies inside
+_SPELL_REACH = 64
+_WORD_CHAR = re.compile(r"\w")
+# a character that any word character fills, in the strings a family's pattern matches (_wordings)
+_WILD = "\x00"
 
 
 def union_seconds(spans) -> float:
@@ -59,6 +71,86 @@ def check_hit(d: dict, key: str) -> bool:
     return bool(((d.get("dataset_checks") or {}).get(name) or {}).get(field))
 
 
+def _wordings(items, limit=50000):
+    """Every string a parsed pattern matches, with _WILD for a character any word character fills; None when the
+    pattern uses a form this does not spell out or matches more than limit strings."""
+    out = ['']
+    for op, av in items:
+        if op is _C.LITERAL:
+            alts = [chr(av)]
+        elif op is _C.IN:
+            alts = [chr(v) for o, v in av] if all(o is _C.LITERAL for o, v in av) else [_WILD]
+        elif op is _C.ANY:
+            alts = [_WILD]
+        elif op is _C.AT:
+            alts = ['']
+        elif op is _C.SUBPATTERN:
+            alts = _wordings(av[-1], limit)
+        elif op is _C.BRANCH:
+            alts = [s for b in av[1] for s in (_wordings(b, limit) or [None])]
+        elif op in (_C.MAX_REPEAT, _C.MIN_REPEAT):
+            lo, hi, sub = av
+            inner = _wordings(sub, limit)
+            if inner is None:
+                return None
+            if hi <= 1:
+                alts = ([''] if lo == 0 else []) + inner
+            elif all(len(s) == 1 for s in inner):
+                alts = [_WILD]          # a run of any length of characters ("\w+") reads as one wild character
+            else:
+                return None
+        else:
+            return None
+        if alts is None or None in alts:
+            return None
+        out = [a + b for a in out for b in dict.fromkeys(alts)]
+        if len(out) > limit:
+            return None
+    return out
+
+
+def _vocabulary(patterns):
+    """The pieces of letters the patterns can match: (every three letters in a run of letters, every whole run of one
+    or two letters), or None when some pattern cannot be spelled out or puts a wild character beside a letter."""
+    tri, short = set(), set()
+    for r in patterns:
+        strings = _wordings(_parser.parse(r.pattern, r.flags))
+        if strings is None or any(re.search(r"[^\W\d_]" + _WILD + "|" + _WILD + r"[^\W\d_]", x) for x in strings):
+            return None
+        for x in strings:
+            for run in re.findall(r"[^\W\d_]+", x.lower()):
+                tri.update(run[i:i + 3] for i in range(len(run) - 2))
+                if len(run) <= 2:
+                    short.add(run)
+    return tri, short
+
+
+def _may_hold(vocab, word, i, j) -> bool:
+    """Whether a family's word can cover one of letters i to j of word, a run of letters at least three long. The
+    letters of word that a match covers are a run of letters the pattern matches, or part of one, so some three of
+    them around those letters are three letters of such a run, or they are a whole run of two letters, or of one at
+    an edge of word. Without a vocabulary (a pattern this cannot spell out) every word may."""
+    if vocab is None or not word.isascii():
+        return True
+    tri, short = vocab
+    low = word.lower()
+    return (any(low[x:x + 3] in tri for x in range(max(0, i - 2), min(j + 1, len(low) - 2)))
+            or any(low[x:x + 2] in short for x in range(max(0, i - 1), min(j + 1, len(low) - 1)))
+            or (i == 0 and low[0] in short) or (j == len(low) - 1 and low[-1] in short))
+
+
+def _overlaps(patterns, pre, word, post) -> bool:
+    """Whether a match of one of the patterns in pre + word + post overlaps word."""
+    text, a, b = pre + word + post, len(pre), len(pre) + len(word)
+    for r in patterns:
+        for x in r.finditer(text):
+            if x.start() >= b:
+                break
+            if x.end() > a:
+                return True
+    return False
+
+
 class Families:
     def __init__(self, path: Path | None = None, tag_names_path: Path | None = None):
         spec = json.loads(Path(path or HERE / "families.json").read_text())
@@ -68,6 +160,8 @@ class Families:
         self.kinds = {t: v.get("kind") for t, v in tn.get("operator_mistakes", {}).items()}
         self.defs = spec["families"]
         self._re = {f["slug"]: re.compile(f["text"], re.I) for f in self.defs if f.get("text")}
+        self._spell_cache = {}
+        self._vocab = _vocabulary(self._re.values())
 
     def tag_name(self, key: str, tag: str | None) -> str:
         """The tag's plain name (tag_names.json), else its words with the first letter capitalised."""
@@ -98,6 +192,10 @@ class Families:
         f = next((f for f in self.defs if f["slug"] == slug), None)
         return f["list"] if f else "mistake" if str(slug).startswith("m:") else "data"
 
+    @staticmethod
+    def rated(i: dict) -> bool:
+        return _sev(i) is not None
+
     def counts(self, key: str, i: dict) -> bool:
         """Whether an issue of this list ("data_issues" or "operator_mistakes") counts (the module docstring)."""
         s = _sev(i)
@@ -109,28 +207,89 @@ class Families:
         lst = LISTS[key]
         cat = i.get("category") or ""
         plain = self.tag_name(key, cat)
-        text = f"{i.get('issue') or ''} {i.get('evidence') or ''}"
-        for f in self.defs:
-            if f["list"] != lst or (f.get("datasets") and dataset not in f["datasets"]):
-                continue
+        eligible = [f for f in self.defs if f['list'] == lst
+                    and (not f.get('datasets') or dataset in f['datasets'])]
+        # Structured categories outrank incidental words anywhere in the prose.
+        for f in eligible:
             if cat in (f.get("tags") or []) or plain in (f.get("names") or []):
                 return f["slug"]
-            # a text rule claims an issue by its words; with "among", only issues whose tag reads as one of those names
-            if f["slug"] in self._re and (not f.get("among") or plain in f["among"]) and self._re[f["slug"]].search(text):
-                return f["slug"]
+        # Words refine only a tag that names no one problem: one the model files several problems under (a family's
+        # "among") or one it coined (no entry in tag_names.json). A known tag keeps its own name.
+        if not (self._broad(plain) or cat not in self.plain.get(key, {})):
+            return ("d:" if lst == "data" else "m:") + plain
+        # The issue and its evidence are read as one note, each sentence of it on its own grammar (board/polarity.py):
+        # nothing in one sentence retracts another. The issue says what the problem is; its evidence decides only
+        # when the issue asserts none of the families.
+        issue, evidence = (self._spelled(str(i.get(field) or '')) for field in ('issue', 'evidence'))
+        text = issue + '\n' + evidence if evidence else issue
+        spans = denied_spans(text)
+        claimed = {}
+        for f in eligible:
+            if f["slug"] in self._re and (not f.get('among') or plain in f['among']):
+                start = next((m.start() for m in self._re[f["slug"]].finditer(text)
+                              if not any(a <= m.start() < b for a, b in spans)), None)
+                if start is not None:
+                    claimed[f["slug"]] = start
+        for in_issue in (True, False):
+            for f in eligible:
+                if f["slug"] in claimed and (claimed[f["slug"]] <= len(issue)) == in_issue:
+                    return f["slug"]
         return ("d:" if lst == "data" else "m:") + plain
+
+    def _spelled(self, text: str) -> str:
+        """text with each word that two swapped letters keep from being a family's word put right ("dorpout"). A
+        swap keeps every character offset, so the clause reading is unchanged."""
+        if text in self._spell_cache:
+            return self._spell_cache[text]
+        out = list(text)
+        n = len(out)
+        patterns = list(self._re.values())
+        for m in re.finditer(r"[^\W\d_]{4,}", text):
+            a, b = m.span()
+            w = m.group()
+            # no family word is that long, and trying every swap in it would cost its length squared
+            if len(w) > _SPELL_REACH:
+                continue
+            # A family word that overlaps this word lies within _SPELL_REACH of it, so only that stretch of the text
+            # is read; reading the whole text for every word and every swap made a long note take minutes. The
+            # stretch ends at word edges, so a "\b" in a family's pattern reads as it would in the whole text.
+            lo, hi = max(0, a - _SPELL_REACH), min(n, b + _SPELL_REACH)
+            while lo < a and lo > 0 and _WORD_CHAR.match(out[lo - 1]):
+                lo += 1
+            while hi > b and hi < n and _WORD_CHAR.match(out[hi]):
+                hi -= 1
+            pre, post = ''.join(out[lo:a]), ''.join(out[b:hi])
+            if _may_hold(self._vocab, w, 0, len(w) - 1) and _overlaps(patterns, pre, w, post):
+                continue
+            for k in range(len(w) - 1):
+                if w[k] == w[k + 1]:
+                    continue
+                cand = w[:k] + w[k + 1] + w[k] + w[k + 2:]
+                # a family's word the swap brings in covers one of the two letters it moved
+                if _may_hold(self._vocab, cand, k, k + 1) and _overlaps(patterns, pre, cand, post):
+                    out[a:b] = cand
+                    break
+        out = ''.join(out)
+        if len(self._spell_cache) > 4096:
+            self._spell_cache.clear()
+        self._spell_cache[text] = out
+        return out
+
+    def _broad(self, plain: str) -> bool:
+        return any(plain in (f.get('among') or []) for f in self.defs)
 
     def classify(self, d: dict) -> dict:
         """The episode's families: counted ones with the issues that count under each (empty when a check or the
-        outcome raised it), minor ones that nothing counted, and not_counted, the families of reader issues that are
+        outcome raised it), minor and unrated ones with no counted issue, and not_counted, the families of reader issues that are
         no fault in the recording (a list outside COUNTED_LISTS), shown on the episode and never counted."""
-        counted, minor = collections.defaultdict(list), collections.defaultdict(list)
+        counted, minor, unrated = (collections.defaultdict(list) for _ in range(3))
         not_counted = {}
         ds = d.get("dataset")
         for key in LISTS:
             for i in d.get(key) or []:
                 if i and i.get("issue"):
-                    (counted if self.counts(key, i) else minor)[self.family_of(key, i, ds)].append(i)
+                    group = counted if self.counts(key, i) else minor if self.rated(i) else unrated
+                    group[self.family_of(key, i, ds)].append(i)
         # the episode's outcome, and each part's of a long recording labelled in parts (label/pieces.py puts those
         # under tasks), so a part reached and then undone counts as a short episode's does
         outcomes = {str((d.get("completion") or {}).get("task_completed") or "").lower()}
@@ -147,6 +306,7 @@ class Families:
                 fam = self.reader_family(str(x["kind"]))
                 (counted if self.list_of(fam) in COUNTED_LISTS else not_counted).setdefault(fam, [])
         return {"counted": dict(counted), "minor": {k: v for k, v in minor.items() if k not in counted},
+                "unrated": {k: v for k, v in unrated.items() if k not in counted},
                 "not_counted": {k: v for k, v in not_counted.items() if k not in counted}}
 
     def hands_hidden_seconds(self, d: dict) -> float | None:

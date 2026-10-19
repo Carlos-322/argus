@@ -294,12 +294,16 @@ def test_unshown_frames_before_recorded_primary_are_preserved(tmp_path, monkeypa
         expected_times = (stamps - 1_700_000_000_000_000_000) / 1e9
         assert np.array_equal(times['capture'], expected_times)
         assert np.array_equal(times['presentation'], expected_times)
-        assert times['pts'].tolist() == [0, 33_000, 68_000, 101_000, 143_000, 179_000]
+        # These are exact storage addresses; native message clocks above own presentation timing.
+        np.testing.assert_array_equal(times['pts'], formats.probe(camera['packed'])['pts'])
+        assert np.all(np.diff(times['pts']) > 0)
     old_ep, _ = converted(root, tmp_path / 'old', monkeypatch, legacy=True)
     with np.load(old_ep / 'times.npz') as original_times, np.load(ep / 'times.npz') as times:
         assert original_times['exo'].dtype == times['exo'].dtype
         assert original_times['exo'].tobytes() == times['exo'].tobytes()
-        assert times['exo_pts'].tolist() == [100_000, 133_000, 168_000, 201_000, 243_000, 279_000]
+        main_source = json.loads((ep / 'sources.json').read_text())['exo']
+        np.testing.assert_array_equal(times['exo_pts'], formats.probe(main_source['packed'])['pts'])
+        assert np.all(np.diff(times['exo_pts']) > 0)
     assert 'camera_clock' not in camera
     assert hashlib.sha256(raw.read_bytes()).hexdigest() == proof['sha256']
 
@@ -346,16 +350,28 @@ def test_malformed_nested_claims_stay_recorded_without_failing_usable_recording(
 
 
 def test_early_unshown_camera_does_not_extend_selected_step_claim_end(tmp_path, monkeypatch):
+    from mcap.reader import make_reader
     controls = []
+    source_ends = []
     for name, options in [('selected_only', {}), ('early_secondary', {
             'other_camera': True, 'early_other_ns': 100_000_000,
             'other_topic': '/robot0/sensor/thermal0/compressed'})]:
         root = tmp_path / name
         root.mkdir()
-        recording(root / 'episode.mcap', step_text=True, **options)
-        _, ctx = converted(root, tmp_path / (name + '_prepared'), monkeypatch, legacy=False)
+        raw = root / 'episode.mcap'
+        recording(raw, step_text=True, **options)
+        with raw.open('rb') as stream:
+            selected = np.asarray([message.log_time for _, _, message in make_reader(stream).iter_messages(
+                topics=[genhumanego.CAMERA_TOPIC])], dtype=np.int64)
+        source_ends.append(round((selected[-1] - selected[0] + np.median(np.diff(selected))) / 1e9, 3))
+        ep, ctx = converted(root, tmp_path / (name + '_prepared'), monkeypatch, legacy=False)
+        with np.load(ep / ctx['recorded_camera_clocks']) as native:
+            np.testing.assert_array_equal(native['exo_log_ns'], selected)
+        assert ctx['source']['presentation_clock']['basis'] == 'mcap_log_time'
+        assert ctx['source']['presentation_clock']['physical_synchronization_verified'] is False
         controls.append(ctx['annotation_subtasks'])
-    assert controls[0] == [{'t0': .033, 't1': .215, 'label': 'recorded final step'}]
+    assert source_ends == [.214, .214]
+    assert controls[0] == [{'t0': .033, 't1': source_ends[0], 'label': 'recorded final step'}]
     assert controls[1] == controls[0]
 
 

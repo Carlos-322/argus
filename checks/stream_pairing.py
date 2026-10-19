@@ -7,7 +7,9 @@
 EPISODES are folders of prepared episode_* folders. Each mode reads the episode's context.json, sources.json,
 state.npz, its real-times file and kmap_*.npy files if the sources name them, and (stream_pairing, recorded_jumps)
 the mounted cameras' videos, and writes its result into context.json under the key named above; an episode that
-already has that key is skipped unless --force. `python -m board build` copies all three into the episode's
+already has a current successful result is skipped unless --force. Errors and older algorithms are retried.
+The command exits 3 when an episode's check could not run, with its error retained alongside usable results.
+`python -m board build` copies all three into the episode's
 dataset_checks on the board (the labelling harness also reports stream_pairing). None of it goes into the prompt.
 `python -m checks EPISODES` runs all three and the capture checks.
 
@@ -42,6 +44,9 @@ from label import episode as me
 from label import frames as mf
 from label import state as ms
 from label.atomic import write_atomic
+from checks.camera_intervals import to_anchor
+from checks import EXIT_PARTIAL
+from prepare.signal_alignment import recorder_arrival
 
 SMALL_W = 64          # image change is measured on a 64-px-wide grey copy of each frame
 
@@ -56,7 +61,9 @@ def stream_motion(ep: dict, v: str) -> np.ndarray:
     n = int(s["n_frames"])
     pts = ep["times"].get(f"{v}_pts") if ep.get("times") is not None else None
     fps = me.ep_fps(ep)
-    own = np.zeros(max(n - 1, 0))
+    own = np.full(max(n - 1, 0), np.nan)
+    if n == 0:
+        return own
     with av.open(str(s["packed"])) as c:
         st = c.streams.video[0]
         st.codec_context.thread_count = 1
@@ -86,9 +93,7 @@ def stream_motion(ep: dict, v: str) -> np.ndarray:
     km = ep["kmap"].get(v)
     if km is None:
         return own
-    cum = np.concatenate([[0.0], np.cumsum(own)])
-    km = np.clip(np.asarray(km, dtype=int), 0, n - 1)
-    return cum[km[1:]] - cum[km[:-1]]
+    return to_anchor(ep, v, own, len(km))
 
 
 def actor_speed(ep: dict, g: int) -> np.ndarray:
@@ -142,6 +147,9 @@ def unaligned(ep: dict) -> dict | None:
 
 def camera_alignment_reason(ep: dict, cam: str) -> str | None:
     """An assumed camera or anchor clock cannot place this camera against recorded state motion."""
+    if recorder_arrival(ep['context']):
+        return ('Camera and state use recorder arrival timing. Transport delays do not establish '
+                'physical synchronization, so their motion was not compared.')
     clocks = ep["context"].get("camera_clock") or {}
     affected = [v for v in {cam, me.anchor(ep)} if v in clocks]
     return (f"Camera placement for {', '.join(sorted(affected))} uses assumed presentation timing."
@@ -261,24 +269,48 @@ def jumps(ep_dir: Path) -> dict | None:
                     f"7 frames"}
 
 
+def _own_steps(ep: dict, cam: str, i: int, n: int) -> list[int]:
+    """The steps of camera cam's own frames (j: from its frame j to j + 1) that can hold the anchor step between
+    frames i and i + 1. A camera on the anchor's frames has that one step. A camera with its own clock has the steps
+    from its last frame at or before anchor frame i to its first at or after frame i + 1. A camera paired by its frame
+    for each anchor frame (kmap, nearest in time) has the steps between those two frames, and when both anchor frames
+    show the same frame of it (a camera slower than the anchor) the step falls inside one of its intervals, the one
+    before that frame or the one after it, so both are read: the leap shows in one of them."""
+    km = ep["kmap"].get(cam)
+    if km is None:
+        steps = [i]
+    else:
+        times = ep.get("times")
+        anchor = me.anchor(ep)
+        if times is not None and cam in times and anchor in times:
+            ta, tc = np.asarray(times[anchor], dtype=np.float64), np.asarray(times[cam], dtype=np.float64)[:n]
+            a = int(np.searchsorted(tc, ta[i], side="right")) - 1
+            b = int(np.searchsorted(tc, ta[i + 1], side="left"))
+            steps = list(range(a, b))
+        else:
+            a, b = int(km[i]), int(km[i + 1])
+            steps = list(range(a, b)) if b > a else [a - 1, a]
+    return [j for j in steps if 0 <= j < n - 1] or [min(max(i, 0), max(n - 2, 0))]
+
+
 def _camera_at(ep: dict, cam: str, i: int) -> dict:
-    """Camera cam's image change at the step between anchor frames i and i+1, against its median change over
-    3 frames either side (decoded at their exact pts)."""
+    """Camera cam's largest image change over the steps of its own frames that hold the step between anchor frames i
+    and i+1 (_own_steps), against its median change over 3 of its frames either side (decoded at their exact pts)."""
     s = ep["sources"][cam]
     n = int(s["n_frames"])
-    km = ep["kmap"].get(cam)
-
-    def own(k: int) -> int:
-        return int(km[k]) if km is not None else k
-    lo, hi = max(0, own(i) - 3), min(n - 1, own(i + 1) + 3)
+    steps = _own_steps(ep, cam, i, n)
+    lo, hi = max(0, steps[0] - 3), min(n - 1, steps[-1] + 1 + 3)
     ks = list(range(lo, hi + 1))
     pts = ep["times"].get(f"{cam}_pts") if ep.get("times") is not None else None
     ims = mf.extract_frames(s["packed"], s["base_s"], n, ks, pts=pts, fps=me.ep_fps(ep))
-    grey = [np.asarray(ims[k].convert("L").resize((SMALL_W, max(2, int(SMALL_W * ims[k].height / ims[k].width)))),
-                       dtype=np.int16) for k in ks]
-    ch = [float(np.abs(b - a).mean()) for a, b in zip(grey, grey[1:])]
-    at = ch[ks.index(own(i + 1)) - 1] if own(i + 1) in ks[1:] else max(ch)
-    med = float(np.median(ch))
+    grey = {k: np.asarray(ims[k].convert("L").resize((SMALL_W, max(2, int(SMALL_W * ims[k].height / ims[k].width)))),
+                          dtype=np.int16) for k in ks if k in ims}
+    # a step whose two frames both decode; one the decoder could not give is no measurement, never a still picture
+    ch = {k: float(np.abs(grey[k + 1] - grey[k]).mean()) for k in ks[:-1] if k in grey and k + 1 in grey}
+    if not ch or not any(j in ch for j in steps):
+        return {"not_assessed": f"camera {cam}'s frames around the step could not be decoded"}
+    at = max(ch[j] for j in steps if j in ch)
+    med = float(np.median(list(ch.values())))
     return {"image_change_at": round(at, 2), "image_change_window_median": round(med, 2),
             "visual_jump": bool(at > VISUAL_JUMP * max(med, 0.5))}
 
@@ -316,6 +348,25 @@ MODES = {"pairing": ("stream_pairing", pairing, "crossed"),
          "jumps": ("recorded_jumps", jumps, "flagged"),
          "grippers": ("gripper_channels", grippers, "flagged")}
 
+# Bump the affected mode when its measurement or decision rule changes.
+ALGORITHM_VERSIONS = {"stream_pairing": 2, "recorded_jumps": 3, "gripper_channels": 1}
+
+
+def needs_check(ctx: dict, mode: str) -> bool:
+    key, _, field = MODES[mode]
+    versions = ctx.get('check_versions')
+    if (not isinstance(versions, dict) or type(versions.get(key)) is not int
+            or versions[key] != ALGORITHM_VERSIONS[key] or key not in ctx):
+        return True
+    result = ctx[key]
+    if result is None:
+        return False
+    if not isinstance(result, dict) or 'error' in result:
+        return True
+    if field not in result:
+        return not isinstance(result.get('not_assessed'), str) or not result['not_assessed'].strip()
+    return not (type(result[field]) is bool or (mode == 'pairing' and result[field] is None))
+
 
 def _safe(mode: str, d: str) -> tuple[str, dict | None, str | None]:
     """One check's result on one episode. A check that crashes is that check's result, {"error": why, its finding's
@@ -344,7 +395,7 @@ def main():
             if not (d / "context.json").exists():
                 continue
             ctx = json.loads((d / "context.json").read_text())
-            if args.force or key not in ctx:
+            if args.force or needs_check(ctx, name):
                 eps.append(str(d))
     print(f"episodes to scan: {len(eps)}", flush=True)
     done = found = failed = 0
@@ -361,6 +412,9 @@ def main():
             p = Path(d) / "context.json"
             ctx = json.loads(p.read_text())
             ctx[key] = r
+            versions = ctx.get('check_versions')
+            ctx['check_versions'] = {**(versions if isinstance(versions, dict) else {}),
+                                     key: ALGORITHM_VERSIONS[key]}
             write_atomic(p, ctx, indent=1)
             if r and r.get(field):
                 found += 1
@@ -368,7 +422,8 @@ def main():
             if done % 50 == 0:
                 print(f"progress {done}/{len(eps)} {field}={found} failed={failed}", flush=True)
     print(f"done {done} {field}={found} failed={failed}", flush=True)
+    return EXIT_PARTIAL if failed else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

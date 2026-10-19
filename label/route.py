@@ -16,6 +16,7 @@ reference run's recorded answer for each task text, so every model sees the same
 from __future__ import annotations
 
 import json
+import copy
 import fcntl
 import hashlib
 import threading
@@ -80,7 +81,7 @@ def request(ep: dict) -> list:
 
 
 def _paid_route(ep, api_key, call_model, timeout, receipt_path, identity, reserve_dispatch, settle_dispatch, billing_fields, force_refresh):
-    from label.errors import KeyExhausted, SpendCap
+    from label.errors import DispatchError, KeyExhausted, SpendCap
     from label.harness import model_prices, _verified_final_cost, persist_final_claim, same_input_identity
     text = route_text(ep)
     routing_identity = {'version': 1, 'task_sha256': hashlib.sha256(text.encode()).hexdigest(),
@@ -140,7 +141,7 @@ def _paid_route(ep, api_key, call_model, timeout, receipt_path, identity, reserv
     try:
         resp = call_model(content, ROUTE_MODEL, ROUTE_REASONING, api_key,
                           max_tokens=ROUTE_MAX_TOKENS, timeout=timeout)
-    except KeyExhausted as error:
+    except DispatchError as error:
         if error.verified_unpaid:
             persist({'fine_detail': None, 'why': 'routing request rejected before processing', 'cost_usd': 0.0,
                      'dispatch_outcome': 'not dispatched'})
@@ -156,8 +157,14 @@ def _paid_route(ep, api_key, call_model, timeout, receipt_path, identity, reserv
         hit.update(cost_usd=bound if cost is None else cost, usage=usage, cost_source=source,
                    generation_id=resp.get('id'), dispatch_outcome='received',
                    cost_is_conservative_estimate=cost is None)
+        hit['response'] = copy.deepcopy(resp)
         try:
-            msg = resp['choices'][0]['message']['content']
+            choice = (resp.get('choices') or [{}])[0]
+            hit.update(response_text=(choice.get('message') or {}).get('content'),
+                       finish_reason=choice.get('finish_reason') or choice.get('native_finish_reason'))
+            if hit['finish_reason'] == 'length':
+                raise ValueError('routing reply cut off; using wide cells')
+            msg = choice['message']['content']
             ans = json.loads(msg[msg.find('{'):msg.rfind('}') + 1])
             fine = ans.get('fine_detail')
             hit.update(fine_detail=fine if isinstance(fine, bool) else None,

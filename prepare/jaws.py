@@ -8,6 +8,7 @@ No inference of contact, force, grasp success or object thickness is made.
 from __future__ import annotations
 
 import fcntl
+from contextlib import nullcontext
 import hashlib
 import json
 from pathlib import Path
@@ -309,7 +310,7 @@ def analyse_frames(frame_factory, times_s, declaration):
 
 
 def analyse(video, *, times_s, camera, declaration, output_dir, source_proof, frame_start=0,
-            protected_roots=()):
+            protected_roots=(), read_only=False):
     """Return output-cached evidence for an exact native-clock source window.
 
     source_proof is the caller's existing verified source receipt. Source stat and
@@ -338,10 +339,12 @@ def analyse(video, *, times_s, camera, declaration, output_dir, source_proof, fr
                 'camera': camera, 'declaration': declaration, 'frame_start': frame_start,
                 'frame_count': len(times), 'times_sha256': hashlib.sha256(times.astype('<f8').tobytes()).hexdigest()}
     key = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if not read_only:
+        output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f'{key}.json'
-    with (output_dir / f'{key}.lock').open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with (nullcontext() if read_only else (output_dir / f'{key}.lock').open('a')) as lock:
+        if lock is not None:
+            fcntl.flock(lock, fcntl.LOCK_EX)
         if path.is_file():
             try:
                 cached = json.loads(path.read_text())
@@ -365,11 +368,12 @@ def analyse(video, *, times_s, camera, declaration, output_dir, source_proof, fr
         if [after.st_size, after.st_mtime_ns, after.st_ctime_ns, after.st_ino] != identity['source_stat']:
             return _abstain('source_changed_during_analysis')
         result.update(cache_key=key, identity=identity)
-        write_atomic(path, result, allow_nan=False)
+        if not read_only:
+            write_atomic(path, result, allow_nan=False)
         return result
 
 
-def for_episode(ep: dict, output_dir: Path | None) -> dict:
+def for_episode(ep: dict, output_dir: Path | None, *, read_only=False) -> dict:
     """Measure explicitly qualified cameras outside immutable prepared/source folders."""
     ctx = ep['context']
     declarations = {view: entry.get('jaw_geometry') for view, entry in (ctx.get('cameras') or {}).items()
@@ -413,7 +417,7 @@ def for_episode(ep: dict, output_dir: Path | None) -> dict:
             proof = source_proof(ctx, ep['dir'])
             record = analyse(path, times_s=times, camera=view, declaration=declaration,
                 output_dir=output_dir, source_proof=proof,
-                frame_start=starts[0], protected_roots=roots)
+                frame_start=starts[0], protected_roots=roots, read_only=read_only)
             result[view] = {key: value for key, value in record.items() if key != 'identity'}
             result[view]['source_proof'] = proof
         except (OSError, ValueError, KeyError, subprocess.SubprocessError):

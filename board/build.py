@@ -3,7 +3,9 @@
     python -m board build BOARD          BOARD/manifest.json in; BOARD/qa/, BOARD/BUILT.json out
 
 A board serves the episode files in BOARD/qa. Those files are derived: every build regenerates them from the runs
-listed in BOARD/manifest.json and nothing else, so a board never shows a stale or mixed set of labels. Each file is
+listed in BOARD/manifest.json and nothing else. Publication exchanges each derived directory when supported;
+otherwise per-file replacements keep it available, with rollback on failure. Concurrent readers of that fallback
+can briefly see files from both generations. Each file is
 the run's label (board/to_board.py) with its provenance (`_run`: run id, code commit, kind, slice), the episode's
 rig and length, the deterministic dataset checks and the dataset's own labels from its context.json, where the
 footage comes from and its license (`dataset_source`, from board/dataset_sources.json, for the public datasets
@@ -93,12 +95,14 @@ BUILT.json as before. "sensors": false in the manifest turns it off. Like hands/
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import math
 import os
 import re
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 from board.to_board import (and_list, convert, dumps, field_words, label_failed, label_outputs, off_schema_text,
@@ -325,7 +329,7 @@ def steps_outside(d: dict, result: dict | None = None) -> list[dict]:
     is a known number (not estimated)."""
     from label.episode import STEP_SLACK_S
     dur = d.get("duration_s")
-    num = lambda x: isinstance(x, (int, float)) and not isinstance(x, bool)
+    num = lambda x: isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
     one = lambda xs, a, b: a if len(xs) == 1 else b
     said, edge, parts = [], False, []
     if num(dur) and math.isfinite(dur) and dur > 0 and not d.get("duration_estimated"):
@@ -343,6 +347,27 @@ def steps_outside(d: dict, result: dict | None = None) -> list[dict]:
                 f"{len(stray)} of its {len(keys)} key events {one(stray, 'lies', 'lie')} outside the episode"
                 if stray else ""]
         edge = bool(past or early or stray)
+        for field, name, time_keys, start_key, end_key in (
+                ('data_issues', 'data issue', ('t_s', 'end_s'), 't_s', 'end_s'),
+                ('operator_mistakes', 'operator mistake', ('t_s', 'end_s'), 't_s', 'end_s'),
+                ('tasks', 'task', ('start_s', 'end_s', 'completed_at_s', 'goal_reached_at_s', 'undone_at_s'),
+                 'start_s', 'end_s'),
+                ('completion', 'completion', ('completed_at_s', 'goal_reached_at_s', 'undone_at_s'), None, None),
+                ('state_changes', 'state change', ('t_s',), None, None),
+                ('recovery', 'recovery', ('failure_t_s', 'recovered_at_s'), 'failure_t_s', 'recovered_at_s')):
+            value = d.get(field)
+            rows = [value] if isinstance(value, dict) else [row for row in value or [] if isinstance(row, dict)]
+            outside = [row for row in rows if any(num(row.get(key)) and not lo <= row[key] <= hi
+                                                 for key in time_keys)]
+            reversed_rows = [row for row in rows if start_key and num(row.get(start_key)) and num(row.get(end_key))
+                             and row[end_key] < row[start_key]]
+            if outside:
+                said.append(f"{len(outside)} {name}{'' if len(outside) == 1 else 's'} "
+                            f"{one(outside, 'lies', 'lie')} outside the episode")
+            if reversed_rows:
+                said.append(f"{len(reversed_rows)} {name}{'' if len(reversed_rows) == 1 else 's'} "
+                            f"{one(reversed_rows, 'ends', 'end')} before it starts")
+            edge = edge or bool(outside)
     st = (result or {}).get("stitched") if isinstance((result or {}).get("stitched"), dict) else {}
     for p in st.get("outside_part") or []:
         if not isinstance(p, dict) or not (num(p.get("t0_s")) and num(p.get("t1_s"))):
@@ -462,7 +487,8 @@ def add_context(d: dict, ctx: dict, ep_dir: Path, result: dict | None = None) ->
     from board.clips import UNSHOWN_NOT_DECODABLE, unshown_views
     uncut = {x.get("camera") for x in ctx.get("reader_issues") or []
              if isinstance(x, dict) and x.get("kind") == UNSHOWN_NOT_DECODABLE}
-    unshown = [{"view": v, "name": str(e.get("name") or v), "why": str(e.get("why") or "")}
+    unshown = [{"view": v, "name": str(e.get("name") or v), "why": str(e.get("why") or ""),
+                **{key: e[key] for key in ('clock_alignment', 'presentation_clock') if key in e}}
                for v, e in unshown_views(ctx) if v not in uncut]
     if unshown:
         d["unshown_cameras"] = unshown
@@ -555,33 +581,41 @@ def add_contacts(d: dict, ctx: dict, result: dict | None = None) -> None:
     (label/episode.py build_request, label/pieces.py write_pieces) and its result holds them, so those are used."""
     recorded = ctx.get("contacts") or (result or {}).get("contacts") or []
     from label import contacts as lc
+    from prepare.signal_alignment import recorder_arrival, RECORDER_ARRIVAL, RECORDER_ARRIVAL_LIMITATION
     from label.dictionary_context import field_interpretation
     meta = {s['name']: {**s, 'dictionary': field_interpretation(ctx, s['name'])}
             for s in ctx.get('signals') or [] if isinstance(s, dict) and s.get('name')}
+    if recorder_arrival(ctx):
+        meta = {name: {'aligned_by': RECORDER_ARRIVAL, **value} for name, value in meta.items()}
     covered = {} if ctx.get('state_unaligned') else lc.coverage(meta)
     d.pop('contact_sensor_coverage', None)
     if covered:
         d['contact_sensor_coverage'] = covered
     missing = d.get('contacts_missing') or []
     if missing:
+        def covered_hand(row):
+            hand = row.get('hand')
+            return isinstance(hand, str) and hand.strip().lower() in covered
         d['contacts_missing'] = [{**m, 'withheld_from_final': True,
-                                 'withheld_reason': 'Instrumentation coverage is unknown for the reported hand.'}
-                                if isinstance(m, dict) and m.get('hand') not in covered else m for m in missing]
+                                 'withheld_reason': ('Instrumentation coverage is unknown for the reported hand.'
+                                    if not covered_hand(m) else RECORDER_ARRIVAL_LIMITATION)}
+                                if isinstance(m, dict) and (not covered_hand(m) or recorder_arrival(ctx))
+                                else m for m in missing]
     if not recorded and not missing:
         for k in ("contacts_model", "contact_views"):
             d.pop(k, None)
         return
     from checks import contacts as cc
     # a contact timed by a signal placed from both starts says so, also one found before contacts carried it
-    recorded = lc.mark_aligned(recorded, {s["name"]: s for s in ctx.get("signals") or []
-                                          if isinstance(s, dict) and s.get("name")})
+    recorded = lc.mark_aligned(recorded, meta)
     seen = {c.get("id"): c for c in d.pop("contacts_model", None) or []}
     views = d.pop("contact_views", None) or {}
     shown = set(views.get("shown") or [])
     d["contacts"] = [{**c, **({"seen": seen[c["id"]]} if c["id"] in seen else {}), "shown": c["id"] in shown}
                      for c in recorded]
     res = cc.check({"contacts": list(seen.values()), "contacts_missing": d.get("contacts_missing") or []}, recorded,
-                   views.get("strips") or {}, float(ctx.get("fps") or 30), instrumented_hands=set(covered))
+                   views.get("strips") or {}, float(ctx.get("fps") or 30), instrumented_hands=set(covered),
+                   timing_context=ctx)
     if res is not None:
         d["dataset_checks"] = d.get("dataset_checks") or {}
         d["dataset_checks"]["contact_checks"] = res
@@ -641,7 +675,7 @@ def build_comparisons(board: Path, manifest: dict, qa_new: Path, board_src: dict
     from compare import metrics as mc
     out = board / "compare.new"
     if out.exists():
-        shutil.rmtree(out)
+        remove_tree(out)
     out.mkdir()
     models = [m for m in mc.load_models(manifest, board) if not m["reference"]]
     metrics = mc.compute(manifest, board, board_src)
@@ -668,7 +702,7 @@ def build_comparisons(board: Path, manifest: dict, qa_new: Path, board_src: dict
             if r["status"] == "pending":
                 continue
             if r["status"] == "parsed":
-                d = convert(json.loads(r["path"].read_text()), bd.get("dataset"))
+                d = convert(r['_record'], bd.get("dataset"))
                 d.update(ctx)
                 d["_meta"] = {**(d.get("_meta") or {}), **meta}
             else:
@@ -678,6 +712,9 @@ def build_comparisons(board: Path, manifest: dict, qa_new: Path, board_src: dict
                                    "completion_tokens": r.get("out_tokens")}
             info = {"key": m["key"], "name": m["episode_name"], "status": r["status"], "model": m["model"],
                     "example": m["example"]}
+            if 'cost_complete' in r:
+                d.setdefault('_usage', {}).update({key: r[key] for key in
+                    ('billed_usd', 'reserved_usd', 'cost_complete')})
             if r["status"] == "unparsed":
                 info.update({"parse_error": r.get("error"), "raw_head": (r.get("raw") or "")[:3000],
                              "raw_chars": len(r.get("raw") or "")})
@@ -705,7 +742,7 @@ def build_hands(board: Path, spec: dict, qa_new: Path, episodes: dict) -> dict:
     out, kout = board / "hands.new", board / "hand_keypoints.new"
     for d in (out, kout):
         if d.exists():
-            shutil.rmtree(d)
+            remove_tree(d)
         d.mkdir()
     here = board.resolve()
     src, clips = (Path(p) if Path(p).is_absolute() else (here / p).resolve() for p in (spec["src"], spec["clips"]))
@@ -732,7 +769,7 @@ def build_sensors(board: Path, episodes: dict) -> dict | None:
         return None
     out = board / "sensors.new"
     if out.exists():
-        shutil.rmtree(out)
+        remove_tree(out)
     out.mkdir()
     res = bs.build(have, out)
     for sk in res["skipped"]:
@@ -806,13 +843,164 @@ def label_sources(manifest: dict, board: Path) -> dict:
     return {f: out for e in manifest.get("datasets", []) for f, (_, out, _, _) in entry_labels(e, here)[1].items()}
 
 
+def exchange_directories(left: Path, right: Path) -> None:
+    """Exchange existing directory names atomically, preserving both on failure."""
+    import ctypes
+    import sys
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == 'darwin' and hasattr(libc, 'renamex_np'):
+        exchange = libc.renamex_np
+        exchange.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        result = exchange(os.fsencode(left), os.fsencode(right), 2)
+    elif sys.platform.startswith('linux') and hasattr(libc, 'renameat2'):
+        exchange = libc.renameat2
+        exchange.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        result = exchange(-100, os.fsencode(left), -100, os.fsencode(right), 2)
+    else:
+        raise OSError(errno.ENOTSUP, 'Atomic directory exchange is unavailable on this platform')
+    if result:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code))
+
+
+def remove_tree(path: Path) -> None:
+    """Remove derived trees when macOS also removes their AppleDouble entries."""
+    def onerror(function, name, error):
+        if not isinstance(error[1], FileNotFoundError):
+            raise error[1]
+    shutil.rmtree(path, onerror=onerror)
+
+
+def _discard_publication(root: Path) -> None:
+    # Keep the cleanup phase recorded until its backup has been removed.
+    # A killed recursive cleanup must not orphan the remaining backup files.
+    previous = root / 'previous'
+    if previous.exists():
+        remove_tree(previous)
+    remove_tree(root)
+
+
+def recover_publications(board: Path, name: str | None = None) -> None:
+    """Restore interrupted installs; retain unrecognized backups for inspection."""
+    for root in sorted(board.glob(f'.{name or "*"}.rollback-*')):
+        if not root.is_dir():
+            continue
+        marker = root / 'publication.json'
+        try:
+            state = json.loads(marker.read_text())
+            target = state['target']
+            if (state.get('format') != 'argus-publication/1' or not isinstance(target, str) or
+                    Path(target).name != target or target in ('', '.', '..') or
+                    not root.name.startswith(f'.{target}.rollback-') or root.is_symlink()):
+                raise ValueError('Unrecognized publication record')
+            phase = state['phase']
+            if phase not in ('copying', 'ready', 'published', 'restored'):
+                raise ValueError('Unrecognized publication phase')
+        except (OSError, ValueError, KeyError, TypeError):
+            if root.is_dir() and not root.is_symlink() and not any(root.iterdir()):
+                root.rmdir()
+                continue
+            print(f'board: preserved unrecognized publication backup at {root}', file=sys.stderr)
+            continue
+        if phase == 'ready':
+            backup, live = root / 'previous', board / target
+            if live.is_symlink() or not backup.is_dir() or any(p.is_symlink() for p in [backup, *backup.rglob('*')]):
+                raise RuntimeError(f'Publication recovery needs inspection; previous data is preserved at {root}')
+            live.mkdir(exist_ok=True)
+            try:
+                _install_tree(backup, live)
+            except BaseException as error:
+                raise RuntimeError(f'Publication recovery failed; previous data is preserved at {root}') from error
+            write_atomic(marker, {**state, 'phase': 'restored'})
+        _cleanup_publication(root)
+
+
+def _cleanup_publication(root: Path) -> None:
+    try:
+        _discard_publication(root)
+    except OSError as error:
+        print(f'board: publication cleanup deferred at {root}: {error}', file=sys.stderr)
+
+
+def _install_tree(source: Path, destination: Path) -> None:
+    """Replace regular files atomically without removing the live directory."""
+    incoming = {p.relative_to(source): p for p in source.rglob('*') if p.is_file()}
+    for rel, path in sorted(incoming.items()):
+        target = destination / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(prefix='.argus-publish-', dir=target.parent)
+        os.close(fd)
+        temporary = Path(name)
+        try:
+            shutil.copy2(path, temporary)
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+    for path in destination.rglob('*'):
+        if path.is_file() and path.relative_to(destination) not in incoming:
+            path.unlink(missing_ok=True)
+    for path in sorted(destination.rglob('*'), key=lambda p: len(p.parts), reverse=True):
+        if path.is_dir() and not any(path.iterdir()):
+            path.rmdir()
+
+
+def publish_directory(old: Path, new: Path) -> None:
+    """Prefer a generation exchange; fall back to per-file publication and rollback.
+
+    Unsupported filesystems keep the live directory and every open file reader.
+    New readers can observe mixed generations during the portable fallback.
+    A complete backup restores the previous generation if publication fails.
+    """
+    recover_publications(old.parent, old.name)
+    try:
+        exchange_directories(old, new)
+        return
+    except OSError as error:
+        if error.errno not in {errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EINVAL, errno.EXDEV}:
+            raise
+    # Derived outputs contain regular files. Reject links before touching live data.
+    if any(p.is_symlink() for root in (old, new) for p in [root, *root.rglob('*')]):
+        raise OSError(errno.ENOTSUP, 'Portable directory publication requires regular files')
+    backup_root = Path(tempfile.mkdtemp(prefix=f'.{old.name}.rollback-', dir=old.parent))
+    backup = backup_root / 'previous'
+    marker = backup_root / 'publication.json'
+    state = {'format': 'argus-publication/1', 'target': old.name, 'phase': 'copying'}
+    try:
+        write_atomic(marker, state)
+        shutil.copytree(old, backup)
+        write_atomic(marker, {**state, 'phase': 'ready'})
+    except BaseException:
+        _discard_publication(backup_root)
+        raise
+    try:
+        _install_tree(new, old)
+        write_atomic(marker, {**state, 'phase': 'published'})
+    except BaseException:
+        try:
+            _install_tree(backup, old)
+        except BaseException as restore_error:
+            raise RuntimeError(f'Publication rollback failed; previous data is preserved at {backup}') from restore_error
+        write_atomic(marker, {**state, 'phase': 'restored'})
+        _cleanup_publication(backup_root)
+        raise
+    _cleanup_publication(backup_root)
+
+
 def _swap(board: Path, name: str, keep: bool) -> None:
-    """Replaces BOARD/<name> with BOARD/<name>.new (derived files only; the runs they came from are untouched).
-    Without keep, the old folder is removed and nothing replaces it."""
-    old, new = board / name, board / f"{name}.new"
+    """Publish derived files without removing the live directory before replacement."""
+    old, new = board / name, board / f'{name}.new'
+    recover_publications(board, name)
+    if not keep:
+        if old.exists():
+            remove_tree(old)
+        return
     if old.exists():
-        shutil.rmtree(old)
-    if keep:
+        publish_directory(old, new)
+        try:
+            remove_tree(new)
+        except OSError as error:
+            print(f'board: publication cleanup deferred at {new}: {error}', file=sys.stderr)
+    else:
         new.rename(old)
 
 
@@ -927,11 +1115,12 @@ def guarded_episode_file(entry: dict, manifest: dict, fname: str, name: str, r: 
 
 
 def build(board: Path) -> dict:
+    recover_publications(board)
     manifest = json.loads((board / "manifest.json").read_text())
     here = board.resolve()
     new = board / "qa.new"
     if new.exists():
-        shutil.rmtree(new)
+        remove_tree(new)
     new.mkdir(parents=True)
     counts, built_entries = {}, []
     board_src = {}      # board file -> the run output its label came from
@@ -981,6 +1170,8 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("board", type=Path, help="the board folder, with manifest.json")
     a = ap.parse_args()
+    if not (a.board / 'manifest.json').is_file():
+        ap.error('No board manifest.json exists. A free review stops before board generation; build a labelled board first.')
     print(json.dumps(build(a.board)["counts"], indent=1))
     return 0
 

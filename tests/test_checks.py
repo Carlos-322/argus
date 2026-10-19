@@ -121,6 +121,34 @@ def test_assumed_wrist_clock_does_not_qualify_pairing_or_jump_video(tmp_path):
     assert all("right" in capture[c]["why"] for c in capture_qc.CAMERA_MOTION_CHECKS)
 
 
+@pytest.mark.parametrize('basis', ['capture', 'mcap_log_time'])
+def test_recorder_arrival_retains_state_measurements_without_physical_video_comparison(tmp_path, basis):
+    state, left, right = two_grippers(1)
+    state[60:, 0] += .10
+    state[:, 6] = .5
+    path = write_episode(tmp_path / 'episode_000000', state,
+                         {'left': levels_for(right), 'right': levels_for(left)},
+                         source={'presentation_clock': {'basis': basis,
+                             'physical_synchronization_verified': False}})
+    pair = stream_pairing.pairing(path)
+    jump = stream_pairing.jumps(path)
+    assert any(event['step'] > 9 for event in jump['events'])
+    assert stream_pairing.grippers(path)['actors']['left']['flat'] is True
+    if basis == 'capture':
+        assert pair['crossed'] is True
+        assert any('visual_jump' in event for event in jump['events'])
+    else:
+        assert 'recorder arrival' in pair['not_assessed'].lower() and 'crossed' not in pair
+        assert all('visual_jump' not in event for event in jump['events'])
+        report = capture_qc.run_episode(path)
+        assert report['metrics']['episode']['clock'] == 'recorder arrival times'
+        checks = {check['check']: check for check in report['checks']}
+        assert checks['nonfinite_signal']['status'] == 'clear'
+        for name in capture_qc.CAMERA_MOTION_CHECKS:
+            assert checks[name]['status'] == 'not_applicable'
+            assert 'recorder arrival' in checks[name]['why'].lower()
+
+
 def test_stream_pairing_needs_two_mounted_streams(tmp_path):
     s, vL, _ = two_grippers()
     d = write_episode(tmp_path / "episode_000000", s[:, :7], {"right": levels_for(vL)})
@@ -158,6 +186,56 @@ def test_recorded_jump_the_camera_shows(tmp_path):
     r = stream_pairing.jumps(_leap_episode(tmp_path, camera_shows_it=True))
     assert r["flagged"] is False
     assert [e["visual_jump"] for e in r["events"] if e["actor"] == "left"] == [True]
+
+
+@pytest.mark.parametrize("mapping", ["floor", "nearest"])
+@pytest.mark.parametrize("seen", [True, False])
+def test_recorded_jump_on_a_half_rate_camera(tmp_path, mapping, seen):
+    """A camera at half the anchor's rate, paired by its frame for each anchor frame: a leap after any anchor step
+    shows in the camera interval that holds that step, so the camera showing it is never flagged and the camera not
+    showing it always is. Both anchor frames of a step can show the same camera frame; the leap is then read on the
+    interval on either side of it, where it used to be read on the interval before only."""
+    for i in (58, 59, 60, 61):
+        s, vL, vR = two_grippers(14)
+        s[i + 1:, 7] += 0.10
+        own = np.array([vR[2 * j] + vR[2 * j + 1] for j in range(T // 2 - 1)])
+        if seen:
+            own[-(-(i + 1) // 2) - 1] += 10.0          # own frame j is taken at anchor 2j
+        d = write_episode(tmp_path / f"{i}" / "episode_000000", s, {"left": levels_for(vL)})
+        write_video(d / "right.mp4", levels_for(own))
+        km = np.arange(T) // 2 if mapping == "floor" else np.minimum((np.arange(T) + 1) // 2, T // 2 - 1)
+        np.save(d / "kmap_right.npy", km)
+        src = json.loads((d / "sources.json").read_text())
+        src["right"] = {"packed": str(d / "right.mp4"), "base_s": 0.0, "n_frames": T // 2, "kmap": "kmap_right.npy"}
+        (d / "sources.json").write_text(json.dumps(src))
+        ev = [e for e in stream_pairing.jumps(d)["events"] if e["actor"] == "right" and e["step"] > 9]
+        assert ev and all(e["visual_jump"] is seen for e in ev), (i, ev)
+
+
+def _ego(tmp_path: Path, name: str, speed: np.ndarray) -> dict:
+    d = write_episode(tmp_path / name / "episode_000000", np.zeros((len(speed) + 1, 0)), {"exo": levels_for(speed)},
+                      profile="ego_head", kind="none")
+    r = capture_qc.run_episode(d)
+    return {c["check"]: c for c in r["checks"]}["video_frozen_run"]
+
+
+def test_a_video_only_frozen_camera_is_judged_from_its_pixels(tmp_path):
+    """With no recorded motion to say the view had to change, a still run is a frozen camera when the picture moves
+    on the frame steps right before and after it (it stops dead and resumes), shown as a note; a scene that slows into
+    stillness and out of it cannot be told from a frozen camera, so the check is not assessed rather than clear; a
+    picture that never holds still is clear."""
+    rng = np.random.default_rng(0)
+    stops = rng.uniform(0.5, 1.0, T - 1)
+    stops[40:85] = 0.0
+    frozen = _ego(tmp_path, "stops", stops)
+    assert frozen["status"] == "fired" and frozen["shown_as"] == "note"
+    slows = rng.uniform(0.5, 1.0, T - 1)
+    slows[30:40] = np.linspace(0.5, 0.0, 10)
+    slows[40:85] = 0.0
+    slows[85:95] = np.linspace(0.0, 0.5, 10)
+    still = _ego(tmp_path, "slows", slows)
+    assert still["status"] == "not_applicable" and "camera exo" in still["why"]
+    assert _ego(tmp_path, "moves", rng.uniform(0.5, 1.0, T - 1))["status"] == "clear"
 
 
 def test_no_jump_in_smooth_motion(tmp_path):
@@ -320,6 +398,8 @@ def test_capture_qc_trimmed_all_placeholder_window_has_no_pixel_assessment(tmp_p
 
 
 def test_capture_qc_frozen_motion_needs_usable_pairs_on_aligned_camera(tmp_path):
+    """The left camera has no usable frame; the right one's timing cannot be compared with the state, but its picture
+    never holds still for a second, which the pixels alone show, so it is clear for it, with the left camera named."""
     s, _, vR = two_grippers(3)
     d = write_episode(tmp_path / "episode_000000", s,
                       {"left": np.zeros(T), "right": levels_for(vR)},
@@ -329,8 +409,8 @@ def test_capture_qc_frozen_motion_needs_usable_pairs_on_aligned_camera(tmp_path)
     listed = {c["check"]: c for c in r["checks"]}
     assert listed["video_decode_frame_count_mismatch"]["status"] == "fired"
     frozen = listed["video_frozen_run"]
-    assert frozen["status"] == "not_applicable"
-    assert "left" in frozen["why"] and "right" in frozen["why"]
+    assert frozen["status"] == "clear"
+    assert "left" in frozen["why"]
     assert listed["video_extreme_exposure"]["status"] in ("clear", "fired")
 
 
@@ -501,6 +581,82 @@ def test_timebase_measures_lag_and_jitter():
     # measured alone the episode is never flagged: the rule needs the neighbours from the scan
     assert timebase.timebase_check(state, action)["sped_up_recording"] is False
     assert timebase.timebase_check(state, action, neighbour_lag=2.7)["sped_up_recording"] is True
+
+
+def _recording_at(fps: float, seed: int = 0, n_s: float = 10.0) -> tuple[np.ndarray, np.ndarray]:
+    """(state, action) of a real-time teleop episode at fps whose recorder skips one sample in 12 (a step that covers
+    two real intervals), the follower 4/30 s behind the leader."""
+    rng = np.random.default_rng(seed)
+    n = int(n_s * fps)
+    steps = np.full(n - 1, 1 / fps)
+    steps[6::12] = 2 / fps
+    t = np.concatenate([[0.0], np.cumsum(steps)]) + 1.0
+    fine = np.arange(0.0, t[-1] + 1.0, 1 / 600)
+    walk = np.cumsum(rng.normal(0, 1, (len(fine), 12)), axis=0)
+    kernel = np.hanning(181) / np.hanning(181).sum()
+    path = np.stack([np.convolve(walk[:, j], kernel, mode="same") for j in range(12)], axis=1) * 0.01
+
+    def joints(at: np.ndarray) -> np.ndarray:
+        out = np.zeros((len(at), 14))
+        out[:, timebase.JOINTS] = np.stack([np.interp(at, fine, path[:, j]) for j in range(12)], axis=1)
+        return out
+    return joints(t - 4 / 30), joints(t)
+
+
+@pytest.mark.parametrize("fps", [15, 30, 60, 120, 240])
+def test_timebase_lag_is_a_time_at_any_frame_rate(fps):
+    """The follower's delay is searched for and judged in seconds: at 120 fps a real 133 ms delay is 16 frames, past
+    the 12 the search stopped at, and was read as a short one. A recorder that skips at a regular period adds the same
+    jump to both streams at that period; those steps are left out, so they never pull the peak to the period."""
+    state, action = _recording_at(fps)
+    lag = timebase.follower_lag_frames(state, action, fps)
+    assert 0.11 < lag / fps < 0.14
+    r = timebase.timebase_check(state, action, lag, fps)
+    assert r["follower_lag_frames"] == lag and r["sped_up_recording"] is False
+
+
+def test_timebase_missing_readings_never_read_as_a_lag():
+    """A NaN or infinite reading is left out of the steps beside it; it no longer turns the correlation into NaN,
+    whose argmax read as a lag of 0 and flagged real-time recordings as sped up."""
+    import warnings
+    base = _recording(0, sped_up=False, skips=False)
+    for spoil in (lambda s, a: s.__setitem__(150, np.nan), lambda s, a: a.__setitem__((150, 3), np.nan),
+                  lambda s, a: s.__setitem__((150, 2), np.inf),
+                  lambda s, a: s.__setitem__(np.random.default_rng(0).random(len(s)) < 0.05, np.nan)):
+        state, action = (x.copy() for x in base)
+        spoil(state, action)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            r = timebase.timebase_check(state, action, 3.0)
+        assert r["follower_lag_frames"] == pytest.approx(4.0, abs=0.3) and r["sped_up_recording"] is False
+    for state in (np.full((300, 14), np.nan), np.ones((300, 14)), np.zeros((0, 14)), np.zeros((300, 3))):
+        r = timebase.timebase_check(state, state.copy(), 3.0)
+        assert r["follower_lag_frames"] is None and r["sped_up_recording"] is False
+
+
+def test_timebase_apply_never_reads_a_context_from_the_working_folder(tmp_path, monkeypatch):
+    """A label file with no episode_dir is matched to the episode folder of its name among EPISODES; with none, it is
+    left as it is. It used to read context.json from whatever folder the command ran in."""
+    out = tmp_path / "timebase.csv"
+    pd.DataFrame({"episode_index": [3, 4], "neighbour_lag_frames": [2.5, 2.5],
+                  "sped_up_recording": [True, True]}).to_csv(out, index=False)
+    eps = tmp_path / "episodes"
+    (eps / "episode_000004").mkdir(parents=True)
+    (eps / "episode_000004" / "context.json").write_text(json.dumps({"profile": "teleop_arms"}))
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    (cwd / "context.json").write_text(json.dumps({"source": {"presentation_clock": {"basis": "mcap_log_time"}}}))
+    monkeypatch.chdir(cwd)
+    labels = tmp_path / "out"
+    labels.mkdir()
+    measured = {"follower_lag_frames": 2.5, "skipped_frac": 0.05, "repeated_frac": 0.0, "sped_up_recording": False}
+    for e in (3, 4):
+        (labels / f"episode_{e:06d}.json").write_text(json.dumps({"dataset_checks": {"timebase": measured}}))
+    assert timebase.cmd_apply(Namespace(timebase=out, roots=[eps], labels=labels)) == 0
+    lone = json.loads((labels / "episode_000003.json").read_text())["dataset_checks"]["timebase"]
+    assert lone == measured
+    found = json.loads((labels / "episode_000004.json").read_text())["dataset_checks"]["timebase"]
+    assert found["sped_up_recording"] is True and "not_assessed" not in found
 
 
 def test_timebase_scan_and_apply(tmp_path, capsys):
@@ -1021,3 +1177,19 @@ def test_the_checks_write_context_json_without_loading_the_model_harness():
             "checks.sensors, checks.timebase, label.pieces; print('label.harness' in sys.modules)")
     r = subprocess.run([sys.executable, "-c", code], cwd=repo, capture_output=True, text=True, timeout=120)
     assert r.returncode == 0 and r.stdout.strip() == "False", r.stdout + r.stderr
+
+
+def test_pairing_motion_marks_repeated_or_missing_observations_unknown(tmp_path):
+    import av
+    clip = tmp_path / 'camera.mp4'
+    write_video(clip, [50, 70, 100])
+    with av.open(str(clip)) as container:
+        pts = np.array([frame.pts for frame in container.decode(video=0)])
+    ep = {'sources': {'left': {'packed': str(clip), 'base_s': 0., 'n_frames': 3}},
+          'context': {'fps': 30}, 'times': {'left_pts': pts},
+          'kmap': {'left': np.array([0, 0, 1, 1, 2])}}
+    motion = stream_pairing.stream_motion(ep, 'left')
+    np.testing.assert_allclose(motion, [np.nan, 20, np.nan, 30], atol=1, equal_nan=True)
+    # A missing native frame makes both neighboring changes unknown, not stationary.
+    ep['times']['left_pts'] = np.array([pts[0], (pts[0] + pts[1]) // 2, pts[2]])
+    assert np.isnan(stream_pairing.stream_motion(ep, 'left')).all()

@@ -14,7 +14,8 @@ import os
 import shutil
 import subprocess
 from fractions import Fraction
-from functools import lru_cache
+
+from label.atomic import cached_while_unchanged
 
 
 def even(x: float) -> int:
@@ -24,16 +25,20 @@ def even(x: float) -> int:
 def geometry(path: str, ffprobe: str | None = None) -> dict:
     """{"stored": (w, h), "sar": Fraction, "rotation": degrees as ffprobe reports it, "matrix": [a, b, c, d] or None,
     "mirror": bool} for the first video stream; a file ffprobe cannot read is taken as stored (sar 1, no rotation).
-    Read once per file version (its size and modification time)."""
+    Read once per file version (its size and modification time), and kept only for the version it was read from."""
     try:
-        st = os.stat(path)
-        version = (st.st_size, st.st_mtime_ns)
+        version = _version(path)
     except OSError:
         version = None
     return dict(_geometry(str(path), version, ffprobe))
 
 
-@lru_cache(maxsize=4096)
+def _version(path) -> tuple:
+    st = os.stat(path)
+    return st.st_size, st.st_mtime_ns
+
+
+@cached_while_unchanged(4096, lambda path, version, ffprobe: version is not None and _version(path) == version)
 def _geometry(path: str, version, ffprobe: str | None) -> dict:
     exe = ffprobe or shutil.which("ffprobe") or "ffprobe"
     try:

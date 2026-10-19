@@ -2376,11 +2376,14 @@ def _lerobot_v3_without_its_episode_list_keeps_every_camera_it_can(tmp_path):
     _lerobot_v3(root, {top: 30, wrist: 25}, {"observation.state": list(rng.random((30, 3))),
                                               "timestamp": np.arange(30) / 30})
     rep = f.convert(root, "teleop_arms", tmp_path / "eps_whole", "test", 900)
-    assert not rep["failed"] and len(rep["episodes"]) == 1, rep
-    ctx = _episode_ctx(tmp_path / "eps_whole", rep, "file-000")
+    # the wrist file cannot be lined up with the top one, so it is a recording of its own, never dropped
+    assert not rep["failed"] and len(rep["episodes"]) == 2, rep
+    ctx = _episode_ctx(tmp_path / "eps_whole", rep, top)
     assert ctx.get("unsplit") and "observation.state" in [s["name"] for s in ctx.get("signals") or []], ctx
     assert any(u.startswith(wrist) for u in ctx["source"]["unused_cameras"]), ctx["source"]
     assert [i["camera"] for i in _issues(ctx, "camera_not_aligned")] == [wrist], ctx.get("reader_issues")
+    alone = _episode_ctx(tmp_path / "eps_whole", rep, wrist)
+    assert [c["key"] for c in alone["cameras"].values()] == [wrist], alone["cameras"]
 
 
 def test_lerobot_v3_without_its_episode_list_keeps_every_camera_it_can():

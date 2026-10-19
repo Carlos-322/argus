@@ -28,7 +28,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from prepare.signal_alignment import PLACEMENT_FIELDS, placement_text
+from prepare.signal_alignment import (PLACEMENT_FIELDS, placement_text, recorder_arrival,
+                                      RECORDER_ARRIVAL, RECORDER_ARRIVAL_LIMITATION)
 
 MIN_CONTACTS = 3
 OFFSET_FRAMES = 1.0
@@ -41,18 +42,25 @@ def _between(strip: list, f, first: bool) -> float | None:
     if not isinstance(f, int) or not strip or not 1 <= f <= len(strip):
         return None
     i = f - 1
-    if first:
-        return None if i == 0 else (strip[i - 1] + strip[i]) / 2
-    return None if i == len(strip) - 1 else (strip[i] + strip[i + 1]) / 2
+    pair = (i - 1, i) if first else (i, i + 1)
+    if not 0 <= pair[0] < pair[1] < len(strip):
+        return None
+    a, b = strip[pair[0]], strip[pair[1]]
+    # a strip time that is not a finite number places nothing: a NaN offset would make every median after it NaN
+    if not all(isinstance(x, (int, float, np.number)) and not isinstance(x, bool) and np.isfinite(x) for x in (a, b)):
+        return None
+    return (a + b) / 2
 
 
-def check(labels: dict, contacts: list[dict], strips: dict, fps: float, instrumented_hands=None) -> dict | None:
+def check(labels: dict, contacts: list[dict], strips: dict, fps: float, instrumented_hands=None,
+          *, timing_context=None) -> dict | None:
     """dataset_checks["contact_checks"] for one episode: the model's contacts (labels["contacts"], by id), the
     recording's (contacts), the strip times each contact picture was built with ({id: {"begin": [...], "end": [...]}})
     and the camera's frame rate. instrumented_hands names the hands with touch recordings, including quiet sensors.
     Legacy callers without coverage can check missing contacts only on recorded-contact sides. Raw labels are kept.
     None when no contacts, missing observations or actual instrumented coverage exist."""
-    missing_observations = [x for x in (labels.get('contacts_missing') or []) if isinstance(x, dict)]
+    missing_observations = [(x, x['hand'].strip().lower() if isinstance(x.get('hand'), str) else None)
+                            for x in (labels.get('contacts_missing') or []) if isinstance(x, dict)]
     if not contacts and not instrumented_hands and not missing_observations:
         return None
     seen = {c.get("id"): c for c in (labels.get("contacts") or []) if isinstance(c, dict) and c.get("review_status") != "rejected"}
@@ -64,6 +72,12 @@ def check(labels: dict, contacts: list[dict], strips: dict, fps: float, instrume
     # show its touch says how far off the placement is, not that the sensor's clock is, nor that the sensor fired on
     # its own: it is left out of clock_offset and touch_not_seen and named by its placement
     placed = [cid for cid, rec in by_id.items() if rec.get("aligned_by")]
+    arrival = {cid for cid, rec in by_id.items() if rec.get('aligned_by') == RECORDER_ARRIVAL}
+    arrival_clock = recorder_arrival(timing_context or {})
+    if arrival_clock:
+        placed = list(by_id)
+        arrival |= {cid for cid, rec in by_id.items() if not rec.get('aligned_by')}
+    physically_unverified = set(by_id) if arrival_clock else arrival
     for cid, rec in by_id.items():
         m = seen.get(cid)
         if not m or cid in placed:
@@ -76,10 +90,18 @@ def check(labels: dict, contacts: list[dict], strips: dict, fps: float, instrume
         if e is not None:
             offsets.append(("end", cid, e - rec["end_s"]))
     shown = [cid for cid in by_id if cid in seen]
-    frame_ms = 1000.0 / float(fps or 30.0)
+    # a frame rate that is missing, zero or not a finite number says nothing; the cameras' usual 30 is taken instead
+    rate = float(fps) if isinstance(fps, (int, float, np.number)) and np.isfinite(fps) and fps > 0 else 30.0
+    frame_ms = 1000.0 / rate
     out = {"contacts": len(by_id), "checked": len(shown), "notes": []}
+    if arrival_clock or arrival:
+        out.update(timing_basis='mcap_log_time', timing_limitation=RECORDER_ARRIVAL_LIMITATION)
+    if arrival_clock or arrival and len(arrival) == len(by_id):
+        out['not_assessed'] = {name: RECORDER_ARRIVAL_LIMITATION for name in
+                               ('clock_offset', 'touch_not_seen', 'hand_mismatch', 'contact_missing')}
     for cid in placed:
-        field = PLACEMENT_FIELDS.get(by_id[cid]["aligned_by"], "placed_with_unspecified_alignment")
+        by = RECORDER_ARRIVAL if cid in arrival else by_id[cid]['aligned_by']
+        field = PLACEMENT_FIELDS.get(by, "placed_with_unspecified_alignment")
         out.setdefault(field, []).append(cid)
     if offsets:
         ms = np.array([o for _, _, o in offsets]) * 1000.0
@@ -97,7 +119,8 @@ def check(labels: dict, contacts: list[dict], strips: dict, fps: float, instrume
         notes.append({"check": "touch_not_seen", "evidence": (
             f"{len(not_seen)} of the {len(timed)} contacts checked show no touch in the frames "
             f"({', '.join(not_seen)})")})
-    pairs = [(cid, by_id[cid].get("hand"), str(seen[cid].get("hand") or "").lower()) for cid in shown]
+    pairs = [(cid, by_id[cid].get("hand"), str(seen[cid].get("hand") or "").lower())
+             for cid in shown if cid not in physically_unverified]
     known = [(cid, h, m) for cid, h, m in pairs if h in ("left", "right") and m in ("left", "right")]
     wrong = [(cid, h, m) for cid, h, m in known if h != m]
     if wrong:
@@ -107,8 +130,11 @@ def check(labels: dict, contacts: list[dict], strips: dict, fps: float, instrume
              f"({', '.join(c for c, _, _ in wrong)}): the left and right sensors look swapped") if swapped else
             f"{len(wrong)} of {len(known)} contacts are seen on the other hand than the signal's name says "
             f"({', '.join(f'{c} recorded {h}, seen {m}' for c, h, m in wrong)})")})
-    missing = [x for x in missing_observations if x.get('review_status') != 'rejected'
-               and not x.get('withheld_from_final') and str(x.get('hand') or '').strip().lower() in covered]
+    arrival_hands = {by_id[cid].get('hand') for cid in arrival}
+    verified_hands = {rec.get('hand') for cid, rec in by_id.items() if cid not in arrival}
+    missing = [x for x, hand in missing_observations if not arrival_clock
+               and hand not in arrival_hands - verified_hands and x.get('review_status') != 'rejected'
+               and not x.get('withheld_from_final') and hand in covered]
     if missing:
         notes.append({"check": "contact_missing", "evidence": (
             f"{len(missing)} moment{'s' if len(missing) != 1 else ''} where a hand takes hold of or presses something "

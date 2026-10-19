@@ -21,13 +21,66 @@ TIME_BASE_DEN = 1_000_000   # microseconds: some ABC frames are stamped only 1 u
 NOMINAL_FPS = 30            # only a one-frame tolerance for the muxer's own shift
 
 
+class RemuxSourceError(ValueError):
+    """Recorded camera packets cannot preserve their frame and timestamp association."""
+
+
+class UnsupportedPacketOrder(RemuxSourceError):
+    """Source packets lack enough clock information to associate reordered pictures."""
+
+
+def check_packet_order(path, fmt: str) -> None:
+    """Reject actual display reordering; a codec's B-frame capability alone does not establish it."""
+    import av
+    with av.open(str(path), format=fmt) as source:
+        stream = source.streams.video[0]
+        if not stream.codec_context.has_b_frames:
+            return
+        stream.codec_context.thread_count = 1
+        index, last = 0, -1
+        for packet in source.demux(stream):
+            if packet.size:
+                # Dummy packet identities survive decoding, exposing picture order without inventing source times.
+                packet.pts = packet.dts = index
+                index += 1
+            for frame in packet.decode():
+                if frame.pts is None or frame.pts <= last:
+                    raise UnsupportedPacketOrder("Cannot copy reordered Annex-B frames with B-frames: messages do not establish both "
+                                     "presentation and decode timestamps.")
+                last = frame.pts
+
+
+def check_message_ownership(path, fmt: str, message_ends: list[int]) -> None:
+    """Every parsed access unit must occupy exactly one original nonempty camera message."""
+    import av
+    count, start = 0, 0
+    with av.open(str(path), format=fmt) as source:
+        for packet in source.demux(source.streams.video[0]):
+            if not packet.size:
+                continue
+            if (count >= len(message_ends) or packet.pos != start
+                    or packet.pos + packet.size != message_ends[count]):
+                raise RemuxSourceError('Annex-B picture/message ownership is unverified: each message must contain '
+                                       'exactly one complete encoded picture, without batching or fragmentation.')
+            start = message_ends[count]
+            count += 1
+    if count != len(message_ends):
+        raise RemuxSourceError(f'Annex-B picture/message ownership is unverified: {len(message_ends)} messages '
+                               f'produced {count} pictures.')
+
+
 def remux(frames: list[bytes], t_rel_s: np.ndarray, fmt: str, out: Path) -> np.ndarray:
     """Copy Annex-B frames packet for packet into an mp4 whose pts are the frames' real capture times
     (rounded to the microsecond time base). No re-encode. Returns the pts in the written file, one per frame."""
     import av
+    input_format = {"h264": "h264", "h265": "hevc"}.get(fmt)
+    if input_format is None:
+        raise RemuxSourceError(f"Unsupported recorded camera codec: {fmt!r}.")
     with tempfile.NamedTemporaryFile(suffix="." + fmt, dir=out.parent, delete=False) as f:
+        ends = []
         for b in frames:
             f.write(b)
+            ends.append(f.tell())
         raw = f.name
     pts = np.round(np.asarray(t_rel_s, dtype=np.float64) * TIME_BASE_DEN).astype(np.int64)
     # a frame stamped at or before the previous one (a recorder glitch, counted in stream_checks) is
@@ -36,8 +89,10 @@ def remux(frames: list[bytes], t_rel_s: np.ndarray, fmt: str, out: Path) -> np.n
         if pts[i] <= pts[i - 1]:
             pts[i] = pts[i - 1] + 1
     try:
-        with av.open(raw, format={"h264": "h264", "h265": "hevc"}[fmt]) as src, av.open(str(out), "w") as dst:
+        with av.open(raw, format=input_format) as src, av.open(str(out), "w") as dst:
             ist = src.streams.video[0]
+            check_packet_order(raw, input_format)
+            check_message_ownership(raw, input_format, ends)
             ost = dst.add_stream_from_template(ist)
             ost.time_base = Fraction(1, TIME_BASE_DEN)
             i = 0
@@ -45,7 +100,7 @@ def remux(frames: list[bytes], t_rel_s: np.ndarray, fmt: str, out: Path) -> np.n
                 if not pkt.size:
                     continue
                 if i >= len(pts):
-                    raise RuntimeError(f"{out.name}: more packets than frame messages")
+                    raise RemuxSourceError(f"{out.name}: more packets than frame messages")
                 pkt.stream = ost
                 pkt.time_base = ost.time_base
                 pkt.pts = pkt.dts = int(pts[i])
@@ -57,7 +112,7 @@ def remux(frames: list[bytes], t_rel_s: np.ndarray, fmt: str, out: Path) -> np.n
                 dst.mux(pkt)
                 i += 1
         if i != len(pts):
-            raise RuntimeError(f"{out.name}: {len(pts)} frame messages but {i} packets")
+            raise RemuxSourceError(f"{out.name}: {len(pts)} frame messages but {i} packets")
     finally:
         os.unlink(raw)
     with av.open(str(out)) as c:
@@ -67,5 +122,5 @@ def remux(frames: list[bytes], t_rel_s: np.ndarray, fmt: str, out: Path) -> np.n
     # decoder sees. The real capture times stay in times.npz.
     shift = np.unique(got - pts) if len(got) == len(pts) else np.array([10**9])
     if len(shift) != 1 or abs(int(shift[0])) >= TIME_BASE_DEN // NOMINAL_FPS:
-        raise RuntimeError(f"{out.name}: pts in the written mp4 differ from the capture times ({shift[:5]})")
+        raise RemuxSourceError(f"{out.name}: pts in the written mp4 differ from the capture times ({shift[:5]})")
     return got

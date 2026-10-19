@@ -32,7 +32,8 @@ has no board label to set it against, so it is left out):
     a call that returned nothing is reported beside it, not counted as a response. The reference is asked every
     episode the board has a label of, and a board label is always a response that parsed
   - schema violations: every parsed response of that model
-  - cost and latency: every response returned (an unparsed response is still paid for)
+  - cost and latency: every response returned (an unparsed response is still paid for). Costs include earlier
+    paid attempts for that unit. Unresolved invoices are reported separately and excluded from cost averages.
   - events per minute, key events, subgoals, data issues, operator mistakes: the episodes every model in the
     chart parsed, so no model's number moves because it failed on other episodes than another
   - agreement: each pair on the episodes both parsed
@@ -52,7 +53,8 @@ from collections import defaultdict
 from pathlib import Path
 
 from board.families import Families
-from label.harness import episode_cost
+from label.harness import annotation_record, reply_truncated
+from label.receipts import billing_summary, has_response
 
 FAMILIES = Families()
 MODELS_PATH = Path(__file__).resolve().parent.parent / "configs" / "models.json"
@@ -60,10 +62,10 @@ RIGS ={"teleop_arms": "teleop", "handheld_gripper": "handheld", "ego_head": "hea
 RIG_NAMES = {"all": "All footage", "teleop": "Teleop", "handheld": "UMI", "head_camera": "Human ego"}
 RESPONDED = ("parsed", "unparsed", "cut_off")
 OUTCOMES = ("success", "success_then_undone", "failure", "partial", "unclear")
-TASK_OUTCOMES = ("success", "partial", "failure")
+from board.label_projection import TASK_OUTCOMES, effective_outcome
 LISTS = ("data_issues", "operator_mistakes")
 PER_EPISODE = ("events_per_min", "key_events", "subgoals", "data_issues", "data_issues_minor", "operator_mistakes",
-               "operator_mistakes_minor")
+               "operator_mistakes_minor", "data_issues_unrated", "operator_mistakes_unrated")
 
 
 # ---------------------------------------------------------------- the runs
@@ -148,28 +150,32 @@ def slice_episodes(eps: Path) -> list[str]:
     return sorted(p.name for p in eps.iterdir() if (p / "context.json").exists())
 
 
-def read_output(p: Path) -> dict:
+def read_output(p: Path, record: dict | None = None) -> dict:
     """A run output file's response: status, raw labels when parsed, usage, and the model that gave it. A file that
     does not read is a response that did not parse."""
     try:
-        r = json.loads(p.read_text())
+        r = record if record is not None else json.loads(p.read_text())
     except (OSError, ValueError) as e:
         return {"status": "unparsed", "error": f"the output file does not read: {e}"[:300], "raw": "", "cost": None,
                 "latency": None, "out_tokens": None, "path": p, "model": None}
     if r.get("dry_run"):
         return {"status": "pending"}
-    if p.name.startswith("failed_"):
+    billing = billing_summary(r, p)
+    base = {**billing, 'cost': billing['billed_usd'] if billing['cost_complete'] else None,
+            'path': p, 'model': r.get('model'), '_record': r}
+    if r.get('final_dispatch_outcome') == 'not dispatched' or (
+            not has_response(r) and (r.get('final_dispatch_outcome') in ('claimed', 'unverified')
+                                    or p.name.startswith('noreply_'))):
+        return {'status': 'no_response', **base}
+    if reply_truncated(r) or p.name.startswith("failed_"):
         # a failed_<episode>.json: the board's own label of an episode whose reply was cut off (board/to_board.py)
         u = r.get("usage") or {}
-        cost = round(episode_cost(r), 6) if u.get("est_cost_usd") is not None else u.get("cost")
-        return {"status": "cut_off", "cost": cost, "latency": None, "out_tokens": u.get("completion_tokens"),
+        return {**base, "status": "cut_off", "latency": None, "out_tokens": u.get("completion_tokens"),
                 "finish_reason": r.get("finish_reason"), "tail": r.get("content_tail") or "", "path": p,
                 "model": r.get("model")}
     u = r.get("usage") or {}
     # the episode's billed cost: its model call and, for a routed episode, the routing call made for it
-    cost = round(episode_cost(r), 6) if u.get("est_cost_usd") is not None else None
-    base = {"cost": cost, "latency": u.get("latency_s"), "out_tokens": u.get("completion_tokens"), "path": p,
-            "model": r.get("model")}
+    base.update(latency=u.get('latency_s'), out_tokens=u.get('completion_tokens'))
     if r.get("parse_ok"):
         return {"status": "parsed", "labels": r.get("labels") or {}, "config": r.get("config") or {}, **base}
     lab = r.get("labels") or {}
@@ -179,12 +185,12 @@ def read_output(p: Path) -> dict:
 def response(model: dict, name: str) -> dict:
     """One episode's response: status, raw labels when parsed, usage."""
     out = model["run"] / "out"
-    p, f = out / f"{name}.json", out / f"failed_{name}.json"
-    if p.exists():
-        return read_output(p)
-    if f.exists():
-        # the harness records a cut-off reply's billed cost and its routing call like any other episode's
-        return read_output(f)
+    try:
+        selected = annotation_record(out, f'{name}.json')
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {'status': 'unparsed', 'error': 'saved receipts could not be verified', 'cost': None}
+    if selected is not None:
+        return read_output(selected[0], selected[1])
     # only a run that finished (label/run.py writes "done", or "exit N" when some calls failed) has episodes it
     # will never answer; a running or interrupted run (killed from outside, then resumed) has episodes to come
     st = str(model.get("status") or "")
@@ -234,96 +240,42 @@ def _list(L: dict, key: str) -> list:
 
 
 def schema_violations(L: dict, config: dict | None = None) -> list[str]:
-    """Where a parsed response departs from the schema every model was given. Head-camera responses carry
-    tasks instead of one completion. An episode with a single camera, named for its actor
-    (FastUMI's one-gripper tasks: the prompt names the camera "gripper" and still lists left, right or both),
-    may name that actor: the ambiguity is the prompt's, and counting it would score our wording as the model's
-    failure to follow it."""
-    v = []
-    arms = {"left", "right", "both"}
-    labels = (config or {}).get("cam_labels") or []
-    if len((config or {}).get("views") or []) == 1 and labels:
-        arms |= {str(labels[0])}
-    req = {"scene": dict, "timeline": list, "task_summary": str, "key_events": list, "state_changes": list,
-           "scene_graph": list, "recovery": list, "instruction_variants": list, "performance_review": str,
-           "data_issues": list}
-    for k, t in req.items():
-        if k not in L:
-            v.append(f"{k} missing")
-        elif not isinstance(L[k], t):
-            v.append(f"{k} is not a {t.__name__}")
-    if "tasks" in L:
-        if not isinstance(L["tasks"], list):
-            v.append("tasks is not a list")
-        else:
-            for i, t in enumerate(L["tasks"]):
-                if not isinstance(t, dict) or str(t.get("outcome") or "").lower() not in TASK_OUTCOMES:
-                    v.append(f"task {i}: outcome")
-    else:
-        c = L.get("completion")
-        if not isinstance(c, dict):
-            v.append("completion missing")
-        elif str(c.get("task_completed") or "").lower() not in OUTCOMES:
-            v.append(f"completion: task_completed {c.get('task_completed')!r}")
-    for i, s in enumerate(_list(L, "timeline")):
-        if not isinstance(s, dict):
-            v.append(f"timeline {i}: not a segment")
-            continue
-        if not (_num(s.get("start_s")) and _num(s.get("end_s"))):
-            v.append(f"timeline {i}: times")
-        elif s["end_s"] < s["start_s"]:
-            v.append(f"timeline {i}: ends before it starts")
-        if s.get("arm") not in arms:
-            v.append(f"timeline {i}: arm {s.get('arm')!r}")
-        if s.get("contribution") not in ("advancing", "wasteful", "idle"):
-            v.append(f"timeline {i}: contribution {s.get('contribution')!r}")
-        if s.get("progress") is not None and not (_num(s["progress"]) and 0 <= s["progress"] <= 1):
-            v.append(f"timeline {i}: progress {s.get('progress')!r}")
-    for i, k in enumerate(_list(L, "key_events")):
-        if not isinstance(k, dict) or not _num(k.get("t_s")):
-            v.append(f"key event {i}: time")
-        elif str(k.get("outcome") or "").lower() not in ("success", "failure", "unclear"):
-            v.append(f"key event {i}: outcome {k.get('outcome')!r}")
-    for key in LISTS:
-        lst = L.get(key)
-        if lst is None:
-            continue
-        if not isinstance(lst, list):
-            v.append(f"{key} is not a list")
-            continue
-        for i, x in enumerate(lst):
-            if not isinstance(x, dict) or not str(x.get("issue") or "").strip():
-                v.append(f"{key} {i}: no description")
-            elif str(x.get("severity") or "").lower() not in ("low", "medium", "high"):
-                v.append(f"{key} {i}: severity {x.get('severity')!r}")
-    return v
+    """Where a parsed response departs from the schema every model was given: the board's own list
+    (board/label_projection.py project and schema_rules), so a model is never scored on a rule the board does not
+    show."""
+    from board.to_board import typed
+    from board.label_projection import diagnostics
+    projected, dropped = typed({"labels": L, "config": config})
+    return list(diagnostics(projected, dropped).values())
 
 
 def measure(L: dict, dataset: str | None, config: dict | None = None) -> dict:
     """The counts one parsed response contributes."""
+    from board.to_board import typed
+    from board.label_projection import diagnostics, issues, severity
+    L, dropped = typed({"labels": L, "config": config})
+    violations = list(diagnostics(L, dropped).values())
     tl = [s for s in _list(L, "timeline") if isinstance(s, dict) and s.get("start_s") is not None]
     ke = [k for k in _list(L, "key_events") if isinstance(k, dict)]
     m = {"segments": len(tl), "key_events": len(ke),
          "subgoals": sum(1 for k in ke if str(k.get("kind") or "").lower() == "subgoal_complete"),
-         "violations": schema_violations(L, config)}
+         "violations": violations}
     fams = set()
     for key in LISTS:
-        items = [i for i in _list(L, key) if isinstance(i, dict) and str(i.get("issue") or "").strip()]
-        n = sum(1 for i in items if FAMILIES.counts(key, {**i, "severity": str(i.get("severity") or "low").lower()}))
+        items = issues(L, key)
+        n = sum(1 for i in items if FAMILIES.counts(key, i))
         m[key] = n
-        m[key + "_minor"] = len(items) - n
+        unrated = sum(severity(item) is None for item in items)
+        m[key + "_unrated"] = unrated
+        m[key + "_minor"] = len(items) - n - unrated
         fams |= {FAMILIES.family_of(key, i, dataset) for i in items}
     m["families"] = sorted(fams)
     tasks = [t for t in _list(L, "tasks") if isinstance(t, dict)]
     if tasks:
-        m["outcome"] = None
         m["tasks"] = [len(tasks), sum(1 for t in tasks if str(t.get("outcome") or "").lower() == "success")]
-    else:
-        c = L.get("completion")
-        oc = str(c.get("task_completed") or "").lower() if isinstance(c, dict) else ""
-        # partial is a kind of failure (board/to_board.py), so two runs agree when both say the task was not done
-        oc = "failure" if oc == "partial" else oc
-        m["outcome"] = oc if oc in OUTCOMES else (oc or None)
+    c = L.get("completion")
+    oc = effective_outcome(c.get("task_completed")) if isinstance(c, dict) else None
+    m["outcome"] = oc if oc in OUTCOMES else None
     return m
 
 
@@ -352,7 +304,9 @@ def metric_values(models: list, eps: list, rows: dict) -> dict:
                   "data_issues": _r(_mean([r["data_issues"] for r in rs]), 3),
                   "data_issues_minor": _r(_mean([r["data_issues_minor"] for r in rs]), 3),
                   "operator_mistakes": _r(_mean([r["operator_mistakes"] for r in rs]), 3),
-                  "operator_mistakes_minor": _r(_mean([r["operator_mistakes_minor"] for r in rs]), 3)}
+                  "operator_mistakes_minor": _r(_mean([r["operator_mistakes_minor"] for r in rs]), 3),
+                  "data_issues_unrated": _r(_mean([r.get("data_issues_unrated", 0) for r in rs]), 3),
+                  "operator_mistakes_unrated": _r(_mean([r.get("operator_mistakes_unrated", 0) for r in rs]), 3)}
     return out
 
 
@@ -396,7 +350,10 @@ def _responses(k: str, eps: list, rows: dict) -> dict:
             "violations": _r(_mean(viol), 3),
             "violations_any": _r(sum(1 for x in viol if x) / len(viol)) if viol else None,
             "violations_n": len(viol),
-            "cost": _r(_mean(costs), 4), "cost_n": len([c for c in costs if c is not None]),
+            "cost": _mean(costs), "cost_n": len([c for c in costs if c is not None]),
+            'billed_usd': sum(rec.get('billed_usd', 0) for rec in mine),
+            'reserved_usd': sum(rec.get('reserved_usd', 0) for rec in mine),
+            'cost_incomplete': sum(rec.get('cost_complete') is False for rec in mine),
             "latency": _r(_mean(lats), 1), "latency_n": len([x for x in lats if x is not None])}
 
 
@@ -419,7 +376,7 @@ def _with_example(m: dict, ref: str | None, eps: list, rows: dict) -> dict | Non
         ag = agreement(k, ref, with_ref, rows) if with_ref else {}
         return {"parse_share": _r(st.count("parsed") / resp) if resp else None,
                 "violations": _r(_mean(viol), 3),
-                "cost": _r(_mean([r.get("cost") for r in rs]), 4),
+                "cost": _mean([r.get("cost") for r in rs]),
                 "latency": _r(_mean([r.get("latency") for r in rs]), 1),
                 **{f: (mv.get(k) or {}).get(f) for f in PER_EPISODE},
                 "agree_outcome": ag.get("outcome"), "agree_issues": ag.get("issues")}
@@ -455,7 +412,8 @@ def compute(manifest: dict, base: Path | None = None, sources: dict | None = Non
             row = rows.setdefault(ident["file"], {**ident, "by": {}})
             r = response(m, name)
             rec = {"status": r["status"],
-                   **{f: r[f] for f in ("cost", "latency", "out_tokens") if r.get(f) is not None}}
+                   **{f: r[f] for f in ("cost", "latency", "out_tokens", 'billed_usd', 'reserved_usd', 'cost_complete')
+                      if r.get(f) is not None}}
             if r["status"] == "parsed":
                 rec.update(measure(r["labels"], row["dataset"], r.get("config")))
             row["by"][m["key"]] = rec
@@ -463,11 +421,21 @@ def compute(manifest: dict, base: Path | None = None, sources: dict | None = Non
     seen = set()
     for row in rows.values():
         src = sources.get(row["file"])
-        if src is None or not Path(src).exists():
+        if src is None:
             continue
-        r = read_output(Path(src))
+        path = Path(src)
+        canonical = path.name.removeprefix('failed_').removeprefix('noreply_')
+        try:
+            selected = annotation_record(path.parent, canonical)
+        except (OSError, ValueError, TypeError, AttributeError):
+            r = {'status': 'unparsed', 'error': 'saved receipts could not be verified', 'cost': None}
+        else:
+            if selected is None:
+                continue
+            r = read_output(selected[0], selected[1])
         seen.add(r.get("model"))
-        rec = {"status": r["status"], **{f: r[f] for f in ("cost", "latency", "out_tokens") if r.get(f) is not None}}
+        rec = {"status": r["status"], **{f: r[f] for f in ("cost", "latency", "out_tokens", 'billed_usd',
+                'reserved_usd', 'cost_complete') if r.get(f) is not None}}
         if r["status"] == "parsed":
             rec.update(measure(r["labels"], row["dataset"], r.get("config")))
         row["by"][REFERENCE_KEY] = rec

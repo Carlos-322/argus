@@ -40,7 +40,7 @@ This module does three things around them:
 3. The command line above.
 
 Output, context["capture_qc"]:
-    {"source": "public-dataset-adapter@99d0a9e", "version": 2,
+    {"source": "public-dataset-adapter@99d0a9e", "version": 3,
      "flags": [{"check", "title", "t_s", "camera", "actor", "evidence"}],
      "notes": [{"check", "text"}],
      "not_assessed": {check: why},
@@ -60,14 +60,17 @@ from pathlib import Path
 
 import numpy as np
 
+from checks import EXIT_PARTIAL
 from checks.vendor import public_dataset_adapter_qc as up
+from checks.camera_intervals import to_anchor
 from label import episode as me
 from label import frames as mf
 from label.atomic import write_atomic
 from prepare.state_notes import STATE_WHY, NOT_RECORDED, LAYOUT
+from prepare.signal_alignment import recorder_arrival
 
 SOURCE = up.SOURCE
-VERSION = 2          # the format version of context["capture_qc"]
+VERSION = 4          # the assessment version of context["capture_qc"]
 GRAY = 64
 
 # ------------------------------------------------------------------------------------------ thresholds
@@ -112,8 +115,8 @@ EXTRA: dict[str, dict] = {
 }
 
 
-# the checks that compare the recorded state with the video (video_frozen_run too where a frozen picture is claimed only
-# while the state says the view must change, frozen_needs_motion)
+# the checks that compare the recorded state with the video. video_frozen_run reads the state too where it can
+# (frozen_needs_motion), and where it cannot it judges each still run from the picture on either side of it
 STATE_VS_VIDEO = ("camera_state_alignment_mismatch", "largest_action_not_in_video",
                   "visual_change_unexplained_by_action", "pixel_action_corr_mismatch")
 
@@ -386,27 +389,6 @@ def _features(ep: dict, v: str, d: dict) -> dict:
             "pair": pair.astype(np.float32), "pchange": pchange.astype(np.float32)}
 
 
-def to_anchor(ep: dict, v: str, own: np.ndarray, T: int) -> np.ndarray | None:
-    """Per-anchor-interval values (len T-1) from a camera's own per-frame-pair values (len n-1).
-    A camera without a kmap must have exactly the anchor's frames. With a kmap, interval i sums the
-    camera's own changes from frame km[i] to km[i+1]; NaN when the camera has no new frame there."""
-    km = ep["kmap"].get(v)
-    n = len(own) + 1
-    if km is None:
-        return own[:T - 1].astype(np.float64) if n == T else None
-    km = np.asarray(km, dtype=np.int64)[:T]
-    if len(km) < T:
-        return None
-    km = np.clip(km, 0, n - 1)
-    finite = np.isfinite(own)
-    cum = np.concatenate([[0.0], np.cumsum(np.where(finite, own, 0.0))])
-    bad = np.concatenate([[0], np.cumsum(~finite)])
-    a, b = km[:-1], km[1:]
-    out = cum[b] - cum[a]
-    out[(b <= a) | ((bad[b] - bad[a]) > 0)] = np.nan
-    return out
-
-
 def _camera_or_failure(ep: dict, v: str) -> dict:
     """camera_features, or, when the camera's frames cannot be read at all (its file gone, a crash computing them),
     {"failed": the exception, "n": its frame count}, which assess records as that camera's crash: the checks not run
@@ -542,13 +524,14 @@ def assess(feats: dict) -> dict:
     ep, T, cams = feats["ep"], feats["T"], feats["cams"]
     ctx = ep["context"]
     assumed_clocks = ctx.get("camera_clock") or {}
+    arrival_clock = recorder_arrival(ctx)
     anchor = me.anchor(ep) if cams else None
     # The same frame-window eligibility as label.episode.plan, without running its sampling work here.
     state_window_ok = (anchor is not None and not ctx.get("state_unaligned")
                        and int(ep["sources"][anchor]["n_frames"]) == T
                        and all(len(km) >= T for v, km in ep["kmap"].items() if v != anchor and v in cams))
     comparison_cameras = ({v for v in cams if v not in assumed_clocks and anchor not in assumed_clocks}
-                          if state_window_ok else set())
+                          if state_window_ok and not arrival_clock else set())
     rig = me.rig(ep)
     kind = me.state_kind(ep)
     policy, extra = policy_for(rig)
@@ -804,6 +787,7 @@ def assess(feats: dict) -> dict:
     list_checks = VIDEO_CHECKS[1:]    # the check each evidence list is for, in the same order
     pixel_observed = {check: 0 for check in PIXEL_CHECKS}
     pixel_limited = {check: [] for check in PIXEL_CHECKS}
+    frozen_undecided = []     # cameras with a still run that neither the recorded motion nor the pixels can judge
     motion_limited = []
     with _guard(R, ("missing_camera",)):
         R["missing_camera"] = _fired([] if cams else [_ev("the episode has no camera")])
@@ -816,17 +800,20 @@ def assess(feats: dict) -> dict:
         with _guard(R, ("video_frozen_run",)):
             av_all = actor_views(ep, names) if usable_state and extra["frozen_needs_motion"] else []
 
-    def expected_motion(v: str, t0: float, t1: float) -> str:
-        """Why camera v's picture must change between t0 and t1, from the recorded state, or "" when the
-        recording gives no such reason (video-only rigs, or nothing recorded moving)."""
+    def expected_motion(v: str, t0: float, t1: float) -> str | None:
+        """Why camera v's picture must change between t0 and t1, from the recorded state; "" when the recording says
+        nothing it watches moved; None when the recording cannot say (a video-only rig, no recorded actor moving
+        this camera or in its view, or state and video timing that cannot be compared)."""
         if not usable_state or av_all is None or v not in comparison_cameras:
-            return ""
+            return None
         k = np.flatnonzero((ts >= t0) & (ts <= t1))
         if len(k) < 2:
-            return ""
+            return None
         a, b = int(k[0]), int(k[-1])
         mounted = [g for g, mv in enumerate(av_all) if mv == v]
         movers = mounted if mounted else (list(range(len(names))) if v == "exo" and rig == "teleop_arms" else [])
+        if not movers:
+            return None
         s_raw = np.asarray(ep["state"], dtype=np.float64)
         for g in movers:
             o = 7 * g
@@ -876,10 +863,9 @@ def assess(feats: dict) -> dict:
                 if seen < expected or not seen:
                     pixel_limited[check].append(f"camera {v}: {seen} of {expected} usable "
                                                 + ("frames" if check in PIXEL_CHECKS[:2] else "frame pairs"))
-                if check == "video_frozen_run" and extra["frozen_needs_motion"] and v not in comparison_cameras:
-                    pixel_limited[check].append(f"camera {v}: state and video timing cannot be compared")
-                else:
-                    pixel_observed[check] += seen > 0
+                if check == "video_frozen_run" and extra["frozen_needs_motion"]:
+                    continue        # observed where its still runs are judged (below)
+                pixel_observed[check] += seen > 0
             if v in comparison_cameras and int(pok.sum()) < max(n - 1, 0):
                 motion_limited.append(f"camera {v}: {int(pok.sum())} of {max(n - 1, 0)} usable frame pairs")
             if ok.any():
@@ -945,38 +931,71 @@ def assess(feats: dict) -> dict:
             longest_run = max(runs, key=span_s) if runs else None
             longest_s = span_s(longest_run) if longest_run else 0.0
             frozen = [r for r in runs if span_s(r) > extra["frozen_run_s"]]
-            if extra["frozen_needs_motion"]:
-                # a still scene can decode to identical frames (a RealOmin view shows 29 identical frames between
-                # keyframes), so a frozen picture is claimed only while the recording says the view must change
-                kept = []
-                for r in frozen:
-                    why = expected_motion(v, _cam_t(ep, v, r[0], c["fps"]), _cam_t(ep, v, r[1] + 1, c["fps"]))
-                    if why:
-                        kept.append((r, why))
-            else:
-                kept = [(r, "") for r in frozen]
-            if kept:
-                r, why = max(kept, key=lambda x: span_s(x[0]))
-                # a recorder that re-encodes a frozen camera changes the picture a little at each keyframe; one such
-                # step (well under real motion) between two frozen runs does not end the freeze, so the run that fired
-                # is reported from where the freeze starts to where it ends. Runs that fire on their own are the only
-                # ones extended, so no new firing can come of it.
-                m_ = extra["duplicate_motion_mad"] or float("inf")
-                starts = {a_: b_ for a_, b_ in runs}
-                ends = {b_: a_ for a_, b_ in runs}
+            # a recorder that re-encodes a frozen camera changes the picture a little at each keyframe; one such
+            # step (well under real motion) between two frozen runs does not end the freeze, so a run is judged and
+            # reported from where the freeze starts to where it ends. Only runs over the rule on their own are
+            # extended, so no new firing can come of it.
+            m_ = extra["duplicate_motion_mad"] or float("inf")
+            starts = {a_: b_ for a_, b_ in runs}
+            ends = {b_: a_ for a_, b_ in runs}
+
+            def whole(r):
                 a0, b0, steps = r[0], r[1], 0
                 while a0 - 2 in ends and np.isfinite(pair[a0 - 1]) and pair[a0 - 1] < m_:
                     a0, steps = ends[a0 - 2], steps + 1
                 while b0 + 2 in starts and np.isfinite(pair[b0 + 1]) and pair[b0 + 1] < m_:
                     b0, steps = starts[b0 + 2], steps + 1
-                r = (a0, b0)
+                return (a0, b0), steps
+
+            def moving_around(r) -> str:
+                # the picture moves by real motion on the frame steps on both sides of the still run: a live view
+                # slows into stillness and out of it, while a camera that stops sending stops dead mid-motion and
+                # resumes mid-motion, so this tells a frozen picture from a still scene from the pixels alone
+                a_, b_ = r
+                if not (a_ > 0 and b_ + 1 < len(pair) and np.isfinite(pair[a_ - 1]) and np.isfinite(pair[b_ + 1])
+                        and min(pair[a_ - 1], pair[b_ + 1]) >= m_):
+                    return ""
+                return (f"the picture moves by {pair[a_ - 1]:.1f} and {pair[b_ + 1]:.1f} grey levels on the frame "
+                        "steps either side of it")
+            undecided = []
+            if extra["frozen_needs_motion"]:
+                # a still scene can decode to identical frames (a RealOmin view shows 29 identical frames between
+                # keyframes), so a frozen picture is claimed only while the recording says the view must change, or,
+                # where the recording cannot say, while the picture moves right before and right after it
+                kept = []
+                for r in frozen:
+                    why = expected_motion(v, _cam_t(ep, v, r[0], c["fps"]), _cam_t(ep, v, r[1] + 1, c["fps"]))
+                    basis = None
+                    if why is None:
+                        w, _ = whole(r)
+                        why, basis = moving_around(w), "picture"
+                        if not why:
+                            undecided.append(w)
+                            continue
+                    if why:
+                        kept.append((r, why, basis))
+            else:
+                kept = [(r, "", None) for r in frozen]
+            if kept:
+                r, why, basis = max(kept, key=lambda x: span_s(x[0]))
+                r, steps = whole(r)
                 t0 = _cam_t(ep, v, r[0], c["fps"])
                 but = (f", apart from {steps} single keyframe step{'s' if steps > 1 else ''} under {m_:g}"
                        if steps else "")
-                frz_ev.append(_ev(f"camera {v} shows the same picture for {span_s(r):.1f} s from {t0:.1f} s (every "
-                                  f"consecutive frame changes by under {extra['duplicate_pair_mad']:g} grey "
-                                  f"levels{but})" + (f" while {why}" if why else "")
-                                  + f"; the rule is over {extra['frozen_run_s']:g} s", t0, v))
+                ev = _ev(f"camera {v} shows the same picture for {span_s(r):.1f} s from {t0:.1f} s (every "
+                         f"consecutive frame changes by under {extra['duplicate_pair_mad']:g} grey "
+                         f"levels{but})" + (f" while {why}" if why else "")
+                         + f"; the rule is over {extra['frozen_run_s']:g} s", t0, v)
+                frz_ev.append({**ev, "basis": basis} if basis else ev)
+            if extra["frozen_needs_motion"]:
+                if undecided and not kept:
+                    r = max(undecided, key=span_s)
+                    frozen_undecided.append(
+                        f"camera {v} shows the same picture for {span_s(r):.1f} s from "
+                        f"{_cam_t(ep, v, r[0], c['fps']):.1f} s, and neither the recorded motion nor the picture on "
+                        "either side says whether its view had to change")
+                else:
+                    pixel_observed["video_frozen_run"] += int(pok.sum()) > 0
             done.add("video_frozen_run")
             extreme = (means < extra["black_mean"]) | (means > extra["white_mean"])
             cam_metrics[v] = {"frames": n, "decoded": c["decoded"], "fps": round(c["fps"], 2),
@@ -1010,10 +1029,16 @@ def assess(feats: dict) -> dict:
         r = R.get(check)
         if r and r["status"] in ("clear", "fired"):
             why = "; ".join(pixel_limited[check])
-            if not pixel_observed[check] and not cam_err:
+            if not pixel_observed[check] and not cam_err and not (check == "video_frozen_run" and frozen_undecided):
                 R[check] = _na(f"No usable video observations for this check. {why}")
             elif why:
                 R[check] = {**r, "why": why}
+    r = R.get("video_frozen_run")
+    if frozen_undecided and r and r["status"] in ("clear", "fired"):
+        # a still picture nothing can judge is not a clear camera: the check is clear only when no camera has one
+        undecided = "; ".join(frozen_undecided)
+        why = "; ".join(x for x in (r.get("why"), undecided) if x)
+        R["video_frozen_run"] = _na(why) if r["status"] == "clear" else {**r, "why": why}
 
     # ---- motion (filtering.py:1654-1700, 1796-1861), end-effector pose only
     actor_metrics: dict[str, dict] = {}
@@ -1184,17 +1209,19 @@ def assess(feats: dict) -> dict:
         # board/clips.py drop_cameras): every check that compares it with the video is not assessed; the checks on the
         # state alone stand
         why = f"The recorded state is not on these cameras' frames. {ctx['state_unaligned']}"
-        for c in STATE_VS_VIDEO + (("video_frozen_run",) if extra["frozen_needs_motion"] else ()):
+        for c in STATE_VS_VIDEO:
             R[c] = _na(why)
-    if assumed_clocks or not state_window_ok:
+    if assumed_clocks or arrival_clock or not state_window_ok:
         skipped = sorted(set(cams) - comparison_cameras)
         why = ("The recorded state does not match the anchor camera's frame window."
                if not state_window_ok else
+               'State and video motion were not compared: recorder arrival timing does not establish physical synchronization.'
+               if arrival_clock else
                f"State and video motion were not compared for {', '.join(skipped)}: camera placement uses assumed presentation timing.")
-        for c in CAMERA_MOTION_CHECKS + (("video_frozen_run",) if extra["frozen_needs_motion"] else ()):
+        for c in CAMERA_MOTION_CHECKS:
             r = R.get(c)
             if r and r["status"] in ("clear", "fired"):
-                if (c in CAMERA_MOTION_CHECKS and not anchor_pair) or (c == "video_frozen_run" and not comparison_cameras):
+                if not anchor_pair:
                     R[c] = _na(why)
                 else:
                     R[c] = {**r, "why": "; ".join(x for x in (r.get("why"), why) if x)}
@@ -1213,7 +1240,8 @@ def assess(feats: dict) -> dict:
         R.update({c: _errored(state_error) for c in STATE_CHECKS})
     return {"checks": R, "cameras": cam_metrics, "actors": actor_metrics,
             "episode": {"duration_s": round(duration, 2), "rig": rig, "state_kind": kind, "gripper_unit": unit,
-                        "clock": ("assumed camera presentation" if ctx.get("camera_clock") else
+                        "clock": ("recorder arrival times" if arrival_clock else
+                                  "assumed camera presentation" if ctx.get("camera_clock") else
                                   "capture times" if real_times else "frame_index / fps")}}
 
 
@@ -1282,8 +1310,10 @@ DISPOSITION: dict[str, dict] = {
                 "keyframes), so we require a change under 0.1 grey levels on every frame for over 1 s while the "
                 "recorded state says the view must change (the camera's own gripper or arm moves, or any arm moves in "
                 "front of a fixed top camera); the only firing is FastUMI 433's frozen left camera (confirmed camera "
-                "fault, 16.8 s); never claimed on video-only rigs, where a still scene cannot be told from a frozen "
-                "camera",
+                "fault, 16.8 s). Where no recorded motion speaks for the camera (video-only rigs, a camera on no "
+                "recorded actor, timing that cannot be compared) a still run is claimed only when the picture moves by "
+                "real motion on the frame steps right before and right after it, shown as a note; a still run that "
+                "neither can judge makes the check not assessed rather than clear",
         "A camera shows the same frozen picture for over a second while the recording says it was moving.",
         applies=ARMS),
     "video_extreme_exposure": _d(
@@ -1550,11 +1580,17 @@ def format_result(a: dict) -> dict:
             listing.append({**row, "status": "clear", **({"why": r["why"]} if r.get("why") else {})})
             continue
         counted = d["disposition"] == "flag" and rig in d["applies"]
-        if counted:
-            for e in r["events"]:
+        # a firing found from the picture alone (a frozen camera no recorded motion speaks for) has not been confirmed
+        # on any verified dataset, so it is a note even where the check's other firings are issues
+        issues = [e for e in r["events"] if e.get("basis") != "picture"] if counted else []
+        if issues:
+            for e in issues:
                 flags.append({"check": check, "title": d["title"], "t_s": e["t_s"], "camera": e["camera"],
                               "actor": e["actor"], "evidence": e["evidence"]})
-            listing.append({**row, "status": "fired", "shown_as": "issue", "events": len(r["events"]),
+            for e in r["events"]:
+                if e.get("basis") == "picture":
+                    notes.append(note_record(check, e["evidence"], rig))
+            listing.append({**row, "status": "fired", "shown_as": "issue", "events": len(issues),
                             **({"why": r["why"]} if r.get("why") else {})})
             continue
         why = note_row_why(check, rig, r.get("why"))
@@ -1591,9 +1627,8 @@ def run_episode(ep_dir: Path | str) -> dict:
 
 # ------------------------------------------------------------------------------------------ CLI
 
-# the exit status when some episode's checks could not run because its worker stopped: every episode still has a
-# record (those with every check errored), so a caller goes on and reads the errored checks from the records
-EXIT_FAILED = 3
+# Each episode still has a record, including the checks that could not finish.
+EXIT_FAILED = EXIT_PARTIAL
 
 
 def _one(d: str) -> tuple[str, dict, str | None, float]:
@@ -1634,10 +1669,17 @@ def _alone(d: str) -> tuple[str, dict, str | None, float]:
 
 
 def needs_check(ctx: dict) -> bool:
-    """Whether an episode is checked without --force: it has no record, or its record is one written because its
-    worker stopped (worker_stopped), which says nothing about the episode, so a rerun checks it again."""
+    """Retry missing results, interrupted workers and assessments with errored checks."""
     cq = ctx.get("capture_qc")
-    return not isinstance(cq, dict) or bool(cq.get("worker_stopped"))
+    if not isinstance(cq, dict) or cq.get("worker_stopped") or cq.get("version") != VERSION:
+        return True
+    checks = cq.get("checks")
+    if not isinstance(checks, list) or not checks or not all(isinstance(c, dict) for c in checks):
+        return True
+    names = [c.get("check") for c in checks]
+    if not all(isinstance(n, str) for n in names) or len(names) != len(set(names)) or set(names) != set(CHECKS):
+        return True
+    return any(c.get("status") not in ("clear", "fired", "not_applicable") for c in checks)
 
 
 def main() -> int:
@@ -1664,10 +1706,13 @@ def main() -> int:
     def record(d: str, r: dict, err: str | None, secs: float) -> None:
         nonlocal done, flagged, failed
         done += 1
-        if err:
+        errors = [c for c in r.get("checks", []) if c.get("status") == "errored"]
+        if err or errors:
             failed += 1
-            r = {**r, "worker_stopped": True}
-            print(f"FAILED {Path(d).name}: {err}", flush=True)
+            if err:
+                r = {**r, "worker_stopped": True}
+            reason = err or errors[0].get("why", "capture checks could not run")
+            print(f"FAILED {Path(d).name}: {reason}", flush=True)
         p = Path(d) / "context.json"
         ctx = json.loads(p.read_text())
         ctx["capture_qc"] = r

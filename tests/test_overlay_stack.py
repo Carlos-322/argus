@@ -70,6 +70,10 @@ const wire=interactive.setupSensorEvidence(pair,()=>seeks++,(el,event,fn)=>callb
   null,null,()=>placements++);
 wire.sync(2.46244);assert.deepEqual(buttons.map(b=>b['aria-pressed']),['false','true']);
 callbacks.get(buttons[0])();assert.deepEqual(buttons.map(b=>b['aria-pressed']),['true','false']);
+wire.sync(2.48);assert.deepEqual(buttons.map(b=>b['aria-pressed']),['true','false'],
+ 'playing through concurrent findings preserves the selected active evidence');
+wire.sync(3.02);assert.deepEqual(buttons.map(b=>b['aria-pressed']),['false','true'],
+ 'selection expires with its display window instead of keeping a stale overlay');
 callbacks.get(buttons[1])();assert.deepEqual(buttons.map(b=>b['aria-pressed']),['false','true']);
 const previousSeeks=seeks,previousPlacements=placements;
 callbacks.get(strip)({target:{closest:()=>({dataset:{sensorFinding:'1'}})}});
@@ -288,3 +292,80 @@ def test_retained_scene_clip_size_keeps_original_model_query_clock(tmp_path):
     assert qualified['unshown1'][6] == .2
     assert clips.main_cam(sources) == 'exo'
     assert {name: (episode / name).read_bytes() for name in before} == before
+
+
+def test_dataset_and_license_urls_cannot_turn_into_executable_links():
+    script = r'''
+const assert=require('assert'),{piece}=require(process.argv[1])();
+const api=new Function(piece('esc')+piece('safeExternalUrl')+piece('datasetSourceHtml')
+ +'return {esc,safeExternalUrl,datasetSourceHtml};')();
+assert.equal(api.esc("' onclick='x"),'&#39; onclick=&#39;x');
+for(const url of ['javascript:alert(1)','JaVaScRiPt:alert(1)','java\nscript:alert(1)','data:text/html,<script>x</script>']) {
+ assert.equal(api.safeExternalUrl(url),'');
+ assert(!api.datasetSourceHtml({name:'Dataset',license:'Public',hub:url,license_url:url}).includes('href='));
+}
+const html=api.datasetSourceHtml({name:'Dataset',license:'Public',hub:'https://example.com/data?q=a&b=c'});
+assert(html.includes('href="https://example.com/data?q=a&amp;b=c"'));
+'''
+    subprocess.run(['node', '-e', script, str(HERE / 'page_functions.js')], check=True)
+
+
+def test_temporary_frame_load_failure_retries_only_live_local_frames():
+    script = r'''
+const assert=require('assert'),{piece}=require(process.argv[1])();
+(async()=>{
+ let attempts=0,revoked=0,clock=0,hidden=true;
+ const now={now:()=>clock},wait=(fn,ms)=>{clock+=ms;fn();};
+ const urlApi=class extends URL{};
+ urlApi.createObjectURL=()=> 'blob:ready';urlApi.revokeObjectURL=()=>revoked++;
+ const image={tagName:'IMG',isConnected:true,currentSrc:'https://board.example/api/frame?id=x&t=1',
+  src:'https://board.example/api/frame?id=x&t=1',
+  closest:()=>({classList:{remove(name){assert.equal(name,'nofr');hidden=false;}}}),
+  addEventListener(event,fn){if(event==='load')this.loaded=fn;}};
+ const responses=[...Array.from({length:5},()=>({status:503,ok:false,headers:{get:()=> '1'}})),
+  {status:200,ok:true,blob:async()=>({})}];
+ const api=new Function('fetch','URL','location','setTimeout','Date',piece('retryFrameImage')+'return retryFrameImage;')(
+  async()=>{attempts++;return responses.shift();},urlApi,{href:'https://board.example/',origin:'https://board.example'},wait,now);
+ await api(image);assert.equal(attempts,6);assert.equal(image.src,'blob:ready');image.loaded();assert.equal(revoked,1);assert(!hidden,'recovered goal pixels must become visible');
+ await api({...image,currentSrc:'https://external.example/api/frame?id=x'});assert.equal(attempts,6);
+ await api({...image,isConnected:false});assert.equal(attempts,6);
+ await api({...image,currentSrc:'https://board.example/media/missing.jpg'});assert.equal(attempts,6);
+ assert.equal(clock,5000,'a normally busy renderer can recover after five seconds');
+ let failures=0;clock=0;
+ const down=new Function('fetch','URL','location','setTimeout','Date',piece('retryFrameImage')+'return retryFrameImage;')(
+  async()=>{failures++;return {status:503,ok:false,headers:{get:()=> '100000'}};},urlApi,
+  {href:'https://board.example/',origin:'https://board.example'},wait,now);
+ await down({...image,src:'https://board.example/api/frame?id=other',currentSrc:'https://board.example/api/frame?id=other'});assert.equal(clock,30000,'retry window is bounded');assert(failures<=16,'busy responses do not cause a retry storm');
+})().catch(error=>{console.error(error);process.exit(1);});
+'''
+    subprocess.run(['node', '-e', script, str(HERE / 'page_functions.js')], check=True)
+
+
+def test_explicit_finding_survives_playback_beyond_its_automatic_onset_window():
+    script = r'''
+const assert=require('assert');
+const {src}=require(process.argv[1])();
+const begin=src.indexOf('// ================= sensor evidence:');
+const end=src.indexOf('// ================= touch:',begin);
+const {strip,createElement}=cardDocument(),callbacks=new Map();
+const buttons=[0,1].map(i=>({dataset:{gripFinding:String(i),evidenceT:String(i?12:20),evidencePause:'true'},
+ setAttribute(k,v){this[k]=v;}}));
+const doc={createElement,getElementById:id=>id==='grip-finding-overlay'?strip:null,
+ querySelectorAll:q=>['[data-evidence-t]','[data-grip-finding]'].includes(q)?buttons:[]};
+const api=new Function('esc','fmtT','document',src.slice(begin,end)
+ +'return {sensorEvidence,setupSensorEvidence};')(String,String,doc);
+const E=api.sensorEvidence({sensor_evidence:{version:1,findings:[
+ {start_s:10,end_s:30,inspect_s:20,headline:'Continuing hold',confidence:'medium',adds_beyond_video:true},
+ {start_s:12,end_s:26,inspect_s:12,headline:'Later finding',confidence:'medium',adds_beyond_video:true}]}});
+const wire=api.setupSensorEvidence(E,()=>{},(el,event,fn)=>callbacks.set(el,fn),()=>{});
+wire.sync(20);assert.deepEqual(buttons.map(b=>b['aria-pressed']),['false','true']);
+callbacks.get(buttons[0])();
+wire.sync(20.04);assert.deepEqual(buttons.map(b=>b['aria-pressed']),['true','false'],
+ 'an explicit inspection survives its first playback frame while source evidence still applies');
+wire.sync(29.9);assert.deepEqual(buttons.map(b=>b['aria-pressed']),['true','false']);
+wire.sync(30.01);assert.equal(strip.hidden,true,
+ 'manual inspection expires at its actual finding end');
+wire.sync(20);assert.deepEqual(buttons.map(b=>b['aria-pressed']),['false','true'],
+ 'automatic playback still replaces an earlier onset rather than resurrecting it');
+'''
+    subprocess.run(['node', '-e', CARD_DOM + script, str(HERE / 'page_functions.js')], check=True)
