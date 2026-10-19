@@ -5172,7 +5172,7 @@ function syncGripEvidence(G, t, finding = null) {
   if (panel && finding) syncGripOverlayPressure(G, finding, t, panel, Infinity);
   if (G?.generic) syncGenericSensorVideos(t);
 }
-function setupSensorEvidence(E, seek, on, inspectContact, d = null, file = null, relayout = () => {}) {
+function setupSensorEvidence(E, seek, on, inspectContact, d = null, file = null, relayout = () => {}, media = null) {
   const overlay = document.getElementById('sensor-overlay'), strip = document.getElementById('grip-finding-overlay'),
     now = document.getElementById('sensor-evidence-now');
   const details = document.getElementById('sensor-evidence-details');
@@ -5233,10 +5233,11 @@ function setupSensorEvidence(E, seek, on, inspectContact, d = null, file = null,
     if (delta < -1e-6) chosenGrip = null;
     if (explicitFindingIndex != null) chosenGrip = explicitFindingIndex;
     const allFindings = E.overlayFindings || E.insights || [];
-    const available = displayGripFindings(E, t, presentationWindows);
+    const ended = media?.ended === true;
+    const available = ended ? [] : displayGripFindings(E, t, presentationWindows);
     const explicit = allFindings.find(f => f.findingIndex === chosenGrip);
     // A manual inspection follows its source interval, even after another onset replaces its automatic card.
-    if (explicit && explicit.start <= t && t <= explicit.end + 1e-6
+    if (!ended && explicit && explicit.start <= t && t <= explicit.end + 1e-6
         && !available.some(f => f.findingIndex === explicit.findingIndex))
       available.push({...explicit, phase: t <= explicit.end + 1e-6 ? 'Now' : 'Earlier'});
     available.sort((a, b) => Number(b.phase === 'Now') - Number(a.phase === 'Now')
@@ -5244,7 +5245,7 @@ function setupSensorEvidence(E, seek, on, inspectContact, d = null, file = null,
     currentCandidates = available;
     displayedGrip = available.find(f => f.findingIndex === chosenGrip) || available[0] || null;
     if (!available.some(f => f.findingIndex === chosenGrip)) chosenGrip = null;
-    const e = activeSensorEvidence(E, t);
+    const e = ended ? null : activeSensorEvidence(E, t);
     if (strip) {
       const key = JSON.stringify(available.map(f => [f.findingIndex, f.phase]));
       strip.hidden = !available.length;
@@ -5316,6 +5317,8 @@ function setupSensorEvidence(E, seek, on, inspectContact, d = null, file = null,
     }
     if (now) now.innerHTML = (html + distribution) || `<span>${(E.insights || []).length ? 'Select a grip finding to inspect its evidence' : loaded ? 'No retained tactile intensity samples' : 'Loading tactile measurements'}</span>`;
   }};
+  // Encoded media can finish before the declared annotation clock does.
+  if (media) on(media, 'ended', () => wire.sync(media.currentTime));
   if (d && file && E.contacts.length && !(E.insights || []).length) loadSensors(file).then(D => {
     if (file !== _activeFile || !details || !document.body.contains(details)) return;
     profiles = sensorProfiles(d, D); loaded = true; signature = null;
@@ -7351,7 +7354,7 @@ function renderEp(d, opts) {
   evidenceWire = setupSensorEvidence(evidence, seek, on, (k, t) => { if (tcWire) tcWire.inspect(k, t); }, d, _activeFile, () => {
     placeSensors();
     scheduleTopPlacement();
-  });
+  }, vid);
   window._epCleanup.push(() => evidenceWire.dispose());
   const syncEvidence = t => {
     evidenceWire.sync(t);
