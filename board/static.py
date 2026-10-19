@@ -324,11 +324,9 @@ def plan(qa: Path, clips: Path, compare: Path | None = None, dictionary_job: Pat
                 media[key] = {"src": src, "rel": video_rel(eid, key, src_sig(src)), "main": cam == cams[0]}
                 # the camera's first frame, the video's poster: the player shows footage from the first paint
                 frames[f"{key}|0"] = {"src": src, "t": 0.0, "rel": frame_rel(eid, key, 0, src_sig(src))}
-                # the camera's depth clip (board/clips.py), which the page's depth switch plays, when it was cut
-                dsrc = clip_path(clips, eid, f"depth_{cam}")
-                if dsrc.exists():
-                    media[f"depth_{cam}"] = {"src": dsrc, "rel": video_rel(eid, f"depth_{cam}", src_sig(dsrc)),
-                                             "main": cam == cams[0]}
+            for view, source in sa.depth_clips(clips, eid).items():
+                key = f'depth_{view}'
+                media[key] = {'src': source, 'rel': video_rel(eid, key, src_sig(source)), 'main': view == cams[0]}
             main = cams[0]
             msrc = clip_path(clips, eid, main)
             times = goal_times(d)

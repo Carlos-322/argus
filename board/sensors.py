@@ -361,7 +361,8 @@ def signal_doc(meta: dict, a: np.ndarray, t: np.ndarray, stride: int, in_contact
 
 def depth_doc(entry: dict, ctx_depth: dict) -> dict:
     """One camera's depth: its units and the colour bar of its pictures (label/depth.py)."""
-    out = {"units": ctx_depth.get("units") or ("metres" if entry.get("scale_m") else "relative"),
+    from label import depth as dp
+    out = {"units": "metres" if dp.metric_scale(entry) else "relative",
            "scale_m": entry.get("scale_m"), "kind": entry.get("kind") or "depth"}
     out.update(legend_bar(entry))
     return out
@@ -376,8 +377,9 @@ def legend_bar(entry: dict) -> dict:
     if not hasattr(dp, "picture") or not hasattr(dp, "legend_ticks"):
         return {}
     disparity = entry.get("kind") == "disparity"
-    if entry.get("scale_m") and not disparity:
-        ramp = np.geomspace(dp.METRIC_NEAR_M, dp.METRIC_FAR_M, BAR_STOPS) / float(entry["scale_m"])
+    scale = dp.metric_scale(entry)
+    if scale:
+        ramp = np.geomspace(dp.METRIC_NEAR_M, dp.METRIC_FAR_M, BAR_STOPS) / scale
         e = entry
     else:
         # a ramp across the range of unknown-unit depth (or disparity) is the same whatever the range, so it is drawn
@@ -446,7 +448,17 @@ def episode_doc(ep_dir: Path) -> dict | None:
         entries = dp.load(ep_dir)
         src = json.loads((ep_dir / "sources.json").read_text()) if (ep_dir / "sources.json").exists() else {}
         cd = ctx.get("depth") or {}
-        doc["depth"] = {v: depth_doc(e, cd.get(v) or {}) for v, e in entries.items() if not src or v in src}
+        doc["depth"] = {}
+        for view, entry in entries.items():
+            unpaired = view not in src or entry.get('paired_camera', view) is None
+            detail = depth_doc(entry, cd.get(view) or {})
+            detail['paired_camera'] = None if unpaired else entry.get('paired_camera', view)
+            if unpaired:
+                from board.clips import DEPTH_SOURCE_FPS
+                detail.update(name=entry.get('source_key') or view, n_frames=int(entry.get('n_frames') or 0),
+                              width=entry.get('width'), height=entry.get('height'),
+                              playback={'kind': 'source_frames', 'fps': DEPTH_SOURCE_FPS})
+            doc['depth'][view] = detail
     return doc
 
 
@@ -457,7 +469,11 @@ def summary(doc: dict) -> dict:
     none = sum(1 for s in sigs if s.get("no_reading"))
     return {"signals": sum(1 for s in sigs if not s.get("constant") and not s.get("no_reading")),
             "constant": sum(1 for s in sigs if s.get("constant")), **({"no_reading": none} if none else {}),
-            "depth": sorted(doc.get("depth") or {})}
+            "depth": sorted(doc.get("depth") or {}),
+            **({'unpaired_depth': sorted(view for view, entry in (doc.get('depth') or {}).items()
+                                        if entry.get('playback', {}).get('kind') == 'source_frames')}
+               if any(entry.get('playback', {}).get('kind') == 'source_frames'
+                      for entry in (doc.get('depth') or {}).values()) else {})}
 
 
 def build(episodes: dict, out_dir: Path) -> dict:

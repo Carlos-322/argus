@@ -20,6 +20,25 @@ from pathlib import Path
 FIXED_HEADER = ("HOW TO LABEL. These instructions are the same for every episode; the episode itself "
                 "(its dataset, cameras, frames, recorded motion and instruction) follows after them.\n\n")
 
+EVIDENCE_CONTRACT = (
+    'This request has separate visual and sensor annotation contracts. Return one JSON object containing all '
+    'required fields. Write the supplied sensor_findings and evidence_findings fields first, then the visual annotation fields. '
+    'Sensor findings use their own source evidence, native timestamps and event granularity; the visual timeline '
+    'and short key_events rules do not restrict them. A sensor-supported change can coincide with a visible action '
+    'or occur when the hand or object is outside the RGB view. Preserve the difference between a measured change '
+    'and an inferred physical explanation. adds_beyond_video means information beyond ordinary scene/task footage '
+    'and the behavioral description. Sensor images, sensor video streams and measurement visualizations are '
+    'eligible supporting evidence, even when rendered as RGB or included in the same frame grids. '
+    'Empty findings remain valid.\n')
+
+EVIDENCE_REVIEW = (
+    '\nApply the sensor and inspected-evidence contracts independently of visual milestone selection. Review the '
+    'complete supplied trajectory through its final samples. Preserve distinct supported changes and their '
+    'comparisons within a single visible action, rather than merging different manipulation implications into '
+    'one broad phase. Do not infer an unseen physical action or outcome from a sensor change alone. Use exact '
+    'supplied, verified episode-aligned measurement times for timed sensor findings, not a rounding to RGB sample '
+    'times. Preserve all stated calibration, interpretation, coverage and alignment limits.\n')
+
 # An episode with no recorded state and no other signal is video only (label/episode.py RECORDED_BLOCKS), and its
 # shared instructions say nothing of a recorded motion it does not have. These are the words taken out, from the
 # header, the robot rigs' tag list and the data contract; the 2026-10-02 audit found "the recorded motion" in the
@@ -144,7 +163,9 @@ Return ONLY JSON with this shape. Each timeline segment is one array whose value
 Rules:
 - Name objects by what you actually see. There is no fixed vocabulary.
   If you cannot tell what something is, describe it by shape/colour.
-- Only claim what the frames show; when unsure, say so in notes rather than guessing.
+- Ground visual annotations in the frames; when unsure, say so in notes rather than guessing.
+  Separate sensor_findings can describe information supported by supplied sensor readings even when RGB does not
+  show it. Keep the stated measurement limits.
 - progress is judged with the whole available video in view, NEVER as an isolated snapshot.
   Ask what state the task had reached by this step and whether this step moves it toward the goal FROM THERE.
 """ + contribution_rules("teleop_arms") + """
@@ -378,7 +399,9 @@ Return ONLY JSON with this shape. Each timeline segment is one array whose value
 Rules:
 - Name objects by what you actually see. There is no fixed vocabulary.
   If you cannot tell what something is, describe it by shape/colour.
-- Only claim what the frames show; when unsure, say so in notes rather than guessing.
+- Ground visual annotations in the frames; when unsure, say so in notes rather than guessing.
+  Separate sensor_findings can describe information supported by supplied sensor readings even when RGB does not
+  show it. Keep the stated measurement limits.
 - progress is judged with the whole available video in view, NEVER as an isolated snapshot.
   Ask what state the task had reached by this step and whether this step moves it toward the goal FROM THERE.
 """ + contribution_rules("ego_head") + """

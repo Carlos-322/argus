@@ -35,12 +35,18 @@ SOURCE_HASH_LIMIT = 16 * 1024 * 1024
 IMPLEMENTATION_SHA256 = hashlib.sha256(b''.join(path.read_bytes() for path in (
     Path(__file__), Path(__file__).with_name('depth.py'),
     Path(__file__).with_name('dictionary_context.py'), Path(__file__).with_name('sensor_evidence.py'),
+    Path(__file__).with_name('episode.py'), Path(__file__).with_name('signals.py'), Path(__file__).with_name('contacts.py'),
+    Path(__file__).with_name('derived_measurements.py'), Path(__file__).with_name('semantic_evidence.py'),
+    Path(__file__).with_name('tactile_capture.py'),
     Path(__file__).with_name('optical_motion.py'), Path(__file__).with_name('tactile_arrays.py'),
     Path(__file__).parent.parent / 'prepare' / 'hdf_metadata.py',
     Path(__file__).parent.parent / 'prepare' / 'mcap_fields.py',
     Path(__file__).parent.parent / 'prepare' / 'state_contract.py',
+    Path(__file__).parent.parent / 'prepare' / 'sensor_semantics.py',
+    Path(__file__).parent.parent / 'prepare' / 'publisher_schemas.py',
     Path(__file__).parent.parent / 'board' / 'public_export.py',
-    Path(__file__).with_name('source_eligibility.py')))).hexdigest()
+    Path(__file__).with_name('source_eligibility.py'),
+    *sorted((Path(__file__).parent.parent / 'configs' / 'sensor_schemas').glob('*.json'))))).hexdigest()
 # These describe the prepared episode or checks already in the annotation request.
 # Original metadata and unfamiliar context keys retain their separate inspection path.
 PREPARED_CONTEXT = frozenset('''episode_id episode_index dataset profile robot_type state_kind state_note state_why
@@ -491,6 +497,7 @@ class Access:
         self.ep = ep
         self.supplied = supplied or {}
         self.state_usable = (plan or {}).get('state_usable', not ep['context'].get('state_unaligned'))
+        self.frame_count = (plan or {}).get('n')
         self.fields = {}
         self.receipts = []
         self.images = {}
@@ -1129,6 +1136,8 @@ class Access:
             notes.append((ctx.get('depth_camera_clock') or {}).get(view))
         unverified = own_entry is not None or any(notes) or any(field['descriptor'].get(k) for k in
                                       ('aligned_by', 'camera_aligned_by', 'clock_problem'))
+        if kind == 'image' and own_entry is None and self.ep.get('times') is not None:
+            unverified = unverified or (self.ep.get('times') or {}).get(view) is None
         measurements = result['mode'] == 'regions'
         limit = 32 if measurements else MAX_IMAGES
         if 'rows' in request:
@@ -1165,6 +1174,7 @@ class Access:
             got = {k: im for k, im in got.items() if k not in placeholders and me.recording_at(image_ep, view, k)}
         media, frames = [], []
         source_frames = []
+        seen_captures, reused_rows = {}, []
         preview_rows = {list(got)[i] for i in indices(len(got), MAX_IMAGES)}
         for k, picture in got.items():
             time_s = float(times[k])
@@ -1198,10 +1208,27 @@ class Access:
                     continue
                 picture = dp.picture(picture, entry)
             else:
-                frames.append({'row': int(k)})
                 if own_entry is not None:
                     source_frames.append({'row': int(k), 'source_row': source_start + int(k),
                                           'source_pts': int(own_pts[k]), 'source_time_s': time_s})
+                    row = {'row': int(k)}
+                else:
+                    capture = me.camera_sample(self.ep, view, int(k))
+                    if capture is None:
+                        continue
+                    source_frames.append(capture)
+                    source_frame = capture['source_frame']
+                    if source_frame in seen_captures:
+                        reused_rows.append({'row': int(k), 'same_capture_as_row': seen_captures[source_frame]})
+                        continue
+                    seen_captures[source_frame] = int(k)
+                    unverified = unverified or not capture['episode_alignment_verified']
+                    if capture['source_time_s'] is not None:
+                        time_s = capture['source_time_s']
+                    row = {'row': int(k), 'display_time_s': capture['display_time_s'],
+                           'source_frame': source_frame, 'source_time_s': capture['source_time_s'],
+                           'capture_offset_s': capture['capture_offset_s']}
+                frames.append(row)
                 if isinstance(picture, mf.Shrunk):
                     picture = picture.at(512)
             picture = picture.copy()
@@ -1212,6 +1239,8 @@ class Access:
             picture.convert('RGB').save(buf, 'JPEG', quality=75)
             frames[-1]['image_sha256'] = hashlib.sha256(buf.getvalue()).hexdigest()
             instant = f'presentation row {k}, unverified alignment' if unverified else f'{time_s:.6f}s'
+            if kind == 'image' and own_entry is None and not unverified:
+                instant += f" (source capture; anchor display {float(times[k]):.6f}s)"
             legend = ' Depth colours: ' + dp.legend(entry) if kind == 'depth' else ''
             if measurements:
                 legend += (' Outlines R1 through R' + str(len(frames[-1]['regions'])) +
@@ -1223,10 +1252,14 @@ class Access:
                       unavailable_rows=[int(k) for k in rows if int(k) not in got], total_rows_in_window=total)
         if source_frames:
             result['source_frames'] = source_frames
+        if reused_rows:
+            result['reused_rows'] = reused_rows
+            result['limitations'].append('Repeated presentation rows reuse the same source capture; returned images are deduplicated.')
         if not unverified:
-            result['times_s'] = [float(times[f['row']]) for f in frames]
-            for frame in frames:
-                frame['time_s'] = float(times[frame['row']])
+            result['times_s'] = [f['source_time_s'] if kind == 'image' and own_entry is None
+                                 else float(times[f['row']]) for f in frames]
+            for frame, capture_time in zip(frames, result['times_s']):
+                frame['time_s'] = capture_time
         else:
             result['limitations'].append('Picture alignment is assumed; presentation rows do not establish episode event times.')
         if measurements:
@@ -1287,8 +1320,11 @@ class Access:
                 'note': 'Uninspected fields cannot support findings. Complete inventory and coverage are saved in the JSON.'}
 
     def bind(self, findings):
+        from label.episode import frame_window
+        window = frame_window(self.ep, self.frame_count)
         doc = {'version': 1, 'interpretation_digest': se.signature(self.ep['context']), 'sensors': [], 'series': [],
                'clock_digest': se._clock_digest(self.ep['context']),
+               'episode_window_s': window,
                'findings': [], 'untimed_findings': [], 'unbound_findings': [], 'coverage': [], 'limitations': []}
         if self.ep.get('dir'):
             doc['source_proof'] = source_proof(self.ep['context'], self.ep['dir'])
@@ -1377,6 +1413,8 @@ class Access:
                 reason = 'missing finite finding interval'
             elif finding['start_s'] > finding['end_s'] or finding.get('adds_beyond_video') is not True:
                 reason = 'invalid interval or no additional information'
+            elif finding['start_s'] < window[0] - 1e-6 or finding['end_s'] > window[1] + 1e-6:
+                reason = 'finding exceeds the episode frame window'
             elif not isinstance(refs, list) or not refs:
                 reason = 'missing evidence references'
             converted, windows = [], []
@@ -1435,8 +1473,8 @@ At most 3 requests per round. Numeric samples preserve separate components (at m
 The inventory includes recorded schema names and field counts across the complete recording. Request {"mode":"inventory","query":"field name or schema substring"} to jump to relevant fields without paging through unrelated sensors. Search is case-insensitive and matches field names or schemas. If next_offset is not null, request {"mode":"inventory","offset":next_offset,"query":"the same query, if used"} for more matching fields. No descriptor is silently discarded. Search and paging consume the same request budget as measurements.
 '''
 
-FINAL = '''Additional inspected evidence follows. Produce the normal episode annotation and optional "evidence_findings": [{"start_s":number,"end_s":number,"headline":"plain English","detail":"what this adds","overlay_detail":"short explanation for the video overlay","observation":"actual readings or images","claim":"interpretation with uncertainty","alternative":"other plausible explanation","confidence":"high|medium|low","adds_beyond_video":true,"evidence":[{"evidence_id":"exact inspection id","time_s":[exact supplied times],"columns":[supplied component indices, for numeric data]}]}]. Empty findings are valid. Cite only aligned inspected samples/images. The finding interval must be covered by the cited inspection windows together, with no uncovered gap. Use separate findings for distinct brief events. Do not span disconnected spikes or attempts with one continuous event interval. Keep headlines short and describe the specific added observation or supported interpretation in plain language. Saying only that a signal changes is not informative. Omit a finding if neither a concrete added observation nor a useful supported implication can be stated. If physical meaning is unresolved, describe the concrete observed pattern. Supply overlay_detail as one short sentence explaining what this adds and essential uncertainty. These two fields appear together on video; avoid repeating the headline or filling the card with technical measurements. Preserve the concrete added information across headline and overlay_detail, including any supported comparison, temporal pattern or contrast with recorded state. A generic sensor phenomenon coinciding with an already-visible action is not a sufficient summary. Do not invent a comparison or physical explanation to make a finding sound informative. Compare repeated phases when their measurements differ. A stable sampled response can be informative when it distinguishes phases; do not infer continuous stability between samples or manufacture a finding for every repetition. Sparse readings do not establish that a signal remained elevated between samples. Contextual images can cover a shorter interval than the supporting measurements. For useful native data without verified episode alignment, use null start_s and end_s and cite "rows": [exact inspected source-row indices] instead of time_s. For useful original metadata, also use null start_s/end_s and cite {"evidence_id":"exact inspection id","pointer":"exact inspected JSON pointer"}. Metadata findings must reason about an implication or discrepancy, not merely repeat a field. Untimed findings are recording-level information, never synchronized events. Do not repeat existing sensor findings. Do not infer calibrated physical quantities, world directions, object identity or slip from an unexplained measurement. No more evidence requests.
-Apply measurement limits to the headline and video overlay, not only to the alternative explanation. Without a verified physical layout, describe cells or channel groups rather than different physical parts of the grip or a redistribution of contact. Compare the whole supplied trajectory: differing minima, a net change, and the first onset of recovery are different observations. Earlier rebounds followed by another dip do not establish delayed recovery. Discrete endpoints alone cannot establish which response began first or whether a change persisted between samples.
+FINAL = '''Additional inspected evidence follows. Produce the normal episode annotation and optional "evidence_findings": [{"start_s":number,"end_s":number,"headline":"plain English","detail":"what this adds","overlay_detail":"short explanation for the video overlay","observation":"actual readings or images","claim":"interpretation with uncertainty","alternative":"other plausible explanation","confidence":"high|medium|low","adds_beyond_video":true,"evidence":[{"evidence_id":"exact inspection id","time_s":[exact supplied times],"columns":[supplied component indices, for numeric data]}]}]. Empty findings are valid. Cite only aligned inspected samples/images. The finding interval must be covered by the cited inspection windows together, with no uncovered gap. Use separate findings for distinct brief events. Do not span disconnected spikes or attempts with one continuous event interval. Keep headlines short and describe the specific added observation or supported interpretation in plain language. Saying only that a signal changes is not informative. Omit a finding if neither a concrete added observation nor a useful supported implication can be stated. If physical meaning is unresolved, describe the concrete observed pattern. Supply overlay_detail as one short sentence explaining what this adds and essential uncertainty. These two fields appear together on video; avoid repeating the headline or filling the card with technical measurements. Preserve the concrete added information across headline and overlay_detail, including any supported comparison, temporal pattern or contrast with recorded state. State what the sensor adds to the visible action. Its timing may coincide with that action; the added information can be localized loading, its redistribution, measured state, or a supported contrast that ordinary scene RGB alone cannot establish. Do not invent a comparison or physical explanation to make a finding sound informative. Compare repeated phases when their measurements differ. A stable sampled response can be informative when it distinguishes phases; do not infer continuous stability between samples or manufacture a finding for every repetition. Sparse readings do not establish that a signal remained elevated between samples. Contextual images can cover a shorter interval than the supporting measurements. For useful native data without verified episode alignment, use null start_s and end_s and cite "rows": [exact inspected source-row indices] instead of time_s. For useful original metadata, also use null start_s/end_s and cite {"evidence_id":"exact inspection id","pointer":"exact inspected JSON pointer"}. Metadata findings must reason about an implication or discrepancy, not merely repeat a field. Untimed findings are recording-level information, never synchronized events. Do not repeat existing sensor findings. Do not infer calibrated physical quantities, world directions, object identity or slip from an unexplained measurement. No more evidence requests.
+Apply measurement limits to the headline and video overlay, not only to the alternative explanation. Without a supplied physical layout, describe cells or channel groups rather than anatomical locations. A publisher_candidate layout supports only a conditional interpretation under that layout, not a verified hardware match. When supplied regional response, hand geometry or gripper state, and video agree, assess the supported manipulation hypothesis, such as relative grip tightening, regional easing or changing contact while the jaw stays fixed. Keep the candidate mapping dependency explicit in the interpretation and retain essential uncertainty in the headline or overlay. A mapping or response convention from a publisher is not a physical force calibration. Compare the whole supplied trajectory: differing minima, a net change, and the first onset of recovery are different observations. Earlier rebounds followed by another dip do not establish delayed recovery. Discrete endpoints alone cannot establish which response began first or whether a change persisted between samples.
 Measurements can add useful scale to a change already visible in RGB. A task-relevant change in finger response, camera-relative surface depth or measured effort can add information even when the visual action already has a subgoal. Explain what the measurement establishes and what it cannot establish. For depth, verify the marked regions cover the intended surfaces; distinguish region medians from tracked-point displacement or world-space clearance. Do not turn arbitrary region statistics into an annotation without a useful interpretation.
 '''
 
@@ -1594,8 +1632,10 @@ def replay_selection(access, saved):
 
 def final_content(content, image_bytes, access, doc, extra, *, image_limit, image_bytes_limit, image_inflation):
     """The evidence suffix shared by dispatch and offline request verification."""
-    addition = [{'type': 'text', 'text': FINAL + '\nINSPECTION COVERAGE\n' +
-                packed(Access.coverage_summary(doc))}] + extra
+    from label import prompts
+    addition = [{'type': 'text', 'text': prompts.EVIDENCE_CONTRACT + '\nINSPECTED EVIDENCE CONTRACT\n' + FINAL
+                + '\nINSPECTION COVERAGE\n' + packed(Access.coverage_summary(doc))}] + extra
+    addition.append({'type': 'text', 'text': prompts.EVIDENCE_REVIEW})
     extra_images = [part for part in addition if part.get('type') == 'image_url']
     extra_bytes = sum(len(base64.b64decode(part['image_url']['url'].split(',', 1)[1])) for part in extra_images)
     if ((image_bytes + extra_bytes) * image_inflation > image_bytes_limit

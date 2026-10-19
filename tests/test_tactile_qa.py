@@ -100,7 +100,11 @@ def test_request_cites_only_camera_frames_that_reach_the_model(tmp_path, monkeyp
     monkeypatch.setattr(me, 'frames', decoded_with_unused_frames)
     request = me.build_request(ep_dir, cell_w=192)
     camera = next(s for s in request['sensor_evidence']['sensors'] if s['id'] == 'camera:extra1')
-    assert not set(camera['times']).intersection(excluded)
+    native_times = {row['source_time_s'] for row in camera.get('native_captures') or []}
+    # Native supplemental grids can independently supply a source capture that
+    # was absent from the scene grid. An unused decoded image alone cannot.
+    assert not (set(camera['times']) - native_times).intersection(excluded)
+    assert len(native_times) == request['native_tactile_frames']
 
 
 def test_repeated_context_refresh_preserves_withheld_findings(tmp_path):

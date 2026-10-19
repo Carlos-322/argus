@@ -363,7 +363,7 @@ def label_episode(ep_dir: Path, out_path: Path, *, model: str, reasoning: str, a
                        'camera_observation_labels': req['camera_observation_labels']}
                       if 'camera_observations' in req['schema_fields'] else {}),
                    "grid_cols": req["grid_cols"], "cell": req["cell"],
-                   "n_timesteps": len(pl["ks"]), "n_frames_sent": len(pl["ks"]) * len(req["cam_labels"]),
+                   "n_timesteps": len(pl["ks"]), "n_frames_sent": len(pl["ks"]) * len(req["cam_labels"]) + req.get("native_tactile_frames", 0),
                    "n_image_parts": req["n_images"], "fullres_frames": ["first", "last"],
                    "contact_detail_s": req["contact_s"], "resolution_route": route,
                    "timesteps_s": req["timesteps"], "detail": DETAIL, "circular_image": req["lens"],

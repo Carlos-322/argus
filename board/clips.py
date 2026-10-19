@@ -110,6 +110,9 @@ KEY_S = 2                    # a keyframe every 2 s, so a seek decodes at most 2
 MIN_DECODE_FPS = 1.0         # the slowest any reader decodes a frame, for the time a cut may take to begin
 DEPTH_CRF = 26               # a depth clip: its colour shading carries sensor noise that CRF 20 keeps at about
                              # five times the colour clip's size; 26 halves that and the shapes stay as clear
+DEPTH_ENC_TAG = f'argus-depth-crf{DEPTH_CRF}-source-presence-v1'
+DEPTH_SOURCE_FPS = 30
+DEPTH_SOURCE_ENC_TAG = f'argus-depth-crf{DEPTH_CRF}-source-frames-v1'
 # names the recipe; board/static.py folds it into its media names, so a new recipe gets new names
 ENC_TAG = f"h264-crf{CRF}-{PRESET}-main{MAIN_BOX[0]}x{MAIN_BOX[1]}-side{SIDE_BOX[0]}x{SIDE_BOX[1]}-kf{KEY_S}s-srcts-camclock-v5"
 
@@ -468,6 +471,8 @@ def extract_depth(ep_dir: Path, cam: str, colour_mp4: Path, out_mp4: Path, threa
 
     from board.hands import probe_pts
     from label import depth as dp
+    if colour_mp4 is None:
+        return extract_depth_source(ep_dir, cam, out_mp4, threads)
     entry = dp.load(ep_dir)[cam]
     w, h, tb, pts = probe_pts(colour_mp4)
     sources = json.loads((ep_dir / "sources.json").read_text())
@@ -489,7 +494,8 @@ def extract_depth(ep_dir: Path, cam: str, colour_mp4: Path, out_mp4: Path, threa
     if ctx.get("presentation_times") or ctx.get("depth_presentation_times"):
         from prepare.camera_clock import pairing_times
         times.update(pairing_times(ep_dir, ctx))
-    if cam in times and f"depth_{cam}" in times:
+    timed = cam in times and f"depth_{cam}" in times
+    if timed:
         ct = times[cam][skip:skip + len(pts)]
         want = depth_frame_map(ct, times[f"depth_{cam}"]) + [None] * (len(pts) - len(ct))
         if len(ct) < len(pts):
@@ -499,6 +505,21 @@ def extract_depth(ep_dir: Path, cam: str, colour_mp4: Path, out_mp4: Path, threa
     else:
         # no capture times: the depth stream's frames are the camera's own, one for one
         want = [skip + i if skip + i < len(dpts) else None for i in range(len(pts))]
+    anchor = main_cam(sources)
+    km = entry['km']
+    if cam == anchor:
+        # The stored map retains absent source rows and part boundaries. Re-pairing the surviving packets would
+        # fill a missing source row with a neighboring reading, or shift later rows when no clock was recorded.
+        available = len(ct) if timed else len(pts)
+        want = [int(km[skip + i]) if i < available and skip + i < len(km)
+                and 0 <= km[skip + i] < len(dpts) else None for i in range(len(pts))]
+    elif timed and anchor in times:
+        # Side cameras keep their own nearest depth timing, but cannot fill an authoritative hole in the
+        # anchor's source presence map. Project that presence onto this camera's retained clip frames.
+        anchor_rows = depth_frame_map(times[cam][skip:skip + len(pts)], times[anchor])
+        for i, row in enumerate(anchor_rows):
+            if row is not None and row < len(km) and km[row] < 0:
+                want[i] = None
     index_of = {int(p): i for i, p in enumerate(dpts)}
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
     tmp = temporary_path(out_mp4, '.mp4')
@@ -511,6 +532,7 @@ def extract_depth(ep_dir: Path, cam: str, colour_mp4: Path, out_mp4: Path, threa
         with src, av.open(str(tmp), "w", format="mp4",
             options={"movflags": "+faststart", **({"movie_timescale": str(tb.denominator)}
                                                    if tag == HALFWAY_TAG else {})}) as dst:
+            dst.metadata['description'] = DEPTH_ENC_TAG
             if tag == HALFWAY_TAG:
                 dst.metadata["comment"] = tag          # timed as its colour clip, so read the same way
             if not src.streams.video:
@@ -583,6 +605,69 @@ def extract_depth(ep_dir: Path, cam: str, colour_mp4: Path, out_mp4: Path, threa
     finally:
         tmp.unlink(missing_ok=True)
     return issues
+
+
+def extract_depth_source(ep_dir: Path, view: str, out_mp4: Path, threads: int = 2) -> list[dict]:
+    """Replay an unpaired stream by native source-frame ordinal, independently of the episode clock."""
+    from fractions import Fraction
+    import av
+    import numpy as np
+    from PIL import Image
+    from label import depth as dp
+    entry = dp.load(ep_dir)[view]
+    pts = entry.get('pts')
+    if pts is None or not len(pts):
+        raise ValueError('Unpaired depth has no recorded packet addresses')
+    with depth_decoding():
+        with av.open(str(entry['packed'])) as source:
+            stream = source.streams.video[0]
+            width = int(entry.get('width') or stream.codec_context.width)
+            height = int(entry.get('height') or stream.codec_context.height)
+    width, height, _ = clip_size(width, height, False)
+    width, height = max(2, width), max(2, height)
+    rng = None
+    if not dp.metric_scale(entry) and not entry.get('range'):
+        rows = np.linspace(0, len(pts) - 1, min(24, len(pts))).astype(int).tolist()
+        rng = dp.scale_range(dp.decode(entry, pts, rows).values())
+    out_mp4.parent.mkdir(parents=True, exist_ok=True)
+    temporary = temporary_path(out_mp4, '.mp4')
+    lost = []
+    try:
+        with av.open(str(entry['packed'])) as source, av.open(str(temporary), 'w', format='mp4',
+                                                           options={'movflags': '+faststart'}) as output:
+            output.metadata['description'] = DEPTH_SOURCE_ENC_TAG
+            incoming = source.streams.video[0]
+            incoming.codec_context.thread_count = threads
+            source.seek(int(pts[0]), stream=incoming, backward=True, any_frame=False)
+            frames = iter(decoded_frames(source, incoming))
+            current = next(frames, None)
+            outgoing = output.add_stream('libx264', rate=DEPTH_SOURCE_FPS)
+            outgoing.width, outgoing.height, outgoing.pix_fmt = width, height, 'yuv420p'
+            outgoing.codec_context.thread_count = threads
+            outgoing.options = {'crf': str(DEPTH_CRF), 'preset': PRESET, 'profile': 'high'}
+            clock = Fraction(1, DEPTH_SOURCE_FPS)
+            for row, packet in enumerate(pts):
+                while current is not None and (current.pts is None or current.pts < packet):
+                    current = next(frames, None)
+                if current is not None and current.pts == packet:
+                    image = dp.picture(dp._array(current, entry), entry, rng)
+                    image = image.resize((width, height), Image.Resampling.NEAREST)
+                    pixels = np.asarray(image)
+                else:
+                    pixels = np.zeros((height, width, 3), np.uint8)
+                    lost.append(row)
+                frame = av.VideoFrame.from_ndarray(pixels, format='rgb24')
+                frame.pts, frame.time_base = row, clock
+                for encoded in outgoing.encode(frame):
+                    output.mux(encoded)
+            for encoded in outgoing.encode():
+                output.mux(encoded)
+        os.replace(temporary, out_mp4)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return ([{'kind': DEPTH_NOT_DECODABLE, 'camera': view, 'source_frames': lost,
+              'what': f'{view} has {len(lost)} undecodable source frames; those sequence frames are black.'}]
+            if lost else [])
 
 
 @contextlib.contextmanager
@@ -814,8 +899,7 @@ def episode_jobs(ep_dir: Path, mp4_dir: Path, force: bool, prefix: str = ""):
 
 
 def depth_jobs(ep_dir: Path, mp4_dir: Path, force: bool, prefix: str = "") -> list:
-    """(episode folder, camera, colour clip, depth clip, fps) for each camera of the episode with a depth stream whose
-    colour clip exists and whose depth clip is missing or does not match the colour clip's frame count."""
+    """Pending depth previews. Paired streams follow their colour clip; unpaired streams replay native source rows."""
     dj = ep_dir / "depth.json"
     src_p = ep_dir / "sources.json"
     if not dj.exists() or not src_p.exists():
@@ -825,14 +909,21 @@ def depth_jobs(ep_dir: Path, mp4_dir: Path, force: bool, prefix: str = "") -> li
     ctx_p = ep_dir / "context.json"
     fps = float((json.loads(ctx_p.read_text()) if ctx_p.exists() else {}).get("fps") or 30.0)
     jobs = []
-    for cam in json.loads(dj.read_text()):
-        if cam not in sources:
-            continue
-        colour, out = clip_path(mp4_dir, eid, cam), depth_clip(mp4_dir, eid, cam)
-        n = clip_frames(colour) if colour.exists() else 0
+    for cam, entry in json.loads(dj.read_text()).items():
+        unpaired = cam not in sources or entry.get('paired_camera', cam) is None
+        colour, out = (None if unpaired else clip_path(mp4_dir, eid, cam)), depth_clip(mp4_dir, eid, cam)
+        n = int(entry.get('n_frames') or 0) if unpaired else clip_frames(colour) if colour.exists() else 0
         if not n:
             continue
-        if force or not (out.exists() and clip_frames(out) == n):
+        current = False
+        if not force and out.exists() and clip_frames(out) == n:
+            import av
+            try:
+                with av.open(str(out)) as preview:
+                    current = preview.metadata.get('description') == (DEPTH_SOURCE_ENC_TAG if unpaired else DEPTH_ENC_TAG)
+            except (OSError, av.error.FFmpegError):
+                pass
+        if force or not current:
             jobs.append((ep_dir, cam, colour, out, fps))
     return jobs
 

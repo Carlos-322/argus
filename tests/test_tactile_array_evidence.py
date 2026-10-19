@@ -151,6 +151,8 @@ def test_sensor_clock_accepts_timestamp_rounding_but_rejects_real_overrun():
                  [{'name': 'pressure', 'shape': [4, 4]}])
     ep['times']['exo'] = np.linspace(0, 4.4992719999999995, 5)
     doc = se.build(ep, {'n': 5, 'ks': [0, 2, 4]})
+    # Isolate sensor coverage inside a wider scene window.
+    doc['episode_window_s'] = [-1., 6.]
     finding = {'start_s': 0, 'end_s': 4.499272, 'headline': 'Cell readings fluctuate',
                'claim_type': 'response_change', 'adds_beyond_video': True,
                'evidence': [{'sensor_id': 'signal:pressure', 'time_s': [0, 4.499272]}]}

@@ -101,6 +101,35 @@ def _measurement(reference, a, b, valid, agreement):
     return row
 
 
+def _correspondence(row, a, b):
+    """Reject local matches contradicted by global contrast or competing repeated-pattern alignments."""
+    if row.get('p95_px') is None:
+        return row
+    shape = tuple(1 << (2 * size - 2).bit_length() for size in a.shape)
+    correlation = np.fft.irfftn(np.fft.rfftn(b, s=shape, axes=(0, 1)) *
+        np.fft.rfftn(a[::-1, ::-1], s=shape, axes=(0, 1)), s=shape, axes=(0, 1))
+    cy, cx = np.asarray(a.shape) - 1
+    radius = min(64, min(a.shape) // 3)
+    search = correlation[cy-radius:cy+radius+1, cx-radius:cx+radius+1].copy()
+    y, x = np.unravel_index(np.argmax(search), search.shape)
+    peak = float(search[y, x])
+    shift = np.array([x-radius, y-radius], dtype=float)
+    search[max(0, y-3):y+4, max(0, x-3):x+4] = -np.inf
+    ratio = float(np.max(search) / peak) if peak > 0 else 1.
+    disagreement = float(np.linalg.norm(shift - [row['mean_dx_px'], row['mean_dy_px']]))
+    # A deforming pad need not have one global translation peak. Competing global
+    # translations qualify coherent local fields, rather than erasing elastic motion.
+    coherent = row['local_p95_px'] <= max(.35, 2 * row['threshold_agreement_p95_px'])
+    ambiguous = (ratio >= .98 and coherent) or disagreement > max(1., row['p95_px'] * .5)
+    quality = {'global_translation_px': shift.tolist(), 'alternative_peak_ratio': round(ratio, 4),
+               'coherent_local_field': coherent, 'ambiguous': ambiguous}
+    if ambiguous:
+        return {**{key: row[key] for key in ('time_s', 'from_s', 'to_s', 'matched', 'tracked_fraction') if key in row}, 'p95_px': None,
+                'correspondence': quality,
+                'quality_gap': 'Competing repeated-pattern alignments or global contrast movement contradict a unique local dot correspondence.'}
+    return {**row, 'correspondence': quality}
+
+
 def measure(frames, times):
     """Evidence at supplied instants, with explicit quality gaps and image coordinates."""
     ks = sorted(k for k in frames if k in times)
@@ -141,11 +170,22 @@ def measure(frames, times):
     chosen = set(np.rint(np.linspace(0, len(pairs)-1, min(8, len(pairs)))).astype(int))
     chosen.update(sorted(range(len(pairs)), key=lambda i: pairs[i].get('p95_px') or 0,
                          reverse=True)[:MAX_COMPARISONS-len(chosen)])
-    selected = [pairs[i] for i in sorted(chosen)]
+    contrast = {ks[0]: _contrast(first)}
+    def pixels(k):
+        if k not in contrast:
+            contrast[k] = _contrast(_image(frames[k], width))
+        return contrast[k]
+    selected = [_correspondence(pairs[i], pixels(ks[i]), pixels(ks[i+1])) for i in sorted(chosen)]
+    if not any(pair['p95_px'] is not None for pair in selected):
+        return None
     used_times = {times[ks[0]], *(p['from_s'] for p in selected), *(p['to_s'] for p in selected)}
+    selected_samples = []
+    for k, row in zip(ks, samples):
+        if row['time_s'] in used_times:
+            selected_samples.append(_correspondence(row, pixels(ks[0]), pixels(k)))
     return {'version': 1, 'analysis_size': list(first.size), 'reference_s': times[ks[0]],
-            'reference_markers': len(reference), 'samples': [r for r in samples if r['time_s'] in used_times],
+            'reference_markers': len(reference), 'samples': selected_samples,
             'pairs': selected, 'comparisons_total': len(pairs),
-            'method': 'Contrast-weighted dot centers at two thresholds. Pairs compare the same valid markers. Coherent movement is retained; local_p95_px separately removes a fitted affine field.',
+            'method': 'Contrast-weighted dot centers at two thresholds. Global contrast rejects competing pattern alignments or movement inconsistent with local matches. Remaining local matches are not certified marker identities. Coherent movement is retained; local_p95_px separately removes a fitted affine field.',
             'coordinates': 'Pixels at the common analysis_size, x right and y down. No world direction, pressure or force calibration. The first supplied frame is a reference, not a certified unloaded pad.',
-            'coverage': 'Only supplied image instants. Large movement, lost dots and ambiguous centers produce quality gaps. Sparse comparisons cannot establish continuous slip or complete transient coverage.'}
+            'coverage': 'Only supplied image instants. Large movement, lost dots and ambiguous centers can produce quality gaps. Repeated patterns can alias adjacent dots; zero reported displacement does not establish no movement. Sparse comparisons cannot establish continuous slip or complete transient coverage.'}
