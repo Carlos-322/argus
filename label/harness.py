@@ -1236,7 +1236,7 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
                 doc, extra = ea.discover(evidence_access, content, select, cache, reserve_cost=reserve,
                                         reserve_dispatch=selection_dispatch, settle_dispatch=settle_selection,
                                         force_refresh=force_refresh, refresh_id=inspection_refresh_id,
-                                        ledger_managed=(pricing_quote is not None and reserve_selection is not None
+                                        ledger_managed=(require_known_pricing and reserve_selection is not None
                                                         and settle_selection is not None),
                                         image_limit=MAX_IMAGES, image_bytes_limit=IMAGE_LIMIT_BYTES / IMAGE_SIZE_INFLATION)
             except Exception as error:

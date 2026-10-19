@@ -761,11 +761,18 @@ class Access:
         if window:
             description['request_window'] = window.strip()
         supplied = se._array_projection(se._prompt(self.supplied)[1]) if self.supplied.get('sensors') else {'sensors': [], 'series': []}
+        series = []
         for row in supplied.get('series') or []:
-            times = row.pop('times', [])
-            row.pop('values', None)
-            row['samples'] = len(times)
-            row['time_range_s'] = [min(times), max(times)] if times else None
+            times = row.get('times') or []
+            summary = {key: row[key] for key in ('id', 'sensor_id', 'label', 'unit',
+                'native_samples', 'sampled', 'derivation_id') if key in row}
+            columns = row.get('columns') or []
+            summary.update(samples=len(times), valid_samples=sum(value is not None for value in row.get('values') or []),
+                           time_range_s=[min(times), max(times)] if times else None,
+                           operation=bounded(row.get('operation') or '', 240),
+                           source_columns=columns if isinstance(columns, list) and len(columns) <= 8 else
+                               {'count': len(columns)} if isinstance(columns, list) else columns)
+            series.append(summary)
         sensors = []
         for sensor in supplied.get('sensors') or []:
             summary = {key: sensor[key] for key in (
@@ -803,7 +810,7 @@ class Access:
             sensors.append(summary)
         description['sensor_annotations_generated'] = False
         description['already_supplied_sensor_evidence'] = {
-            'sensors': sensors, 'series': supplied.get('series') or [],
+            'sensors': sensors, 'series': series,
             'coverage': supplied.get('coverage') or [],
             'limitations': bounded(supplied.get('limitations') or [], 2000)}
         parts = [{'type': 'text', 'text': 'RECORDING CONTEXT\n' + packed(description)}]

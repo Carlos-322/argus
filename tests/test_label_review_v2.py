@@ -529,6 +529,45 @@ def test_budget_increase_resumes_undispatched_selection(tmp_path, monkeypatch, i
     assert sent == ['selection', 'final']
 
 
+@pytest.mark.parametrize('cap', [0., .1, 20.])
+def test_known_rate_inspection_uses_the_funded_batch_cap(tmp_path, monkeypatch, cap):
+    from test_camera_timing import recording
+    from label import evidence_access as ea
+    ep = recording(tmp_path, np.arange(12) / 30)
+    context_path = ep / 'context.json'
+    context = json.loads(context_path.read_text())
+    context['instruction'] = 'Source task context. ' * 12000
+    context['new_fact'] = {'value': 7}
+    context_path.write_text(json.dumps(context))
+    request = harness.me.build_request(ep, model=harness.DEFAULT_MODEL, reasoning='medium', cell_w=128,
+                                       inspect_evidence=True)
+    access = request['evidence_access']
+    selection = access.selection_content(request['content']) + [{'type': 'text', 'text': ea.SELECTION +
+                 '\nFIELD INVENTORY\n' + ea.packed(access.page())}]
+    assert harness.final_cost_bound(selection, ea.MAX_SELECTION_TOKENS) > ea.MAX_SELECTION_COST
+    sent = []
+    def provider(request, timeout):
+        assert request.get_method() != 'GET', 'Known model rates require no external quote'
+        selecting = 'FIELD INVENTORY' in json.dumps(json.loads(request.data)['messages'])
+        sent.append('selection' if selecting else 'final')
+        return answer({'requests': []} if selecting else {'task_summary': 'The hand reaches.'})
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', provider)
+    out = tmp_path / 'funded'
+    rc = harness.run_batch([ep], out, keys=['sk-or-test'], concurrency=1, force=False,
+        model=harness.DEFAULT_MODEL, reasoning='medium', max_tokens=100, timeout=1, cell_w=128, max_spend=cap)
+    if cap == 0:
+        result = json.loads((out / (ep.name + '.json')).read_text())
+        assert rc == 0 and sent == ['final']
+        assert result['evidence_inspection']['status'] == 'incomplete'
+    elif cap < 1:
+        assert rc == 1 and sent == []
+    else:
+        result = json.loads((out / (ep.name + '.json')).read_text())
+        assert rc == 0 and sent == ['selection', 'final']
+        assert result['evidence_inspection']['status'] == 'complete'
+        assert harness.episode_cost(result) == pytest.approx(.02)
+
+
 def test_native_search_fee_without_enforceable_ceiling_refuses_paid_dispatch(tmp_path, monkeypatch):
     from test_camera_timing import recording
     ep = recording(tmp_path, np.arange(12) / 30)
