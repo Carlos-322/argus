@@ -198,3 +198,57 @@ def test_marker_comparison_can_use_other_supplied_pad_images_as_context():
         else:
             invalid['sensors'][1]['episode_alignment_verified'] = False
         assert not se.bind(invalid, [finding])['findings']
+
+
+def test_prompt_budget_preserves_small_optical_comparisons_and_quality_limits():
+    import json
+
+    _, doc = evidence({0: pad(), 4: pad(2)})
+    template = doc['sensors'][0]
+    doc['sensors'] = []
+    for channel in range(4):
+        sensor = copy.deepcopy(template)
+        sensor['id'] = f'camera:extra{channel + 1}'
+        sensor['times'] = list(range(48))
+        motion = sensor['marker_motion']
+        pair = motion['pairs'][0]
+        sample = motion['samples'][-1]
+        # A full-episode request includes both large transitions and smaller
+        # changes during a hold. Magnitude alone does not rank their usefulness.
+        motion['pairs'] = [{**copy.deepcopy(pair), 'from_s': 2*i, 'to_s': 2*i+1,
+                            'p95_px': .4 if i == 12 else 3.,
+                            'local_p95_px': .2 if i == 12 else 1.5,
+                            'correspondence': {'global_translation_px': [0., 0.],
+                                             'alternative_peak_ratio': .8,
+                                             'coherent_local_field': False, 'ambiguous': False}}
+                           for i in range(16)]
+        motion['samples'] = [{**copy.deepcopy(sample), 'time_s': t,
+                              'p95_px': None if t == 24 else 2.,
+                              'correspondence': {'global_translation_px': [0., 0.],
+                                               'alternative_peak_ratio': 1. if t == 24 else .8,
+                                               'coherent_local_field': True, 'ambiguous': t == 24}}
+                             for t in sensor['times']]
+        motion['comparisons_total'] = 64
+        doc['sensors'].append(sensor)
+    original = copy.deepcopy(doc)
+    finding = {'start_s': 24, 'end_s': 25, 'headline': 'Contact changes during the hold',
+               'claim_type': 'marker_motion', 'adds_beyond_video': True,
+               'evidence': [{'sensor_id': 'camera:extra1', 'time_s': [24, 25]}]}
+    assert se.bind(doc, [finding])['findings'] == [finding]
+    sent = se.prompt(doc)
+    assert len(sent.encode()) <= se.MAX_PROMPT_BYTES
+    projected = json.loads(sent.split('\n')[-1])
+    for before, after in zip(original['sensors'], projected['sensors']):
+        for key in ('pairs', 'samples'):
+            table = after['marker_motion'][key]
+            restored = [{k: v for k, v in zip(table['columns'], row) if v is not None}
+                        for row in table['rows']]
+            expected = [{**{k: v for k, v in row.items() if v is not None and k != 'correspondence'},
+                         **{'correspondence.' + k: v for k, v in row.get('correspondence', {}).items()}}
+                        for row in before['marker_motion'][key]]
+            assert restored == expected
+    assert doc == original
+    # A reference-relative quality gap cannot erase a valid adjacent pair, but
+    # that pair must not become usable when its own correspondence fails.
+    doc['sensors'][0]['marker_motion']['pairs'][12]['p95_px'] = None
+    assert not se.bind(doc, [finding])['findings']
