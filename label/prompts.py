@@ -26,7 +26,10 @@ EVIDENCE_CONTRACT = (
     'Sensor findings use their own source evidence, native timestamps and event granularity; the visual timeline '
     'and short key_events rules do not restrict them. A sensor-supported change can coincide with a visible action '
     'or occur when the hand or object is outside the RGB view. Preserve the difference between a measured change '
-    'and an inferred physical explanation. Empty findings remain valid.\n')
+    'and an inferred physical explanation. adds_beyond_video means information beyond ordinary scene/task footage '
+    'and the behavioral description. Sensor images, sensor video streams and measurement visualizations are '
+    'eligible supporting evidence, even when rendered as RGB or included in the same frame grids. '
+    'Empty findings remain valid.\n')
 
 EVIDENCE_REVIEW = (
     '\nApply the sensor and inspected-evidence contracts independently of visual milestone selection. Review the '

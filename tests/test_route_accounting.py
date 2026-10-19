@@ -829,9 +829,10 @@ def test_cache_only_inspection_does_not_consume_remaining_cap_again(tmp_path, mo
     monkeypatch.setattr(ea, 'discover', lambda *a, **kw: ({'digest': 'same-cache', 'cost_usd': .02,
         'rounds': [], 'limitations': []}, []))
     req = build_with_access(ep, cell_w=128)
-    addition = [{'type': 'text', 'text': ea.FINAL + '\nINSPECTION COVERAGE\n' +
-                 ea.packed(ea.Access.coverage_summary({'limitations': []}))}]
-    cap = harness.final_cost_bound(req['content'] + addition, 100) + .000001
+    content, _, _ = ea.final_content(req['content'], req['image_bytes'], req['evidence_access'],
+        {'limitations': []}, [], image_limit=harness.MAX_IMAGES,
+        image_bytes_limit=harness.IMAGE_LIMIT_BYTES, image_inflation=harness.IMAGE_SIZE_INFLATION)
+    cap = harness.final_cost_bound(content, 100) + .000001
     assert label_spend(job) == pytest.approx(.02)
     assert harness.run_batch([ep], out, keys=['sk-or-fixture'], concurrency=1,
         force=False, max_spend=cap, **args(cell_w=128)) == 0
