@@ -1,5 +1,6 @@
 """Reader and board rules retain the same evidence when used together."""
 import json
+import os
 import zipfile
 from pathlib import Path
 
@@ -8,7 +9,7 @@ import pytest
 
 from board import build, clips
 from board.families import Families
-from label import episode
+from label import atomic, episode
 from prepare import formats
 
 
@@ -18,13 +19,11 @@ def test_context_writers_keep_the_old_file_when_a_write_stops(tmp_path, monkeypa
     original = {"arbitrary": {"start_s": 37, "nested": [1, {"claim": "kept"}]}, "reader_issues": []}
     p.write_text(json.dumps(original))
     before = p.read_bytes()
-    write = Path.write_text
 
-    def stopped(path, text, *args, **kwargs):
-        if path.name.endswith("json") or path.name.endswith("tmp"):
-            write(path, text[:7], *args, **kwargs)
-            raise OSError("write stopped")
-        return write(path, text, *args, **kwargs)
+    def stopped(fd):
+        # the stop lands where every writer's bytes reach the disk, so no writer can step around it
+        os.ftruncate(fd, 7)
+        raise OSError("write stopped")
 
     def change():
         if writer == "notes":
@@ -33,10 +32,11 @@ def test_context_writers_keep_the_old_file_when_a_write_stops(tmp_path, monkeypa
             clips.record_depth(tmp_path, "exo", [{"kind": "depth_clip_failed", "what": "failed", "camera": "exo"}])
 
     with monkeypatch.context() as m:
-        m.setattr(Path, "write_text", stopped)
+        m.setattr(atomic.os, "fsync", stopped)
         with pytest.raises(OSError, match="write stopped"):
             change()
     assert p.read_bytes() == before
+    assert sorted(x.name for x in tmp_path.iterdir()) == ["context.json"]   # no temporary file is left behind
     change()
     assert json.loads(p.read_text())["arbitrary"] == original["arbitrary"]
 

@@ -210,9 +210,11 @@ def test_a_main_camera_taken_out_with_no_capture_times_leaves_the_state_unaligne
     assert sp.jumps(ep)["not_assessed"] and "flagged" not in sp.jumps(ep)
     assert sp.grippers(ep)["actors"]                         # the state alone is still checked
     rows = {r["check"]: r for r in capture_qc.run_episode(ep)["checks"]}
-    for c in ("camera_state_alignment_mismatch", "video_frozen_run"):
-        assert rows[c]["status"] == "not_applicable" and "not on these cameras' frames" in rows[c]["why"], rows[c]
-        assert ":" not in rows[c]["why"]                     # a reason is whole sentences, read on the job page
+    c = "camera_state_alignment_mismatch"
+    assert rows[c]["status"] == "not_applicable" and "not on these cameras' frames" in rows[c]["why"], rows[c]
+    assert ":" not in rows[c]["why"]                         # a reason is whole sentences, read on the job page
+    # a frozen picture is judged from the pixels where the state cannot speak, and this camera never holds still
+    assert rows["video_frozen_run"]["status"] == "clear", rows["video_frozen_run"]
     assert ":" not in sp.pairing(ep)["not_assessed"]
     assert rows["invalid_state_shape"]["status"] == "clear"
 
@@ -265,7 +267,9 @@ def test_the_cameras_spans_are_measured_again_on_the_new_main_camera(tmp_path):
     eps = tmp_path / "episodes"
     rep = formats.convert(up, "teleop_arms", eps, "mine", float("inf"), grouping={})
     ep = eps / rep["episodes"][0]["episode_id"]
-    assert [x["kind"] for x in json.loads((ep / "context.json").read_text())["reader_issues"]] == ["camera_coverage_partial"]
+    # the reader decodes the main camera once and names its damage; board clips then finds it does not decode at all
+    assert sorted(x["kind"] for x in json.loads((ep / "context.json").read_text())["reader_issues"]) == [
+        "camera_coverage_partial", "frames_damaged"]
     assert _clips(eps, tmp_path / "clips").returncode == 0
     ctx = json.loads((ep / "context.json").read_text())
     assert [x["kind"] for x in ctx["reader_issues"]] == ["camera_not_decodable"], ctx["reader_issues"]

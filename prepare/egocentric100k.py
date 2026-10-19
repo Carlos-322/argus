@@ -31,9 +31,10 @@ from pathlib import Path
 
 import numpy as np
 
-from label.atomic import write_atomic
+from label.atomic import write_atomic, write_bytes_atomic
 from prepare import cli
 from prepare import hub
+from label.presented import presented_pts
 
 # Data Review and python -m prepare folder hand an upload to an adapter that recognizes it (prepare/formats.py
 # upload_adapters); this one reads only the published dataset
@@ -117,9 +118,7 @@ def download(shard: str, raw: Path, member: str | None = None, seed: int | None 
         clip_meta = json.loads(_get(url, (meta[2], meta[2] + meta[1] - 1))[0]) if meta else {}
         mp4.parent.mkdir(parents=True, exist_ok=True)
         js.write_text(json.dumps(clip_meta, indent=1))
-        part = mp4.with_suffix(".part")
-        part.write_bytes(_get(url, (data_off, data_off + size - 1))[0])
-        part.replace(mp4)
+        write_bytes_atomic(mp4, _get(url, (data_off, data_off + size - 1))[0])
     return name
 
 
@@ -132,7 +131,7 @@ def prepare_clip(shard: str, member: str, raw: Path, out_root: Path) -> dict:
     ep.mkdir(parents=True, exist_ok=True)
     with av.open(str(mp4)) as c:
         st = c.streams.video[0]
-        pts = sorted(p.pts for p in c.demux(st) if p.pts is not None and not p.is_discard)
+        pts = presented_pts(c, st)
         tb, w, h = st.time_base, st.codec_context.width, st.codec_context.height
     n = len(pts)
     fps = float(clip_meta.get("fps") or 30.0)

@@ -200,6 +200,29 @@ def preparation_checkpoint(job: Path, receipt: dict) -> None:
     write_atomic(job / 'preparation_receipt.json', receipt)
 
 
+def smallest_unit_reserve(job: Path, out: Path) -> float | None:
+    """The least any unit with no usable label yet can reserve for its final call, from the dry run's requests (their
+    output limit, since routing and evidence selection change the prompt), or None when that is unknown (a model
+    priced by quote) or every unit is labelled. A refusal on it never turns away a run the cap could pay for."""
+    from label.harness import annotation_complete
+    bounds = []
+    for dry in sorted((job / 'dry').glob('episode_*.json')):
+        try:
+            done = json.loads((out / dry.name).read_text())
+            if annotation_complete(done) and not done.get('dry_run'):
+                continue
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+        try:
+            bound = (json.loads(dry.read_text()).get('request') or {}).get('final_cost_floor_usd')
+        except (OSError, ValueError, AttributeError):
+            return None
+        if not isinstance(bound, (int, float)) or isinstance(bound, bool) or not math.isfinite(bound):
+            return None
+        bounds.append(float(bound))
+    return min(bounds) if bounds else None
+
+
 def unverified_preparation_artifacts(job: Path) -> bool:
     """A newly acquired execution lease is not a saved preparation artifact."""
     if any((job / name).exists() for name in ('episodes', 'episodes_unclipped', 'report.json',
@@ -284,7 +307,7 @@ def main() -> int:
     ap.add_argument("--timeout", type=int, default=None,
                     help="seconds per labeling request (default: the harness's 600 seconds)")
     ap.add_argument('--retry-received', action='append', default=[], metavar='EPISODE',
-                    help='retry only this unit with a received unusable reply; repeat for additional units')
+                    help='send this unit alone again: one with a received unusable reply, or one whose earlier charge is unknown (that possible charge stays counted against the cap); repeat for additional units')
     ap.add_argument('--force', action='store_true', help='explicitly refresh paid units, retaining prior charges and replies')
     ap.add_argument('--max-tokens', type=int, default=None, help='completion limit for new label requests')
     ap.add_argument("--max-minutes", type=float, default=0, help="read at most this much footage (default: all)")
@@ -308,6 +331,12 @@ def main() -> int:
     from label.harness import execution_lock
     job = a.out.resolve()
     job.mkdir(parents=True, exist_ok=True)
+    units = sorted(p.name for p in (job / 'units').glob('episode_*'))
+    unknown = set(a.retry_received) - set(units)
+    if units and unknown:
+        # a retried unit received a reply in an earlier run, so it exists before this one prepares anything
+        raise SystemExit('--retry-received names unknown units: ' + ', '.join(sorted(unknown)) +
+                         '; available units: ' + ', '.join(units))
     with execution_lock(job) as lock_fd, execution_lock(job / 'run' / 'out') as output_lock_fd:
         return review_job(a, overrides, lock_fd, output_lock_fd)
 
@@ -423,16 +452,27 @@ def review_job(a, overrides, lock_fd, output_lock_fd) -> int:
     label_rc = 0
     try:
         remaining = dictionary_stage.remaining_label_budget(job, a.cap)
+        smallest = smallest_unit_reserve(job, run_dir / 'out')
+        if remaining > 0 and smallest is not None and remaining < smallest:
+            # nothing could be labelled, so nothing is paid for: routing and evidence selection would be wasted
+            print(f'the cap leaves ${remaining:.2f}, and labelling one unit reserves ${smallest:.2f} until it is '
+                  f'billed, mostly for its output limit; nothing was sent. Raise --cap, or lower --max-tokens to '
+                  f'reserve less.', flush=True)
+            remaining = 0.0
         if remaining > 0:
+            # the harness settles run.json itself if this wrapper is killed while it runs (label.run.finalize_worker)
+            label_env = {**env, 'ARGUS_STAGED_RUN_METADATA': str((run_dir / 'run.json').resolve())}
             label_rc = run_step(job, "label", [PY, "-m", "label.harness", "--episodes-root", str(job / "units"), "--out-dir",
                                     str(run_dir / "out"), "--concurrency", str(a.concurrency),
-                                    "--max-spend", str(remaining), *timeout_args, *retry_args], env, ok_codes=(0, 1))
+                                    "--max-spend", str(remaining), *timeout_args, *retry_args], label_env, ok_codes=(0, 1))
         else:
             label_rc = int(a.force or bool(a.retry_received))
             print('label budget exhausted by prior spending or outstanding reservations', flush=True)
             from label.harness import record_budget_refusal
             for dry in sorted((job / 'dry').glob('episode_*.json')):
-                record_budget_refusal(run_dir / 'out' / dry.name, json.loads(dry.read_text()))
+                # a unit the cap refused is a failure of this run, never a "done" with nothing labelled
+                if record_budget_refusal(run_dir / 'out' / dry.name, json.loads(dry.read_text())):
+                    label_rc = 1
         spend = dictionary_stage.dictionary_spend(job)
         label_cost = dictionary_stage.label_spend(job)
         complete = spend['complete'] and dictionary_stage.label_spend_complete(job)
@@ -464,4 +504,5 @@ def review_job(a, overrides, lock_fd, output_lock_fd) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from label.harness import cli
+    raise SystemExit(cli(main))

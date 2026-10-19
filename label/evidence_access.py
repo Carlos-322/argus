@@ -5,6 +5,7 @@ import base64
 import copy
 import hashlib
 import io
+import glob
 import json
 import math
 import re
@@ -1452,11 +1453,13 @@ def merge(parts, ep_dir=None):
 
 
 def rejected_selection_proof(record):
-    """A durable unpaid rejection has explicit HTTP and numeric receipt types, never diagnostic prose."""
+    """A durable unpaid rejection has explicit receipt types, never diagnostic prose. Which failures are unpaid is
+    decided once, where the request is sent (label/harness.py _post, DispatchError.verified_unpaid): an error status,
+    or a request that never left the machine (no status). The receipt records that verdict, and this reads it back
+    rather than keeping a second, shorter list of statuses that would turn a saved unpaid failure into a charge."""
     def attempt(row):
         return (isinstance(row, dict) and row.get('state') == 'rejected unpaid'
-                and type(row.get('http_status')) is int and (row['http_status'] in (401, 402)
-                    or row['http_status'] == 429 and row.get('rejection_code') == 'insufficient_quota')
+                and (row.get('http_status') is None or type(row.get('http_status')) is int)
                 and type(row.get('http_attempt')) is int and row['http_attempt'] == 1
                 and type(row.get('cost_usd')) in (int, float) and row['cost_usd'] == 0
                 and math.isfinite(row['cost_usd']) and row.get('verified_unpaid') is True)
@@ -1550,7 +1553,17 @@ def replay_selection(access, saved):
     for index, row in enumerate(doc['rounds']):
         if row.get('state') != 'received' or not isinstance(row.get('response'), dict):
             raise ValueError('saved selection has no returned response')
-        count, requested = replay_selection_round(access, row, doc, extra, count, skipped, strict=True)
+        # The replay does exactly what the paid run did with each reply (discover), and the rebuilt request must
+        # then match the paid one byte for byte (request_attestation), which is the proof; a reply the run could not
+        # read is replayed as unread, never treated as a reason to pay again.
+        try:
+            count, requested = replay_selection_round(access, row, doc, extra, count, skipped)
+        except InvalidSelection as error:
+            if index != len(doc['rounds']) - 1:
+                raise ValueError('saved selection has unexplained trailing rounds') from error
+            doc.update(status='incomplete')
+            doc['limitations'].append(f'Invalid selection ({str(error)[:120]}); no repair call.')
+            break
         if not requested or count >= MAX_REQUESTS:
             if index != len(doc['rounds']) - 1:
                 raise ValueError('saved selection has unexplained trailing rounds')
@@ -1605,7 +1618,7 @@ def discover(access, base_content, call, cache_path, *, rounds=2, reserve_cost=0
         # Keep the original durable receipt and its claim files for accounting and inspection.
         refresh = uuid.uuid4().hex
         path.rename(path.with_name(path.name + '.previous.' + refresh))
-        for claim in path.parent.glob(path.name + '.round*.claim'):
+        for claim in path.parent.glob(glob.escape(path.name) + '.round*.claim'):
             claim.rename(claim.with_name(claim.name + '.previous.' + refresh))
         doc.update(input_digest=digest, digest=hashlib.sha256((digest + refresh).encode()).hexdigest())
     if force_refresh and refresh_id is not None:
@@ -1622,7 +1635,7 @@ def discover(access, base_content, call, cache_path, *, rounds=2, reserve_cost=0
         if doc.get('input_digest', doc.get('digest')) != digest:
             if (not doc.get('rounds') and doc.get('cost_usd') == 0
                     and not doc.get('cost_is_conservative_estimate')
-                    and not any(path.parent.glob(path.name + '.round*.claim'))):
+                    and not any(path.parent.glob(glob.escape(path.name) + '.round*.claim'))):
                 # A refused, undispatched selection has no paid inputs to reuse.
                 doc = {'version': 1, 'digest': digest, 'status': 'complete', 'rounds': [],
                        'cost_usd': 0.0, 'limitations': []}
@@ -1716,8 +1729,8 @@ def discover(access, base_content, call, cache_path, *, rounds=2, reserve_cost=0
                 if type(cost) in (int, float) and math.isfinite(cost) and cost >= 0 and settle_dispatch is not None:
                     settle_dispatch(reserve, cost)
             except Exception as error:
-                from label.errors import KeyExhausted
-                if isinstance(error, KeyExhausted) and error.verified_unpaid:
+                from label.errors import DispatchError
+                if isinstance(error, DispatchError) and error.verified_unpaid:
                     saved.update(state='rejected unpaid', http_status=error.http_status,
                                  http_attempt=1, verified_unpaid=True, cost_usd=0.0,
                                  **({'rejection_code': error.rejection_code} if error.rejection_code else {}))

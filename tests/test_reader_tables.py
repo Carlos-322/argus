@@ -449,7 +449,7 @@ def test_a_damaged_archive_keeps_its_good_members_and_names_the_bad_one(tmp_path
         _zip_one_encrypted(a)
     else:
         _tar_cut(a, "w" if kind == "tar" else "w:gz")
-    root, notes = f.open_archives(a, tmp_path / "unpacked")
+    root, notes, _ = f.open_archives(a, tmp_path / "unpacked")
     got = sorted(p.relative_to(root).as_posix() for p in f.files_under(root))
     assert got == ["take/a_camera1.mp4", "take/a_camera2.mp4"]
     assert (root / "take" / "a_camera1.mp4").read_bytes() == MEMBERS["take/a_camera1.mp4"]

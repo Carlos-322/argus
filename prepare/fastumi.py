@@ -27,6 +27,7 @@ import numpy as np
 from label.atomic import write_atomic
 from prepare import cli
 from prepare import hub
+from label.presented import presented_pts
 
 # Data Review and python -m prepare folder hand an upload to an adapter that recognizes it (prepare/formats.py
 # upload_adapters); this one reads only the published dataset
@@ -84,7 +85,7 @@ def pts_on_grid(mp4: Path, fps: int) -> tuple[int, bool]:
     from fractions import Fraction
     with av.open(str(mp4)) as c:
         s = c.streams.video[0]
-        pts = sorted(p.pts for p in c.demux(s) if p.size and not p.is_discard)
+        pts = presented_pts(c, s)
         step = Fraction(1, fps) / s.time_base
     ok = step.denominator == 1 and pts == [k * int(step) for k in range(len(pts))]
     return len(pts), ok

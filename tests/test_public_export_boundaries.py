@@ -164,6 +164,10 @@ def test_projection_does_not_enable_remote_dictionary_writes(public_sources, mon
 
 
 def test_static_json_boundaries(public_sources, tmp_path, monkeypatch):
+    # the operator published uploader metadata (static site --publish-uploader-values); private paths still never go
+    from board import public_export
+    monkeypatch.setattr(public_export, '_PUBLISH_DEFAULT', True)
+    monkeypatch.setattr(serve, 'EXPORT_UPLOADER_VALUES', True)       # board serve --publish-uploader-values
     monkeypatch.setattr(static, 'plan', lambda *a, **k: [
         {'rec': {'file': 'ep.json', 'episode_id': 'ep', 'duration_s': 1},
          'ds': 'synthetic', 'media': {}, 'frames': {}}])

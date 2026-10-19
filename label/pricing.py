@@ -82,7 +82,7 @@ def quote(model: str, timeout: int) -> dict:
                 'prompt_token_bound': context, 'input_usd_per_token': input_rate,
                 'output_usd_per_token': output_rate, 'request_usd': maxima['request'],
                 'image_usd': maxima['image'],
-                'bound_basis': ('Full published context window; separate image and request fees bounded by provider.max_price. '
+                'bound_basis': ('Prompt bounded by the request text and, per image, the most a published tokenizer charges for its size, at most the published context window; separate image and request fees bounded by provider.max_price. '
                                 + ('Claude search requires an explicit tool; none is supplied. Cache TTL is 5 minutes.'
                                    if claude else 'No published native search charge.')),
                 'provider_max_price': {**maxima, 'prompt': float(Decimal(str(maxima['prompt'])) * 1_000_000),
@@ -91,10 +91,52 @@ def quote(model: str, timeout: int) -> dict:
         raise ValueError(f'No verified pricing rates for {model}: {error}; no paid request was dispatched') from error
 
 
+def image_token_bound(width: int, height: int) -> int:
+    """The most a published image tokenizer charges for one image of this size. gpt-4o mini's high detail rule charges
+    the most per tile, 2,833 tokens plus 5,667 for each 512 px tile once the image is scaled down to fit 2048 px and
+    its shorter side to 768 px. https://developers.openai.com/api/docs/guides/images-vision#tile-based-image-tokenization
+    A fixed ceiling per image had been below it, so a request that fit a cap by the ceiling could still exceed it."""
+    w, h = float(width), float(height)
+    if max(w, h) > 2048:
+        w, h = w * 2048 / max(w, h), h * 2048 / max(w, h)
+    if min(w, h) > 768:
+        w, h = w * 768 / min(w, h), h * 768 / min(w, h)
+    return 2833 + 5667 * math.ceil(w / 512) * math.ceil(h / 512)
+
+
+# The size that tiles the most once scaled (2048 px by 768 px: 4 by 2 tiles), for an image whose size is unknown
+LARGEST_CHARGED_SIZE = (2048, 768)
+
+
+def image_sizes(content: list) -> list:
+    """(width, height) of every image part of a request, read from its own bytes. An image whose size cannot be read
+    counts at LARGEST_CHARGED_SIZE, so an unknown is bounded by the most any image can cost, never left out."""
+    import base64
+    import io
+    from PIL import Image
+    sizes = []
+    for part in content:
+        if part.get('type') == 'image_url':
+            try:
+                raw = base64.b64decode(part['image_url']['url'].split(',', 1)[1])
+                with Image.open(io.BytesIO(raw)) as image:
+                    sizes.append(image.size)
+            except Exception:
+                sizes.append(LARGEST_CHARGED_SIZE)
+    return sizes
+
+
 def cost_bound(content: list, max_tokens: int, quote: dict) -> float:
-    """Use the full published context bound because image tokenizers differ by provider."""
-    images = sum(part.get('type') == 'image_url' for part in content)
-    amount = (quote['prompt_token_bound'] * quote['input_usd_per_token']
+    """Bound the prompt from the request itself: its text (a token is at least one byte) and, for each image, the
+    most a published tokenizer charges for its size (image_token_bound), never more than the published context
+    window. Reserving the whole window held about $6 for a request that costs well under $1, so a small cap
+    labelled nothing."""
+    sizes = image_sizes(content)
+    images = len(sizes)
+    text_bytes = sum(len(str(part.get('text', '')).encode('utf-8')) for part in content if part.get('type') == 'text')
+    prompt_tokens = min(quote['prompt_token_bound'],
+                        text_bytes + sum(image_token_bound(*size) for size in sizes) + 1024)
+    amount = (prompt_tokens * quote['input_usd_per_token']
               + max_tokens * quote['output_usd_per_token'] + quote['request_usd'] + images * quote['image_usd'])
     if not math.isfinite(amount) or amount < 0:
         raise ValueError('provider cost bound is invalid')

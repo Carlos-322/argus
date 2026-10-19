@@ -669,14 +669,14 @@ def test_run_batch_caps_selection_before_dispatch_and_keeps_paid_inspection(tmp_
     small_receipt = json.loads((small / f'noreply_{ep.name}.json').read_text())
     assert small_receipt['final_dispatch_outcome'] == 'not dispatched'
     assert small_receipt['evidence_inspection']['status'] == 'incomplete'
+    # $1.50 covers a selection but not the final request it serves (64,000 output tokens reserve $3.20), so no
+    # selection is bought: paying for evidence the final request can never use was money for nothing
     paid = tmp_path / 'job' / 'run' / 'out'
     assert harness.run_batch([ep], paid, max_spend=1.5, **args) == 1
-    assert calls == [1]
+    assert calls == []
     paid_receipt = json.loads((paid / f'noreply_{ep.name}.json').read_text())
-    assert paid_receipt['evidence_inspection']['cost_usd'] == pytest.approx(.02)
-    assert harness.episode_cost(paid_receipt) == pytest.approx(.02)
-    assert label_spend(tmp_path / 'job') == pytest.approx(.02)
-    assert paid_receipt['evidence_inspection']['rounds'][0]['state'] == 'received'
+    assert paid_receipt['evidence_inspection']['status'] == 'incomplete'
+    assert harness.episode_cost(paid_receipt) == 0 and label_spend(tmp_path / 'job') == 0
 
 
 def test_crashed_selection_reservation_survives_resume_and_service_spend(tmp_path):

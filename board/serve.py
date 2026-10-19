@@ -57,6 +57,7 @@ import logging
 import math
 import os
 import re
+import selectors
 import shutil
 import socket
 import socketserver
@@ -69,14 +70,15 @@ from contextlib import contextmanager, ExitStack
 from functools import lru_cache, wraps
 import urllib.parse
 import uuid
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from pathlib import Path
 
 from board.families import Families
 from board.public_export import project as public_json
 from board.to_board import dumps, finite
 from compare.metrics import model_names, reasoning_effort
-from label.atomic import write_atomic
+from label.atomic import (cached_while_unchanged, file_version, remove_if, small_file, sweep_removals,
+                          write_atomic)
 
 
 def _find_ffmpeg() -> str | None:
@@ -108,34 +110,53 @@ _FFMPEG_SEM = threading.Semaphore(int(os.environ.get("BOARD_FFMPEG_CONCURRENCY",
 _FRAME_DIR = Path(os.environ["BOARD_FRAME_DIR"]) if os.environ.get("BOARD_FRAME_DIR") else None
 
 
-_CLIP_TIMES: dict = {}
-_CLIP_HALFWAY: dict = {}
+# Per-process memos of what ffprobe read from a clip, keyed by the clip's stat (_clip_key) and kept only when the clip
+# still has that stat once the read is over (cached_while_unchanged): each stands for exactly the version it was read
+# from, and a clip replaced during the read is read again.
+def _clip_key(mp4: Path) -> tuple:
+    st = mp4.stat()
+    return str(mp4), st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino
+
+
+def _still_clip(mp4, key: tuple) -> bool:
+    try:
+        return _clip_key(Path(mp4)) == tuple(key[:5])
+    except OSError:
+        return False
+
+
+def _ffprobe() -> str:
+    probe = Path(FFMPEG).with_name("ffprobe") if FFMPEG else None
+    return str(probe) if probe and probe.exists() else "ffprobe"
+
+
+@cached_while_unchanged(2048, lambda *key: _still_clip(key[0], key))
+def _read_clip_times(*key) -> list:
+    try:
+        r = subprocess.run([_ffprobe(), "-v", "error", "-select_streams", "v:0", "-show_entries",
+                            "packet=pts_time,flags", "-of", "csv=p=0", key[0]], capture_output=True, text=True,
+                           timeout=60)
+        return sorted(float(a) for a, *f in (ln.split(",") for ln in r.stdout.split() if ln)
+                      if a not in ("", "N/A") and "D" not in "".join(f))
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
 
 
 def _clip_times(mp4: Path) -> list:
     """The clip's frame times on the episode clock (sorted presentation times), read once per clip
     version; [] when they cannot be read."""
     try:
-        st = mp4.stat()
-        key = (str(mp4), st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino)
+        return _read_clip_times(*_clip_key(mp4))
     except OSError:
         return []
-    hit = _CLIP_TIMES.get(key)
-    if hit is not None:
-        return hit
-    probe = Path(FFMPEG).with_name("ffprobe") if FFMPEG else None
-    try:
-        r = subprocess.run([str(probe) if probe and probe.exists() else "ffprobe", "-v", "error", "-select_streams",
-                            "v:0", "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", str(mp4)],
-                           capture_output=True, text=True, timeout=60)
-        ts = sorted(float(a) for a, *f in (ln.split(",") for ln in r.stdout.split() if ln)
-                    if a not in ("", "N/A") and "D" not in "".join(f))
-    except (OSError, subprocess.SubprocessError, ValueError):
-        ts = []
-    if len(_CLIP_TIMES) > 2048:
-        _CLIP_TIMES.clear()
-    _CLIP_TIMES[key] = ts
-    return ts
+
+
+@cached_while_unchanged(2048, lambda *key: _still_clip(key[0], key))
+def _read_clip_comment(*key) -> str:
+    # an ffprobe that cannot run raises, so its failure is never kept as the clip's answer
+    r = subprocess.run([_ffprobe(), "-v", "error", "-show_entries", "format_tags=comment", "-of",
+                        "default=nw=1:nk=1", key[0]], capture_output=True, text=True, timeout=60)
+    return r.stdout.strip()
 
 
 def _shown_from_halfway(mp4: Path) -> bool:
@@ -143,24 +164,9 @@ def _shown_from_halfway(mp4: Path) -> bool:
     sets HALFWAY_TAG as the clip's comment), so the frame a time shows is the one on screen then."""
     from board.clips import HALFWAY_TAG
     try:
-        st = mp4.stat()
-        key = (str(mp4), st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino)
-    except OSError:
-        return False
-    if key in _CLIP_HALFWAY:
-        return _CLIP_HALFWAY[key]
-    probe = Path(FFMPEG).with_name("ffprobe") if FFMPEG else None
-    try:
-        r = subprocess.run([str(probe) if probe and probe.exists() else "ffprobe", "-v", "error", "-show_entries",
-                            "format_tags=comment", "-of", "default=nw=1:nk=1", str(mp4)],
-                           capture_output=True, text=True, timeout=60)
+        return _read_clip_comment(*_clip_key(mp4)) == HALFWAY_TAG
     except (OSError, subprocess.SubprocessError):
         return False
-    hit = r.stdout.strip() == HALFWAY_TAG
-    if len(_CLIP_HALFWAY) > 2048:
-        _CLIP_HALFWAY.clear()
-    _CLIP_HALFWAY[key] = hit
-    return hit
 
 
 class CacheBusy(RuntimeError):
@@ -174,7 +180,7 @@ class FootageCapacityError(ValueError):
 class _VerifiedFootage(tuple):
     def __new__(cls, out, name, record):
         result = super().__new__(cls, (out, name))
-        result.receipt = dict(record)
+        result.receipt = _stored_record(record)
         return result
 
 
@@ -199,9 +205,17 @@ _FOOTAGE_DISK_BYTES = int(os.environ.get('BOARD_FOOTAGE_DISK_BYTES', 2 * 1024**3
 _FOOTAGE_DISK_FILES = int(os.environ.get('BOARD_FOOTAGE_DISK_FILES', 128))
 
 
-def _trim_disk_cache(folder: Path, suffix: str, *, max_bytes: int, max_files: int, protect=None):
+def _trim_disk_cache(folder: Path, suffix: str, *, max_bytes: int, max_files: int, protect=None, last=()):
+    """Remove the least recently used cache files until the folder is within its budgets. Files in `protect` (a path or
+    a collection of them) are never removed, and files in `last` only once nothing else is left to remove.
+
+    Other server processes can share the folder, so the listing is only a plan: each file is removed through
+    remove_if, only while it is still the version listed and nothing has used it since."""
+    protect = {protect} if isinstance(protect, Path) else set(protect or ())
+    last = set(last)
     with _DISK_CACHE_LOCK:
         entries = []
+        sweep_removals(folder)
         temporary = re.compile(r'(?:[a-f0-9]{40}\.[0-9]+\.[0-9]+\.part|'
                                r'[a-f0-9]{20}\.[0-9]+\.[0-9]+(?:\.[a-f0-9]{32})?\.part(?:\.len)?\.mp4)')
         for path in folder.glob('*.part*'):
@@ -218,7 +232,7 @@ def _trim_disk_cache(folder: Path, suffix: str, *, max_bytes: int, max_files: in
                         except CacheBusy:
                             continue
                     else:
-                        path.unlink(missing_ok=True)
+                        remove_if(path, lambda version: version[1] < time.time_ns() - 600 * 10**9)
             except OSError:
                 continue
         if suffix == '.mp4':
@@ -243,25 +257,27 @@ def _trim_disk_cache(folder: Path, suffix: str, *, max_bytes: int, max_files: in
             if not owned.fullmatch(path.name):
                 continue
             try:
-                st = path.stat()
-                age = st.st_mtime_ns
-                if suffix == '.mp4':
-                    age = _footage_recency(path, age)
-                entries.append((age, path, st.st_size))
+                version = file_version(path)
+                entries.append((_cache_recency(path, suffix, version), path, version))
             except OSError:
                 continue
-        total, count = sum(x[2] for x in entries), len(entries)
-        for _, path, size in sorted(entries):
+        total, count = sum(x[2][0] for x in entries), len(entries)
+        for age, path, version in sorted(entries, key=lambda entry: (entry[1] in last, entry[0])):
             if total <= max_bytes and count <= max_files:
                 break
-            if path == protect:
+            if path in protect:
                 continue
             try:
-                path.unlink(missing_ok=True)
-                total -= size
-                count -= 1
+                if remove_if(path, lambda now, listed=version, age=age, path=path:
+                             now == listed and _cache_recency(path, suffix, now) <= age):
+                    total -= version[0]
+                    count -= 1
             except OSError:
                 continue
+
+
+def _cache_recency(path, suffix, version):
+    return _footage_recency(path, version) if suffix == '.mp4' else version[1]
 
 
 _FRAME_WORK_SEM = threading.BoundedSemaphore(max(1, int(os.environ.get('BOARD_FFMPEG_CONCURRENCY', 4))))
@@ -288,8 +304,7 @@ def extract_frame(mp4: Path, t: float, max_w: int = 640, *, _wait=False) -> byte
     if not math.isfinite(t) or not 0 <= t <= 604800 or not 1 <= max_w <= 1920:
         raise ValueError('Frame time must be between 0 and 604800 seconds, and width between 1 and 1920')
     try:
-        st = mp4.stat()
-        key = (str(mp4), st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino, float(t), int(max_w))
+        key = (*_clip_key(mp4), float(t), int(max_w))
     except OSError:
         return None
     disk = _FRAME_DIR / (hashlib.sha1(repr(key).encode()).hexdigest() + '.jpg') if _FRAME_DIR else None
@@ -343,6 +358,8 @@ def _extract_uncached_frame(mp4, t, max_w, key, disk):
         out = r.stdout if (r.returncode == 0 and r.stdout) else None
         if out:
             break
+    if out and not _still_clip(mp4, key):
+        return out                # cut from a clip replaced meanwhile: right for this request, kept for no other
     if out:
         _remember_frame(key, out)
         if disk is not None:
@@ -416,13 +433,8 @@ _FOOTAGE_READY_LOCK = threading.Lock()
 _FOOTAGE_MEMORY_LOCK = threading.Lock()
 _FOOTAGE_RECORDS = OrderedDict()
 _FOOTAGE_ACCESS = OrderedDict()
-_FOOTAGE_HINTS = OrderedDict()
-_PREPARE_WAITERS = threading.BoundedSemaphore(max(4, 2 * int(os.environ.get('BOARD_FOOTAGE_CONCURRENCY', 1))))
-_CONTENT_PROBES = OrderedDict()
-_CONTENT_PROBE_LOCK = threading.Lock()
 _FOOTAGE_TICKET_SECONDS = 3600
 _MEDIA_READERS = threading.local()
-_FOOTAGE_DOWNLOAD_SEM = threading.BoundedSemaphore(4)
 _FOOTAGE_THREADS = int(os.environ.get("BOARD_FOOTAGE_THREADS", 2))
 _FOOTAGE_STALL_TIMEOUT = max(1.0, float(os.environ.get('BOARD_FOOTAGE_STALL_TIMEOUT', 300)))
 _EXPORT_SEM = threading.BoundedSemaphore(2)
@@ -432,10 +444,12 @@ _FOOTAGE_LOCKS: dict = {}
 _FOOTAGE_LOCKS_LOCK = threading.Lock()
 
 
+# label file name -> (its trusted version, the episode ID it held then). Labels are rewritten by other processes (a
+# labelling run, a rebuild), so an entry stands only for the version it was read from: every lookup checks each file's
+# version, reads again only the files that changed, and reads the file it picks once more before using it.
 _LABEL_INDEX_LOCK = threading.Lock()
 _LABEL_INDEX = {}
 _LABEL_INDEX_ROOT = None
-_LABEL_INDEX_CHECKED = 0.0
 
 
 @contextmanager
@@ -454,8 +468,9 @@ def _footage_lock(key):
 
 
 def footage_label(eid: str) -> dict:
-    """Index episode IDs once and read only labels changed since the previous scan."""
-    global _LABEL_INDEX_ROOT, _LABEL_INDEX_CHECKED
+    """The current label of an episode: the file named after it, else the one whose episode ID it is, found through an
+    index that reads only the labels whose version changed since this process last read them."""
+    global _LABEL_INDEX_ROOT
     direct = HERE / f'{eid}.json'
     if _under(HERE, direct) and direct.is_file():
         try:
@@ -465,24 +480,23 @@ def footage_label(eid: str) -> dict:
         except (OSError, ValueError, TypeError, AttributeError, RecursionError):
             pass
     with _LABEL_INDEX_LOCK:
-        if _LABEL_INDEX_ROOT != HERE or time.monotonic() - _LABEL_INDEX_CHECKED >= 1:
-            previous = dict(_LABEL_INDEX) if _LABEL_INDEX_ROOT == HERE else {}
-            _LABEL_INDEX.clear()
-            for path in sorted(HERE.glob('*.json')):
-                if not _under(HERE, path):
+        previous = dict(_LABEL_INDEX) if _LABEL_INDEX_ROOT == HERE else {}
+        _LABEL_INDEX.clear()
+        for path in sorted(HERE.glob('*.json')):
+            if not _under(HERE, path):
+                continue
+            try:
+                sig = _label_identity(path)
+                old = previous.get(path.name)
+                if old is not None and old[0] == sig:
+                    _LABEL_INDEX[path.name] = old
                     continue
-                try:
-                    sig = _label_identity(path)
-                    old = previous.get(path.name)
-                    if old is not None and old[0] == sig:
-                        _LABEL_INDEX[path.name] = old
-                        continue
-                    label = json.loads(path.read_text())
-                    identity = ((label.get('_meta') or {}).get('episode_id') or path.stem) if isinstance(label, dict) else None
-                    _LABEL_INDEX[path.name] = (sig, identity)
-                except (OSError, ValueError, TypeError, AttributeError, RecursionError):
-                    continue
-            _LABEL_INDEX_ROOT, _LABEL_INDEX_CHECKED = HERE, time.monotonic()
+                label = json.loads(path.read_text())
+                identity = ((label.get('_meta') or {}).get('episode_id') or path.stem) if isinstance(label, dict) else None
+                _LABEL_INDEX[path.name] = (sig, identity)
+            except (OSError, ValueError, TypeError, AttributeError, RecursionError):
+                continue
+        _LABEL_INDEX_ROOT = HERE
         path = next((HERE / name for name, (_, identity) in _LABEL_INDEX.items() if identity == eid), None)
     if path is not None:
         try:
@@ -539,17 +553,25 @@ def footage_layout(sizes: list, gap: int = FOOTAGE_GAP) -> tuple:
     return up(x + col_w), up(h0), cells
 
 
+def _trusted_version(path, version) -> tuple:
+    """The part of a file's stat that stands for its content: all of it (device, inode, size, modification and change
+    times) where the filesystem keeps change times (static._durable_metadata), and only size and modification time on
+    exFAT, NFS, SMB and FUSE, whose inodes and change times are not reliable. A receipt records this when the file is
+    made, and requests compare only this against it: content is never hashed on a request, so an edit by hand that
+    keeps a file's size and modification time is not seen, as on most file servers."""
+    from board.static import _durable_metadata
+    version = tuple(version)
+    return version if _durable_metadata(str(path), version) else (version[2], version[3])
+
+
 def _probe(p: Path) -> tuple:
-    version = next((version for reader, version, _ in getattr(_MEDIA_READERS, 'active', [])
+    version = next((version for reader, version in getattr(_MEDIA_READERS, 'active', [])
                     if Path(reader.name) == p), None)
     return _probe_versioned(p, version or _footage_version(p))
 
 
 def _probe_versioned(p: Path, version: tuple) -> tuple:
-    from board.static import _durable_metadata
-    if _durable_metadata(str(p), version):
-        return _cached_probe_versioned(p, version)
-    return _cached_probe_versioned.__wrapped__(p, version)
+    return _cached_probe_versioned(p, _trusted_version(p, version))
 
 
 @contextmanager
@@ -568,7 +590,7 @@ def _probe_admission(key):
 
 @lru_cache(maxsize=2048)
 def _cached_probe_versioned(p: Path, version: tuple) -> tuple:
-    # Trusted cache hits bypass admission; cold probes and hashes share its bound.
+    # Cache hits bypass admission; cold probes share its bound.
     with _probe_admission((p, version)):
         return _probe_uncached(p)
 
@@ -592,8 +614,8 @@ def _probe_uncached(p: Path) -> tuple:
     s = j["streams"][0]
     import av
     with av.open(str(p)) as c:
-        pk = [(float(x.pts * x.time_base), float(x.duration * x.time_base))
-              for x in c.demux(c.streams.video[0]) if x.size and x.pts is not None]
+        from label.presented import presented
+        pk = [(float(x.pts * x.time_base), float(x.duration * x.time_base)) for x in presented(c, c.streams.video[0])]
     # Some FFprobe builds omit packet lengths and stop their container duration at the final frame's start.
     dur = max(t + d for t, d in pk) if pk else float(j["format"]["duration"])
     num, _, den = str(s.get("avg_frame_rate") or "0/1").partition("/")
@@ -654,31 +676,6 @@ def _footage_version(path: Path) -> tuple:
     return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
 
 
-def _stream_digest(source, size, destination=None):
-    """Hash exactly the admitted byte count, never follow a growing source."""
-    digest = hashlib.sha256()
-    remaining = size
-    while remaining:
-        chunk = source.read(min(1024 * 1024, remaining))
-        if not chunk:
-            raise ValueError('Media changed while its snapshot was being read')
-        digest.update(chunk)
-        if destination is not None:
-            destination.write(chunk)
-        remaining -= len(chunk)
-    if source.read(1):
-        raise ValueError('Media grew while its snapshot was being read')
-    return digest.hexdigest()
-
-
-def _copy_source_snapshot(source: Path, target: Path, version: tuple) -> str:
-    with source.open('rb') as incoming, target.open('xb') as outgoing:
-        digest = _stream_digest(incoming, version[2], outgoing)
-    if _footage_version(source) != version:
-        raise ValueError('Media changed while its snapshot was being read')
-    return digest
-
-
 @contextmanager
 def _file_lock(path, *, blocking=True):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -711,163 +708,54 @@ def _file_lock(path, *, blocking=True):
                 fcntl.flock(lock, fcntl.LOCK_UN)
 
 
-@contextmanager
-def _snapshot_workspace():
-    """Portable fallback uses independent, crash-recoverable copy slots."""
-    from board.build import remove_tree
-    folder = FOOTAGE_DIR / '.sources'
-    folder.mkdir(parents=True, exist_ok=True)
-    with ExitStack() as stack:
-        for slot in range(max(1, int(os.environ.get('BOARD_FOOTAGE_CONCURRENCY', 1)))):
-            try:
-                stack.enter_context(_file_lock(folder / f'.slot-{slot}.lock', blocking=False))
-                break
-            except CacheBusy:
-                continue
-        else:
-            raise CacheBusy('Media snapshot preparation is busy; try again shortly')
-        prefix = f'snapshot-{slot}-'
-        for old in folder.glob(prefix + '*'):
-            if old.is_dir() and not old.is_symlink():
-                remove_tree(old)
-        temporary = Path(tempfile.mkdtemp(prefix=prefix, dir=folder))
-        try:
-            yield temporary
-        finally:
-            remove_tree(temporary)
-
-
 def _source_path(path):
     if os.name == 'posix':
-        for reader, _, _ in getattr(_MEDIA_READERS, 'active', []):
+        for reader, _ in getattr(_MEDIA_READERS, 'active', []):
             if Path(reader.name) == path:
                 return Path('/dev/fd') / str(reader.fileno())
     return path
 
 
-@contextmanager
-def _encode_sources(cams):
-    if os.name == 'posix':
-        yield [(cam, _source_path(path)) for cam, path in cams]
-        return
-    readers = {Path(reader.name): (version, digest) for reader, version, digest
-               in getattr(_MEDIA_READERS, 'active', [])}
-    if not any(digest is not None for _, digest in readers.values()):
-        yield cams
-        return
-    with _snapshot_workspace() as temporary:
-        working = []
-        for index, (cam, path) in enumerate(cams):
-            version, digest = readers[path]
-            if digest is not None:
-                target = temporary / f'{index}.mp4'
-                with _FOOTAGE_PROBE_SEM:
-                    if _copy_source_snapshot(path, target, version) != digest:
-                        raise ValueError('Media changed during footage preparation')
-                path = target
-            working.append((cam, path))
-        yield working
-
-
 def _source_process_options():
     readers = getattr(_MEDIA_READERS, 'active', [])
-    return {'pass_fds': tuple(reader.fileno() for reader, _, _ in readers)} if os.name == 'posix' and readers else {}
+    return {'pass_fds': tuple(reader.fileno() for reader, _ in readers)} if os.name == 'posix' and readers else {}
 
 
 def _validate_active_sources():
-    # An open descriptor binds pathname replacements. Input bytes must remain
-    # stable throughout preparation; before/after hashes detect persistent edits,
-    # not a transient in-place edit restored while an encoder is reading.
-    for reader, version, digest in getattr(_MEDIA_READERS, 'active', []):
+    # An open descriptor binds pathname replacements. A source edited in place while it is encoded changes its trusted
+    # stat (_trusted_version), so the output is not published.
+    for reader, version in getattr(_MEDIA_READERS, 'active', []):
         stat = os.fstat(reader.fileno())
         current = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
-        if digest is not None:
-            with _FOOTAGE_PROBE_SEM:
-                reader.seek(0)
-                if _stream_digest(reader, version[2]) != digest:
-                    raise ValueError('Media changed during footage preparation')
-        elif current != version:
+        if _trusted_version(reader.name, current) != _trusted_version(reader.name, version):
             raise ValueError('Media changed during footage preparation')
 
 
 @contextmanager
-def _prepare_admission():
-    # Waiting requests are bounded independently of encoder slots. One HTTP
-    # request can wait for a progressing long encode without polling source bytes.
-    if not _PREPARE_WAITERS.acquire(blocking=False):
-        raise CacheBusy('Media preparation queue is busy; try again shortly')
-    acquired = False
-    previous = getattr(_MEDIA_READERS, 'prepare_slot', False)
-    try:
-        _FOOTAGE_SEM.acquire()
-        acquired = True
-        _MEDIA_READERS.prepare_slot = True
-        yield
-    finally:
-        _MEDIA_READERS.prepare_slot = previous
-        if acquired:
-            _FOOTAGE_SEM.release()
-        _PREPARE_WAITERS.release()
+def _footage_sources(cams):
+    """Hold each source open for the probe and the encode, and name it by its trusted stat (_trusted_version).
 
-
-def _cached_prepare_hint(key):
-    with _FOOTAGE_MEMORY_LOCK:
-        output = _FOOTAGE_HINTS.get(key)
-    return output is not None and output.is_file()
-
-
-def _remember_prepare_hint(key, output):
-    if key is None:
-        return
-    with _FOOTAGE_MEMORY_LOCK:
-        _FOOTAGE_HINTS[key] = output
-        _FOOTAGE_HINTS.move_to_end(key)
-        while len(_FOOTAGE_HINTS) > max(128, _FOOTAGE_DISK_FILES):
-            _FOOTAGE_HINTS.popitem(last=False)
-
-
-@contextmanager
-def _footage_sources(cams, request_options=None):
-    """Retain source handles; untrusted files are content-validated on every prepare.
-
-    POSIX probe and encode children inherit these same handles. A ready hit reads
-    each untrusted source once, without copying it. Misses verify its content again
-    before publication. Source media must not be edited during preparation.
+    POSIX probe and encode children read these same descriptors, so a path replaced meanwhile cannot switch the bytes.
+    A source is never hashed: its name in the output's key is its stat, so a prepared span is found from stats alone
+    and never waits for an encode of anything else.
     """
-    from board.static import _durable_metadata
     if len(cams) > 64:
         raise ValueError('Too many footage cameras')
     with ExitStack() as stack:
-        previous = (getattr(_MEDIA_READERS, 'active', []), getattr(_MEDIA_READERS, 'untrusted', False),
-                    getattr(_MEDIA_READERS, 'prepare_hint', None))
-        active, working, identities, digests, opened = [], [], [], [], []
-        for cam, path in cams:
+        previous = getattr(_MEDIA_READERS, 'active', [])
+        active, identities = [], []
+        for _, path in cams:
             reader = stack.enter_context(path.open('rb'))
             stat = os.fstat(reader.fileno())
             version = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
-            opened.append((cam, path, reader, version, not _durable_metadata(str(path), version)))
-        untrusted = any(item[4] for item in opened)
-        hint = (hashlib.sha1(json.dumps([request_options, [(str(path), version)
-                for _, path, _, version, _ in opened]]).encode()).hexdigest() if request_options is not None else None)
-        _MEDIA_READERS.active, _MEDIA_READERS.untrusted, _MEDIA_READERS.prepare_hint = active, untrusted, hint
+            active.append((reader, version))
+            trusted = _trusted_version(path, version)
+            identities.append([str(path), *trusted] if len(trusted) > 2 else [str(path), 'size-mtime', *trusted])
+        _MEDIA_READERS.active = active
         try:
-            # Hints permit only a potential ready hit to perform its mandatory
-            # content check under contention. They never authorize source bytes.
-            if untrusted and not _cached_prepare_hint(hint):
-                stack.enter_context(_prepare_admission())
-            for cam, path, reader, version, weak in opened:
-                digest = None
-                if weak:
-                    with _probe_admission(('source', str(path), version)):
-                        digest = _stream_digest(reader, version[2])
-                    reader.seek(0)
-                active.append((reader, version, digest))
-                working.append((cam, path))
-                identities.append([str(path), 'sha256', digest] if digest else [str(path), *version])
-                digests.append(digest)
-            yield working, identities, digests
+            yield list(cams), identities
         finally:
-            _MEDIA_READERS.active, _MEDIA_READERS.untrusted, _MEDIA_READERS.prepare_hint = previous
+            _MEDIA_READERS.active = previous
 
 
 @contextmanager
@@ -881,20 +769,27 @@ def _maintenance_error(error):
     logging.getLogger(__name__).warning('Footage cache bookkeeping deferred: %s', error)
 
 
-def _footage_recency(out, default):
+def _footage_recency(out, version):
+    """When the movie at `out`, at `version` (file_version), was last used: its own modification time, the shared
+    receipt's (which every server touches on use, _touch_footage) and this process's own record of using that version,
+    never of an earlier version at the same name."""
     with _FOOTAGE_MEMORY_LOCK:
-        age = _FOOTAGE_ACCESS.get(str(out), default)
+        age = _FOOTAGE_ACCESS.get((str(out), tuple(version)), version[1])
     try:
         age = max(age, (FOOTAGE_DIR / '.ready' / f'{out.stem}.json').stat().st_mtime_ns)
     except OSError:
         pass
-    return max(age, default)
+    return max(age, version[1])
 
 
 def _touch_footage(out):
+    try:
+        key = (str(out), file_version(out))
+    except OSError:
+        return
     with _FOOTAGE_MEMORY_LOCK:
-        _FOOTAGE_ACCESS[str(out)] = time.time_ns()
-        _FOOTAGE_ACCESS.move_to_end(str(out))
+        _FOOTAGE_ACCESS[key] = time.time_ns()
+        _FOOTAGE_ACCESS.move_to_end(key)
         while len(_FOOTAGE_ACCESS) > max(128, _FOOTAGE_DISK_FILES):
             _FOOTAGE_ACCESS.popitem(last=False)
     try:
@@ -905,21 +800,61 @@ def _touch_footage(out):
         _maintenance_error(error)
 
 
+def _stored_record(record: dict) -> dict:
+    """A receipt in the shape its JSON file holds (a stat is a list, never a tuple). The memory copy, the returned
+    receipt and the file are all this one shape, so the validator (_receipt_footage) cannot reject a record the server
+    made itself only because it was never written and read back."""
+    return json.loads(json.dumps(record))
+
+
 def _retain_footage_record(out, record):
     with _FOOTAGE_MEMORY_LOCK:
-        _FOOTAGE_RECORDS[str(out)] = dict(record)
+        _FOOTAGE_RECORDS[str(out)] = _stored_record(record)
         _FOOTAGE_RECORDS.move_to_end(str(out))
         while len(_FOOTAGE_RECORDS) > max(128, _FOOTAGE_DISK_FILES):
             _FOOTAGE_RECORDS.popitem(last=False)
 
 
-def _trim_footage_cache(protect=None):
+def _trim_footage_cache(protect=None, owner=None):
     try:
         with _file_lock(FOOTAGE_DIR / '.locks' / 'cache'):
-            _trim_disk_cache(FOOTAGE_DIR, '.mp4', max_bytes=_FOOTAGE_DISK_BYTES,
-                             max_files=_FOOTAGE_DISK_FILES if _FOOTAGE_DISK_FILES > 0 else 2**63, protect=protect)
+            _trim_footage_files(protect, owner)
     except OSError as error:
         _maintenance_error(error)
+
+
+def _trim_footage_files(protect, owner):
+    """Trim prepared videos (with the cache lock held). A video a live download ticket names is kept, except that the
+    client asking may lose its own oldest ones once nothing else is left: other clients' load never cancels a ticket."""
+    held = _ticketed_footage()
+    mine = {FOOTAGE_DIR / name for name, owners in held.items() if owners == {_ticket_owner(owner)}}
+    others = {FOOTAGE_DIR / name for name in held} - mine
+    _trim_disk_cache(FOOTAGE_DIR, '.mp4', max_bytes=_FOOTAGE_DISK_BYTES,
+                     max_files=_FOOTAGE_DISK_FILES if _FOOTAGE_DISK_FILES > 0 else 2**63,
+                     protect=others | ({protect} if protect is not None else set()), last=mine)
+
+
+def _reserve_footage(owner, out: Path, size: int):
+    """Refuse to keep `out` (`size` bytes) unless it fits in the cache budget beside the videos other clients' live
+    tickets name. Those videos are never evicted (_trim_footage_files), so the budget is a reservation: the video about
+    to be kept counts against it before it is kept, and one that does not fit is refused (503, retried later) instead
+    of growing the cache past its limit."""
+    held = _ticketed_footage()
+    sizes = []
+    for name, owners in held.items():
+        if owners != {_ticket_owner(owner)} and name != out.name:
+            try:
+                sizes.append((FOOTAGE_DIR / name).stat().st_size)
+            except OSError:
+                continue
+    if sum(sizes) + size > _FOOTAGE_DISK_BYTES or (_FOOTAGE_DISK_FILES > 0 and len(sizes) + 1 > _FOOTAGE_DISK_FILES):
+        raise CacheBusy('Prepared video storage is full of downloads in progress; try again later.')
+
+
+def _footage_room(owner, out: Path):
+    """Refuse to start an encode that cannot be kept. Before encoding, the video's size is unknown but at least one
+    byte; publication reserves its real size (_encode_and_publish)."""
+    _reserve_footage(owner, out, 1)
 
 
 def _receipt_guard(path):
@@ -932,8 +867,11 @@ def _write_footage_record(path, record):
 
 
 def _trim_receipt_temps(folder):
-    for temporary in folder.glob('.*.json.tmp'):
-        match = re.fullmatch(r'\.((?:[a-f0-9]{20}|[a-f0-9]{32}|[a-f0-9]{40})\.json)\.tmp', temporary.name)
+    # write_atomic names each writer's temporary file .<receipt>.<random>.tmp (older ones .<receipt>.tmp); a writer
+    # holds the receipt's guard while its temporary file exists, so one whose guard is free is left by a dead writer
+    for temporary in folder.glob('.*.tmp'):
+        match = re.fullmatch(r'\.((?:[a-f0-9]{20}|[a-f0-9]{32}|[a-f0-9]{40})\.json)(?:\.[a-f0-9]{32})?\.tmp',
+                             temporary.name)
         if match is None:
             continue
         try:
@@ -949,37 +887,14 @@ def _temporary_guard(path):
     return path.with_name(path.name.replace('.part.len.mp4', '.part.mp4') + '.lock')
 
 
-def _content_probe(path: Path, digest: str) -> tuple:
-    # The digest identifies validated source content, independent of its FD pathname.
-    with _CONTENT_PROBE_LOCK:
-        hit = _CONTENT_PROBES.get(digest)
-        if hit is not None:
-            _CONTENT_PROBES.move_to_end(digest)
-            return hit
-    with _probe_admission(('content', digest)):
-        result = _probe_uncached(path)
-    with _CONTENT_PROBE_LOCK:
-        _CONTENT_PROBES[digest] = result
-        _CONTENT_PROBES.move_to_end(digest)
-        while len(_CONTENT_PROBES) > 2048:
-            _CONTENT_PROBES.popitem(last=False)
-    return result
-
-
 def _footage_receipt(result: tuple) -> dict:
-    from board.static import _durable_metadata
+    """The receipt of a prepared video, written when it is made: its stat, which every later request compares
+    (_receipt_footage)."""
     out, name = result
     version = _footage_version(out)
     if out.is_symlink() or not 0 < version[2] <= _FOOTAGE_DISK_BYTES:
         raise FootageCapacityError('Prepared footage exceeds the disk cache budget')
-    record = {'format': 'argus-footage-ready/2', 'file': out.name, 'name': name, 'version': version}
-    if not _durable_metadata(str(out), version):
-        with _FOOTAGE_DOWNLOAD_SEM:
-            with out.open('rb') as source:
-                record['sha256'] = _stream_digest(source, version[2])
-        if _footage_version(out) != version:
-            raise ValueError('Prepared footage changed while its identity was being read')
-    return record
+    return _stored_record({'format': 'argus-footage-ready/2', 'file': out.name, 'name': name, 'version': version})
 
 
 def _discard_changed_footage(out: Path) -> None:
@@ -990,32 +905,21 @@ def _discard_changed_footage(out: Path) -> None:
 
 
 def _receipt_footage(record: dict, *, reader=None) -> tuple | None:
-    from board.static import _durable_metadata
     if (record.get('format') != 'argus-footage-ready/2' or
             not re.fullmatch(r'[a-f0-9]{20}\.mp4', record['file']) or
             not isinstance(record['name'], str) or Path(record['name']).name != record['name']):
         return None
     out = FOOTAGE_DIR / record['file']
     version = _footage_version(out)
-    if out.is_symlink() or list(version) != list(record['version']) or not 0 < version[2] <= _FOOTAGE_DISK_BYTES:
+    trusted = _trusted_version(out, version)
+    if (out.is_symlink() or not isinstance(record['version'], list) or len(record['version']) != 5
+            or trusted != _trusted_version(out, record['version']) or not 0 < version[2] <= _FOOTAGE_DISK_BYTES):
         return None
     if reader is not None:
         stat = os.fstat(reader.fileno())
         opened_version = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
-        if opened_version != version:
+        if _trusted_version(out, opened_version) != trusted:
             return None
-    if 'sha256' in record:
-        with _FOOTAGE_DOWNLOAD_SEM:
-            if reader is None:
-                with out.open('rb') as source:
-                    digest = _stream_digest(source, version[2])
-            else:
-                digest = _stream_digest(reader, version[2])
-                reader.seek(0)
-        if digest != record['sha256'] or _footage_version(out) != version:
-            return None
-    elif not _durable_metadata(str(out), version):
-        return None
     _touch_footage(out)
     return _VerifiedFootage(out, record['name'], record)
 
@@ -1050,11 +954,11 @@ def _cached_footage_record(key):
             pass
     # A surviving ticket is also a durable receipt for this exact output,
     # including when a canonical record is malformed or no longer validates.
-    for path in (FOOTAGE_DIR / '.tickets').glob('*.json'):
-        if not re.fullmatch(r'[a-f0-9]{32}\.json', path.name):
-            continue
+    with _FOOTAGE_READY_LOCK:
+        tokens = [token for token, entry in _ticket_index().items() if entry[1] == key + '.mp4']
+    for token in tokens:
         try:
-            record = _ticket_record(path.stem)
+            record = _ticket_record(token)
             if record and record.get('file') == key + '.mp4':
                 result = _receipt_footage(record)
                 if result is not None:
@@ -1079,38 +983,64 @@ def _ready_footage(request: str) -> tuple | None:
         return None
 
 
+def _snapshot_record(snapshot) -> dict | None:
+    """The JSON object a receipt holds, from small_file's read of it, or None when it holds none (a symbolic link, a
+    file over 4096 bytes, or anything but a JSON object)."""
+    try:
+        record = json.loads(snapshot[2]) if snapshot[2] is not None else None
+    except (ValueError, RecursionError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+_read_receipt_snapshot = small_file(4096)
+
+
+def _receipt_lapsed(snapshot, expire=False) -> bool:
+    """Whether a receipt or alias, as just read, no longer stands: it names no prepared movie that is there, or, for a
+    ticket (`expire`), its expiry has passed."""
+    record = _snapshot_record(snapshot)
+    filename = record.get('file') if record else None
+    if record and record.get('format') == 'argus-footage-alias/1':
+        filename = str(record.get('key')) + '.mp4'
+    if not (isinstance(filename, str) and re.fullmatch(r'[a-f0-9]{20}\.mp4', filename)
+            and (FOOTAGE_DIR / filename).is_file()):
+        return True
+    return expire and _ticket_lapsed(snapshot)
+
+
+def _remove_receipt(path, holds) -> bool:
+    """Remove a receipt, alias or ticket only when `holds` is true for it as it is now, under the lock its writers hold
+    (_write_footage_record), so a version another server wrote since this one read it is never the one removed."""
+    return remove_if(path, holds, read=_read_receipt_snapshot, lock=lambda: _file_lock(_receipt_guard(path)))
+
+
 def _trim_footage_receipts(folder: Path, pattern: str, *, expire=False):
     _trim_receipt_temps(folder)
+    sweep_removals(folder)
     retained = []
     for path in folder.glob('*.json'):
         if not re.fullmatch(pattern, path.name):
             continue
         try:
-            record = _read_footage_receipt(path)
-            filename = record.get('file') if record else None
-            if record and record.get('format') == 'argus-footage-alias/1':
-                filename = str(record.get('key')) + '.mp4'
-            expiry = record.get('expires_at') if expire and record else None
-            valid = (isinstance(filename, str) and re.fullmatch(r'[a-f0-9]{20}\.mp4', filename)
-                     and (FOOTAGE_DIR / filename).is_file())
-            if expire:
-                valid = valid and type(expiry) in (int, float) and math.isfinite(expiry) and expiry >= time.time()
-            if not valid:
-                path.unlink(missing_ok=True)
-            elif expire or len(path.stem) == 40:
-                retained.append((path.stat().st_mtime_ns, path))
+            snapshot = _read_receipt_snapshot(path)
+            if _receipt_lapsed(snapshot, expire):
+                _remove_receipt(path, lambda now: _receipt_lapsed(now, expire))
+            elif not expire and len(path.stem) == 40:
+                retained.append((snapshot[1], path, snapshot))
         except FileNotFoundError:
             pass
         except OSError as error:
             _maintenance_error(error)
-        except (ValueError, TypeError, KeyError):
-            path.unlink(missing_ok=True)
-    # Canonical records follow movie lifetime. Request aliases and expiring
-    # tickets have independent finite bounds, including when media count is zero.
-    limit = ((_FOOTAGE_DISK_FILES if _FOOTAGE_DISK_FILES > 0 else 128) if expire
-             else max(128, 2 * _FOOTAGE_DISK_FILES))
-    for _, path in sorted(retained, reverse=True)[limit:]:
-        path.unlink(missing_ok=True)
+    # Canonical records follow movie lifetime and request aliases have a finite bound. Tickets are bounded when they
+    # are issued, per client (prepare_footage_ticket), so no other client's load trims a live one here. An alias is
+    # trimmed as one of the oldest only while it is still the version judged old: one rewritten since is in use.
+    retained.sort(key=lambda entry: entry[0], reverse=True)
+    for _, path, snapshot in retained[max(128, 2 * _FOOTAGE_DISK_FILES):]:
+        try:
+            _remove_receipt(path, lambda now, seen=snapshot: now == seen)
+        except OSError as error:
+            _maintenance_error(error)
 
 
 def _remember_ready_footage(request: str, result: tuple, record=None) -> None:
@@ -1130,21 +1060,102 @@ def _remember_ready_footage(request: str, result: tuple, record=None) -> None:
         _maintenance_error(error)
 
 
-def _existing_footage_ticket(result):
-    """Cheap repeated prepares share a live ticket without consuming its peers."""
-    version = list(_footage_version(result[0]))
-    for path in (FOOTAGE_DIR / '.tickets').glob('*.json'):
-        try:
-            record = _ticket_record(path.stem)
-            if (record and record.get('file') == result[0].name and record.get('version') == version
-                    and record['expires_at'] - time.time() >= 30):
-                return path.stem
-        except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
-            continue
-    return None
+_TICKET_CLIENT_MAX = 8      # live download tickets one client holds; another withdraws that client's oldest
+_TICKET_MAX = 4096          # live tickets of all clients; past this a prepare is refused, never another's withdrawn
+# FOOTAGE_DIR -> {token: (owner, file, version, expires_at, issued_at, stamp)}. Other server processes renew, withdraw
+# and expire the same ticket files, so an entry stands only for the file at `stamp` (size, modification time and inode,
+# taken before it was read): a file whose stamp differs is read again, and an expiry is acted on only through
+# _remove_receipt, which reads the file again and keeps it when it was renewed.
+_TICKETS = {}
 
 
-def prepare_footage_ticket(result: tuple) -> str:
+def _ticket_owner(client) -> str:
+    """The name a ticket records for the client that asked for it (client_key), not the address itself."""
+    return hashlib.sha256(str(client).encode()).hexdigest()[:16] if client else ''
+
+
+def _ticket_fields(record) -> tuple:
+    """(owner, file, version, expires_at, issued_at) of a ticket record; an unreadable one expires at 0, so it is
+    removed like an expired one."""
+    expiry = record.get('expires_at') if record else None
+    if type(expiry) not in (int, float) or not math.isfinite(expiry) or not isinstance(record.get('file'), str):
+        return '', '', None, 0.0, 0.0
+    issued = record.get('issued_at')
+    return (str(record.get('owner') or ''), record['file'], record.get('version'), float(expiry),
+            float(issued) if type(issued) in (int, float) else float(expiry) - _FOOTAGE_TICKET_SECONDS)
+
+
+def _ticket_lapsed(snapshot) -> bool:
+    return _ticket_fields(_snapshot_record(snapshot))[3] < time.time()
+
+
+def _ticket_stamp(st) -> tuple:
+    return st.st_size, st.st_mtime_ns, st.st_ino
+
+
+def _read_ticket(index, folder, token, stamp=None) -> None:
+    """Read one ticket file into the index as it is now (or drop it when it is gone). The stamp is taken before the
+    read, so a write in between costs one more read later and never leaves an entry newer than its stamp says."""
+    path = folder / f'{token}.json'
+    try:
+        stamp = stamp or _ticket_stamp(os.lstat(path))
+        index[token] = (*_ticket_fields(_snapshot_record(_read_receipt_snapshot(path))), stamp)
+    except FileNotFoundError:
+        index.pop(token, None)
+    except OSError as error:
+        _maintenance_error(error)
+        index.pop(token, None)
+
+
+def _ticket_index() -> dict:
+    """The live tickets in FOOTAGE_DIR/.tickets (with _FOOTAGE_READY_LOCK held). A ticket file is read again whenever
+    its stamp changed since this process read it, so a renewal by another server is seen; expired ones are removed
+    here, each only when it is still expired on a fresh read."""
+    folder = FOOTAGE_DIR / '.tickets'
+    index = _TICKETS.setdefault(str(FOOTAGE_DIR), {})
+    stamps = {}
+    try:
+        entries = list(os.scandir(folder))
+    except OSError:
+        entries = []
+    for entry in entries:
+        if re.fullmatch(r'[a-f0-9]{32}\.json', entry.name):
+            try:
+                stamps[entry.name[:-5]] = _ticket_stamp(entry.stat(follow_symlinks=False))
+            except OSError:
+                continue
+    for token in set(index) - set(stamps):
+        del index[token]
+    for token, stamp in stamps.items():
+        if token not in index or index[token][5] != stamp:
+            _read_ticket(index, folder, token, stamp)
+    now = time.time()
+    for token, entry in list(index.items()):
+        if entry[3] < now:
+            try:
+                if _remove_receipt(folder / f'{token}.json', _ticket_lapsed):
+                    del index[token]
+                else:
+                    _read_ticket(index, folder, token)      # renewed since it was read: keep its new expiry
+            except OSError as error:
+                _maintenance_error(error)
+    return index
+
+
+def _ticketed_footage() -> dict:
+    """{video file name: owners of the live tickets that name it}."""
+    held = {}
+    with _FOOTAGE_READY_LOCK:
+        for entry in _ticket_index().values():
+            held.setdefault(entry[1], set()).add(entry[0])
+    return held
+
+
+def prepare_footage_ticket(result: tuple, client=None, *, reuse: bool = False) -> str:
+    """A download ticket for a prepared video, owned by `client` (client_key). With `reuse`, the client's own live
+    ticket for the same video is renewed for a full lifetime and returned instead. A client holds at most
+    _TICKET_CLIENT_MAX tickets, and its own oldest is withdrawn past that; other clients' load never withdraws one.
+    Past _TICKET_MAX live tickets in all, a new ticket is refused."""
     record = getattr(result, 'receipt', None)
     if record is None:
         record, _ = _cached_footage_record(result[0].stem)
@@ -1155,15 +1166,47 @@ def prepare_footage_ticket(result: tuple) -> str:
         raise CacheBusy('Prepared video was evicted; prepare it again.') from error
     if record is None or list(version) != list(record.get('version') or []):
         raise ValueError('Prepared footage changed before ticket publication')
-    record['expires_at'] = time.time() + _FOOTAGE_TICKET_SECONDS
-    token = uuid.uuid4().hex
+    owner, now = _ticket_owner(client), time.time()
+    record.update(owner=owner, issued_at=now, expires_at=now + _FOOTAGE_TICKET_SECONDS)
+    # A ticket protects its video from eviction, so issuing one is a reservation too. It holds the cache lock that
+    # publication and trimming hold, so a trim cannot remove the video between this check and the ticket's write.
+    with _file_lock(FOOTAGE_DIR / '.locks' / 'cache'):
+        try:
+            current = _footage_version(result[0])
+        except FileNotFoundError as error:
+            raise CacheBusy('Prepared video was evicted; prepare it again.') from error
+        if list(current) != list(version):
+            raise ValueError('Prepared footage changed before ticket publication')
+        _reserve_footage(client, result[0], version[2])
+        return _issue_footage_ticket(result, record, owner, version, now, reuse)
+
+
+def _issue_footage_ticket(result, record, owner, version, now, reuse):
     with _FOOTAGE_READY_LOCK:
         folder = FOOTAGE_DIR / '.tickets'
+        index = _ticket_index()
+        token = next((token for token, entry in index.items() if reuse and entry[0] == owner
+                      and entry[1] == result[0].name and entry[2] == list(version)), None)
+        if token is None:
+            mine = sorted((entry[4], token) for token, entry in index.items() if entry[0] == owner)
+            excess = len(mine) - _TICKET_CLIENT_MAX + 1
+            for issued, old in mine:
+                if excess <= 0:
+                    break
+                # withdrawn only while it is still the ticket judged oldest: one renewed since is not, and stays
+                if not _remove_receipt(folder / f'{old}.json',
+                                       lambda now, issued=issued: _ticket_fields(_snapshot_record(now))[4] == issued):
+                    _read_ticket(index, folder, old)
+                    if old in index:
+                        continue
+                index.pop(old, None)
+                excess -= 1
+            if len(index) >= _TICKET_MAX:
+                raise CacheBusy('Too many downloads are prepared at once; try again later.')
+            token = uuid.uuid4().hex
         _write_footage_record(folder / f'{token}.json', record)
-        try:
-            _trim_footage_receipts(folder, r'[a-f0-9]{32}\.json', expire=True)
-        except (OSError, ValueError) as error:
-            _maintenance_error(error)
+        _read_ticket(index, folder, token)
+        _trim_receipt_temps(folder)
     return token
 
 
@@ -1171,14 +1214,17 @@ def _ticket_record(token: str) -> dict | None:
     if not re.fullmatch(r'[a-f0-9]{32}', token):
         return None
     receipt = FOOTAGE_DIR / '.tickets' / f'{token}.json'
-    record = _read_footage_receipt(receipt)
-    if record is None:
-        return None
-    expiry = record.get('expires_at')
-    if type(expiry) not in (int, float) or not math.isfinite(expiry) or expiry < time.time():
-        receipt.unlink(missing_ok=True)
-        return None
-    return record
+    for _ in range(2):
+        record = _read_footage_receipt(receipt)
+        if record is None:
+            return None
+        expiry = record.get('expires_at')
+        if type(expiry) in (int, float) and math.isfinite(expiry) and expiry >= time.time():
+            return record
+        # expired as read: removed only if it is still expired now, and read again when another server renewed it
+        if _remove_receipt(receipt, _ticket_lapsed):
+            return None
+    return None
 
 
 def ticket_footage(token: str) -> tuple | None:
@@ -1191,11 +1237,21 @@ def ticket_footage(token: str) -> tuple | None:
 
 @contextmanager
 def _ticket_reader(token):
-    # Validate and send the same open file so a path replacement cannot switch
-    # bytes between identity checking and Range delivery.
-    reader, result = None, None
     try:
         record = _ticket_record(token)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        record = None
+    with _footage_reader(record) as opened:
+        yield opened
+
+
+@contextmanager
+def _footage_reader(record):
+    """(verified movie, open file) for a receipt, or (None, None). The file is opened first and its open descriptor is
+    checked against the receipt, then the same descriptor is sent, so another server evicting or replacing the movie
+    after it was verified can neither switch the bytes nor make this send a file the receipt does not name."""
+    reader, result = None, None
+    try:
         if record and re.fullmatch(r'[a-f0-9]{20}\.mp4', record.get('file', '')):
             reader = (FOOTAGE_DIR / record['file']).open('rb')
             result = _receipt_footage(record, reader=reader)
@@ -1208,7 +1264,7 @@ def _ticket_reader(token):
             reader.close()
 
 
-def footage(eid: str, t0: float = 0.0, t1: float | None = None) -> tuple | None:
+def footage(eid: str, t0: float = 0.0, t1: float | None = None, client=None) -> tuple | None:
     """Prepare the current sources; tickets separately serve the exact prepared output."""
     if not math.isfinite(t0) or (t1 is not None and not math.isfinite(t1)):
         raise ValueError('Footage times must be finite')
@@ -1218,28 +1274,19 @@ def footage(eid: str, t0: float = 0.0, t1: float | None = None) -> tuple | None:
         return None
     if _FOOTAGE_DISK_BYTES <= 0:
         raise FootageCapacityError('Prepared footage disk cache has no capacity')
-    options = [eid, float(t0), None if t1 is None else float(t1), FOOTAGE_TAG,
-               label.get('duration_s'), label.get('camera_views')]
-    with _footage_sources(cams, options) as (working, identities, digests):
-        result = _footage_from_sources(eid, t0, t1, label, working, identities, digests)
-        if result is not None:
-            _remember_prepare_hint(_MEDIA_READERS.prepare_hint, result[0])
-        return result
+    with _footage_sources(cams) as (working, identities):
+        return _footage_from_sources(eid, t0, t1, label, working, identities, client)
 
 
-def _footage_from_sources(eid, t0, t1, label, cams, identities, digests):
+def _footage_from_sources(eid, t0, t1, label, cams, identities, client=None):
     request_parts = [eid, float(t0), None if t1 is None else float(t1), FOOTAGE_TAG,
                      label.get('duration_s'), label.get('camera_views'), identities]
     request = hashlib.sha1(json.dumps(request_parts).encode()).hexdigest()
     ready = _ready_footage(request)
     if ready is not None:
-        _trim_footage_cache(ready[0])
+        _trim_footage_cache(ready[0], client)
         return ready
-    if getattr(_MEDIA_READERS, 'untrusted', False) and not getattr(_MEDIA_READERS, 'prepare_slot', False):
-        with _FOOTAGE_MEMORY_LOCK:
-            _FOOTAGE_HINTS.pop(_MEDIA_READERS.prepare_hint, None)
-    probes = [_content_probe(path, digest) if digest else _probe(path)
-              for (_, path), digest in zip(cams, digests)]
+    probes = [_probe(path) for _, path in cams]
     clocks = label.get('camera_views') or ['exo', 'left', 'right']
     anchor = next((cam for cam in clocks if any(c == cam for c, _ in cams)), cams[0][0])
     dur = label.get('duration_s')
@@ -1255,22 +1302,15 @@ def _footage_from_sources(eid, t0, t1, label, cams, identities, digests):
     name = f'{eid}.mp4' if whole else f'{eid}_{t0:.1f}-{t1:.1f}s.mp4'
     key = hashlib.sha1(json.dumps([eid, t0, t1, FOOTAGE_TAG, identities]).encode()).hexdigest()[:20]
     out = FOOTAGE_DIR / f'{key}.mp4'
-    with ExitStack() as stack:
-        if getattr(_MEDIA_READERS, 'untrusted', False) and not getattr(_MEDIA_READERS, 'prepare_slot', False):
-            ready = _ready_footage(key)
-            if ready is not None:
-                _remember_ready_footage(request, ready)
-                return ready
-            # Admission always precedes the output lock, including stale hints.
-            stack.enter_context(_prepare_admission())
-        with _footage_lock(key):
-            ready = _ready_footage(key)
-            if ready is not None:
-                _remember_ready_footage(request, ready)
-                return ready
-            result = _uncached_footage(key, out, name, cams, probes, t0, t1)
-            _remember_ready_footage(request, result)
-            return result
+    with _footage_lock(key):
+        ready = _ready_footage(key)
+        if ready is not None:
+            _remember_ready_footage(request, ready)
+            return ready
+        _footage_room(client, out)
+        result = _uncached_footage(key, out, name, cams, probes, t0, t1, client)
+        _remember_ready_footage(request, result)
+        return result
 
 
 def _run_footage(cmd: list) -> subprocess.CompletedProcess:
@@ -1304,23 +1344,18 @@ def _run_footage(cmd: list) -> subprocess.CompletedProcess:
             raise
 
 
-def _uncached_footage(key, out, name, cams, probes, t0, t1):
-    if getattr(_MEDIA_READERS, 'prepare_slot', False):
-        return _encode_reserved_footage(key, out, name, cams, probes, t0, t1)
-    return _admitted_uncached_footage(key, out, name, cams, probes, t0, t1)
+def _uncached_footage(key, out, name, cams, probes, t0, t1, client=None):
+    # An encode never waits for another: a request that finds every encoder busy is answered 503 and retries.
+    if not _FOOTAGE_SEM.acquire(blocking=False):
+        raise CacheBusy('Media preparation is busy; try again shortly')
+    try:
+        working = [(cam, _source_path(path)) for cam, path in cams]
+        return _encode_and_publish(key, out, name, working, probes, t0, t1, client)
+    finally:
+        _FOOTAGE_SEM.release()
 
 
-@_bounded_work(_FOOTAGE_SEM)
-def _admitted_uncached_footage(*args):
-    return _encode_reserved_footage(*args)
-
-
-def _encode_reserved_footage(key, out, name, cams, probes, t0, t1):
-    with _encode_sources(cams) as working:
-        return _encode_and_publish(key, out, name, working, probes, t0, t1)
-
-
-def _encode_and_publish(key, out, name, cams, probes, t0, t1):
+def _encode_and_publish(key, out, name, cams, probes, t0, t1, client=None):
     # A competing process may publish while this encoder runs. Publication adopts
     # its verified result instead of replacing a file held by a live ticket.
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -1350,13 +1385,13 @@ def _encode_and_publish(key, out, name, cams, probes, t0, t1):
             # Only the short rename/receipt/prune transaction shares a cache lock.
             # Source work, encoding and full output hashing run independently.
             with _file_lock(FOOTAGE_DIR / '.locks' / 'cache'):
+                _reserve_footage(client, out, record['version'][2])
                 if out.exists():
                     _discard_changed_footage(out)
                 os.replace(tmp, out)
-                record.update(file=out.name, version=_footage_version(out))
+                record = _stored_record({**record, 'file': out.name, 'version': _footage_version(out)})
                 _remember_ready_footage(key, (out, name), record)
-                _trim_disk_cache(FOOTAGE_DIR, '.mp4', max_bytes=_FOOTAGE_DISK_BYTES,
-                                 max_files=_FOOTAGE_DISK_FILES if _FOOTAGE_DISK_FILES > 0 else 2**63, protect=out)
+                _trim_footage_files(out, client)
         return _VerifiedFootage(out, name, record)
     finally:
         try:
@@ -1419,21 +1454,31 @@ def labels_license(board: Path) -> dict | None:
 
 
 def _label_identity(path):
-    from board.static import _durable_metadata, src_sig
-    version = _footage_version(path)
-    return version if _durable_metadata(str(path), version) else (*version, src_sig(path))
+    return _trusted_version(path, _footage_version(path))
+
+
+def _opened_version(source) -> tuple:
+    stat = os.fstat(source.fileno())
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
 
 def _read_label(path):
     """Reuse bytes already read by an episode request to refresh its rail row."""
-    raw = path.read_bytes()
+    with path.open('rb') as source:
+        opened = _trusted_version(path, _opened_version(source))
+        raw = source.read()
     label = json.loads(raw)
     key = str(path.parent)
     if isinstance(label, dict) and 'episode_prompt' in label:
         with _LIST_LOCK:
             known = key in _LIST_ROWS
+        try:
+            # the row stands for the file only while nothing replaced the bytes this request read
+            known = known and _label_identity(path) == opened
+        except OSError:
+            known = False
         if known:
-            row = (hashlib.sha256(raw).hexdigest(), _rail_record(path, label))
+            row = (opened, _rail_record(path, label))
             with _LIST_LOCK:
                 rows = _LIST_ROWS[key]
                 rows[path.name] = row
@@ -1443,7 +1488,7 @@ def _read_label(path):
 
 
 def _refresh_weak_list(here: Path):
-    """Hash and parse the same stable bytes, preserving last complete writer output."""
+    """Read only the labels whose size or modification time changed, preserving last complete writer output."""
     key = str(here)
     with _LIST_LOCK:
         previous = dict(_LIST_ROWS.get(key, {}))
@@ -1452,22 +1497,19 @@ def _refresh_weak_list(here: Path):
         try:
             if not _under(here, path):
                 continue
-            before = _footage_version(path)
-            with path.open('rb') as source:
-                raw = source.read(_EXPORT_LABEL_BYTES + 1)
-                source.seek(0)
-                repeated = source.read(_EXPORT_LABEL_BYTES + 1)
-            if (len(raw) > _EXPORT_LABEL_BYTES or raw != repeated
-                    or _footage_version(path) != before):
-                raise ValueError('Label changed during snapshot')
-            digest = hashlib.sha256(raw).hexdigest()
+            version = _label_identity(path)
             old = previous.get(path.name)
-            if old and old[0] == digest:
+            if old and old[0] == version:
                 rows[path.name] = old
                 continue
+            with path.open('rb') as source:
+                opened = _trusted_version(path, _opened_version(source))
+                raw = source.read()
+            if opened != version or _label_identity(path) != version:
+                raise ValueError('Label changed during snapshot')
             label = json.loads(raw)
             if isinstance(label, dict) and 'episode_prompt' in label:
-                rows[path.name] = (digest, _rail_record(path, label))
+                rows[path.name] = (version, _rail_record(path, label))
         except (OSError, ValueError, TypeError, AttributeError, RecursionError):
             if path.name in previous:
                 rows[path.name] = previous[path.name]
@@ -1492,11 +1534,13 @@ def _refresh_weak_list_worker(here):
 
 
 def list_episodes(here: Path | None = None) -> list:
-    """Serve complete rail snapshots; weak filesystem byte checks run off requests.
+    """Serve complete rail snapshots; on a weak filesystem the scan runs off requests.
 
     Live weak-filesystem lists can lag writes by one refresh interval plus scan
-    time. A malformed in-progress write retains its last complete row; a removed
-    file disappears on the next complete scan. Episode exports read current files.
+    time, and see a label as changed when its size or modification time changes
+    (_trusted_version). A malformed in-progress write retains its last complete row;
+    a removed file disappears on the next complete scan. Episode exports read
+    current files.
     """
     from board.static import _durable_metadata
     here = here or HERE
@@ -1567,9 +1611,13 @@ def capture_catalog() -> dict:
     return {CAPTURE_PREFIX + k: {"name": name, "list": "data", "check": True} for k, (name, _group) in NAMES.items()}
 
 
-def public_label(d: dict) -> dict:
-    """Copy public JSON after source checks and current human interpretation."""
-    return public_json(d)
+EXPORT_UPLOADER_VALUES = False      # --publish-uploader-values: downloads and exports carry uploader metadata values
+
+
+def public_label(d: dict, *, export: bool = False) -> dict:
+    """Copy public JSON after source checks and current human interpretation. A download or export leaves the board,
+    so it carries uploader metadata values only when the operator published them (--publish-uploader-values)."""
+    return public_json(d, uploader_values=EXPORT_UPLOADER_VALUES) if export else public_json(d)
 
 
 def current_label(d: dict, job: Path | None, filename: str) -> dict:
@@ -1767,6 +1815,51 @@ def render_index(title: str, board: dict, name: str = "", header: str | None = N
             .replace("__FAMILIES__", _js({**FAMILIES.catalog(), **capture_catalog()})))
 
 
+@lru_cache(maxsize=1)
+def machine_names() -> frozenset:
+    """This machine's own host names, with and without their domain and as .local, which a board on a network address
+    answers to."""
+    names = set()
+    for name in (socket.gethostname(), socket.getfqdn()):
+        name = (name or '').lower().rstrip('.')
+        if name:
+            short = name.split('.')[0]
+            names.update((name, short, short + '.local'))
+    return frozenset(names)
+
+
+def host_allowed(host: str, bound: str, allowed=()) -> bool:
+    """Whether a board listening on `bound` answers to a request whose Host is `host`. Every board answers to localhost,
+    the loopback addresses and the names given with --allow-host. A board on a network address also answers to any IP
+    address, which DNS rebinding cannot forge since it needs a name, and to this machine's own names (machine_names); a
+    loopback board answers to nothing else, since only a proxy on this machine forwards other names to it."""
+    import ipaddress
+    host = host.lower().rstrip('.')
+    if host in ('localhost', '127.0.0.1', '::1') or host in {str(h).lower().rstrip('.') for h in allowed}:
+        return True
+    try:
+        if ipaddress.ip_address(str(bound).split('%')[0]).is_loopback:
+            return False
+    except ValueError:
+        pass
+    try:
+        ipaddress.ip_address(host.split('%')[0])
+        return True
+    except ValueError:
+        return host in machine_names()
+
+
+def media_tag(path: Path, version: tuple, *made) -> str:
+    """An entity tag for a served clip, or for what was made from it (`made`: a frame's time, width and recipe): its
+    trusted stat (_trusted_version), so a browser keeps unchanged media and revalidates it, and a replaced clip gets a
+    new tag."""
+    identity = repr((str(path), _trusted_version(path, version), made)).encode()
+    return '"' + hashlib.sha1(identity).hexdigest()[:32] + '"'
+
+
+REVALIDATE = 'no-cache'      # browsers may keep media, but ask each time whether it is still current
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     # keep-alive: a page asks for its labels, posters and three videos at once, and a proxy in front (or a browser
     # that talks to the board directly) reuses one connection for them instead of opening one per request; an idle
@@ -1774,6 +1867,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = 30
     request_read_timeout = 15
+
+    def setup(self):
+        # BoardHTTPServer hands over one request of a connection it holds, with the head it already received
+        if isinstance(self.request, _HeldRequest):
+            self.connection = self.request.sock
+            self.rfile = self.request.reader
+            self.wfile = socketserver._SocketWriter(self.connection)
+            return
+        super().setup()
+
+    def handle(self):
+        if isinstance(self.request, _HeldRequest):
+            self.close_connection = True
+            self.handle_one_request()
+            self.request.close = self.close_connection
+            return
+        super().handle()
+
+    def finish(self):
+        if isinstance(self.request, _HeldRequest):
+            return
+        super().finish()
+
+    def client(self) -> str:
+        """Who this request comes from (client_key), for per-client bounds."""
+        if isinstance(self.request, _HeldRequest):
+            return self.request.client
+        return client_key(str(self.client_address[0]) if self.client_address else '',
+                          (self.headers.get_all('X-Forwarded-For') or [None])[-1] if self.headers else None)
 
     def _stop_read_deadline(self):
         deadline = getattr(self, '_read_deadline', None)
@@ -1830,17 +1952,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_file(self, p: Path, ctype: str, download: str | None = None, *, source=None):
+    def _not_modified(self, tag: str) -> bool:
+        """Answer 304 when the browser's copy carries this entity tag."""
+        given = self.headers.get('If-None-Match')
+        if not given or not ({t.strip().removeprefix('W/') for t in given.split(',')} & {tag, '*'}):
+            return False
+        self.send_response(304)
+        self.send_header('ETag', tag)
+        self.send_header('Cache-Control', REVALIDATE)
+        self.end_headers()
+        return True
+
+    def _send_file(self, p: Path, ctype: str, download: str | None = None, *, source=None, validate=False):
         """Serve a file with proper HTTP Range support so the browser
-        can stream/seek without downloading the whole thing first; download names the saved file."""
+        can stream/seek without downloading the whole thing first; download names the saved file. With validate, the
+        response carries the file's entity tag (media_tag) so a browser revalidates its copy instead of fetching it
+        again."""
         try:
             st = os.fstat(source.fileno()) if source is not None else p.stat()
         except OSError:
             self._send(404, {"error": "not found"})
             return
         size = st.st_size
+        tag = media_tag(p, (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)) if validate else None
+        if tag and self._not_modified(tag):
+            return
 
         rng = self.headers.get("Range") or self.headers.get("range")
+        if tag and rng and (self.headers.get('If-Range') or tag) != tag:
+            rng = None          # the copy the browser is completing has changed: send the whole file
         start = 0
         end = size - 1
         partial = False
@@ -1882,7 +2022,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(length))
             self.send_header("Accept-Ranges", "bytes")
-            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+            if tag:
+                self.send_header('ETag', tag)
+                self.send_header('Cache-Control', REVALIDATE)
+            else:
+                self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
             if download:
                 self.send_header("Content-Disposition", f'attachment; filename="{download}"')
             self.end_headers()
@@ -1950,27 +2094,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
             raise ValueError('Unsupported request body framing')
         return int(lengths[0])
 
-    def _browser_origin_allowed(self):
+    def _browser_refusal(self) -> str | None:
+        """Why a browser's request is refused, or None: another site's page asking (Sec-Fetch-Site), or a Host header
+        this board does not answer to (host_allowed), which is how DNS rebinding reaches a board."""
         if self.headers.get('Sec-Fetch-Site') == 'cross-site':
-            return False
+            return 'Cross-site requests are disabled.'
         server = getattr(self, 'server', None)
         if server is None:
-            return True
+            return None
+        raw = self.headers.get('Host') or ''
         try:
-            host = urllib.parse.urlsplit('http://' + (self.headers.get('Host') or '')).hostname
+            host = urllib.parse.urlsplit('http://' + raw).hostname
         except ValueError:
-            return False
-        if server.server_address[0] in ('127.0.0.1', '::1'):
-            allowed = {'localhost', '127.0.0.1', '::1'}
-            allowed.update(getattr(server, 'allowed_hosts', ()))
-            return host in allowed
-        return bool(host)
+            host = None
+        if host and host_allowed(host, server.server_address[0], getattr(server, 'allowed_hosts', ())):
+            return None
+        shown = re.sub(r'[^A-Za-z0-9.:\[\]_-]', '', host or raw)[:100]
+        if not shown:
+            return 'The request names no host this board answers to.'
+        return (f'This board does not answer to the host name {shown}. If it is reached by that name, for example '
+                f'through a reverse proxy such as tailscale serve or Caddy, start it with --allow-host {shown}.')
 
     def do_POST(self):
         """Export unique episodes through a bounded spool before sending headers."""
-        if not self._browser_origin_allowed():
+        refusal = self._browser_refusal()
+        if refusal:
             self.close_connection = True
-            return self._send(403, {'error': 'Cross-site requests are disabled.'})
+            return self._send(403, {'error': refusal})
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path not in ('/api/export', '/api/dictionary'):
             self.close_connection = True
@@ -2016,7 +2166,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             label = json.loads(raw)
                             if not isinstance(label, dict):
                                 raise ValueError('Invalid label')
-                            label = finite(public_label(current_label(label, DICTIONARY_JOB, path.name)))
+                            label = finite(public_label(current_label(label, DICTIONARY_JOB, path.name), export=True))
                             for text in json.JSONEncoder(ensure_ascii=False, separators=(',', ':'), allow_nan=False).iterencode(label):
                                 chunk = text.encode()
                                 total += len(chunk)
@@ -2047,9 +2197,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._stop_read_deadline()
-        if not self._browser_origin_allowed():
+        refusal = self._browser_refusal()
+        if refusal:
             self.close_connection = True
-            return self._send(403, {'error': 'Cross-site requests are disabled.'})
+            return self._send(403, {'error': refusal})
         try:
             return self._get()
         except (RecursionError, json.JSONDecodeError, UnicodeDecodeError):
@@ -2086,7 +2237,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send(404, {"error": "no such file"})
                 return
             if (q.get("download") or [""])[0] == "1":
-                body = dumps(public_label(current_label(_read_label(p), DICTIONARY_JOB, p.name)), separators=(",", ":")).encode()
+                body = dumps(public_label(current_label(_read_label(p), DICTIONARY_JOB, p.name), export=True),
+                             separators=(",", ":")).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Disposition", f'attachment; filename="{p.name}"')
@@ -2213,7 +2365,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             name = f"{eid}_{cam if own else 'main'}.mp4" \
                 if (q.get("download") or [""])[0] == "1" \
                 else None
-            self._send_file(mp4, "video/mp4", name)
+            self._send_file(mp4, "video/mp4", name, validate=name is None)
             return
         if parsed.path == "/api/footage":
             # the episode's cameras in one video (footage), whole or from t0 to t1 s; prepare=1 makes it and answers
@@ -2235,9 +2387,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send(404, {"error": "no such episode"})
                 return
             try:
-                got = footage(eid, t0, t1)
+                got = footage(eid, t0, t1, self.client())
             except CacheBusy as error:
-                return self._send(503, {'error': str(error)})
+                return self._send(503, {'error': str(error), 'retryable': True})
             except FootageCapacityError as error:
                 return self._send(507, {'error': str(error)})
             except ValueError as error:
@@ -2256,7 +2408,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             out, name = got
             if (q.get("prepare") or [""])[0] == "1":
                 try:
-                    ticket = _existing_footage_ticket(got) or prepare_footage_ticket(got)
+                    ticket = prepare_footage_ticket(got, self.client(), reuse=True)
                     try:
                         size = out.stat().st_size
                     except FileNotFoundError as error:
@@ -2270,8 +2422,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return self._send(409, {'error': 'Prepared video changed; prepare it again.'})
                 self._send(200, {"bytes": size, "name": name, "ticket": ticket})
                 return
-            self._send_file(out, "video/mp4", name)
-            return
+            with _footage_reader(getattr(got, 'receipt', None)) as (verified, reader):
+                if verified is None:
+                    return self._send(503, {'error': 'Prepared video changed; prepare it again.', 'retryable': True})
+                return self._send_file(out, "video/mp4", name, source=reader)
         if parsed.path == "/api/frame":
             q = urllib.parse.parse_qs(parsed.query)
             mp4 = clip_path(MP4_DIR, (q.get("id") or [""])[0], (q.get("cam") or ["exo"])[0])
@@ -2283,6 +2437,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 w = int((q.get("w") or ["640"])[0])
             except ValueError:
                 w = 640
+            tag = None
+            try:
+                if _under(MP4_DIR, mp4) and math.isfinite(t):
+                    from board.static import FRAME_TAG
+                    tag = media_tag(mp4, _footage_version(mp4), t, w, FRAME_TAG)
+            except OSError:
+                tag = None
+            if tag and self._not_modified(tag):
+                return
             try:
                 jpg = extract_frame(mp4, t, w) if _under(MP4_DIR, mp4) else None
             except CacheBusy as error:
@@ -2295,7 +2458,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "image/jpeg")
             self.send_header("Content-Length", str(len(jpg)))
-            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+            if tag:
+                self.send_header('ETag', tag)
+            self.send_header("Cache-Control", REVALIDATE if tag else "no-store, no-cache, must-revalidate, max-age=0")
             self.end_headers()
             try:
                 self.wfile.write(jpg)
@@ -2305,35 +2470,432 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._send(404, {"error": "unknown path"})
 
 
-class BoardHTTPServer(socketserver.ThreadingTCPServer):
-    """Bound idle and slow connections before allocating a handler thread."""
-    daemon_threads = True
+def client_key(peer: str, forwarded: str | None = None) -> str:
+    """Who a request comes from, for sharing workers and download tickets between clients: the peer's address, the
+    /64 network of an IPv6 peer (one host is routinely given a whole /64), or, for a loopback peer (a reverse proxy on
+    this machine), the address that proxy put last in X-Forwarded-For. A forwarded address is trusted only from
+    loopback: anything that can connect there can read the board's files anyway."""
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(peer.split('%')[0])
+    except ValueError:
+        return peer
+    if ip.is_loopback and forwarded:
+        last = forwarded.split(',')[-1].strip()
+        try:
+            ip = ipaddress.ip_address(last.strip('[]').split('%')[0])
+        except ValueError:
+            return 'forwarded ' + last[:64] if last else str(ip)
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return str(ipaddress.ip_network(f'{ip}/64', strict=False)) if ip.version == 6 else str(ip)
+
+
+_FORWARDED_FOR = re.compile(rb'\nx-forwarded-for[ \t]*:[ \t]*([^\r\n]*)', re.I)
+_HEAD_END = re.compile(rb'\r?\n\r?\n')
+
+
+class _Held:
+    """A connection the server holds while no worker serves it: the bytes of its next request head so far, when it
+    was accepted or handed back, and when that head's first byte came."""
+    __slots__ = ('sock', 'address', 'peer', 'client', 'data', 'since', 'first', 'state', 'queued')
+
+    def __init__(self, sock, address):
+        self.sock, self.address, self.peer = sock, address, client_key(address[0])
+        self.client, self.data, self.state, self.queued = self.peer, bytearray(), 'held', 0.0
+        self.since, self.first = time.monotonic(), None
+
+
+class _Reader:
+    """A held connection's request bytes for a handler: what the server already received, then the socket. It never
+    reads ahead of what the handler asks for, so bytes of a pipelined next request stay here for the server."""
+    closed = False
+
+    def __init__(self, sock, data):
+        self.sock, self.buffer = sock, bytearray(data)
+
+    def _fill(self) -> bool:
+        chunk = self.sock.recv(65536)
+        self.buffer += chunk
+        return bool(chunk)
+
+    def readline(self, limit=-1):
+        while True:
+            end = self.buffer.find(b'\n')
+            if end >= 0 and (limit is None or limit < 0 or end < limit):
+                end += 1
+                break
+            if limit is not None and 0 <= limit <= len(self.buffer):
+                end = limit
+                break
+            if not self._fill():
+                end = len(self.buffer)
+                break
+        out = bytes(self.buffer[:end])
+        del self.buffer[:end]
+        return out
+
+    def read(self, n=-1):
+        while (n is None or n < 0 or len(self.buffer) < n) and self._fill():
+            pass
+        end = len(self.buffer) if n is None or n < 0 else min(n, len(self.buffer))
+        out = bytes(self.buffer[:end])
+        del self.buffer[:end]
+        return out
+
+    def close(self):
+        pass
+
+
+class _HeldRequest:
+    """What Handler is given in place of a socket for one request on a held connection."""
+    def __init__(self, sock, reader, client):
+        self.sock, self.reader, self.client, self.close = sock, reader, client, True
+
+
+class BoardHTTPServer(socketserver.TCPServer):
+    """Hold idle and slow connections without a thread each, and share the worker threads fairly between clients.
+
+    One selector thread holds every connection between requests and reads request heads; a worker thread is given a
+    connection only once its request head has arrived, for that one request, and the connection then comes back. A
+    client that keeps sockets idle, or trickles a head byte by byte, so costs file descriptors, never the workers other
+    viewers need. A waiting request goes to the client with the fewest requests in progress, and one client never has
+    more than client_workers. Held connections are bounded: near the bound idle ones are closed after a second, and
+    over it the oldest connection of whichever client holds the most is closed, so a new viewer is queued and served,
+    never refused because someone else holds sockets."""
     allow_reuse_address = True
     request_queue_size = 128
+    max_workers = 64
+    client_workers = 16
+    max_connections = 1024
+    head_bytes = 256 * 1024
+    worker_idle_seconds = 0.5
 
-    def __init__(self, *args, **kwargs):
-        self._connections = threading.BoundedSemaphore(64)
-        super().__init__(*args, **kwargs)
-
-    def process_request(self, request, client_address):
-        if not self._connections.acquire(blocking=False):
-            self.shutdown_request(request)
-            return
+    def __init__(self, server_address, RequestHandlerClass, bind_and_activate=True):
+        super().__init__(server_address, RequestHandlerClass, bind_and_activate)
         try:
-            super().process_request(request, client_address)
-        except BaseException:
-            self._connections.release()
-            raise
+            import resource
+            soft = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+            if soft != resource.RLIM_INFINITY:
+                # leave descriptors for clips, footage, locks and the encoders' pipes
+                self.max_connections = max(16, min(self.max_connections, soft - 128))
+        except (ImportError, OSError, ValueError):
+            pass
+        self._lock = threading.Lock()
+        self._work = threading.Condition(self._lock)
+        self._selector = selectors.DefaultSelector()
+        self._wake_read, self._wake_write = socket.socketpair()
+        self._wake_read.setblocking(False)
+        self._wake_write.setblocking(False)
+        self._by_peer = {}                  # peer -> its connections not being served (held or queued)
+        self._held = set()                  # registered with the selector, reading a head
+        self._ready = OrderedDict()         # client -> deque of connections whose request head has arrived
+        self._busy = {}                     # client -> requests being served
+        self._returned = []                 # connections workers hand back for their next request
+        self._serving = self._workers = self._idle = self._queued = 0
+        self._stopping = threading.Event()
+        self._stopped = threading.Event()
+        self._stopped.set()
+        self._accept_paused_until = 0.0
 
-    def process_request_thread(self, request, client_address):
+    # selector thread ------------------------------------------------------------------------------------------------
+
+    def serve_forever(self, poll_interval=0.25):
+        self._stopping.clear()
+        self._stopped.clear()
+        self.socket.setblocking(False)
+        self._selector.register(self.socket, selectors.EVENT_READ, 'listen')
+        self._selector.register(self._wake_read, selectors.EVENT_READ, 'wake')
         try:
-            super().process_request_thread(request, client_address)
+            while not self._stopping.is_set():
+                for key, _ in self._selector.select(poll_interval):
+                    if key.data == 'listen':
+                        self._accept()
+                    elif key.data == 'wake':
+                        self._adopt()
+                    else:
+                        self._receive(key.data)
+                self._sweep()
         finally:
-            self._connections.release()
+            for fileobj in (self.socket, self._wake_read):
+                try:
+                    self._selector.unregister(fileobj)
+                except (KeyError, ValueError):
+                    pass
+            self._close_all()
+            self._stopped.set()
+
+    def shutdown(self):
+        self._stopping.set()
+        self._wake()
+        self._stopped.wait()
+
+    def server_close(self):
+        super().server_close()
+        self._close_all()
+        for end in (self._wake_read, self._wake_write):
+            end.close()
+        self._selector.close()
+
+    def _connections(self) -> int:
+        return sum(map(len, self._by_peer.values())) + self._serving
+
+    def _accept(self):
+        for _ in range(64):
+            try:
+                sock, address = self.socket.accept()
+            except BlockingIOError:
+                return
+            except OSError as error:
+                if error.errno in (errno.EMFILE, errno.ENFILE, errno.ENOBUFS, errno.ENOMEM):
+                    with self._lock:
+                        evicted = self._evict()
+                    if not evicted:
+                        # nothing to close: stop accepting a moment instead of spinning on the listening socket
+                        self._selector.unregister(self.socket)
+                        self._accept_paused_until = time.monotonic() + 0.1
+                    return
+                if error.errno in (errno.ECONNABORTED, errno.EPROTO, errno.EINTR):
+                    continue
+                raise
+            sock.setblocking(False)
+            held = _Held(sock, address if isinstance(address, tuple) else (str(address), 0))
+            with self._lock:
+                self._track(held)
+                while self._connections() > self.max_connections and self._evict():
+                    pass
+            if held.state == 'held':
+                self._selector.register(sock, selectors.EVENT_READ, held)
+
+    def _track(self, held):
+        self._by_peer.setdefault(held.peer, set()).add(held)
+        self._held.add(held)
+        held.state = 'held'
+
+    def _untrack(self, held):
+        peers = self._by_peer.get(held.peer)
+        if peers is not None:
+            peers.discard(held)
+            if not peers:
+                del self._by_peer[held.peer]
+        self._held.discard(held)
+
+    def _evict(self) -> bool:
+        """Close one connection of the client holding the most: an idle one first, then one still sending its head,
+        then one waiting for a worker; the oldest of each. Called with the lock held."""
+        if not self._by_peer:
+            return False
+        peer = max(self._by_peer, key=lambda p: len(self._by_peer[p]))
+        order = {'held': 0, 'queued': 2}
+        victim = min(self._by_peer[peer], key=lambda h: (order[h.state] + (h.first is not None), h.since))
+        if victim.state == 'queued':
+            waiting = self._ready.get(victim.client)
+            if waiting is not None:
+                waiting.remove(victim)
+                self._queued -= 1
+                if not waiting:
+                    del self._ready[victim.client]
+        else:
+            try:
+                self._selector.unregister(victim.sock)
+            except (KeyError, ValueError):
+                pass
+        self._untrack(victim)
+        victim.state = 'closed'
+        self._close(victim.sock)
+        return True
+
+    def _receive(self, held):
+        try:
+            chunk = held.sock.recv(65536)
+        except (BlockingIOError, InterruptedError):
+            return
+        except OSError:
+            chunk = b''
+        if not chunk:
+            return self._drop(held)
+        if held.first is None:
+            held.first = time.monotonic()
+        held.data += chunk
+        if _HEAD_END.search(held.data):
+            self._selector.unregister(held.sock)
+            with self._lock:
+                self._queue(held)
+        elif len(held.data) > self.head_bytes:
+            self._drop(held)
+
+    def _drop(self, held):
+        try:
+            self._selector.unregister(held.sock)
+        except (KeyError, ValueError):
+            pass
+        with self._lock:
+            self._untrack(held)
+            held.state = 'closed'
+        self._close(held.sock)
+
+    def _adopt(self):
+        try:
+            while self._wake_read.recv(4096):
+                pass
+        except (BlockingIOError, InterruptedError):
+            pass
+        with self._lock:
+            returned, self._returned = self._returned, []
+            for held in returned:
+                self._serving -= 1
+                if self._stopping.is_set():
+                    self._close(held.sock)
+                    continue
+                self._track(held)
+                if _HEAD_END.search(held.data):
+                    self._queue(held)
+            while self._connections() > self.max_connections and self._evict():
+                pass
+        for held in returned:
+            if held.state == 'held':
+                held.sock.setblocking(False)
+                self._selector.register(held.sock, selectors.EVENT_READ, held)
+
+    def _sweep(self):
+        now = time.monotonic()
+        if self._accept_paused_until and now >= self._accept_paused_until:
+            self._accept_paused_until = 0.0
+            self._selector.register(self.socket, selectors.EVENT_READ, 'listen')
+        deadline = float(getattr(self.RequestHandlerClass, 'request_read_timeout', 15))
+        with self._lock:
+            crowded = self._connections() > 0.75 * self.max_connections
+            expired = [h for h in self._held
+                       if now - (h.first if h.first is not None else h.since) >
+                       (1.0 if crowded and h.first is None else deadline)]
+        for held in expired:
+            self._drop(held)
+
+    def _close_all(self):
+        with self._lock:
+            pending = [h for peers in self._by_peer.values() for h in peers] + self._returned
+            self._serving -= len(self._returned)
+            self._returned = []
+            self._by_peer.clear()
+            self._held.clear()
+            self._ready.clear()
+            self._queued = 0
+            self._work.notify_all()
+        for held in pending:
+            try:
+                self._selector.unregister(held.sock)
+            except (KeyError, ValueError, RuntimeError):
+                pass
+            self._close(held.sock)
+
+    @staticmethod
+    def _close(sock):
+        try:
+            sock.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+        sock.close()
+
+    def _wake(self):
+        try:
+            self._wake_write.send(b'.')
+        except (BlockingIOError, OSError):
+            pass
+
+    # workers --------------------------------------------------------------------------------------------------------
+
+    def _queue(self, held):
+        """A connection whose request head has arrived waits for a worker. Called with the lock held."""
+        forwarded = _FORWARDED_FOR.findall(bytes(held.data[:_HEAD_END.search(held.data).end()]))
+        held.client = client_key(held.address[0], forwarded[-1].decode('latin-1') if forwarded else None)
+        self._held.discard(held)
+        held.state, held.queued = 'queued', time.monotonic()
+        self._ready.setdefault(held.client, deque()).append(held)
+        self._queued += 1
+        if self._queued > self._idle and self._workers < self.max_workers:
+            self._workers += 1
+            threading.Thread(target=self._work_loop, name='board-worker', daemon=True).start()
+        self._work.notify()
+
+    def _take(self):
+        """The waiting connection of the client with the fewest requests in progress (the longest waiting of those),
+        skipping clients at their share. Called with the lock held."""
+        best = None
+        for client, waiting in self._ready.items():
+            busy = self._busy.get(client, 0)
+            if busy < self.client_workers and (best is None or (busy, waiting[0].queued) < best[0]):
+                best = ((busy, waiting[0].queued), client)
+        if best is None:
+            return None
+        waiting = self._ready[best[1]]
+        held = waiting.popleft()
+        if not waiting:
+            del self._ready[best[1]]
+        self._queued -= 1
+        self._untrack(held)
+        held.state = 'serving'
+        self._serving += 1
+        self._busy[held.client] = self._busy.get(held.client, 0) + 1
+        return held
+
+    def _work_loop(self):
+        with self._work:
+            try:
+                while True:
+                    held = self._take()
+                    if held is None:
+                        if self._stopping.is_set():
+                            return
+                        self._idle += 1
+                        try:
+                            notified = self._work.wait(self.worker_idle_seconds)
+                        finally:
+                            self._idle -= 1
+                        held = self._take()
+                        if held is None:
+                            if notified and not self._stopping.is_set():
+                                continue
+                            return
+                    client = held.client
+                    self._work.release()
+                    try:
+                        self._serve(held)
+                    finally:
+                        self._work.acquire()
+                        busy = self._busy.get(client, 1) - 1
+                        if busy:
+                            self._busy[client] = busy
+                        else:
+                            self._busy.pop(client, None)
+            finally:
+                self._workers -= 1
+
+    def _serve(self, held):
+        sock, keep = held.sock, False
+        request = None
+        try:
+            sock.setblocking(True)
+            sock.settimeout(getattr(self.RequestHandlerClass, 'timeout', None))
+            request = _HeldRequest(sock, _Reader(sock, held.data), held.client)
+            self.RequestHandlerClass(request, held.address, self)
+            keep = not request.close and not self._stopping.is_set()
+        except Exception:
+            self.handle_error(sock, held.address)
+        if not keep:
+            with self._lock:
+                self._serving -= 1
+            held.state = 'closed'
+            self._close(sock)
+            return
+        held.data = request.reader.buffer
+        held.since, held.first = time.monotonic(), (time.monotonic() if held.data else None)
+        with self._lock:
+            self._returned.append(held)
+        self._wake()
 
 
 def main(argv=None) -> int:
-    global HERE, MP4_DIR, COMPARE_DIR, HANDS_DIR, KEYPOINTS_DIR, SENSORS_DIR, FOOTAGE_DIR, PORT, PAGE_TITLE, BOARD_NAME
+    global HERE, MP4_DIR, COMPARE_DIR, HANDS_DIR, KEYPOINTS_DIR, SENSORS_DIR, FOOTAGE_DIR, PORT, PAGE_TITLE, BOARD_NAME, EXPORT_UPLOADER_VALUES
     global HEADER, DICTIONARY_JOB
     ap = argparse.ArgumentParser(prog="python -m board serve", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -2345,7 +2907,15 @@ def main(argv=None) -> int:
                                                         f"(default {PAGE_TITLE!r})")
     ap.add_argument("--header", type=Path, help="an HTML file with a site's own header, shown in place of the page's "
                                                 "title bar (its <style> blocks go into the page's head)")
-    ap.add_argument('--allow-host', action='append', default=[], help='additional hostname accepted on a loopback listener')
+    ap.add_argument('--allow-host', action='append', default=[],
+                    help="another host name the board answers to, such as the name a reverse proxy that keeps the "
+                         "visitor's Host header (tailscale serve, Caddy) or a LAN DNS name gives it; repeatable. "
+                         "Without it the board answers to localhost and, when --host is a network address, to IP "
+                         "addresses and this machine's own names")
+    ap.add_argument('--publish-uploader-values', action='store_true',
+                    help="show and export the uploader's own metadata values (file attributes, sidecar fields) to "
+                         "everyone who can reach the board; by default only a loopback board with no --allow-host "
+                         "shows them, and downloads and exports never carry them")
     ap.add_argument("--dictionary-job", type=Path, help="enable local dictionary editing for this upload")
     a = ap.parse_args(argv)
     DICTIONARY_JOB = a.dictionary_job.resolve() if a.dictionary_job else None
@@ -2362,13 +2932,28 @@ def main(argv=None) -> int:
     _trim_footage_cache()
     for folder in ('.ready', '.tickets'):
         _trim_receipt_temps(FOOTAGE_DIR / folder)
+    try:
+        # idle connections cost only a descriptor each (BoardHTTPServer), so allow enough of them
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        want = 4096 if hard == resource.RLIM_INFINITY else min(hard, 4096)
+        if soft != resource.RLIM_INFINITY and soft < want:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+    except (ImportError, OSError, ValueError):
+        pass
     socketserver.ThreadingTCPServer.allow_reuse_address = True
     # socketserver's default listen backlog is 5: a burst of visitors (or a proxy opening many connections at once)
     # overflows it and those connections wait on SYN retries for up to a minute
     socketserver.ThreadingTCPServer.request_queue_size = 128
     socketserver.ThreadingTCPServer.daemon_threads = True
-    with BoardHTTPServer(("127.0.0.1" if DICTIONARY_JOB else a.host, PORT), Handler) as httpd:
+    bind = "127.0.0.1" if DICTIONARY_JOB else a.host
+    EXPORT_UPLOADER_VALUES = a.publish_uploader_values
+    from board.public_export import publish_uploader_values
+    # a loopback board nobody else is let in to (no --allow-host for a proxy) is the uploader's own view
+    publish_uploader_values(a.publish_uploader_values or (bind in ('127.0.0.1', 'localhost', '::1') and not a.allow_host))
+    with BoardHTTPServer((bind, PORT), Handler) as httpd:
         httpd.allowed_hosts = a.allow_host
+        machine_names()      # resolve this machine's names once, before the first request waits on it
         if not list_episodes():
             print('No episodes are available. A free review stops before board generation; build a board with labels.', file=sys.stderr, flush=True)
         print(f"board at http://localhost:{PORT} ({len(list_episodes())} episodes from {HERE}, clips from {MP4_DIR})",

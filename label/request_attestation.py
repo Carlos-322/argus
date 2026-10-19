@@ -43,7 +43,11 @@ def matches(record: dict, current: dict, ep_dir: Path, out_dir: Path, *, example
         if not settings['cell_w'] and route.get('routed'):
             rig = harness.me.rig(harness.me.load(ep_dir))
             low, high = harness.me.ROUTE_WIDTHS[rig]
-            route_width = low if route.get('fine_detail') is False else high
+            # the width routing chose, as it recorded it (an episode with no task text takes the narrow one with
+            # fine_detail unset); only an older receipt without it is derived from fine_detail
+            recorded = route.get('cell_w')
+            route_width = recorded if type(recorded) is int and recorded > 0 else (
+                low if route.get('fine_detail') is False else high)
         request = harness.me.build_request(ep_dir, detail=harness.DETAIL, gate=harness.DECODE_GATE,
             grid_cols=harness.GRID_COLS, cell_w=settings['cell_w'] or None, max_cell_w=route_width,
             example_dir=example_dir, inspect_evidence=True, model=settings['model'], reasoning=settings['reasoning'],

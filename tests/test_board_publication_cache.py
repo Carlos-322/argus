@@ -104,8 +104,9 @@ def test_durable_digest_uses_the_native_and_intel_statfs_abi(tmp_path):
         assert result.stdout.strip() == 'True', result.stderr
 
 
-@pytest.mark.parametrize('held_stage', ['probe', 'hash'])
-def test_http_probe_admission_bounds_distinct_and_duplicate_misses_and_keeps_ready_downloads(tmp_path, monkeypatch, held_stage):
+@pytest.mark.parametrize('weak', [False, True])
+def test_http_probe_admission_bounds_distinct_and_duplicate_misses_and_keeps_ready_downloads(tmp_path, monkeypatch, weak):
+    held_stage = 'probe'
     source = tmp_path / 'clips'
     source.mkdir()
     for name in ('ready', 'cold', 'other'):
@@ -120,7 +121,7 @@ def test_http_probe_admission_bounds_distinct_and_duplicate_misses_and_keeps_rea
     lock, probes = threading.Lock(), []
     def run(cmd, **kwargs):
         if '-show_entries' in cmd:
-            path = next((Path(reader.name) for reader, _, _ in getattr(serve._MEDIA_READERS, 'active', [])
+            path = next((Path(reader.name) for reader, _ in getattr(serve._MEDIA_READERS, 'active', [])
                          if Path(cmd[-1]).name == str(reader.fileno())), Path(cmd[-1]))
             with lock:
                 probes.append(path.name)
@@ -141,30 +142,11 @@ def test_http_probe_admission_bounds_distinct_and_duplicate_misses_and_keeps_rea
     monkeypatch.setattr(av, 'open', lambda *args, **kwargs: Container())
     monkeypatch.setattr(serve.subprocess, 'run', run)
     monkeypatch.setattr(serve, '_run_footage', run)
-    if held_stage == 'hash':
-        durable, stream_digest = static._durable_metadata, serve._stream_digest
+    if weak:
+        # a weak filesystem takes the same path: identity from stat, nothing hashed or queued
+        durable = static._durable_metadata
         monkeypatch.setattr(static, '_durable_metadata', lambda path, version:
             False if Path(path).name in ('episode_cold.mp4', 'episode_other.mp4') else durable(path, version))
-        def slow_hash(reader, *args):
-            if Path(reader.name).name == 'episode_cold.mp4':
-                entered.set()
-                assert release.wait(5)
-            return stream_digest(reader, *args)
-        monkeypatch.setattr(serve, '_stream_digest', slow_hash)
-    queued = threading.Event()
-    if held_stage == 'hash':
-        from contextlib import contextmanager
-        admission = serve._prepare_admission
-        admissions = [0]
-        @contextmanager
-        def observe():
-            with lock:
-                admissions[0] += 1
-                if admissions[0] == 3:
-                    queued.set()
-            with admission():
-                yield
-        monkeypatch.setattr(serve, '_prepare_admission', observe)
     ready, _ = serve.footage('episode_ready', 0, 1)
     with socketserver.ThreadingTCPServer(('127.0.0.1', 0), serve.Handler) as server:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -183,20 +165,13 @@ def test_http_probe_admission_bounds_distinct_and_duplicate_misses_and_keeps_rea
                 duplicate = pool.submit(get, 'cold')
                 other = pool.submit(get, 'other')
                 try:
-                    if held_stage == 'probe':
-                        assert duplicate.result()[0] == 503
-                        assert other.result()[0] == 503
-                    else:
-                        assert queued.wait(2)
-                        assert not duplicate.done() and not other.done()
+                    assert duplicate.result()[0] == 503
+                    assert other.result()[0] == 503
                     assert get('ready') == (200, ready.read_bytes())
-                    assert probes == (['episode_ready.mp4', 'episode_cold.mp4'] if held_stage == 'probe'
-                                      else ['episode_ready.mp4'])
+                    assert probes == ['episode_ready.mp4', 'episode_cold.mp4']
                 finally:
                     release.set()
                 assert worker.result()[0] == 200
-                if held_stage == 'hash':
-                    assert duplicate.result()[0] == other.result()[0] == 200
         finally:
             release.set()
             server.shutdown()
@@ -560,16 +535,20 @@ def test_untrusted_metadata_never_reuses_a_same_process_digest(tmp_path, monkeyp
     assert static.src_sig(source) == hashlib.sha256(b'bbbb').hexdigest()
 
 
-def test_untrusted_metadata_never_reuses_a_same_process_probe(tmp_path, monkeypatch):
+def test_untrusted_metadata_probe_follows_size_and_modification_time(tmp_path, monkeypatch):
+    # Suggestion 9: on a weak filesystem a probe is reused while size and modification time match, whatever the
+    # unreliable inode and change time say, and redone when either changes.
     source = tmp_path / 'source.mp4'
     source.write_bytes(b'a')
     monkeypatch.setattr(static, '_durable_metadata', lambda *args: False)
     monkeypatch.setattr(serve, '_probe_uncached', lambda path: (path.read_bytes()[0], 16, 4, 30))
-    version = (1, 2, 1, 0, 0)
     serve._probe_versioned.cache_clear()
-    assert serve._probe_versioned(source, version)[0] == 97
+    assert serve._probe_versioned(source, (1, 2, 1, 0, 0))[0] == 97
     source.write_bytes(b'b')
-    assert serve._probe_versioned(source, version)[0] == 98
+    assert serve._probe_versioned(source, (1, 9, 1, 0, 7))[0] == 97
+    assert serve._probe_versioned(source, (1, 2, 1, 5, 0))[0] == 98
+    source.write_bytes(b'cc')
+    assert serve._probe_versioned(source, (1, 2, 2, 5, 0))[0] == 99
 
 
 def test_untrusted_footage_key_tracks_bytes_when_stat_identity_collides(tmp_path, monkeypatch):

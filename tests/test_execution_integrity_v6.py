@@ -112,18 +112,45 @@ def test_received_retry_uses_newer_truncation_instead_of_older_healthy_primary(t
     assert len(latest['final_cost_history']) == 2
 
 
-@pytest.mark.parametrize('outcome', ['received', 'unverified'])
-def test_received_retry_cannot_repurchase_healthy_or_unknown_charge_output(tmp_path, monkeypatch, outcome):
+def test_received_retry_cannot_repurchase_healthy_output(tmp_path, monkeypatch):
     ep = recording(tmp_path, np.arange(12) / 30)
     settings = dict(model=harness.DEFAULT_MODEL, reasoning='medium', max_tokens=100, cell_w=128, example_dir=None)
-    record = {'input_identity': harness.input_identity(ep, **settings), 'parse_ok': outcome == 'received',
-        'labels': {'task_summary': 'A hand reaches.'} if outcome == 'received' else {'_raw': 'unusable'},
-        'usage': {'est_cost_usd': .003}, 'final_dispatch_outcome': outcome, 'final_reserved_usd': 1.}
+    record = {'input_identity': harness.input_identity(ep, **settings), 'parse_ok': True,
+        'labels': {'task_summary': 'A hand reaches.'},
+        'usage': {'est_cost_usd': .003}, 'final_dispatch_outcome': 'received', 'final_reserved_usd': 1.}
     out = tmp_path / 'out'; out.mkdir(); path = out / (ep.name + '.json')
     path.write_text(json.dumps(record)); original = path.read_bytes()
     monkeypatch.setattr(harness.urllib.request, 'urlopen', lambda *a, **kw: pytest.fail('unapproved paid retry'))
-    assert harness.run_batch([ep], out, retry_received=[ep.name], **options()) == 1
+    # a healthy label is kept and nothing is bought; naming it is noted, and the finished job does not fail
+    assert harness.run_batch([ep], out, retry_received=[ep.name], **options()) == 0
     assert path.read_bytes() == original
+    assert not (out / f'stale_{ep.name}.json').exists()
+
+
+def test_unknown_charge_is_retried_only_when_named_and_stays_counted(tmp_path, monkeypatch):
+    # A dispatch whose outcome is unknown may have been billed: a plain resume never sends it again, and naming it
+    # sends that unit alone while its possible charge stays reserved against the cap.
+    ep = recording(tmp_path, np.arange(12) / 30)
+    settings = dict(model=harness.DEFAULT_MODEL, reasoning='medium', max_tokens=100, cell_w=128, example_dir=None)
+    record = {'input_identity': harness.input_identity(ep, **settings), 'parse_ok': False,
+        'labels': {'_raw': 'unusable'}, 'final_dispatch_outcome': 'unverified', 'final_reserved_usd': 1.}
+    out = tmp_path / 'out'; out.mkdir(); path = out / ('noreply_' + ep.name + '.json')
+    path.write_text(json.dumps(record))
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', lambda *a, **kw: pytest.fail('unapproved paid retry'))
+    assert harness.run_batch([ep], out, **options()) == 1
+    marker = json.loads((out / f'stale_{ep.name}.json').read_text())
+    assert marker['refresh'] == f'--retry-received {ep.name}'
+    calls = []
+    def transport(request, timeout):
+        calls.append(provider_kind(request))
+        return response('{"requests":[]}' if calls[-1] == 'selection' else '{"task_summary":"A hand reaches."}')
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', transport)
+    assert harness.run_batch([ep], out, retry_received=[ep.name], **options()) == 0
+    assert calls.count('final') == 1
+    saved = json.loads((out / (ep.name + '.json')).read_text())
+    assert any(h.get('final_dispatch_outcome') == 'unverified' and h.get('final_reserved_usd') == 1.
+               for h in saved['final_cost_history'])
+    assert output_spend(out) >= 1.
 
 
 def test_changed_paid_inputs_are_isolated_without_being_reused(tmp_path, monkeypatch):

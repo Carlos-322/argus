@@ -263,7 +263,8 @@ def test_only_complete_first_dispatch_quota_proof_can_release_charge(monkeypatch
     def transport(request, timeout):
         count.append(1)
         if attempts == 2 and len(count) == 1:
-            raise urllib.error.HTTPError(request.full_url, 503, 'unknown', {}, io.BytesIO(b'{}'))
+            # a gateway timeout: the first attempt may have been billed, so a later quota answer proves nothing
+            raise urllib.error.HTTPError(request.full_url, 504, 'unknown', {}, io.BytesIO(b'{}'))
         raise urllib.error.HTTPError(request.full_url, 429, 'quota', {}, io.BytesIO(json.dumps(body).encode()))
     monkeypatch.setattr(harness.urllib.request, 'urlopen', transport)
     monkeypatch.setattr(harness.time, 'sleep', lambda *args: None)
@@ -325,16 +326,17 @@ def test_reparse_valid_json_does_not_make_truncation_a_completed_reply(tmp_path,
     assert calls.count('final') == 2 and output_spend(out) == pytest.approx(.009)
 
 
-def test_reference_cost_includes_new_auxiliary_charge_after_refused_refresh(tmp_path, monkeypatch):
+def test_reference_cost_matches_spend_after_refused_refresh(tmp_path, monkeypatch):
     ep = recording(tmp_path, np.arange(12) / 30); out = tmp_path / 'out'
     calls = transport_fixture(monkeypatch, iter([('{"task_summary":"A hand reaches."}', 'stop')]))
     assert harness.run_batch([ep], out, **options()) == 0
     original = (out / (ep.name + '.json')).read_bytes()
     refresh = options(); refresh.update(force=True, max_tokens=1_000_000)
     harness.run_batch([ep], out, **refresh)
-    assert calls == ['selection', 'final', 'selection']
+    # the refresh's final request cannot fit the cap, so no evidence selection is bought for it
+    assert calls == ['selection', 'final']
     assert (out / (ep.name + '.json')).read_bytes() == original
-    assert output_spend(out) == pytest.approx(.009)
+    assert output_spend(out) == pytest.approx(.006)
     (tmp_path / 'run.json').write_text('{}')
     reference = reference_result(tmp_path, ep)
     assert reference['status'] == 'parsed'

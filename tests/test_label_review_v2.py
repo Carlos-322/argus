@@ -43,22 +43,25 @@ def test_dictionary_quota_failover_uses_transport_unpaid_proof(tmp_path, monkeyp
 
 @pytest.mark.parametrize('status,body', [(429, {}), (503, {}),
     (429, {'error': {'code': 'insufficient_quota'}})])
-def test_dictionary_ambiguous_openrouter_error_keeps_claim(tmp_path, monkeypatch, status, body):
+def test_dictionary_openrouter_error_status_is_unpaid(tmp_path, monkeypatch, status, body):
+    # An error status is the provider declining to produce a completion: nothing is billed, so the request is
+    # retried, then sent with the next key, and nothing stays reserved.
     from test_dictionary import episode
     ep = episode(tmp_path, 'one', [('pad', np.ones((2, 1)), {})])
     sent = []
     def provider(request, timeout):
-        sent.append(request.full_url)
+        sent.append(request.get_header('Authorization'))
         reject(request, status, body)
     monkeypatch.setattr(harness.urllib.request, 'urlopen', provider)
+    monkeypatch.setattr(harness.time, 'sleep', lambda seconds: None)
     job = tmp_path / 'job'
     result = dd.prepare_upload(job, [ep], None, harness.call_model_once,
                                api_keys=['sk-or-first', 'sk-or-second'])
-    assert result['status'] == 'failed' and result['cost_usd'] is None
-    assert result['dispatch_attempts'] == [{'attempt': 1, 'state': 'dispatched'}]
-    assert dd.prepare_upload(job, [ep], None, harness.call_model_once,
-                             api_keys=['sk-or-first', 'sk-or-second']) == result
-    assert len(sent) == 1
+    assert result['status'] == 'failed' and result['cost_usd'] == 0
+    assert [a['state'] for a in result['dispatch_attempts']] == ['rejected unpaid', 'rejected unpaid']
+    # a spent quota is not retried on the same key; a busy provider is
+    tries = 1 if body else harness.UNPAID_ATTEMPTS
+    assert sent == ['Bearer sk-or-first'] * tries + ['Bearer sk-or-second'] * tries
 
 
 def test_only_missing_trailing_notes_are_recovered_without_column_shift():
@@ -223,7 +226,37 @@ def test_legacy_partial_paid_output_is_not_sent_again(tmp_path, monkeypatch, has
 
 
 @pytest.mark.parametrize('status', [429, 503])
-def test_ambiguous_final_http_error_retains_reserve_and_never_replays(tmp_path, monkeypatch, status):
+def test_final_http_error_status_is_unpaid_and_resumes(tmp_path, monkeypatch, status):
+    # The provider answered with an error instead of a completion, so nothing was billed: the reservation is released
+    # and a plain resume sends the final request again, with no --force.
+    from test_camera_timing import recording
+    ep = recording(tmp_path, np.arange(12) / 30)
+    sent, fail = [], [True]
+    def provider(request, timeout):
+        selection = 'FIELD INVENTORY' in json.dumps(json.loads(request.data)['messages'])
+        sent.append('selection' if selection else 'final')
+        if not selection and fail[0]:
+            reject(request, status, {'error': {'message': 'busy'}})
+        return answer({'requests': []} if selection else {'task_summary': 'The hand reaches.'})
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', provider)
+    monkeypatch.setattr(harness.time, 'sleep', lambda seconds: None)
+    out = tmp_path / 'out'
+    args = dict(keys=['sk-or-first', 'sk-or-second'], concurrency=1, force=False, max_spend=1.,
+                model=harness.DEFAULT_MODEL, reasoning='medium', max_tokens=100, timeout=1, cell_w=128)
+    assert harness.run_batch([ep], out, **args) == 1
+    receipt = json.loads((out / ('noreply_' + ep.name + '.json')).read_text())
+    assert receipt['final_dispatch_outcome'] == 'not dispatched' and receipt['final_reserved_usd'] == 0
+    assert receipt['final_rejection']['http_status'] == status
+    assert sent.count('final') == harness.UNPAID_ATTEMPTS
+    fail[0] = False
+    assert harness.run_batch([ep], out, **args) == 0
+    assert sent.count('final') == harness.UNPAID_ATTEMPTS + 1
+
+
+@pytest.mark.parametrize('outcome', ['timeout', 504])
+def test_unknown_final_outcome_retains_reserve_and_never_replays(tmp_path, monkeypatch, outcome):
+    # Sent, then no answer (a read timeout, a gateway timeout): the request may have been billed, so its reservation
+    # stays and a plain resume never sends it again.
     from test_camera_timing import recording
     ep = recording(tmp_path, np.arange(12) / 30)
     sent = []
@@ -231,7 +264,9 @@ def test_ambiguous_final_http_error_retains_reserve_and_never_replays(tmp_path, 
         selection = 'FIELD INVENTORY' in json.dumps(json.loads(request.data)['messages'])
         sent.append('selection' if selection else 'final')
         if not selection:
-            reject(request, status, {'error': {'message': 'request outcome unavailable'}})
+            if outcome == 'timeout':
+                raise TimeoutError('The read operation timed out')
+            reject(request, outcome, {'error': {'message': 'request outcome unavailable'}})
         return answer({'requests': []})
     monkeypatch.setattr(harness.urllib.request, 'urlopen', provider)
     out = tmp_path / 'out'
@@ -296,7 +331,10 @@ def test_premium_service_tier_does_not_inflate_standard_comparison_reserve(monke
     monkeypatch.setattr(pricing.urllib.request, 'urlopen', lambda *a, **kw: io.BytesIO(json.dumps(payload).encode()))
     quote = pricing.quote(model, 1)
     assert quote['provider_max_price']['prompt'] == 4.
-    assert pricing.cost_bound([], 64000, quote) == pytest.approx(5.28)
+    # standard-tier rates only; an empty request is bounded at 1,024 prompt tokens, never the whole context window
+    assert pricing.cost_bound([], 64000, quote) == pytest.approx(1024 * .000004 + 64000 * .00002, abs=2e-6)
+    assert pricing.cost_bound([{'type': 'image_url'}] * 1000, 64000, quote) == pytest.approx(
+        1_000_000 * .000004 + 64000 * .00002, abs=2e-6)    # never more than the published window
 
 
 def test_provider_unit_conversion_does_not_lower_the_published_ceiling(monkeypatch):
@@ -366,7 +404,7 @@ def test_capped_non_openai_run_uses_provider_prices_and_enforces_them(tmp_path, 
     assert len(sent) == 3
 
 
-@pytest.mark.parametrize('cap', [2., 8.])
+@pytest.mark.parametrize('cap', [1., 8.])
 def test_quote_handles_published_opus_fee_shape_without_inventing_surcharges(tmp_path, monkeypatch, cap):
     from test_camera_timing import recording
     ep = recording(tmp_path, np.arange(12) / 30)
@@ -387,8 +425,9 @@ def test_quote_handles_published_opus_fee_shape_without_inventing_surcharges(tmp
     monkeypatch.setattr(harness.urllib.request, 'urlopen', provider)
     out = tmp_path / 'out'
     assert harness.run_batch([ep], out, keys=['sk-or-test'], concurrency=1, force=False,
-        model=model, reasoning='medium', max_tokens=64000, timeout=1, cell_w=128, max_spend=cap) == (1 if cap < 5.28 else 0)
-    if cap == 2.:
+        model=model, reasoning='medium', max_tokens=64000, timeout=1, cell_w=128, max_spend=cap) == (1 if cap < 1.28 else 0)
+    # 64,000 output tokens alone reserve $1.28; the prompt is bounded by the request, not the 1M token window
+    if cap == 1.:
         assert sent == ['GET']
         result = json.loads((out / ('noreply_' + ep.name + '.json')).read_text())
         assert harness.episode_cost(result) == 0
@@ -462,7 +501,7 @@ def test_short_rows_with_identifiable_progress_keep_content_and_resume(tmp_path,
     assert sent == ['selection', 'final']
 
 
-@pytest.mark.parametrize('initial_cap', [.01, .35])
+@pytest.mark.parametrize('initial_cap', [.01, .015])
 def test_budget_increase_resumes_undispatched_selection(tmp_path, monkeypatch, initial_cap):
     from test_camera_timing import recording
     ep = recording(tmp_path, np.arange(12) / 30)

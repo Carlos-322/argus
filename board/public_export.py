@@ -1,6 +1,12 @@
 """Copy JSON for public transport after private source/freshness checks.
 
-Access attributes and recognizable credential values are withheld. This is not a
+Uploader-supplied free-form metadata (file attributes, sidecar fields, publisher-native
+fields and metadata inspections of them) is published only when the operator says so
+(publish_uploader_values or project(..., uploader_values=True)). No key-name or value
+pattern can recognise every secret, private path or note an uploader writes, so a public
+output names that metadata without its values. Pipeline-produced fields are projected below.
+
+Access attributes and recognizable credential values are also withheld. This is not a
 publication-rights decision. Other prose, native fields and public citations stay intact.
 Native fields retain identifiers and measurements, including tokenizer symbols,
 QC booleans, relative working directories and declared version strings. Access
@@ -13,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import base64
+from contextvars import ContextVar
 import ipaddress
 import json
 import re
@@ -51,6 +58,29 @@ _URL_QUERY_SECRETS = _SECRETS | {'key', 'signature', 'sig', 'session', 'sessioni
                               'keypairid', 'policy', 'googleaccessid'}
 _ACCESS_URI_PREFIXES = ('file:', 's3:', 'gs:', 'az:', 'abfs:', 'ssh:', 'sftp:', 'ftp:')
 _DROP = object()
+UPLOADER_VALUE_WITHHELD = 'not published (uploader metadata)'
+# The keys of a metadata inspection receipt (label/evidence_access.py) that describe the request, not the value read
+_WITHHELD_RECEIPT_KEYS = frozenset({'field_id', 'mode', 'reason', 'descriptor', 'limitations', 'pointer', 'operation', 'id',
+                                    'presentation_clock'})
+_PUBLISH_DEFAULT = False
+_PUBLISH = ContextVar('publish_uploader_values', default=None)
+
+
+def publish_uploader_values(flag: bool) -> None:
+    """Set whether this process's public outputs carry uploader-supplied metadata values."""
+    global _PUBLISH_DEFAULT
+    _PUBLISH_DEFAULT = bool(flag)
+
+
+def _publishing() -> bool:
+    flag = _PUBLISH.get()
+    return _PUBLISH_DEFAULT if flag is None else flag
+
+
+def publication_policy() -> dict:
+    """Every setting of this module that changes what a public output contains. A build's identity includes it
+    (board/static.py cmd_site), so a build made under another policy gets another id."""
+    return {'uploader_values': _publishing()}
 
 # These reader-owned note maps use source files as their keys. Keys inside the
 # recorded fields remain native identifiers, including absolute HDF paths.
@@ -61,6 +91,9 @@ _NOTE_SOURCE_MAPS = frozenset({
 _NOTE_SOURCE_VALUES = frozenset({'recordedannotationdatasource'})
 _NOTE_CLAIMS = frozenset({'unassigneddatasetmetadataclaims'})
 _READER_CONTEXT_MAPS = _NOTE_SOURCE_MAPS | {'uploadernotes', 'recordedsensorfields'}
+# Maps that hold the uploader's own metadata values (withheld from public outputs unless published)
+_UPLOADER_VALUE_MAPS = frozenset({'recordedmetadata', 'recordedepisodemetadata', 'recordedannotationtables',
+                                  'recordedsensorfields'})
 _ATTRIBUTE_LOCATIONS = frozenset({'sourcedirectory', 'sourcelocation'})
 _METADATA_LIMIT_SUFFIX = (' and its recorded metadata exceed the prompt note limit; complete original rows '
                           'and source claims remain in the episode context and uploader notes.')
@@ -126,9 +159,35 @@ _CREDENTIAL_VALUE = re.compile(
 _JWT_VALUE = re.compile(r'(?<![\w-])([A-Za-z0-9_-]{8,})\.([A-Za-z0-9_-]{2,})\.[A-Za-z0-9_-]+(?![\w-])')
 
 
+def _key_material(text: str) -> bool:
+    """Whether text holds generated key material: a run of letters and digits that separators do not split, 20 or
+    more long, or 16 or more with a digit in it. Provider keys are long unbroken runs drawn at random, while names
+    built from words (sk-learn_preprocessing_pipeline_v2, see-the-tokenizer-config) split into short pieces."""
+    return any(len(run) >= 20 or (len(run) >= 16 and re.search(r'\d', run))
+               for run in re.split(r'[-_.:/=+,;%\s"\']', text))
+
+
+def _weak_match(found: str) -> bool:
+    """Whether a match is only a shape that ordinary names share: a lowercase provider prefix such as sk- or hf_
+    (written in another case it is no provider's), or a token or Cookie label, whose value must then be key
+    material. Every other match is access syntax that is never a name."""
+    lower = found.lower()
+    if lower.startswith(('sk-', 'hf_')):
+        return True
+    return re.match(r'(?:token|cookie)\b', lower) is not None
+
+
 def _credential_value(value: str, _encoded=False) -> bool:
     """Recognize access syntax independently of the publisher's field names."""
-    if _CREDENTIAL_VALUE.search(value) or re.fullmatch(r'\s*Bearer[ \t]+[^\s]{12,}[ \t]*', value, re.I):
+    for found in _CREDENTIAL_VALUE.finditer(value):
+        text = found.group()
+        if not _weak_match(text):
+            return True
+        if text[:3] in ('sk-', 'hf_') and _key_material(text[3:]):
+            return True
+        if text[:3].lower() not in ('sk-', 'hf_') and _key_material(re.split(r'[:=]', text, maxsplit=1)[-1]):
+            return True
+    if re.fullmatch(r'\s*Bearer[ \t]+[^\s]{12,}[ \t]*', value, re.I):
         return True
     basic = re.fullmatch(r'\s*Basic\s+(\S+)\s*', value, re.I)
     if basic:
@@ -352,7 +411,7 @@ def _source_keys(value: dict) -> dict:
 def reader_context_field(name: str, value):
     """Keep reader-owned source-map typing when an inspection unwraps its value."""
     if _name(name) in _READER_CONTEXT_MAPS:
-        return project({name: value}).get(name)
+        return project({name: value}, uploader_values=True).get(name)
     return value
 
 
@@ -488,7 +547,7 @@ def _inspection_record(value: dict) -> dict:
                 else:
                     # A source-owner selection retains note typing around its native members.
                     selected = {'fields': receipt['value']} if native_scope else receipt['value']
-                    selected = project({'recorded_metadata': {'selection': selected}})['recorded_metadata']['selection']
+                    selected = project({'recorded_metadata': {'selection': selected}}, uploader_values=True)['recorded_metadata']['selection']
                     receipt['value'] = selected['fields'] if native_scope else selected
                 if 'exact_metadata_values' in receipt:
                     receipt['exact_metadata_values'] = [{**item, 'pointer': pointer_alias(item.get('pointer'), relative_keys, scope)}
@@ -603,9 +662,12 @@ def _uploader_item(item: dict) -> dict:
 
 def _uploader_group(value: dict) -> dict:
     if not isinstance(value.get('items'), list) or value.get('kind') not in ('notes', 'row'):
-        return value
+        return value if _publishing() else {k: v for k, v in value.items() if k in ('title', 'kind')}
     result = dict(value)
     result['items'] = [_uploader_item(item) if isinstance(item, dict) else item for item in value['items']]
+    if not _publishing():
+        result['items'] = [{key: item[key] for key in ('name',) if key in item} | {'value': UPLOADER_VALUE_WITHHELD}
+                           if isinstance(item, dict) else UPLOADER_VALUE_WITHHELD for item in result['items']]
     title = value.get('title')
     if isinstance(title, str) and title.startswith('Row of ') and _private_location(title[7:]):
         result['title'] = 'Row of ' + (_source_name(title[7:]) or 'source file')
@@ -764,6 +826,11 @@ def _project(value, field: str = '', attribute_owner: str = '', native_fields: b
             value = _dictionary_values(value)
             if field == 'evidenceinspection':
                 value = _inspection_record(value)
+        if field in _UPLOADER_VALUE_MAPS and not native_fields and not _publishing():
+            # the uploader's own recorded metadata, keyed by its source file: the files are named, the values withheld
+            source_keys = _source_keys(value) if field in _NOTE_SOURCE_MAPS else {}
+            return {source_keys.get(key, key): UPLOADER_VALUE_WITHHELD for key in value
+                    if key not in PRIVATE_KEYS and not _credential_value(key)}
         if field == 'uploadernotes' and not native_fields:
             value = _uploader_group(value)
         elif field == 'readerissues' and not native_fields:
@@ -801,6 +868,15 @@ def _project(value, field: str = '', attribute_owner: str = '', native_fields: b
                     or (field == 'compare' and name in ('runid', 'code'))):
                 continue
             item_native, item_notes = native_fields, note_owner
+            if value.get('mode') == 'metadata' and not native_fields and not _publishing():
+                # A withheld metadata receipt keeps only what describes the request; every other key may hold the
+                # value or a copy of it (exact_metadata_values keeps large integers digit for digit), so it is left
+                # out rather than named one copy at a time.
+                if key in ('value', 'preview'):
+                    result[key] = UPLOADER_VALUE_WITHHELD
+                    continue
+                if key not in _WITHHELD_RECEIPT_KEYS:
+                    continue
             if key == 'value' and (source_name := _inspection_source_name(value)):
                 item_notes = _name(source_name)
                 # A selected metadata subtree retains its original native-field scope.
@@ -846,14 +922,21 @@ def _project(value, field: str = '', attribute_owner: str = '', native_fields: b
     return value
 
 
-def project(value):
+def project(value, *, uploader_values=None):
     """Return independent public JSON; omit private fields, use null in arrays.
 
     Values must already be JSON-compatible. This function does not read, resolve,
     write or mutate inputs. Run evidence freshness and human overrides first.
     Native HDF keys and JSON pointers remain meaningful public identifiers.
+    uploader_values None follows publish_uploader_values; True keeps uploader
+    metadata values (request shaping and the operator's opt-in), False withholds them.
     """
-    result = _project(value)
+    token = _PUBLISH.set(uploader_values) if uploader_values is not None else None
+    try:
+        result = _project(value)
+    finally:
+        if token is not None:
+            _PUBLISH.reset(token)
     return None if result is _DROP else result
 
 

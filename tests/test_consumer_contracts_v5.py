@@ -111,7 +111,10 @@ def test_case_and_whitespace_meanings_agree_across_board_compare_and_gate():
 def test_gate_does_not_turn_invalid_or_unknown_severity_into_a_low_severity_claim(severity):
     labels = {'data_issues': [{'category': 'camera_fault', 'issue': 'Frozen camera', 'severity': severity}]}
     assert not judge({'issue': ['camera_fault'], 'sev': 'medium'}, labels)[0]
-    assert not judge({'max_issue_sev': 'low'}, labels)[0]
+    # an unrated issue has no tier: the bound holds over the rated ones, as the board counts them, and the unrated
+    # issue is reported for review rather than read as low or as high
+    met, why = judge({'max_issue_sev': 'low'}, labels)
+    assert met and why == ["needs review: 1 unrated issues have no severity to bound: ['camera_fault']"]
     assert not judge({'issue': ['camera_fault']}, {'data_issues': [
         {'category': 'camera_fault', 'severity': 'high', 'issue': ['not text']} ]})[0]
 
@@ -325,8 +328,10 @@ def test_unrated_issue_stays_visible_without_becoming_low_severity():
     assert not Families().counts('data_issues', item)
     measured = metrics.measure(raw, None)
     assert measured['data_issues_minor'] == 0 and measured['data_issues_unrated'] == 1
+    # the gate bounds the highest rated severity, as the board counts it, and asks for review of the unrated one
     met, reasons = judge({'max_issue_sev': 'high'}, raw)
-    assert not met and reasons == ['unrated issues prevent verifying severity bound: [(None, None)]']
+    assert met and reasons == ['needs review: 1 unrated issues have no severity to bound: [None]']
+    assert judge({'max_issue_sev': 'low'}, raw)[0]
     program = r"""
 const {src,piece}=require('./tests/page_functions')('./board/index.html');
 const start=src.indexOf('  const byCount =');

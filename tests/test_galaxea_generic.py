@@ -176,6 +176,8 @@ def test_explicit_episode_goal_keeps_priority_over_coarse_and_quality_codes(tmp_
 
 
 def test_declared_rate_disagreement_retains_native_stamps_and_qualifies_mapping(tmp_path, monkeypatch):
+    # stamps at 1/15 s sit on a declared 30 Hz grid, every other slot empty: missing frames, not another rate, so the
+    # declared rate pairs the frames with the table's rows and the stamps place them
     root = tmp_path / 'rate'
     native(root)
     info = json.loads((root / 'meta/info.json').read_text())
@@ -184,6 +186,7 @@ def test_declared_rate_disagreement_retains_native_stamps_and_qualifies_mapping(
     ep, ctx = convert(root, tmp_path / 'output', monkeypatch)
     assert ctx['fps'] == 30
     assert any(issue['kind'] == 'recorded_rate_mismatch' for issue in ctx['reader_issues'])
+    assert not any(issue['kind'] == 'declared_rate_wrong' for issue in ctx['reader_issues'])
     with np.load(ep / 'times.npz') as clocks:
         assert clocks['exo_pts'].tolist() == [0, 1024, 2048, 3072]
 

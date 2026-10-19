@@ -58,7 +58,8 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from label.atomic import write_atomic
+from label.atomic import temporary_path, write_atomic
+from label.presented import presented, presented_pts
 
 CAMS = ("exo", "left", "right")
 
@@ -237,8 +238,8 @@ def extract_one(packed: str, base_s: float, n_frames: int, out_mp4: Path,
     episode does) is kept as cut and its counts returned, {"clip_frames", "episode_frames"}, for record_cameras; a
     video that gives no frame at all raises, as one that does not decode does."""
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
-    # a per-process temp name, so two builders on the same clip can never write one file at once
-    tmp = out_mp4.with_suffix(f".{os.getpid()}.tmp.mp4")
+    # a temporary file of this call's own, so two builders (processes or threads) on one clip never share one
+    tmp = temporary_path(out_mp4, '.mp4')
     w, h, resample = source_size(ffmpeg, packed)
     want = int(n_frames) - int(skip)
     dense = False
@@ -255,7 +256,7 @@ def extract_one(packed: str, base_s: float, n_frames: int, out_mp4: Path,
             if dense:
                 # Microsecond packet separation retains tied captures, but an accurate seek can discard the whole
                 # short stream. Select its exact display indices from original PTS instead.
-                packets = sorted(p.pts for p in source.demux(video=0) if p.size and p.pts is not None)
+                packets = presented_pts(source, source.streams.video[0])
                 first = packets.index(int(source_pts[0]))
         # Truncate the seek to microseconds so decimal rounding cannot put it after the wanted packet.
         seek = ["-seek_timestamp", "1", "-ss", f"{math.floor(start * 1_000_000) / 1_000_000:.6f}"]
@@ -465,7 +466,7 @@ def extract_depth(ep_dir: Path, cam: str, colour_mp4: Path, out_mp4: Path, threa
         want = [skip + i if skip + i < len(dpts) else None for i in range(len(pts))]
     index_of = {int(p): i for i, p in enumerate(dpts)}
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out_mp4.with_suffix(f".{os.getpid()}.tmp.mp4")
+    tmp = temporary_path(out_mp4, '.mp4')
     black = np.zeros((h, w, 3), np.uint8)
     with depth_decoding():
         src = av.open(str(entry["packed"]))
@@ -653,7 +654,7 @@ def clip_frames(mp4: Path) -> int:
     try:
         import av
         with av.open(str(mp4)) as c:
-            return sum(1 for p in c.demux(c.streams.video[0]) if p.size and not p.is_discard)
+            return sum(1 for _ in presented(c, c.streams.video[0]))
     except Exception:
         return 0
 
@@ -1308,7 +1309,10 @@ def record_cameras(ep_dir: Path, short: dict, broken: dict, cut, keep_clock: boo
                                                or x.get("kind") == CAMERA_SHORT and "clip_frames" in x
                                                and x.get("camera") in {name(v) for v in redo}
                                                or is_end(x, zero) and x.get("camera") in ended
-                                               or x.get("kind") == CAMERA_NOT_DECODABLE and x.get("camera") in broken))]
+                                               or x.get("kind") == CAMERA_NOT_DECODABLE and x.get("camera") in broken
+                                               # a camera taken out shows no frame, damaged or not
+                                               or x.get("kind") in ("frames_damaged", "frames_not_decodable")
+                                               and x.get("camera") in {name(v) for v in broken}))]
     issues += own
     have = {(x.get("kind"), x.get("camera")) for x in issues if isinstance(x, dict)}
     issues += [x for x in more if (x["kind"], x.get("camera")) not in have]

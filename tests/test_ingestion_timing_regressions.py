@@ -106,10 +106,10 @@ def test_packed_lerobot_v3_counts_its_window_packets_and_keeps_publisher_clock(t
     assert unshown['name'] == rear and unshown['n_frames'] == 3
     with np.load(ep / unshown['camera_times']) as retained:
         np.testing.assert_array_equal(retained['pts'], [200000, 310000, 450000])
-    # LeRobot declares association by frame index; VFR encoding must not rewrite that publisher clock.
-    np.testing.assert_allclose(loaded['times']['exo'], [0, 1 / 30, 2 / 30])
+    # the frames are shown at their own encoded times within the episode's window, not at a declared 30 per second
+    np.testing.assert_allclose(loaded['times']['exo'], [.01, .12, .26], atol=1e-9)
     np.testing.assert_array_equal(loaded['times']['exo_pts'], [200000, 310000, 450000])
-    assert any(i['kind'] == 'recorded_rate_mismatch' for i in loaded['context']['reader_issues'])
+    assert any(i['kind'] == 'declared_rate_wrong' for i in loaded['context']['reader_issues'])
     pictures = episode._decode_view(loaded, 'exo', [0, 1, 2])
     assert [np.asarray(pictures[i]).mean() for i in range(3)] == pytest.approx([60, 80, 100], abs=3)
 

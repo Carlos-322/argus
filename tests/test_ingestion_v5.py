@@ -198,7 +198,7 @@ def test_malformed_json_channel_does_not_abort_dedicated_camera_decode(tmp_path)
     assert '/camera/bad' in failures
 
 
-@pytest.mark.parametrize('text_clock', ['capture', 'arrival_only', 'different_capture'])
+@pytest.mark.parametrize('text_clock', ['capture', 'capture_late', 'arrival_only', 'different_capture'])
 def test_mcap_text_uses_its_verified_camera_clock(tmp_path, text_clock):
     import base64
     from mcap.writer import Writer
@@ -215,8 +215,8 @@ def test_mcap_text_uses_its_verified_camera_clock(tmp_path, text_clock):
         schema = writer.register_schema('sensor_msgs/CompressedImage', 'jsonschema', b'{}')
         camera = writer.register_channel('/camera/front/compressed', 'json', schema, metadata={'capture_clock_id': 'fixture'})
         text_schema = writer.register_schema('TaskText', 'jsonschema', b'{}')
-        task = writer.register_channel('/task', 'json', text_schema, metadata={'capture_clock_id': 'fixture' if text_clock == 'capture' else 'other'})
-        step = writer.register_channel('/task/subtask', 'json', text_schema, metadata={'capture_clock_id': 'fixture' if text_clock == 'capture' else 'other'})
+        task = writer.register_channel('/task', 'json', text_schema, metadata={'capture_clock_id': 'fixture' if text_clock.startswith('capture') else 'other'})
+        step = writer.register_channel('/task/subtask', 'json', text_schema, metadata={'capture_clock_id': 'fixture' if text_clock.startswith('capture') else 'other'})
         for index in range(120):
             data = {'header': header(camera_base + index / 30), 'format': 'png',
                     'data': base64.b64encode(picture.getvalue()).decode()}
@@ -224,16 +224,21 @@ def test_mcap_text_uses_its_verified_camera_clock(tmp_path, text_clock):
         for channel, when, text in [(task, 1., 'fold the cloth'), (step, 1., 'pick up'), (step, 2.5, 'fold')]:
             data = {'data': text}
             if text_clock != 'arrival_only':
-                data['header'] = header((camera_base if text_clock == 'capture' else wall) + when)
-            writer.add_message(channel, round((wall + when + 1) * 1e9), json.dumps(data).encode(), 0)
+                data['header'] = header((camera_base if text_clock.startswith('capture') else wall) + when)
+            # text arrives about as fast as the frames, or a second late; on the camera's declared clock a late
+            # delivery cannot disprove the declaration, so it keeps its stamps and the difference is flagged
+            late = .005 if text_clock == 'capture' else 1
+            writer.add_message(channel, round((wall + when + late) * 1e9), json.dumps(data).encode(), 0)
         writer.finish()
     out = tmp_path / 'out'
     report = formats.convert(source, 'ego_head', out, 'clock fixture', 900)
     assert not report['failed'], report
     ctx = json.loads((out / report['episodes'][0]['episode_id'] / 'context.json').read_text())
-    if text_clock == 'capture':
+    if text_clock.startswith('capture'):
         assert [row['t0'] for row in ctx['annotation_subtasks']] == [1., 2.5]
         assert ctx['instruction'] == 'fold the cloth'
+        flagged = any(i['kind'] == 'capture_clock_offset_possible' for i in ctx.get('reader_issues') or [])
+        assert flagged is (text_clock == 'capture_late')
     else:
         assert [row['t0'] for row in ctx['annotation_subtasks']] == [2., 3.5]
         assert ctx['source']['presentation_clock']['basis'] == 'mcap_log_time'
@@ -1036,14 +1041,28 @@ def test_high_rate_partial_packets_do_not_claim_ambiguous_publisher_rows(tmp_pat
     assert context['recorded_state_archive']['row_count'] == 6
 
 
-def test_jointly_biased_capture_and_publication_times_expose_the_declared_domain_assumption(tmp_path):
+def test_a_joint_bias_the_delivery_delays_reveal_is_placed_by_arrival(tmp_path):
+    # stamps 1.5 s early on both capture and publication: the text then arrives 1.5 s later after its stamps than
+    # the camera's frames do, which a shared clock does not explain, so it is placed on the recorder's arrival clock
     source = tmp_path / 'source.mcap'
     text_recording(source, early=1., late=3.5, text_offset=-1.5, publish_offset=-1.5, publish_clock=True)
+    report = formats.convert(source, 'ego_head', tmp_path / 'out', 'declared publication domain', 900)
+    assert not report['failed'], report
+    context = json.loads((tmp_path / 'out' / report['episodes'][0]['episode_id'] / 'context.json').read_text())
+    assert context['source']['presentation_clock']['basis'] == 'mcap_log_time'
+    assert any(i['kind'] == 'recorder_arrival_timing' for i in context['reader_issues'])
+
+
+def test_jointly_biased_capture_and_publication_times_expose_the_declared_domain_assumption(tmp_path):
+    # a bias small enough to be a later delivery is kept on the declared domain, with the assumption and its size
+    source = tmp_path / 'source.mcap'
+    text_recording(source, early=1., late=3.5, text_offset=-.1, publish_offset=-.1, publish_clock=True)
     report = formats.convert(source, 'ego_head', tmp_path / 'out', 'declared publication domain', 900)
     assert not report['failed'], report
     directory = tmp_path / 'out' / report['episodes'][0]['episode_id']
     context = json.loads((directory / 'context.json').read_text())
     assert context['annotation_subtasks']
+    assert any(i['kind'] == 'capture_clock_offset_possible' for i in context['reader_issues'])
     proof = context['uploader_notes']['publisher_text_timing']['/task/subtask']
     assert proof['physical_synchronization_verified'] is False
     assert 'publish_time' in proof['basis']

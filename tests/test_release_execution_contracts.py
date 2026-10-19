@@ -143,7 +143,7 @@ def test_routing_keeps_unusable_paid_reply_and_uses_wide_cells(tmp_path, monkeyp
         return {'usage': {'cost': .004}, 'choices': [{'finish_reason': finish, 'message': {'content': text}}]}
     monkeypatch.setattr(harness, 'call_model', provider)
     width, record = route.route_width(ep, 'sk-or-fixture', harness.call_model_once,
-                                     receipt_path=tmp_path / 'noreply_episode_a.json')
+                                     out_path=tmp_path / 'episode_a.json')
     assert record['response_text'] == text and record['finish_reason'] == finish
     assert record['fine_detail'] is None
     assert width == max(harness.me.ROUTE_WIDTHS[harness.me.rig(harness.me.load(ep))])

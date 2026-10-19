@@ -620,9 +620,18 @@ def stitch_run(job: Path, eps: Path, long_eps: dict, out: Path) -> dict:
                                'use an explicit fresh job to label changed inputs')
     out.mkdir(parents=True, exist_ok=True)
     res = {"stitched": 0, "incomplete": [], "unlabelled": []}
-    # every short episode's reply as it came, a cut-off one (failed_<episode>.json) too: the board shows each
-    for p in short_outputs:
-        shutil.copy(p, out / p.name)
+    # A short episode's files are published as the run holds them: each is copied, and one the run no longer holds
+    # is removed, so a copy left from an earlier run never stands beside the label that replaced it. Readers choose
+    # the active record from the same files in either folder (annotation_record), and a newer receipt beside an
+    # older label carries billing that choosing one file would lose.
+    held = {p.name for p in short_outputs}
+    for name in sorted({p.stem.removeprefix('failed_').removeprefix('noreply_') for p in short_outputs}):
+        for prefix in ('', 'failed_', 'noreply_'):
+            target = out / f'{prefix}{name}.json'
+            if target.name in held:
+                shutil.copy(src / target.name, target)
+            else:
+                target.unlink(missing_ok=True)
     for ep, parts in long_eps.items():
         got, missing, failed = [], [], []
         for n in parts:

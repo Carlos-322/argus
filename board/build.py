@@ -96,6 +96,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import glob
 import json
 import math
 import os
@@ -882,7 +883,7 @@ def _discard_publication(root: Path) -> None:
 
 def recover_publications(board: Path, name: str | None = None) -> None:
     """Restore interrupted installs; retain unrecognized backups for inspection."""
-    for root in sorted(board.glob(f'.{name or "*"}.rollback-*')):
+    for root in sorted(board.glob(f'.{glob.escape(name)}.rollback-*' if name else '.*.rollback-*')):
         if not root.is_dir():
             continue
         marker = root / 'publication.json'

@@ -39,6 +39,7 @@ from prepare import hub
 from prepare import formats
 from prepare.mcap_source import decoded_messages
 from prepare.remux import RemuxSourceError, remux  # each frame's capture time as its pts
+from label.presented import presented_pts
 
 REPO = "genrobot2025/10Kh-RealOmin-OpenData"
 CAMERA_TOPICS = {"/robot0/sensor/camera0/compressed": "left", "/robot1/sensor/camera0/compressed": "right"}
@@ -156,8 +157,7 @@ def convert(mcap_path: Path, ep: Path, rel: str) -> dict:
             cts[v] = np.asarray(mux(cam[v][1], cam[v][0], out), dtype=np.int64)
             with av.open(str(out)) as c:
                 st = c.streams.video[0]
-                npts[v] = np.asarray(sorted(p.pts for p in c.demux(st) if p.pts is not None and not p.is_discard),
-                                     dtype=np.int64)
+                npts[v] = np.asarray(presented_pts(c, st), dtype=np.int64)
                 sizes[v] = (st.codec_context.width, st.codec_context.height)
             if len(npts[v]) != len(cts[v]):
                 raise RemuxSourceError(f"{v}.mp4: {len(npts[v])} frames in the file but {len(cts[v])} capture times")

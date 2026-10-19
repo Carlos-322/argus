@@ -28,6 +28,9 @@ page loads is a plain file:
                                          re-timing), named by their content like the other media, so a new build
                                          does not upload them again
 
+Every <ds>, <file>, <key>, <cam> and <eid> above is that identifier's site_name, which is both its file name and its
+URL path segment; data/index.json and data/compare/index.json give the page the names it fetches by.
+
 Media names carry a hash of the source clip's content and of the encode settings, so a media file
 never changes under its name (cache it forever), a re-cut clip gets a new name, and builds share media.
 The site step writes these names whether or not the media exists yet, so a build made before the
@@ -69,7 +72,7 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.parse
+import unicodedata
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -77,8 +80,8 @@ from board import clips as bc
 from board import hands as hands_overlay
 from board import serve as sa
 from board.to_board import dumps
-from board.public_export import project as public_json, public_build_manifest
-from label.atomic import write_atomic
+from board.public_export import project as public_json, public_build_manifest, publication_policy
+from label.atomic import temporary_path, write_atomic, write_bytes_atomic
 
 HERE_DIR = Path(__file__).resolve().parent
 TITLE = "Data Dashboard"
@@ -245,16 +248,36 @@ def _h(s: str, n: int) -> str:
     return hashlib.sha1(s.encode()).hexdigest()[:n]
 
 
-def q(s: str) -> str:
-    return urllib.parse.quote(s, safe="")
+# A static build names its files after identifiers it does not choose: episode ids and files, dataset names, camera
+# keys and other models' keys. Each identifier's file name comes from site_name alone, and that name is also its URL
+# path segment unchanged: it holds only lowercase ASCII letters, digits and "._-~", which URL encoding leaves alone, no
+# path splits, and no case-insensitive or Unicode-normalising file system merges, so a file is served at exactly the
+# path the manifest gives. A name already in that alphabet is kept, so the media of such episodes keep their published
+# names; any other gets a readable ASCII form and a digest of the exact identifier after "~", which a kept name never
+# contains, so two identifiers never share a name.
+_KEPT_NAME = re.compile(r"[a-z0-9_-][a-z0-9._-]{0,99}")
+
+
+def site_name(ident: str) -> str:
+    s = str(ident)
+    if _KEPT_NAME.fullmatch(s):
+        return s
+    readable = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode().lower()
+    readable = re.sub(r"[^a-z0-9._-]+", "_", readable).lstrip(".")[:48]
+    return f"{readable}~{hashlib.sha256(s.encode('utf-8', 'surrogatepass')).hexdigest()[:16]}"
+
+
+def site_file(file: str) -> str:
+    """An episode file's name in the build's data folders: its stem's site name, keeping .json."""
+    return site_name(file[:-5]) + ".json" if file.endswith(".json") else site_name(file)
 
 
 def video_rel(eid: str, key: str, sig: str) -> str:
-    return f"v/{key}/{q(eid)}.{_h(MEDIA_TAG + '|' + sig, 10)}.mp4"
+    return f"v/{site_name(key)}/{site_name(eid)}.{_h(MEDIA_TAG + '|' + sig, 10)}.mp4"
 
 
 def frame_rel(eid: str, key: str, ms: int, sig: str) -> str:
-    return f"f/{key}/{q(eid)}/{ms}.{_h(FRAME_TAG + '|' + sig, 8)}.jpg"
+    return f"f/{site_name(key)}/{site_name(eid)}/{ms}.{_h(FRAME_TAG + '|' + sig, 8)}.jpg"
 
 
 def compare_dir(qa: Path, given: Path | None = None) -> Path | None:
@@ -359,13 +382,21 @@ def transcode(src: Path, dst: Path, threads: int, main: bool = True) -> dict:
     cost quality. A clip made some other way (not H.264 4:2:0, larger than the recipe allows, or stored turned or with
     pixels that are not square) is encoded with board/clips.py's recipe at the size it is shown, as the page's main
     camera or a side one (main)."""
+    # each call writes its own temporary file, so two builds of one site never publish each other's half-made copy
+    part = temporary_path(dst, '.mp4')
+    try:
+        return _transcode(src, dst, part, threads, main)
+    finally:
+        part.unlink(missing_ok=True)
+
+
+def _transcode(src: Path, dst: Path, part: Path, threads: int, main: bool) -> dict:
     t0 = time.time()
     sp = probe(src)
     # A retimed clip's movie clock must keep its fine boundaries, including a camera's nonzero first display time.
     fine_clock = ["-movie_timescale", str(bc.DISPLAY_TICKS_PER_S), "-video_track_timescale",
                   str(bc.DISPLAY_TICKS_PER_S)] if sa._shown_from_halfway(src) else []
     dst.parent.mkdir(parents=True, exist_ok=True)
-    part = dst.with_name("." + dst.name + ".part.mp4")
     import av
     compliant = _compliant(sp)
     if compliant:
@@ -460,7 +491,8 @@ def cmd_measure(a):
           flush=True)
     res = defaultdict(list)
     with cf.ThreadPoolExecutor(a.jobs) as ex:
-        futs = {ex.submit(transcode, p[3], mdir / g[0] / g[1] / p[3].name, a.threads, p[4]): (g, p[3])
+        futs = {ex.submit(transcode, p[3], mdir / site_name(g[0]) / site_name(g[1]) / site_name(p[3].name), a.threads,
+                          p[4]): (g, p[3])
                 for g, p in samples}
         for f in cf.as_completed(futs):
             g, src = futs[f]
@@ -538,10 +570,7 @@ def cmd_media(a):
         jpg = sa.extract_frame(j[0], j[1], 640, _wait=True)
         if not jpg:
             return False
-        j[2].parent.mkdir(parents=True, exist_ok=True)
-        tmp = j[2].with_name("." + j[2].name + ".part")
-        tmp.write_bytes(jpg)
-        os.replace(tmp, j[2])
+        write_bytes_atomic(j[2], jpg)
         return True
     with cf.ThreadPoolExecutor(a.jobs) as ex:
         nf = sum(1 for ok in ex.map(do_frame, fjobs) if ok)
@@ -633,8 +662,8 @@ def build_id_for(qa: Path, files: list, compare: Path | None = None, hands: Path
             sp = sensors / f
             if sp.exists():
                 h.update(f"sensors|{f}|".encode() + sp.read_bytes())
-    # the frames on disk are part of the build (the page lists only those), so a build made before the media finish
-    # gets a new id once they have
+    # the frames and web copies on disk are part of the build (the page lists only those frames, and a hand pose file
+    # needs its web copy), so a build made before the media finish gets a new id once they have
     for rel in frames or []:
         h.update(f"frame|{rel}\n".encode())
     if keypoints is not None:
@@ -681,6 +710,14 @@ def media_status(eps, media_root: Path):
     return st, missing
 
 
+# Options that steer how a build is made or where it is written, never what it publishes. The folders the path options
+# name enter the identity by their content (build_id_for, read_header), not by their paths. Every other option enters
+# the identity as given (cmd_site), so forgetting an option here costs a new build id, never a stale one.
+_UNPUBLISHED_OPTIONS = frozenset({'cmd', 'board', 'qa', 'clips', 'out', 'jobs', 'threads', 'limit_per_dataset',
+                                  'dataset', 'samples', 'first', 'build_id', 'force', 'compare', 'hands', 'keypoints',
+                                  'sensors', 'dictionary_job', 'header'})
+
+
 def cmd_site(a):
     if a.public_base and public_json({'public_base': a.public_base}).get('public_base') != a.public_base:
         raise ValueError('--public-base must be a public URL without credentials or signed access parameters')
@@ -693,13 +730,18 @@ def cmd_site(a):
     hands = hands_dir(a.qa, a.hands)
     keypoints = keypoints_dir(a.qa, a.keypoints)
     sensors = sensors_dir(a.qa, getattr(a, "sensors", None))
-    present = sorted(f["rel"] for e in eps for f in e["frames"].values() if (a.out / "media" / f["rel"]).exists())
+    # The frames and web copies already made are part of the build: the page lists only the frames on disk, and a hand
+    # pose file is published only once its web copy exists.
+    present = sorted(m["rel"] for e in eps for m in [*e["frames"].values(), *e["media"].values()]
+                     if (a.out / "media" / m["rel"]).exists())
     identity = build_id_for(a.qa, files, compare, hands, keypoints, present, sensors,
                             getattr(a, "dictionary_job", None),
                             media=sorted(m['rel'] for e in eps for m in e['media'].values()))
-    # Page settings and board metadata also change the exported site.
-    presentation = dumps([a.title, a.public_base, sa.board_name(a.board), sa.labels_license(a.board),
-                          sa.read_header(getattr(a, 'header', None))], sort_keys=True)
+    # Page settings, board metadata and the publication policy also change the exported site. Every option enters
+    # unless it is known not to change what is published, so an option added later cannot reuse an old build id.
+    options = {k: v for k, v in vars(a).items() if k not in _UNPUBLISHED_OPTIONS}
+    presentation = dumps([options, sa.board_name(a.board), sa.labels_license(a.board),
+                          sa.read_header(getattr(a, 'header', None)), publication_policy()], sort_keys=True, default=str)
     bid = a.build_id or identity + '-' + _h(presentation, 8)
     if not bid or Path(bid).name != bid or bid.startswith('.'):
         raise ValueError('build id must be a single visible directory name')
@@ -732,7 +774,7 @@ def cmd_site(a):
         current = sa.current_label(json.loads((a.qa / rec["file"]).read_text()),
                                    getattr(a, "dictionary_job", None), rec["file"])
         view = sa.episode_view(current)
-        (stage / "data/ep" / rec["file"]).write_text(dumps(view))
+        (stage / "data/ep" / site_file(rec["file"])).write_text(dumps(view))
         from board import grids as bg
         grid_root = a.qa.parent / 'grids'
         gidx = bg.read(grid_root, rec['file'], current)
@@ -747,36 +789,42 @@ def cmd_site(a):
                 rel = f"g/{g['sha256']}.jpg"
                 dest = a.out / 'media' / rel
                 if not dest.is_file() or hashlib.sha256(dest.read_bytes()).hexdigest() != g['sha256']:
-                    tmp = dest.with_suffix('.tmp')
-                    tmp.write_bytes(raw)
-                    tmp.replace(dest)
+                    write_bytes_atomic(dest, raw)
                 rels.append(rel)
-            (stage / 'data/grids' / rec['file']).write_text(dumps(bg.view(gidx, lambda i, g: rels[i])))
+            (stage / 'data/grids' / site_file(rec['file'])).write_text(dumps(bg.view(gidx, lambda i, g: rels[i])))
             rec['_grids'] = len(rels)
             grid_count += 1
     for ds, recs in by_ds.items():
-        (stage / "data/lists" / f"{ds}.json").write_text(dumps(public_json(recs), separators=(",", ":")))
-    (stage / "data/index.json").write_text(dumps(public_json({"build": bid, "datasets": datasets, "eps": idx_eps}),
-                                                      separators=(",", ":")))
+        (stage / "data/lists" / f"{site_name(ds)}.json").write_text(dumps(public_json(recs), separators=(",", ":")))
+    # the page fetches each dataset's list and each episode's files by these names, never by a name of its own making
+    site_names = {f: site_file(f) for f in files if site_file(f) != f}
+    (stage / "data/index.json").write_text(dumps(public_json(
+        {"build": bid, "datasets": datasets, "lists": [f"{site_name(ds)}.json" for ds in datasets], "eps": idx_eps,
+         "site_names": site_names}), separators=(",", ":")))
     n_cmp = 0
     if compare is not None:
         # other models' labels: the same files the live board's /api/compare serves, each episode as the page shows it
         (stage / "data/compare").mkdir()
+        keys = sorted(p for p in compare.iterdir() if p.is_dir())
         for name in ("index.json", "metrics.json"):
-            (stage / "data/compare" / name).write_text(dumps(public_json(json.loads((compare / name).read_text()))))
+            doc = public_json(json.loads((compare / name).read_text()))
+            if name == "index.json" and isinstance(doc, dict):
+                doc["site_names"] = {kd.name: site_name(kd.name) for kd in keys}   # each model's folder and list
+            (stage / "data/compare" / name).write_text(dumps(doc))
         listed = set(files)
         (stage / "data/compare/lists").mkdir()
-        for kd in sorted(p for p in compare.iterdir() if p.is_dir()):
-            (stage / "data/compare" / kd.name).mkdir()
+        for kd in keys:
+            (stage / "data/compare" / site_name(kd.name)).mkdir()
             for f in kd.glob("*.json"):
                 if f.name in listed:
                     view = sa.episode_view(sa.current_label(json.loads(f.read_text()),
                                                           getattr(a, "dictionary_job", None), f.name))
-                    (stage / "data/compare" / kd.name / f.name).write_text(dumps(view))
+                    (stage / "data/compare" / site_name(kd.name) / site_file(f.name)).write_text(dumps(view))
                     n_cmp += 1
             # the model's rail records, the same the live board serves at /api/compare/list
             recs = [r for r in sa.rail_records(kd) if r["file"] in listed]
-            (stage / "data/compare/lists" / f"{kd.name}.json").write_text(dumps(public_json(recs), separators=(",", ":")))
+            (stage / "data/compare/lists" / f"{site_name(kd.name)}.json").write_text(
+                dumps(public_json(recs), separators=(",", ":")))
     hands_res = None
     if hands is not None:
         # the hand pose files, each re-timed against the web copy the static page plays (the copy keeps the clip's
@@ -795,7 +843,7 @@ def cmd_site(a):
                 doc = hands_overlay.retime(json.loads((hands / f).read_text()), mp4)
             except (ValueError, RuntimeError) as err:
                 return f, str(err)[:200]
-            (stage / "data/hands" / f).write_text(dumps(public_json(doc), separators=(",", ":")))
+            (stage / "data/hands" / site_file(f)).write_text(dumps(public_json(doc), separators=(",", ":")))
             return f, None
         with cf.ThreadPoolExecutor(8) as ex:
             res = list(ex.map(one, todo))
@@ -813,12 +861,10 @@ def cmd_site(a):
         (a.out / "media" / "k").mkdir(parents=True, exist_ok=True)
         for f, v in kidx["files"].items():
             body = dumps(public_json(json.loads((keypoints / f).read_text())), separators=(",", ":")).encode()
-            rel = f"k/{q(f[:-5])}.{hashlib.sha1(body).hexdigest()[:10]}.json"
+            rel = f"k/{site_name(f[:-5])}.{hashlib.sha1(body).hexdigest()[:10]}.json"
             dst = a.out / "media" / rel
             if not dst.exists():
-                part = dst.with_name(dst.name + ".part")
-                part.write_bytes(body)
-                part.rename(dst)
+                write_bytes_atomic(dst, body)
             v["path"] = rel
             v["bytes"] = len(body)
         (stage / "data/keypoints/index.json").write_text(dumps(public_json(kidx), separators=(",", ":")))
@@ -832,7 +878,8 @@ def cmd_site(a):
         listed = set(files)
         sidx["files"] = {f: v for f, v in sidx["files"].items() if f in listed and (sensors / f).exists()}
         for f in sidx["files"]:
-            (stage / "data/sensors" / f).write_text(dumps(public_json(json.loads((sensors / f).read_text()))))
+            (stage / "data/sensors" / site_file(f)).write_text(
+                dumps(public_json(json.loads((sensors / f).read_text()))))
         (stage / "data/sensors/index.json").write_text(dumps(public_json(sidx), separators=(",", ":")))
         sn_res = {"dir": str(sensors), "files": len(sidx["files"])}
     # the page asks for other models' labels, hand pose files, sensors files and keypoint downloads only when the build
@@ -920,6 +967,9 @@ def main():
     ap.add_argument("--samples", type=int, default=3, help="measure: sample encodes per dataset and camera")
     ap.add_argument("--first", type=int, default=50, help="measure: also project each dataset's first N episodes")
     ap.add_argument("--public-base", help="site: absolute URL of the bucket root, for index.public.html")
+    ap.add_argument("--publish-uploader-values", action="store_true",
+                    help="site: publish the uploader's own metadata values (file attributes, sidecar fields); by "
+                         "default the site names that metadata without its values")
     ap.add_argument("--dictionary-job", type=Path, help="project current human interpretation from this source job")
     ap.add_argument("--build-id", help="site: override the content-derived build id")
     ap.add_argument("--force", action="store_true", help="site: rewrite an existing build id")
@@ -934,6 +984,8 @@ def main():
     a.out = a.out or a.board / "static"
     if not FFMPEG or not FFPROBE:
         sys.exit("ffmpeg/ffprobe not found")
+    from board.public_export import publish_uploader_values
+    publish_uploader_values(getattr(a, "publish_uploader_values", False))
     return {"measure": cmd_measure, "media": cmd_media, "site": cmd_site, "status": cmd_status}[a.cmd](a) or 0
 
 
