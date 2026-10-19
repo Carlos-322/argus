@@ -1746,7 +1746,8 @@ def _and_list(xs: list[str]) -> str:
 
 
 BETWEEN_INSTANTS = (
-    "\nBETWEEN INSTANTS: reconstruct, do not smooth. A brief event can fall between two "
+    "\nBETWEEN INSTANTS: reconstruct, do not smooth. The following rule concerns reconstructing visible actions "
+    "from sampled RGB frames, not separate sensor_findings supported by supplied readings. A brief event can fall between two "
     "instants. When the scene in the frames differs between consecutive instants (something held "
     "is released, moved or gone; a contact is made or broken), an event happened in that "
     "interval: place it there and say in its notes that it is inferred. Do not fill an unseen interval with the "
@@ -1754,7 +1755,8 @@ BETWEEN_INSTANTS = (
     "be a slip, drop, knock or failed grasp, and should be weighed against the frames before "
     "and after, the other side, and where the object ends up. Where the evidence does not "
     "settle it, say so in a note instead of defaulting to the charitable "
-    "reading, and never invent an event when consecutive instants are consistent. An event you "
+    "reading, and never invent a visual action merely because it would be expected between consistent frames. "
+    "Consistent RGB frames do not negate a change measured by a supplied sensor. An event you "
     "infer between instants but cannot confirm from the frames around it goes in the timeline as "
     "inferred; it is not by itself an operator mistake or a data issue.")
 
@@ -1874,7 +1876,7 @@ def ego_annotation_block(ctx: dict) -> str:
 
 # Where a block's text goes in the episode prompt. The base fills the rest: the intro (who and what), the camera
 # paragraph, the frames paragraph, the sampling line, BETWEEN_INSTANTS and the task.
-PROMPT_SLOTS = ("intro", "frames_detail", "frames", "state", "signals", "after_frames", "after_task")
+PROMPT_SLOTS = ("intro", "frames_detail", "frames", "state", "signals", "after_frames", "after_task", "evidence")
 
 
 @dataclass(frozen=True)
@@ -2237,7 +2239,7 @@ BLOCKS = (
     Block("contacts", "after_frames", _has_contacts, contacts_block,
           schema_fields=("contacts", "contacts_missing"),
           checks=("contact_checks",)),
-    Block("sensor_evidence", "signals", _has_sensor_evidence,
+    Block("sensor_evidence", "evidence", _has_sensor_evidence,
           lambda ep, pl: se.prompt(pl["sensor_evidence"]),
           schema_fields=("sensor_findings",)),
     Block("uploader_notes", "after_task", _has_uploader_notes, _uploader_text),
@@ -2496,13 +2498,14 @@ def episode_text(ep: dict, pl: dict, cell_w: int, cell_h: int, native: tuple,
             + _frames_head(ep, cell_w, cell_h, native, capture_mapped=bool(capture_text))
             + capture_text + got["frames_detail"] + "\n" + _instants_line(ep, pl)
             + got["frames"] + got["state"] + got["signals"] + BETWEEN_INSTANTS + got["after_frames"] + "\n"
-            + task_block(ep) + got["after_task"])
+            + task_block(ep) + got["after_task"] + got['evidence']
+            + (prompts.EVIDENCE_REVIEW if got['evidence'] else ''))
 
 
 def build_prompt(ep: dict, pl: dict, *, cell_w: int, cell_h: int, example_dir=None,
                  blocks: list[Block] | None = None) -> tuple[str, str]:
     """(fixed, episode): the shared instructions (output schema, what the episode is, the data contract),
-    identical for every episode of the same rig, instruction presence and recorded or video only variant (is_recorded),
+    identical for every episode of the same rig, instruction presence, sensor-evidence presence and recorded or video only variant (is_recorded),
     then the facts about THIS episode (episode_text). The present blocks are found once, unless the caller has them."""
     ctx = ep["context"]
     r = rig(ep)
@@ -2512,8 +2515,12 @@ def build_prompt(ep: dict, pl: dict, *, cell_w: int, cell_h: int, example_dir=No
     blocks = present_blocks(ep, pl) if blocks is None else blocks
     fixed = prompts.fixed_instructions(r, has_instruction=bool(given), recorded=is_recorded(ep, pl, blocks),
                                       sessions=policy.effective(ctx)["task_mode"] == "session")
+    fixed += prompts.example_block(r, example_dir)
+    if any(block.name == 'sensor_evidence' for block in blocks):
+        fixed = (prompts.EVIDENCE_CONTRACT + '\nVISUAL ANNOTATION CONTRACT\n' + fixed
+                 + '\nEND VISUAL ANNOTATION CONTRACT\n')
     from prepare import jaws
-    return fixed + prompts.example_block(r, example_dir), episode_text(ep, pl, cell_w, cell_h, native, blocks) + jaws.prompt(ep.get('jaw_evidence') or {})
+    return fixed, episode_text(ep, pl, cell_w, cell_h, native, blocks) + jaws.prompt(ep.get('jaw_evidence') or {})
 
 
 EPISODE_HEADER = "\n\nTHE EPISODE TO LABEL.\n\n"

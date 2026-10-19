@@ -396,7 +396,7 @@ BLOCK_CASES = [
      ("RECORDED ACTOR IDENTITY DISAGREES", "The left source names right joints; the actor side is unknown.")),
 ]
 # blocks whose presence switches the shared instructions to another variant
-CHANGES_FIXED = ("state", "no_state")
+CHANGES_FIXED = ("state", "no_state", "sensor_evidence")
 
 
 @pytest.mark.parametrize("block,base,add,markers", BLOCK_CASES, ids=[c[0] for c in BLOCK_CASES])
@@ -936,3 +936,16 @@ def test_other_reader_notes_do_not_add_a_table_interpretation_block():
     ]
     assert me.build_prompt(ep, pl, cell_w=256, cell_h=144) == before
     assert "table_numbers" not in [b.name for b in me.present_blocks(ep, pl)]
+
+
+@pytest.mark.parametrize('case', [case_ego_plain, case_teleop_joints, case_handheld_pose])
+def test_sensor_contract_follows_visual_rules_without_replacing_them(case):
+    ep, pl = case()
+    visual_fixed, _ = me.build_prompt(ep, pl, cell_w=256, cell_h=144)
+    pl['sensor_evidence'] = {'sensors': [{'id': 'signal:pad', 'name': 'pad'}],
+                             'series': [], 'limitations': []}
+    fixed, episode = me.build_prompt(ep, pl, cell_w=256, cell_h=144)
+    assert visual_fixed in fixed
+    assert episode.index('BETWEEN INSTANTS') < episode.index('SENSOR EVIDENCE FOR ADDITIONAL ANNOTATION')
+    assert 'VISUAL ANNOTATION CONTRACT' in fixed
+    assert 'supplied sensor_findings and evidence_findings fields first' in fixed
