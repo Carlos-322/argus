@@ -58,7 +58,7 @@ def worst_precision_recall(items):
     # a correction whose subject is another noun phrase states something about that subject, not the impression
     ('At first it seems frozen, but the arm is just still', 'camera-image'),
     ('Looks like glare, actually a white tablecloth', BROAD),
-    # a question asserts nothing, and the sentence after it is no answer to it
+    # a question asserts nothing, and a sentence with something of its own to say is no answer to it
     ('Glare? No question, it hides the cup', BROAD),
     ('Free of glare until 5 s, then a finger covers the lens', 'camera-fault'),
     ('The view is free of glare except near the window where the plate is clipped', 'low-light'),
@@ -83,14 +83,15 @@ def worst_precision_recall(items):
     ('Glare? None.', BROAD),
     ('Checked 0 to 30 s and ruled out occlusion', BROAD),
     ('The exo view is frozen, and the wrist looks like glare but it is not', 'camera-image'),
-    ('Is the exo view frozen? Yes, from 4 s to 9 s', BROAD),
+    ('Is the exo view frozen? Yes, from 4 s to 9 s', 'camera-image'),
     ('No glare. The exo view is frozen from 4 s', 'camera-image'),
     ('nto glare anywhere', BROAD),
     ('A rcetangular blur covers the cutting board', 'privacy-blur'),
-    # notes that search, judge a name wrong, or answer in field notation; a later sentence retracts nothing
-    ('Earlier I wrote that the lens was covered. Correction: it never was.', 'camera-fault'),
-    ('I initially suspected glare. Nothing is clipped. I am withdrawing the glare flag.', 'low-light'),
-    ('I initially suspected glare and I am withdrawing the glare flag.', 'low-light'),
+    # notes that withdraw what they name, deny with nothing of their own, search, judge a name wrong, or answer
+    # in field notation
+    ('Earlier I wrote that the lens was covered. Correction: it never was.', BROAD),
+    ('I initially suspected glare. Nothing is clipped. I am withdrawing the glare flag.', BROAD),
+    ('I initially suspected glare and I am withdrawing the glare flag.', BROAD),
     ('I am withdrawing the glare flag.', BROAD),
     ('Three things checked: glare, occlusion, and freezing. Glare is absent. Freezing occurs twice.', 'camera-image'),
     ('It would be inaccurate to call this footage overexposed.', BROAD),
@@ -293,12 +294,13 @@ def test_family_precision_and_recall_over_corpora(name, items, bound):
     assert worst >= bound, (name, worst, wrong[:10])
 
 
-def test_a_later_sentence_never_retracts_an_earlier_one():
+def test_a_later_sentence_retracts_only_by_identity():
     """Reviews of f050fa2: a normal result for another camera, a pronoun, or a word saying all is well in a later
-    sentence retracted a fault ("The exo camera appears frozen. The wrist camera plays normally."). What a later
-    sentence is about cannot be read from its grammar, so a statement is denied or retracted only within its own
-    sentence. Measured over every fault followed by sentences of each kind, in one field and split across issue and
-    evidence."""
+    sentence retracted a fault ("The exo camera appears frozen. The wrist camera plays normally."). A later sentence
+    retracts an impression only when it is tied to it by identity: its subject is the impression's subject and it
+    denies the impression, or denies with nothing of its own ("On closer inspection, it is not.", "Correction: it never
+    was."). A flat finding is not an impression and stands. Measured over every fault followed by sentences of each
+    kind, in one field and split across issue and evidence."""
     from board.polarity import denied_spans
     faults = {'camera-image': ['The exo camera appears frozen.', 'The wrist view looks frozen.',
                                'The exo view is frozen from 4 s.', 'The wrist feed goes black.'],
@@ -307,22 +309,27 @@ def test_a_later_sentence_never_retracts_an_earlier_one():
               'camera-fault': ['The lens appears covered.', 'The wrist camera seems rotated sideways.',
                                'A finger blocks part of the lens.'],
               'privacy-blur': ['A rectangular blur appears over the sink.', 'A blurred patch hides the faucet.']}
-    later = ['The wrist camera plays normally throughout.', 'The grasp proceeds normally.',
-             'The right view works correctly throughout.', 'The timestamps advance normally.', 'The audio is fine.',
-             'The operator does not touch it.', 'Nobody notices it.', 'It does not affect the grasp.',
-             'That is not the main problem.', 'On closer inspection, it is not.', 'Correction: it never was.',
-             'On review, it is just a static scene.', 'Actually, nothing is wrong with it.',
-             'On closer inspection, the timestamps advance while the same frame is repeated.']
-    kept = total = 0
+    impressions = {'The exo camera appears frozen.', 'The wrist view looks frozen.', 'Glare appears on the plate.',
+                   'The image looks overexposed.', 'The lens appears covered.', 'The wrist camera seems rotated sideways.',
+                   'A rectangular blur appears over the sink.'}
+    unrelated = ['The wrist camera plays normally throughout.', 'The grasp proceeds normally.',
+                 'The right view works correctly throughout.', 'The timestamps advance normally.', 'The audio is fine.',
+                 'The operator does not touch it.', 'Nobody notices it.', 'It does not affect the grasp.',
+                 'That is not the main problem.', 'On review, it is just a static scene.',
+                 'Actually, nothing is wrong with it.', 'On closer inspection, it is not frozen after 9 s.',
+                 'On closer inspection, the timestamps advance while the same frame is repeated.']
+    denials = ['On closer inspection, it is not.', 'Correction: it never was.']
+    right = total = 0
     for fam, sentences in faults.items():
         for s in sentences:
-            for t in later:
+            for t in unrelated + denials:
+                want = BROAD if t in denials and s in impressions else fam
                 for issue, evidence in ((s + ' ' + t, ''), (s, t)):
                     total += 1
-                    kept += family(issue, evidence) == fam
-            note = s + ' ' + later[0]
+                    right += family(issue, evidence) == want
+            note = s + ' ' + unrelated[0]
             assert not any(a <= len(s) - 2 < b for a, b in denied_spans(note)), note
-    assert kept == total, (kept, total)
+    assert right == total, (right, total)
     # within its own sentence a correction still retracts
     assert family('The view looks frozen, but it is not.') == BROAD
     assert family('Looks like glare, actually a white tablecloth') == BROAD
