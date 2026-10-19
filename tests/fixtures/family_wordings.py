@@ -440,7 +440,7 @@ THIRD = [
     ('hedged-assert', 'Something is off with the stream.', 'The frames are identical for what seems like 5s while the arm keeps moving in the audio.', 'I'),
     ('corrected-withdrawn', 'Initially flagged as frozen, but the feed is live throughout.', '', 'D'),
     ('corrected-withdrawn', 'I first took the bright patch for glare; on a closer look it is a white sheet of paper.', '', 'L'),
-    ('corrected-withdrawn', 'Earlier I wrote that the lens was covered. Correction: it never was.', '', 'D'),
+    ('corrected-withdrawn', 'Earlier I wrote that the lens was covered. Correction: it never was.', '', 'F'),  # retracted only in a later sentence, which retracts nothing (board/polarity.py)
     ('corrected-withdrawn', 'Scratch the freeze note, the timestamps advance normally.', '', 'D'),
     ('corrected-withdrawn', 'Not glare after all; the smear is a rectangular blur over a name badge.', '', 'P'),
     ('corrected-withdrawn', 'What I called a dropout turns out to be the robot pausing; the stream itself is fine.', '', 'D'),
@@ -544,7 +544,7 @@ THIRD = [
     ('long-note', 'Lighting is even across the room. There is no clipping on the window and nothing is washed out. The camera stays on the head mount the whole time. I see no problems with the video.', '', 'D'),
     ('long-note', 'The first minute is clean. At 1:04 the feed freezes on a frame of the cutting board. The audio keeps going, and the frozen frame holds for 9s. After that the video resumes.', '', 'I'),
     ('long-note', "A bystander walks behind the table at 0:15. Their face is under a rectangular blur for the four seconds they are in view. The rest of the clip shows only the operator's hands. No other edits are visible.", '', 'P'),
-    ('long-note', 'I initially suspected glare from the steel sink. Looking frame by frame, the bright area is a small reflection that keeps its detail. Nothing is clipped. I am withdrawing the glare flag.', '', 'D'),
+    ('long-note', 'I initially suspected glare from the steel sink. Looking frame by frame, the bright area is a small reflection that keeps its detail. Nothing is clipped. I am withdrawing the glare flag.', '', 'L'),  # retracted only in a later sentence, which retracts nothing (board/polarity.py)
     ('long-note', 'The wearer reaches up at 0:50. A finger slides over the lens and stays there for about 3s. The task itself continues without interruption. The image is otherwise sharp.', '', 'F'),
     ('long-note', 'Exposure is fine at the start. As the blinds open, the whole bench becomes overexposed and the cup is lost in white. This lasts to the end of the clip. The camera itself is not moved.', '', 'L'),
     ('long-note', 'The robot completes the stack. There is no freeze and no dropout. However, the camera is upside down from the start, so the stack appears to grow downward. Nobody corrects it.', '', 'F'),
@@ -605,7 +605,7 @@ FOURTH = [
     ('corrected_withdrawn', 'Covered lens at 0:10? No, that dark band is a towel lying at the edge of the table.', '', 'D'),
     ('corrected_withdrawn', 'I thought the camera had been removed, but it is still on the wrist; the view only changes because the arm swings.', '', 'D'),
     ('corrected_withdrawn', 'Not glare after all. However, the image does freeze at 1:14 for about 2s.', '', 'I'),
-    ('corrected_withdrawn', 'Earlier I wrote that the frames are identical; that was wrong, the cup shifts a little in each one.', '', 'D'),
+    ('corrected_withdrawn', 'Earlier I wrote that the frames are identical; that was wrong, the cup shifts a little in each one.', '', 'I'),  # retracted only in a later sentence, which retracts nothing (board/polarity.py)
     ('corrected_withdrawn', 'Retracting my note about a blur patch: the region is a frosted glass panel in the cabinet door.', '', 'D'),
     ('corrected_withdrawn', 'The image seemed fine on first pass. On a second pass the bottom edge is clearly occluded by a finger from 0:05 to 0:09.', '', 'F'),
     ('corrected_withdrawn', 'What I called a dropout is the operator switching off the desk lamp; the picture stays live. No dropout occurred.', '', 'D'),
@@ -759,14 +759,14 @@ SECOND_LOOK = [
     ('second-look-confirms', 'The image seems frozen, but on closer inspection it really is frozen.', '', 'I'),
     ('second-look-confirms', 'The view looks frozen. On review, it turns out the feed is frozen for the whole clip.', '', 'I'),
     ('second-look-confirms', 'The lens looks covered.', 'On rewatch, a finger stays over the lens. Nobody corrects it.', 'F'),
-    ('second-look-corrects', 'The camera looks frozen. On closer inspection, it is not frozen; the scene is just static.', '', 'D'),
+    ('second-look-corrects', 'The camera looks frozen. On closer inspection, it is not frozen; the scene is just static.', '', 'I'),  # retracted only in a later sentence, which retracts nothing (board/polarity.py)
     ('second-look-corrects', 'The camera looks frozen. On closer inspection, the arm is simply holding still.', '', 'I'),
     ('second-look-corrects', 'The image looks overexposed. On review, it is a white tablecloth.', '', 'L'),
     ('second-look-corrects', 'The lens appears covered. On closer inspection, nothing covers it.', '', 'F'),
     ('second-look-corrects', 'The feed seems frozen. On rewatch, the video plays normally.', '', 'I'),
-    ('second-look-corrects', 'It looks like glare. On a second look, that is not the case.', '', 'D'),
+    ('second-look-corrects', 'It looks like glare. On a second look, that is not the case.', '', 'L'),  # retracted only in a later sentence, which retracts nothing (board/polarity.py)
     ('second-look-corrects', 'The camera appears rotated. Upon review, the camera is actually level.', '', 'F'),
-    ('second-look-corrects', 'The view looks frozen. On closer inspection, it is not.', '', 'D'),
+    ('second-look-corrects', 'The view looks frozen. On closer inspection, it is not.', '', 'I'),  # retracted only in a later sentence, which retracts nothing (board/polarity.py)
     ('second-look-corrects', 'The camera seems frozen. Update: it was a slow scene, not a freeze.', '', 'I'),
     ('second-look-corrects', 'The view looked frozen. On review, it turned out the operator had paused.', '', 'I'),
     ('second-look-corrects', 'Possible occlusion flagged by the detector.', 'Checked: nothing occludes the lens at any time.', 'F'),

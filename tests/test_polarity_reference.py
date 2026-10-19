@@ -1,6 +1,6 @@
-"""A later statement retracts or answers an earlier one only when it is tied to it by identity (board/polarity.py), measured
-over a grid of subjects, joins and predicates rather than one wording at a time: every cell must read as the rule says,
-so a new wording of an old shape cannot slip through untested."""
+"""What reaches an impression (board/polarity.py), measured over a grid of subjects, joins and predicates rather than one
+wording at a time. Within its sentence, a correction retracts an impression only when its subject is the impression's
+subject; beyond its sentence, nothing retracts it, and only an answer with nothing of its own reaches a question."""
 from __future__ import annotations
 
 import itertools
@@ -14,49 +14,41 @@ FROZEN = re.compile(r'\bfrozen\b', re.I)
 GLARE = re.compile(r'\bglare\b', re.I)
 
 IMPRESSIONS = ['The exo camera appears frozen', 'The view looks frozen', 'It seems frozen']
-# how a later statement follows the impression
-JOINS = [', but ', '. ', '. On closer inspection, ', '; on review, ']
-# (subject, predicate, retracts): retracts is whether the statement is about the impression's subject and denies it
-SAME_SUBJECT = [('it', 'is not frozen'), ('it', 'is not'), ('it', 'never was'), ('that', 'is not the case'),
-                ('that', 'was wrong')]
-OTHER_SUBJECT = [('we', 'actually see the robot moving'), ('I', 'just checked the wrist view'),
-                 ('he', 'is just moving the robot'), ('you', 'can see the arm move'),
-                 ('that wrist camera', 'is just fine'), ('these timestamps', 'actually advance'),
-                 ('the wrist camera', 'is not frozen'), ('the operator', 'does not touch it'),
-                 ('the arm', 'works normally'), ('this wrist view', 'is not frozen'),
-                 # the same subject, but the denial is limited in time, so it limits the impression and denies nothing
-                 ('it', 'is not frozen after 9 s'), ('it', 'is not frozen for the first 2 s')]
-
-
-def _cells():
-    for impression, join in itertools.product(IMPRESSIONS, JOINS):
-        noun = impression.rsplit(' ', 2)[0]
-        for subject, predicate in SAME_SUBJECT + [(noun.lower(), 'is not frozen')] * (noun != 'It'):
-            yield impression, join, subject, predicate, True
-        for subject, predicate in OTHER_SUBJECT:
-            yield impression, join, subject, predicate, False
+SAME_SENTENCE = [', but ', ', but actually ']
+LATER_SENTENCE = ['. ', '. On closer inspection, ', '; on review, ', '. Correction: ']
+# a correction about the impression's own subject with nothing of its own to say: it retracts within the sentence
+BARE_DENIALS = [('it', 'is not'), ('it', 'never was'), ('that', 'is not the case'), ('it', "isn't")]
+# statements about another subject, or about a person, or limited in time: they never retract
+OTHER_SUBJECTS = [('we', 'see the robot moving'), ('I', 'just checked the wrist view'), ('he', 'is just moving the robot'),
+                  ('you', 'can see the arm move'), ('that wrist camera', 'is just fine'),
+                  ('these timestamps', 'advance'), ('the wrist camera', 'is not frozen'),
+                  ('the wrist camera', 'plays normally'), ('the operator', 'does not touch it'),
+                  ('the arm', 'works normally'), ('this wrist view', 'is not frozen'), ('the clock', 'keeps ticking')]
 
 
 def _text(impression, join, subject, predicate):
     later = f'{subject} {predicate}'
-    if join.endswith('. '):
+    if join.endswith(('. ', ': ')):
         later = later[0].upper() + later[1:]
     return f'{impression}{join}{later}.'
 
 
-def test_every_cell_of_the_reference_grid_reads_as_identity_decides():
-    wrong = []
-    cells = list(_cells())
-    for impression, join, subject, predicate, retracts in cells:
-        text = _text(impression, join, subject, predicate)
-        # the impression's own "frozen" is the first match; a retraction leaves no asserted "frozen" before the
-        # later statement
-        first = FROZEN.search(text)
-        spans = polarity.denied_spans(text)
-        retracted = any(a <= first.start() < b for a, b in spans)
-        if retracted != retracts:
-            wrong.append((text, retracts))
-    assert len(cells) > 150
+def _retracted(text):
+    first = FROZEN.search(text)
+    return any(a <= first.start() < b for a, b in polarity.denied_spans(text))
+
+
+def test_every_cell_of_the_reference_grid():
+    cells, wrong = 0, []
+    for impression, join in itertools.product(IMPRESSIONS, SAME_SENTENCE + LATER_SENTENCE):
+        within = join in SAME_SENTENCE
+        for (subject, predicate), retracts in [*((d, within) for d in BARE_DENIALS),
+                                               *((o, False) for o in OTHER_SUBJECTS)]:
+            text = _text(impression, join, subject, predicate)
+            cells += 1
+            if _retracted(text) != retracts:
+                wrong.append((text, retracts))
+    assert cells == len(IMPRESSIONS) * len(SAME_SENTENCE + LATER_SENTENCE) * len(BARE_DENIALS + OTHER_SUBJECTS)
     assert not wrong, wrong
 
 
@@ -71,15 +63,16 @@ def test_a_question_is_asserted_only_by_an_answer_with_nothing_of_its_own(questi
     assert polarity.asserted(FROZEN, text) is asserted, text
 
 
-@pytest.mark.parametrize('text,asserted', [
-    ('I initially suspected glare. I am withdrawing the glare flag.', False),
-    ('I initially suspected glare and I am withdrawing the glare flag.', False),
-    ('Glare on the plate at 2 s. Nothing is clipped. Withdrawing the glare finding.', False),
-    ('Glare on the plate at 2 s. I am withdrawing the occlusion flag.', True),
-    ('Glare on the plate at 2 s. The occlusion flag was withdrawn.', True),
-    ('Glare on the plate at 2 s. The glare flag was withdrawn.', False),
-    ('Glare on the plate at 2 s. Scratch that.', False),
-    ('Glare on the plate at 2 s. The frozen frames are real. Scratch that.', True),
-])
-def test_a_withdrawal_reaches_only_what_it_names(text, asserted):
-    assert polarity.asserted(GLARE, text) is asserted, text
+@pytest.mark.parametrize('later', [
+    'I am withdrawing the glare flag.', 'I am not withdrawing the glare flag.', 'Should I withdraw the glare flag?',
+    'If we withdraw the glare flag, the report will be wrong.', 'The glare flag was withdrawn.', 'Scratch that.',
+    'I am withdrawing the wrist camera glare flag.', 'Nothing is clipped. Withdrawing the glare finding.'])
+def test_a_withdrawal_in_a_later_sentence_retracts_nothing(later):
+    text = f'Glare on the plate at 2 s. {later}'
+    assert polarity.asserted(GLARE, text), text
+
+
+@pytest.mark.parametrize('text', ['Suspected glare on the plate, retracted.', 'The glare I flagged is withdrawn.',
+                                  'Retracting the glare flag.', 'I am withdrawing the glare flag.'])
+def test_a_withdrawal_in_its_own_clause_retracts_what_it_withdraws(text):
+    assert not polarity.asserted(GLARE, text), text
