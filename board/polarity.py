@@ -131,6 +131,9 @@ _DEMONSTRATIVES = {'this', 'that', 'these', 'those'}
 # words that answer the question before them yes, alone or before what they add ("Yes, at 4 s", "Definitely, it
 # hides the label"); an answer that is only a pronoun and an auxiliary answers too ("It is, from 4 s", "It did")
 _YES = {'yes', 'yeah', 'yep', 'yup', 'definitely', 'certainly', 'absolutely', 'indeed', 'confirmed', 'affirmative'}
+# the words a bare denial may have besides its negator ("but it isn't", "but this is not the case", "not at all")
+_BARE_DENIAL = {'it', 'this', 'that', 'is', 'was', "it's", "that's", 'really', 'the', 'case', 'so', 'there', "there's",
+                'any', 'at', 'all'}
 # prepositions that end a negated predicate: what follows is an adjunct of it, not part of it
 PREDICATE_END = {'in', 'on', 'at', 'from', 'to', 'for', 'with', 'during', 'until', 'after', 'before', 'since',
                  'throughout', 'across', 'near', 'around', 'within', 'beyond', 'behind', 'due', 'because',
@@ -509,9 +512,20 @@ def _restricts(words):
     before what it counts ("on a second look") limits nothing."""
     ordinal = {x for x, w in enumerate(words[:-1]) if w == 'second' and words[x + 1][:1].isalpha()
                and words[x + 1] not in _ENDS_A_PHRASE}
+    # "no longer", "any longer" and "anymore" say a state ended, which limits it in time and does not deny it
     return (any(w in _RESTRICTS and x not in ordinal for x, w in enumerate(words))
             or any(w[:1].isdigit() for w in words)
-            or any(a in ('only', 'just') and b in _TIME_WORDS for a, b in zip(words, words[1:])))
+            or any(a in ('only', 'just') and b in _TIME_WORDS for a, b in zip(words, words[1:]))
+            or 'anymore' in words or any(a in ('no', 'any') and b == 'longer' for a, b in zip(words, words[1:])))
+
+
+def _negated_at(words, i):
+    """Whether the word at i is negated: the nearest word before it that is not an auxiliary or an adverb between a
+    negator and its predicate is a negator ("has not been retracted", "am not withdrawing", "never dismissed")."""
+    j = i - 1
+    while j >= 0 and words[j] in SKIP:
+        j -= 1
+    return j >= 0 and _pred_negator(words[j])
 
 
 def _correction(clause):
@@ -524,14 +538,14 @@ def _correction(clause):
     body = words[1:] if lead else words
     if not body or _restricts(body):
         return False
-    if any(w in VERDICTS for w in body):
+    # a verdict corrects only when it is given, not when it is refused ("but I have not retracted that finding")
+    if any(w in VERDICTS and not _negated_at(body, x) for x, w in enumerate(body)):
         return True
     if any(a in ('turns', 'turned') and b == 'out' for a, b in zip(body, body[1:])):
         return True
     if not lead:
         return False
-    content = [w for w in body if w not in ('it', 'this', 'that', 'is', 'was', "it's", "that's", 'really', 'the',
-                                            'case', 'so', 'there', "there's", 'any', 'at', 'all') and not _negator(w)]
+    content = [w for w in body if w not in _BARE_DENIAL and not _negator(w)]
     if not content and any(map(_negator, body)):
         return True
     return lead in ('actually', 'in', 'instead', 'rather') or any(w in CORRECTIONS for w in body) \
@@ -595,7 +609,8 @@ def _corrected_within(clause):
     h = _hedge_at(words)
     if h is None:
         return None
-    if any(w in VERDICTS for w in words[h + 1:]):
+    # a verdict refused ("glare was reported and has not been retracted") retracts nothing
+    if any(w in VERDICTS and not _negated_at(words, x) for x, w in enumerate(words) if x > h):
         return (clause[0].start, clause[-1].end)
     turns = next((x for x in range(h + 1, len(words) - 1) if words[x] in ('turns', 'turned')
                   and words[x + 1] == 'out'), None)
@@ -611,6 +626,58 @@ def _corrected_within(clause):
 # of its own can answer nothing but the question just before it. Every rule that reached further (a later clause that
 # denies, a withdrawal that names a word, a pronoun read across sentences) had to guess what the later sentence is
 # about, and each guess retracted real faults on notes whose later sentence was about something else.
+
+def _same_word(a, b):
+    """Whether two words are forms of one word ("covered" and "covers", "glare" and "glaring")."""
+    a, b = a.lower(), b.lower()
+    if a == b:
+        return True
+    if len(a) < 5 or len(b) < 5:
+        return False
+    k = 0
+    while k < min(len(a), len(b)) and a[k] == b[k]:
+        k += 1
+    return k >= max(4, min(len(a), len(b)) - 3)
+
+
+def _withdraws_part_of(said, impression):
+    """Whether a clause of the impression's own sentence withdraws it by name: a withdrawing verb, not refused and not
+    supposed, whose object names a word of the impression ("I initially suspected glare and I am withdrawing the glare
+    flag"). A withdrawal of something else ("withdrawing the occlusion flag") withdraws nothing of it."""
+    if not said or said[0] in CONDITIONAL:
+        return False
+    for i, w in enumerate(said):
+        if w in WITHDRAW and not _negated_at(said, i):
+            closed = DETERMINERS | _ARTICLES | PRONOUNS | AUX | PREDICATE_END | {'and', 'or', 'of'}
+            named = [x for part in said[i + 1:_phrase_end_words(said, i + 1)] for x in part.split('-')
+                     if len(x) > 2 and x not in closed]
+            return any(_same_word(n, x) for n in named for x in impression)
+    return False
+
+
+def _phrase_end_words(words, j):
+    k = j
+    while k < len(words) and words[k] not in PHRASE_END and words[k] not in BOUNDARY and not _negator(words[k]):
+        k += 1
+    return k
+
+
+def _refuses_correction(said):
+    """Whether a correction clause negates the correction itself: a withdrawal or verdict refused ("but actually I am
+    not withdrawing the glare flag", "but I have not retracted that finding"), or another explanation denied ("but
+    actually it is not just a static scene", "not merely a reflection"). The negator stands just before the verb or the
+    word that offers the explanation. Such a clause keeps the impression; any other negation reads as it did."""
+    for i, w in enumerate(said):
+        if not _pred_negator(w):
+            continue
+        j = i + 1
+        while j < len(said) and said[j] in SKIP:
+            j += 1
+        if j < len(said) and (said[j] in WITHDRAW or said[j] in VERDICTS
+                              or said[j] in ('just', 'merely', 'simply', 'only')):
+            return True
+    return False
+
 
 def _answer(toks):
     """'yes' or 'no' when a sentence opens with an answer that has no content of its own, so it can only answer the
@@ -711,8 +778,10 @@ def denied_spans(text: str) -> list[tuple[int, int]]:
             words = [t.w for t in flat[back][1]]
             h = _hedge_at(words)
             if h is not None:
-                if _correction(clause) and _refers([t.w for t in clause if _is_word(t)],
-                                                   [t.w for t in flat[back][1] if _is_word(t)]):
+                said = [t.w for t in clause if _is_word(t)]
+                impression = [t.w for t in flat[back][1] if _is_word(t)]
+                corrects = _correction(clause) or _withdraws_part_of(said, impression)
+                if corrects and _refers(said, impression) and not _refuses_correction(said):
                     spans.append((flat[back][1][0].start, flat[k - 1][1][-1].end))
                 break
             if words and words[0] in CONTRAST:

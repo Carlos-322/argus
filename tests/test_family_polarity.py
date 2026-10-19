@@ -87,11 +87,22 @@ def worst_precision_recall(items):
     ('No glare. The exo view is frozen from 4 s', 'camera-image'),
     ('nto glare anywhere', BROAD),
     ('A rcetangular blur covers the cutting board', 'privacy-blur'),
-    # notes that search, judge a name wrong, or answer in field notation; a retraction in a later sentence, or a
-    # withdrawal by name, retracts nothing (board/polarity.py), so these keep what the earlier words assert
+    # notes that search, judge a name wrong, or answer in field notation; a retraction in a later sentence retracts
+    # nothing (board/polarity.py), so those keep what the earlier words assert, while a withdrawal that names the
+    # impression in its own sentence retracts it
     ('Earlier I wrote that the lens was covered. Correction: it never was.', 'camera-fault'),
     ('I initially suspected glare. Nothing is clipped. I am withdrawing the glare flag.', 'low-light'),
-    ('I initially suspected glare and I am withdrawing the glare flag.', 'low-light'),
+    ('I initially suspected glare and I am withdrawing the glare flag.', BROAD),
+    # a refused verdict or withdrawal, a denied other explanation and a state that ended keep the impression (review
+    # of 2ab6857)
+    ('I initially suspected glare, but I have not retracted that finding.', 'low-light'),
+    ('I initially suspected glare, but actually I am not withdrawing the glare flag.', 'low-light'),
+    ('The exo camera appears frozen, but actually it is not just a static scene.', 'camera-image'),
+    ('Glare was reported and has not been retracted.', 'low-light'),
+    ('The camera looked frozen, but it is actually no longer frozen.', 'camera-image'),
+    ('I initially suspected glare and I am withdrawing the occlusion flag.', 'low-light'),
+    ('The camera seems frozen, but this is not the case.', BROAD),
+    ('Looks like glare, actually a white tablecloth', BROAD),
     ('I am withdrawing the glare flag.', BROAD),
     ('Three things checked: glare, occlusion, and freezing. Glare is absent. Freezing occurs twice.', 'camera-image'),
     ('It would be inaccurate to call this footage overexposed.', BROAD),
