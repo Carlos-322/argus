@@ -19,7 +19,8 @@ from prepare.formats import is_sensing, names_touch, _names_word
 MAX_SERIES = 12
 MAX_SAMPLES = 96
 MAX_SENSORS = 64
-MAX_PROMPT_BYTES = 48000
+MAX_PROMPT_BYTES = 256000
+MAX_PLOT_SAMPLES = 4096
 META_KEYS = ('name', 'key', 'file', 'shape', 'names', 'unit', 'units', 'rate_hz', 'source',
              'aligned_by', 'camera_aligned_by', 'clock_problem', 'summary_of', 'response_direction', 'calibration', 'coordinate_frame', 'sensor_type', 'description', 'sensor_semantics')
 TIME_KEYS = ('fps', 'real_times', 'clock_zero_s', 'camera_clock', 'clock_fields', 'presentation_times',
@@ -135,6 +136,14 @@ def _samples(times, values, limit=MAX_SAMPLES):
     return [float(times[i]) for i in ids], [float(values[i]) if np.isfinite(values[i]) else None for i in ids]
 
 
+def native_plot(times, values):
+    """Viewer-only source readings, never an extension of model citation coverage."""
+    if len(times) > MAX_PLOT_SAMPLES:
+        return None
+    return {'kind': 'native_samples', 'times': [float(t) for t in times],
+            'values': [float(v) if v is not None and np.isfinite(v) else None for v in values]}
+
+
 def _groups(meta, entry, a, remaining):
     width = a.shape[1]
     units = meta.get('units', meta.get('unit'))
@@ -209,7 +218,19 @@ def build(ep, pl, *, shown=None, images=None, native_images=None, capture_select
     series_limit = max(MAX_SERIES, min(MAX_SENSORS, len(numeric)))
     sample_limit = MAX_SAMPLES if series_limit == MAX_SERIES else max(8, MAX_SAMPLES * MAX_SERIES // (2 * series_limit))
     from label import tactile_arrays
-    array_values, array_count = 0, 0
+    array_positions = []
+    for position, meta in enumerate(numeric):
+        shape = meta.get('shape') or []
+        if not (len(shape) == 2 and all(type(d) is int and 0 < d <= 32 for d in shape)):
+            continue
+        width = math.prod(shape)
+        units = meta.get('units', meta.get('unit'))
+        same_unit = not isinstance(units, list) or len(units) == width and len(set(map(str, units))) == 1
+        if (MAX_SERIES < width <= 1024 and not meta.get('summary_of') and same_unit
+                and _quantity(meta['name'], field_interpretation(ctx, meta['name'])) != 'contact_state'):
+            array_positions.append(position)
+    array_positions = array_positions[:tactile_arrays.MAX_ARRAYS]
+    array_values, native_values, array_count = 0, 0, 0
     for position, meta in enumerate(numeric):
         name = meta['name']
         entry = field_interpretation(ctx, name)
@@ -254,13 +275,19 @@ def build(ep, pl, *, shown=None, images=None, native_images=None, capture_select
         same_unit = not isinstance(units, list) or len(units) == a.shape[1] and len(set(map(str, units))) == 1
         if (not summary and same_unit and quantity != 'contact_state' and a.shape[1] > MAX_SERIES
                 and array_count < tactile_arrays.MAX_ARRAYS):
+            from label import semantic_evidence
+            semantics = semantic_evidence._semantics(ctx, meta, entry, meta.get('shape') or list(a.shape[1:]))
+            remaining_arrays = max(1, sum(index >= position for index in array_positions))
             comparison = tactile_arrays.comparison(a, meta.get('shape') or [], times, pl.get('ks') or [],
-                                                   tactile_arrays.MAX_VALUES - array_values)
+                (tactile_arrays.MAX_VALUES - array_values) // remaining_arrays, semantics=semantics,
+                native_value_budget=(tactile_arrays.MAX_NATIVE_VALUES - native_values) // remaining_arrays)
             if comparison:
                 sensor['array_evidence'] = comparison
                 sensor['times'] = [f['time_s'] for f in comparison['frames'] if f['valid_cells']]
-                sensor['array_supplied_columns'] = a.shape[1]
+                sensor['array_supplied_columns'] = len(comparison.get('valid_indices', range(a.shape[1])))
                 array_values += (len(comparison['frames']) + 1) * a.shape[1]
+                table = comparison['native_constituents']
+                native_values += len(table['values']) * len(table['source_columns'])
                 array_count += 1
         free = series_limit - len(doc['series'])
         remaining = max(1, free // min(free, len(numeric) - position)) if free else 0
@@ -285,9 +312,12 @@ def build(ep, pl, *, shown=None, images=None, native_images=None, capture_select
                                   'operation': 'stored summary' if summary else 'recorded value' if len(ids) == 1 else 'mean of declared group',
                                   'native_samples': n, 'sampled': len(ts) < n,
                                   'sample_period_s': float(np.median(np.diff(times))) if len(times) > 1 else None})
+            plot = native_plot(times, values)
+            if plot is not None:
+                doc['series'][-1]['plot'] = plot
             sensor['supplied_columns'] += len(ids)
         if sensor['supplied_columns'] < a.shape[1]:
-            note = 'Numeric descriptors report supplied_columns versus columns for traces. Selection favors changing cells. Whole-array snapshots, when present, cover all columns only at their listed times. Unshown readings cannot support findings.'
+            note = 'Numeric descriptors report supplied_columns versus columns for traces. Selection favors changing cells. Array snapshots cover the declared valid columns, or all columns if no validity mask is declared, only at their listed times. Unshown readings cannot support findings.'
             if note not in doc['limitations']:
                 doc['limitations'].append(note)
         if n > sample_limit:
@@ -362,7 +392,8 @@ def build(ep, pl, *, shown=None, images=None, native_images=None, capture_select
         if (analysis_images and not rendered and len(capture_times) >= 2
                 and np.all(np.diff(list(capture_times.values())) > 0)):
             from label import optical_motion
-            motion = optical_motion.measure({k: analysis_images[k] for k in capture_times if k in analysis_images}, capture_times)
+            motion = optical_motion.measure({k: analysis_images[k] for k in capture_times if k in analysis_images}, capture_times,
+                anchor_frames=[sample['source_frame'] for sample in samples.values() if sample is not None])
             if motion:
                 doc['sensors'][-1]['marker_motion'] = motion
                 doc['sensors'][-1]['capabilities'].append('marker_motion')
@@ -389,13 +420,28 @@ def image_parts(doc):
 
 
 def _array_projection(payload):
-    # Full raw snapshots remain in the saved evidence. The model gets their
-    # images, fixed scales and numeric summaries, without a duplicate pixel table.
+    # A compact shared-clock matrix preserves constituent comparisons that
+    # regional means and map colors alone cannot express numerically.
     payload = copy.deepcopy(payload)
+    for row in payload.get('series') or []:
+        row.pop('plot', None)
     for sensor in payload.get('sensors') or []:
         array = sensor.get('array_evidence')
-        if array:
-            array['reference'].pop('values', None)
+        if array and 'values' in array['reference']:
+            columns = array.get('valid_indices', list(range(math.prod(array['shape']))))
+            def compact(values):
+                return [int(value) if type(value) is float and math.isfinite(value)
+                        and abs(value) <= 2**53 and value == int(value) else value for value in values]
+            native = array.pop('native_constituents', None)
+            array['constituents'] = {
+                **(native or {}), 'source_columns': columns,
+                'series_ids': [sensor['id'] + ':array:' + str(column) for column in columns],
+                'times_s': native['times_s'] if native is not None else [frame['time_s'] for frame in array['frames']],
+                'reference_values': compact([array['reference']['values'][column] for column in columns]),
+                'values': [compact(row) for row in native['values']] if native is not None else
+                          [compact([frame['values'][column] for column in columns]) for frame in array['frames']],
+                'operation': 'Prepared component values on a shared clock, without spatial averaging; source_columns and series_ids name the corresponding matrix columns. Cite the declared per-cell series_id with exact retained times for a constituent comparison. Layout and authority are shared with this array descriptor.'}
+            array['reference'].pop('values')
             array['reference']['used_for_signed_change_images'] = True
             for frame in array['frames']:
                 frame.pop('values', None)
@@ -437,8 +483,31 @@ Apply measurement limits to the headline and video overlay, not only to the alte
 Return an additional JSON field "sensor_findings": [{"start_s": number, "end_s": number, "inspect_s": number, "headline": "short plain English", "detail": "what the sensor adds", "overlay_detail": "short explanation for the video overlay", "observation": "recorded evidence", "claim": "physical interpretation with uncertainty", "alternative": "other plausible explanation", "confidence": "high|medium|low", "adds_beyond_video": true, "claim_type": "one supplied capability", "evidence": [{"sensor_id": "exact supplied id", "series_id": "exact trace id; omit for images or full-array snapshots", "time_s": [exact supplied sample times], "detail": "supporting observation"}]}]. Every finding needs evidence and must fit the supplied episode times. Cite only readings/images actually supplied. Do not claim confirmed slip, object weight, stiffness or texture without evidence that establishes it.
 '''
     payload = copy.deepcopy({k: doc[k] for k in ('sensors', 'series', 'limitations')})
+    payload['series'] = [row for row in payload['series'] if not row.get('array_constituent')]
     if doc.get('coverage'):
         payload['coverage'] = copy.deepcopy(doc['coverage'])
+    # Keep every constituent column, thinning the largest native table only
+    # when its complete source period cannot coexist with the other evidence.
+    while len((text + _json(_array_projection(payload))).encode()) > MAX_PROMPT_BYTES:
+        candidates = [sensor for sensor in payload['sensors']
+                      if len((sensor.get('array_evidence') or {}).get('native_constituents', {}).get('times_s') or []) > 4]
+        if not candidates:
+            break
+        sensor = max(candidates, key=lambda sensor: len(_json(sensor['array_evidence']['native_constituents'])))
+        table = sensor['array_evidence']['native_constituents']
+        count = max(4, len(table['times_s']) * 3 // 4)
+        from label.tactile_arrays import native_rows
+        required = [i for i, row in enumerate(table['source_rows']) if row in table['preserved_rows']]
+        selected = native_rows(np.asarray(table['times_s']), count, required)
+        for key in ('times_s', 'values', 'source_rows'):
+            table[key] = [table[key][i] for i in selected]
+        table['preserved_rows'] = [row for row in table['preserved_rows'] if row in table['source_rows']]
+        table['omitted_rows'] = table['native_samples'] - len(selected)
+        table['sampled'] = True
+        table['selection'] = 'Spaced retained source-clock rows after prompt byte-budget reduction; omitted readings cannot support findings.'
+        note = f'{sensor["id"]}: native constituent rows were reduced by the prompt byte budget; all declared valid cells remain in every retained row.'
+        if note not in payload['limitations']:
+            payload['limitations'].append(note)
     # Regional trajectories and whole-array images already represent these pads.
     # Under pressure, remove redundant individual-cell traces before thinning the
     # cross-modal comparisons. The full raw source remains inspectable.
@@ -457,15 +526,24 @@ Return an additional JSON field "sensor_findings": [{"start_s": number, "end_s":
     # Keep complete maps, never half a grid. The budgeted projection is rendered
     # into image parts too, so every supplied picture remains citable.
     while len((text + _json(_array_projection(payload))).encode()) > MAX_PROMPT_BYTES:
-        candidates = [s for s in payload['sensors'] if len((s.get('array_evidence') or {}).get('frames') or []) > 4]
+        candidates = [s for s in payload['sensors'] if
+                      len((s.get('array_evidence') or {}).get('frames') or []) > 4 and
+                      any(f['selection_priority'] in (2, 3) for f in s['array_evidence']['frames'])]
         if not candidates:
             break
-        sensor = max(candidates, key=lambda s: len(_json(s['array_evidence'])))
+        sensor = max(candidates, key=lambda s: len(_json(_array_projection({'sensors': [s]}))))
         frames = sensor['array_evidence']['frames']
         removable = [i for i, f in enumerate(frames) if f['selection_priority'] == 2]
+        if not removable and len(frames) > 4:
+            removable = [i for i, f in enumerate(frames) if f['selection_priority'] == 3]
         if not removable:
             break
-        del frames[removable[-1]]
+        # Preserve endpoint/extremum rows and spread remaining native coverage.
+        remove = min(removable, key=lambda i: frames[i + 1]['time_s'] - frames[i - 1]['time_s'])
+        del frames[remove]
+        note = 'Array snapshot rows were reduced by the prompt byte budget; every retained row keeps all declared valid constituent cells.'
+        if note not in payload['limitations']:
+            payload['limitations'].append(note)
         sensor['times'] = [f['time_s'] for f in frames if f['valid_cells']]
     # Optical comparisons have their own budget; never crowd out every numeric channel.
     while len((text + _json(_array_projection(payload))).encode()) > MAX_PROMPT_BYTES:
@@ -475,11 +553,12 @@ Return an additional JSON field "sensor_findings": [{"start_s": number, "end_s":
         sensor = max(candidates, key=lambda s: len(_json(s['marker_motion'])))
         motion = sensor['marker_motion']
         pairs = motion['pairs']
-        limit = max(2, len(pairs)//2)
-        selected = {0, len(pairs)-1}
-        selected.update(sorted(range(len(pairs)), key=lambda i: pairs[i].get('p95_px') or 0,
-                               reverse=True)[:max(0, limit-2)])
-        motion['pairs'] = [pairs[i] for i in sorted(selected)]
+        native = [i for i, pair in enumerate(pairs) if pair.get('selection') == 'native_detail']
+        if native:
+            motion['pairs'] = [pair for i, pair in enumerate(pairs) if i != native[-1]]
+        else:
+            from label.optical_motion import _select
+            motion['pairs'] = _select(pairs, max(2, len(pairs)//2))
         times = {motion['reference_s'], *(p['from_s'] for p in motion['pairs']), *(p['to_s'] for p in motion['pairs'])}
         motion['samples'] = [r for r in motion['samples'] if r['time_s'] in times]
         motion['coverage'] = 'Comparisons reduced by prompt byte budget. ' + motion['coverage'].removeprefix('Comparisons reduced by prompt byte budget. ')
@@ -496,6 +575,19 @@ Return an additional JSON field "sensor_findings": [{"start_s": number, "end_s":
         for key, by_time in auxiliary.items():
             row[key] = [by_time[t] for t in row['times']]
         row['sampled'] = True
+    # If complete array tables still exceed the budget, retain each sensor's
+    # existing trace before spending the entire budget on a few large arrays.
+    while len((text + _json(_array_projection(payload))).encode()) > MAX_PROMPT_BYTES:
+        traced = {row['sensor_id'] for row in payload['series']}
+        candidates = [sensor for sensor in payload['sensors']
+                      if sensor.get('array_evidence') and sensor['id'] in traced]
+        if not candidates:
+            break
+        sensor = max(candidates, key=lambda s: len(_json(_array_projection({'sensors': [s]}))))
+        sensor.pop('array_evidence')
+        sensor.pop('times', None)
+        sensor.pop('array_supplied_columns', None)
+        payload['limitations'].append(f'{sensor["id"]}: complete array evidence withheld by prompt byte budget; separately supplied traces remain available.')
     # Keep every descriptor and explicitly disclose numeric samples withheld by the prompt budget.
     while len((text + _json(_array_projection(payload))).encode()) > MAX_PROMPT_BYTES and payload['series']:
         removed = payload['series'][-1]
@@ -543,17 +635,51 @@ def finding_fields(finding):
         'review_status') if key in finding}
 
 
-def bind(doc, findings):
+def _constituent_series(sensor, table, position, existing, ep):
+    column = table['source_columns'][position]
+    row = {'id': table['series_ids'][position], 'sensor_id': sensor['id'],
+           'label': sensor['name'] + f' [{column}]', 'columns': [column],
+           'unit': next((r.get('unit') for r in existing if r['sensor_id'] == sensor['id']), None),
+           'times': table['times_s'], 'values': [values[position] for values in table['values']],
+           'array_constituent': True, 'operation': 'recorded source component, without spatial averaging',
+           'native_samples': sensor['array_evidence']['native_samples'],
+           'sampled': len(table['times_s']) < sensor['array_evidence']['native_samples']}
+    # The model cites only the retained matrix. The viewer can additionally show
+    # the native trajectory from the same in-memory episode used for the request.
+    n = row['native_samples']
+    source = (ep or {}).get('signals', {}).get(sensor['name'])
+    if source is not None and 0 < n <= MAX_PLOT_SAMPLES and len(source) >= n:
+        values = np.asarray(source[:n]).reshape(n, -1)[:, column]
+        times = _times(ep, n)
+        if len(times) == n and np.isfinite(times).all() and (np.diff(times) > 0).all():
+            indices = np.searchsorted(times, row['times'])
+            if (indices < n).all() and np.allclose(times[indices], row['times'], rtol=0, atol=1e-6):
+                expected = np.array([np.nan if v is None else v for v in row['values']])
+                if np.array_equal(values[indices], expected, equal_nan=True):
+                    row['plot'] = native_plot(times, values)
+                    row['sample_period_s'] = float(np.median(np.diff(times))) if n > 1 else None
+    return row
+
+
+def bind(doc, findings, *, ep=None):
     """Keep unbound replies for inspection; only evidence-backed findings reach overlays."""
     result = copy.deepcopy(doc)
+    previous = {r['id']: r for r in result.get('series') or [] if r.get('array_constituent')}
+    result['series'] = [r for r in result.get('series') or [] if not r.get('array_constituent')]
     result['findings'], result['unbound_findings'] = [], []
     sensors = {s['id']: s for s in doc.get('sensors') or []}
     # Validate against the exact prompt projection, including its byte budget.
     sent = _prompt(doc)[1] if sensors else {'series': []}
     sensors = {s['id']: s for s in sent.get('sensors') or []}
     series = {r['id']: r for r in sent['series']}
+    constituents = {ident: (sensor, table, i)
+                    for sensor in _array_projection(sent).get('sensors') or []
+                    for table in [(sensor.get('array_evidence') or {}).get('constituents') or {}]
+                    for i, ident in enumerate(table.get('series_ids') or [])}
+    materialized = set()
     for f in findings if isinstance(findings, list) else []:
         reason = None
+        selected = {}
         if not isinstance(f, dict):
             reason = 'finding is not an object'
         else:
@@ -575,6 +701,15 @@ def bind(doc, findings):
                     reason = 'invalid sensor/series reference'; break
                 s = sensors.get(ref.get('sensor_id')) if isinstance(ref, dict) else None
                 r = series.get(ref.get('series_id')) if isinstance(ref, dict) else None
+                if r is None and ref.get('series_id') in constituents:
+                    sensor, table, position = constituents[ref['series_id']]
+                    r = _constituent_series(sensor, table, position, sent['series'], ep)
+                    old = previous.get(r['id'])
+                    if ep is None and old and all(old.get(key) == r.get(key) for key in ('times', 'values', 'columns')):
+                        for key in ('plot', 'sample_period_s'):
+                            if key in old:
+                                r[key] = copy.deepcopy(old[key])
+                    selected[r['id']] = r
                 ts = ref.get('time_s') if isinstance(ref, dict) else None
                 array = (s or {}).get('array_evidence') if 'series_id' not in ref else None
                 if not s or (s['kind'] == 'numeric' and not array and (not r or r['sensor_id'] != s['id'])):
@@ -615,6 +750,10 @@ def bind(doc, findings):
             result['unbound_findings'].append({'finding': copy.deepcopy(f), 'reason': reason})
         else:
             result['findings'].append(finding_fields(f))
+            for ident, row in selected.items():
+                if ident not in materialized:
+                    result['series'].append(row)
+                    materialized.add(ident)
     return result
 
 
@@ -720,6 +859,9 @@ def merge(parts, ctx, ep_dir=None):
                 for frame in array['frames']:
                     frame['time_s'] += offset
                 array['reference']['times_s'] = [t + offset for t in array['reference']['times_s']]
+                if array.get('native_constituents'):
+                    native = array['native_constituents']
+                    native['times_s'] = [t + offset for t in native['times_s']]
             if sensor.get('marker_motion'):
                 motion = sensor['marker_motion']
                 motion['reference_s'] += offset
@@ -733,6 +875,8 @@ def merge(parts, ctx, ep_dir=None):
             row = copy.deepcopy(row)
             row['id'], row['sensor_id'] = prefix + row['id'], prefix + row['sensor_id']
             row['times'] = [t + offset for t in row['times']]
+            if row.get('plot'):
+                row['plot']['times'] = [t + offset for t in row['plot']['times']]
             if 'comparison_from_s' in row:
                 row['comparison_from_s'] = [t + offset if t is not None else None for t in row['comparison_from_s']]
             if row.get('derivation_id'):

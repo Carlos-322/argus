@@ -4603,11 +4603,19 @@ function genericSensorSeries(G, f, limit = 3) {
   const selected = (G.series || []).filter(r => ids.has(r.id) && genericSensorAvailable(G, r.sensor_id) && r.review_status !== 'rejected'
     && !r.withheld_from_final && (f.evidence || []).some(e => e.series_id === r.id && e.sensor_id === r.sensor_id) && Array.isArray(r.values) && Array.isArray(r.times)
     && r.values.length === r.times.length && r.values.some(Number.isFinite));
+  const priority = new Map((f.evidence || []).map((ref, i) => [ref.series_id, i]).reverse());
+  selected.sort((a, b) => priority.get(a.id) - priority.get(b.id));
   const sensors = new Map((G.sensors || []).map(s => [s.id, s]));
   const sourceName = r => String((sensors.get(r.sensor_id) || {}).name || r.sensor_id || 'Recorded field');
   const leafName = r => sourceName(r).split(/[./]/).filter(Boolean).pop() || sourceName(r);
   const readable = name => name.replace(/_/g, ' ');
   return selected.slice(0, limit).map(r => {
+      const plot = r.plot;
+      const native = plot?.kind === 'native_samples' && Array.isArray(plot.times) && Array.isArray(plot.values)
+        && plot.times.length === r.native_samples && plot.times.length === plot.values.length && plot.times.length <= 4096
+        && plot.times.every((t, i) => Number.isFinite(t) && (!i || t > plot.times[i - 1]))
+        && plot.values.every(v => v === null || Number.isFinite(v)) && plot.values.some(Number.isFinite);
+      if (native) r = {...r, times: plot.times, values: plot.values, nativePlot: true};
       const valid = r.values.filter(Number.isFinite);
       const receipt = (G.receipts || []).find(receipt => receipt.id === r.sensor_id && receipt.current);
       const depthRegion = !!receipt && receipt.mode === 'regions' && (receipt.descriptor || {}).kind === 'depth';
@@ -4865,18 +4873,22 @@ function gripOverlayPressureHtml(G, f, limit = 3) {
   if (!traces.length) return '';
   const allTimes = traces.flatMap(v => v.times || G.times || []);
   const end = Math.max(1e-6, ...allTimes), x = t => 180 * t / end;
-  return `<span class="gf-pressure" title="${G.generic ? 'Recorded readings or named derived measurements, each row on its own fixed scale. Points are supplied samples. Depth region rows show their recorded range. Other rows retain zero. Missing samples remain blank. Compare within a row.' : 'The dot follows the video. Missing and censored samples remain blank. The dashed line is the starting level. Each row uses a fixed scale over the whole clip. Height shows recorded sensor change, not calibrated force. Compare changes within a row.'}">
+  return `<span class="gf-pressure" title="${G.generic ? 'Lines connect consecutive native readings. Isolated points show sparse supplied samples. Missing readings break the line. Each row has one fixed scale; compare changes within a row.' : 'The dot follows the video. Missing and censored samples remain blank. The dashed line is the starting level. Each row uses a fixed scale over the whole clip. Height shows recorded sensor change, not calibrated force. Compare changes within a row.'}">
     ${traces.map((v, k) => {
       const times = v.times || G.times;
       const y = value => 28 - 24 * (value - v.low) / (v.high - v.low);
       let pen = false, path = '', points = '';
+      const maxGap = v.nativePlot ? Math.max(.001, v.sample_period_s || .03) * 1.5 : .1001;
       v.values.forEach((value, i) => {
         if (!Number.isFinite(value)) { pen = false; return; }
-        if (G.generic) {
+        const previous = i > 0 && Number.isFinite(v.values[i - 1]) && times[i] - times[i - 1] <= maxGap;
+        const next = i + 1 < times.length && Number.isFinite(v.values[i + 1]) && times[i + 1] - times[i] <= maxGap;
+        if (G.generic && (!v.nativePlot || !previous && !next)) {
           points += `<circle data-sensor-recorded-point cx="${x(times[i]).toFixed(2)}" cy="${y(value).toFixed(2)}" r="1.8" fill="currentColor" opacity=".65"/>`;
+          pen = false;
           return;
         }
-        if (!G.generic && i && times[i] - times[i - 1] > .1001) pen = false;
+        if (i && times[i] - times[i - 1] > maxGap) pen = false;
         path += `${pen ? 'L' : 'M'}${x(times[i]).toFixed(2)},${y(value).toFixed(2)} `;
         pen = true;
       });

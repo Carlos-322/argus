@@ -84,7 +84,9 @@ def _bounded_feature(feature, times):
     columns = feature['source_columns']
     if len(columns) > 256 and columns == list(range(columns[0], columns[0] + len(columns))):
         columns = {'start': columns[0], 'count': len(columns)}
+    plot = se.native_plot(feature_times, feature['values']) if source_rows is None else None
     return {**feature, 'values': values, 'times': ts, 'rows': rows, 'source_columns': columns,
+            **({'plot': plot} if plot is not None else {}),
             'coverage': {'scope': 'all native derivation rows' if source_rows is None else 'selected endpoint comparisons', 'valid_count_min': min(counts),
                          'valid_count_max': max(counts), 'valid_samples': sum(value is not None for value in feature['values'])},
             'counts': [counts[i] for i in positions],
@@ -276,6 +278,8 @@ def append(ep, pl, doc, times):
                    'coverage': feature['coverage'], 'valid_counts': feature['counts'],
                    'native_samples': n, 'sampled': len(ts) < n,
                    'sample_period_s': float(np.median(np.diff(times))) if n > 1 else None}
+            if feature.get('plot'):
+                row['plot'] = feature['plot']
             if 'comparison_from_s' in feature['audit']:
                 row['comparison_from_s'] = feature['audit']['comparison_from_s']
                 row['source_rows'] = rows

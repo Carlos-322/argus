@@ -115,9 +115,9 @@ def test_normal_request_derives_motion_from_decoded_tactile_images(tmp_path, cel
     (folder / 'sources.json').write_text(json.dumps({'exo': {'packed': str(movie), 'base_s': 0, 'n_frames': 120}}))
     observed = {}
     measure = om.measure
-    def capture(frames, times):
+    def capture(frames, times, **kwargs):
         observed.update(frames=frames, times=times)
-        return measure(frames, times)
+        return measure(frames, times, **kwargs)
     monkeypatch.setattr(om, 'measure', capture)
     request = me.build_request(folder, cell_w=cell_w, sample_fps=1)
     motion = request['sensor_evidence']['sensors'][0]['marker_motion']
@@ -200,41 +200,41 @@ def test_marker_comparison_can_use_other_supplied_pad_images_as_context():
         assert not se.bind(invalid, [finding])['findings']
 
 
-def test_prompt_budget_preserves_small_optical_comparisons_and_quality_limits():
+def test_prompt_budget_preserves_small_optical_comparisons_and_quality_limits(monkeypatch):
     import json
 
     _, doc = evidence({0: pad(), 4: pad(2)})
     template = doc['sensors'][0]
     doc['sensors'] = []
-    doc['episode_window_s'] = [0., 48.]
+    doc['episode_window_s'] = [0., 64.]
     for channel in range(4):
         sensor = copy.deepcopy(template)
         sensor['id'] = f'camera:extra{channel + 1}'
-        sensor['times'] = list(range(48))
+        sensor['times'] = list(range(64))
         motion = sensor['marker_motion']
         pair = motion['pairs'][0]
         sample = motion['samples'][-1]
         # A full-episode request includes both large transitions and smaller
         # changes during a hold. Magnitude alone does not rank their usefulness.
-        motion['pairs'] = [{**copy.deepcopy(pair), 'from_s': 2*i, 'to_s': 2*i+1,
-                            'p95_px': .4 if i == 12 else 3.,
-                            'local_p95_px': .2 if i == 12 else 1.5,
+        motion['pairs'] = [{**copy.deepcopy(pair), 'from_s': i, 'to_s': i+1,
+                            'p95_px': .4 if i == 35 else 3.,
+                            'local_p95_px': .2 if i == 35 else 1.5,
                             'correspondence': {'global_translation_px': [0., 0.],
                                              'alternative_peak_ratio': .8,
                                              'coherent_local_field': False, 'ambiguous': False}}
-                           for i in range(16)]
+                           for i in range(63)]
         motion['samples'] = [{**copy.deepcopy(sample), 'time_s': t,
-                              'p95_px': None if t == 24 else 2.,
+                              'p95_px': None if t == 35 else 2.,
                               'correspondence': {'global_translation_px': [0., 0.],
-                                               'alternative_peak_ratio': 1. if t == 24 else .8,
-                                               'coherent_local_field': True, 'ambiguous': t == 24}}
+                                               'alternative_peak_ratio': 1. if t == 35 else .8,
+                                               'coherent_local_field': True, 'ambiguous': t == 35}}
                              for t in sensor['times']]
         motion['comparisons_total'] = 64
         doc['sensors'].append(sensor)
     original = copy.deepcopy(doc)
-    finding = {'start_s': 24, 'end_s': 25, 'headline': 'Contact changes during the hold',
+    finding = {'start_s': 35, 'end_s': 36, 'headline': 'Contact changes during the hold',
                'claim_type': 'marker_motion', 'adds_beyond_video': True,
-               'evidence': [{'sensor_id': 'camera:extra1', 'time_s': [24, 25]}]}
+               'evidence': [{'sensor_id': 'camera:extra1', 'time_s': [35, 36]}]}
     assert se.bind(doc, [finding])['findings'] == [finding]
     sent = se.prompt(doc)
     assert len(sent.encode()) <= se.MAX_PROMPT_BYTES
@@ -249,7 +249,20 @@ def test_prompt_budget_preserves_small_optical_comparisons_and_quality_limits():
                         for row in before['marker_motion'][key]]
             assert restored == expected
     assert doc == original
+    # Extra native detail cannot evict the full sequence of scene-anchor comparisons.
+    monkeypatch.setattr(se, 'MAX_PROMPT_BYTES', len(sent.encode()) + 512)
+    for sensor in doc['sensors']:
+        motion = sensor['marker_motion']
+        for i in range(4):
+            motion['pairs'].append({**copy.deepcopy(motion['pairs'][0]), 'from_s': i + .1,
+                                    'to_s': i + .2, 'selection': 'native_detail'})
+    projected = json.loads(se.prompt(doc).split('\n')[-1])
+    for sensor in projected['sensors']:
+        table = sensor['marker_motion']['pairs']
+        rows = [dict(zip(table['columns'], row)) for row in table['rows']]
+        assert {(row['from_s'], row['to_s']) for row in rows if row.get('selection') != 'native_detail'} == {
+            (i, i + 1) for i in range(63)}
     # A reference-relative quality gap cannot erase a valid adjacent pair, but
     # that pair must not become usable when its own correspondence fails.
-    doc['sensors'][0]['marker_motion']['pairs'][12]['p95_px'] = None
+    doc['sensors'][0]['marker_motion']['pairs'][35]['p95_px'] = None
     assert not se.bind(doc, [finding])['findings']

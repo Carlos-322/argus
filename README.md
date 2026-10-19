@@ -44,7 +44,7 @@ It is the only harness to combine native multi-format ingestion (rather than res
 | RGB | Timestamped multi-view frames provide visual context for task execution, object interactions, progress, failures and recoveries. |
 | Proprioception and actions | Joint states, end-effector poses, gripper states and action trajectories provide motion context. Training targets retain their declared semantics rather than being assumed to be executed commands. |
 | Depth | Metric depth supports camera-relative distance and separation when units, calibration and temporal alignment are known. Relative depth remains relative. |
-| Tactile | Pressure, normal/shear force, contact arrays and optical tactile images support analysis of grip, contact distribution and surface motion. Full-array patterns, regional responses and hand geometry are compared with video and gripper state. Publisher layouts remain qualified candidates unless verified for the recording; array shape alone does not establish anatomy or force. Response changes alone do not establish slip. |
+| Tactile | Pressure, normal/shear force, contact arrays and optical tactile images support analysis of grip, contact distribution and surface motion. Full-array patterns, individual-cell and regional responses, and hand geometry are compared with video and gripper state. Publisher layouts remain qualified candidates unless verified for the recording; array shape alone does not establish anatomy or force. Response changes alone do not establish slip. |
 | Other episode fields | Numeric channels, event flags, waveform packets and structured metadata are accessible through the same inspection interface. Spectral analysis of eligible waveforms requires a recorded sample rate. |
 | Task context | Instructions, annotations and calibration metadata provide context. The VLM checks publisher claims against the recording rather than assuming their correctness. |
 
@@ -84,7 +84,7 @@ uv run python -m board serve --board data/review/mine --clips data/review/mine/c
 | Faster actions | [`--sample-fps 2`](label/policy.py) is recommended for subsecond fumbles and rapid recoveries. More images shorten the available request window and can increase cost. |
 | Task scope | Episode/session scope follows source metadata; [`--task-mode episode`](label/policy.py) or [`session`](label/policy.py) overrides it. A missing instruction does not automatically imply a session. Human ego uses the activities schema. |
 
-Optical tactile cameras also supply bounded native-frame comparisons selected from image changes, independently of the regular scene sampling.
+Optical tactile cameras supply comparisons across the sampled episode plus bounded native-frame comparisons around image changes.
 
 Each recording produces one public episode. Long recordings are split to fit API request limits and rejoined on the original timeline; internal chunk boundaries are not treated as recording truncation. Session mode annotates activities within the recording. Preparation limits, missing chunks and processing failures are reported alongside any usable results.
 

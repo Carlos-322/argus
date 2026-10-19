@@ -1420,7 +1420,8 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
             'generation_id': result.get('generation_id'), 'method': 'same episode annotation request'}
     if isinstance(fields.get("sensor_evidence"), dict):
         from label.sensor_evidence import bind
-        result["sensor_evidence"] = bind(fields["sensor_evidence"], labels.get("sensor_findings"))
+        result["sensor_evidence"] = bind(fields["sensor_evidence"], labels.get("sensor_findings"),
+                                         ep=evidence_access.ep if evidence_access is not None else None)
         result["sensor_evidence"]["provenance"] = {"model": result.get("model_served") or model,
             "generation_id": result.get("generation_id"), "method": "same episode annotation request"}
     if evidence_access is not None:

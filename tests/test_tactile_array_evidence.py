@@ -1,6 +1,7 @@
 """The normal request must expose distributed responses outside its few selected traces."""
 import copy
 import json
+import math
 
 import numpy as np
 
@@ -89,7 +90,12 @@ def test_large_arrays_do_not_crowd_out_other_sensor_families():
     sent = json.loads(se.prompt(doc).split('\n')[-1])
     assert {r['sensor_id'] for r in sent['series']} == {s['id'] for s in sent['sensors']}
     assert len(se.prompt(doc).encode()) <= se.MAX_PROMPT_BYTES
-    assert len(se.image_parts(doc)) // 2 <= 4
+    from label import tactile_arrays
+    arrays = [s['array_evidence'] for s in doc['sensors'] if s.get('array_evidence')]
+    assert len(arrays) <= tactile_arrays.MAX_ARRAYS
+    assert sum((len(a['frames']) + 1) * math.prod(a['shape']) for a in arrays) <= tactile_arrays.MAX_VALUES
+    assert sum(p['type'] == 'image_url' for p in se.image_parts(doc)) == sum(
+        math.ceil(len(a['frames']) / 8) for a in arrays)
 
 
 def test_missing_initial_cells_do_not_appear_in_signed_comparison_coverage():
