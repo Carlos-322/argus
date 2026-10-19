@@ -82,6 +82,32 @@ def test_boundary_context_images_do_not_authorize_events_outside_the_scene():
         'evidence': [{'sensor_id': 'camera:extra1', 'time_s': [-.04]}]}])['findings']
 
 
+def test_inspected_boundary_context_does_not_authorize_outside_events(tmp_path):
+    movie = tmp_path / 'packed.mp4'
+    _packed_mp4(movie, 4)
+    pts = probe(movie)['pts']
+    ep = mapped_episode()
+    ep['dir'] = tmp_path
+    ep['times'] = {'exo': np.array([0., 1., 2., 3.9]), 'exo_pts': pts,
+                   'extra1': np.array([-.04, .2, 3.7, 4.01]), 'extra1_pts': pts}
+    ep['sources'] = {'exo': {'packed': str(movie), 'base_s': 0., 'n_frames': 4,
+                             'last_frame_interval_s': .1},
+                     'extra1': {'packed': str(movie), 'base_s': 0., 'n_frames': 4}}
+    ep['kmap']['extra1'] = np.arange(4)
+    for plan in (None, {'n': 3}):
+        access = ea.Access(ep, plan=plan)
+        field = next(field for field in access.inventory() if field['kind'] == 'image' and field['name'] == 'extra1')
+        receipt = access.inspect({'field_id': field['id'], 'mode': 'images', 'rows': [0, 1, 2, 3]})
+        assert receipt['times_s'] == [-.04, .2, 3.7, 4.01]
+        for start, end, cited, valid in ((-.04, -.04, [-.04], False),
+                                        (4.01, 4.01, [4.01], False),
+                                        (3.7, 3.8, [3.7, 4.01], True),
+                                        (3.7, 3.95, [3.7, 4.01], plan is None)):
+            finding = {'start_s': start, 'end_s': end, 'headline': 'Inspected pad response',
+                'adds_beyond_video': True, 'evidence': [{'evidence_id': receipt['id'], 'time_s': cited}]}
+            assert bool(access.bind([finding])['findings']) is valid
+
+
 def test_declared_fixed_grid_keeps_its_episode_times_without_capture_arrays():
     ep = episode({}, [], cameras={'exo': {'name': 'scene'}, 'extra1': {'name': 'gelsight'}})
     ep['times'] = None

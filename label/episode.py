@@ -291,9 +291,17 @@ def frame_time(ep: dict, k: int) -> float:
     return k / ep_fps(ep)
 
 
-def frame_window(ep: dict, n: int) -> list[float]:
+def frame_window(ep: dict, n: int | None = None) -> list[float]:
     """Actual anchor-frame window, including the final interval, without retained duration claims."""
     view = anchor(ep)
+    sources = ep.get('sources') or {}
+    source = sources.get(view) or {}
+    if n is None:
+        n = int(source.get('n_frames', len(ep.get('state', []))))
+        n = min([n, *(len(mapping) for name, mapping in (ep.get('kmap') or {}).items()
+                      if name != view and name in sources)])
+    if n <= 0:
+        return [0., 0.]
     times = (ep.get('times') or {}).get(view)
     if times is None:
         return [0., n / ep_fps(ep)]
@@ -303,7 +311,6 @@ def frame_window(ep: dict, n: int) -> list[float]:
         return [start, float(times[n])]
     steps = np.diff(times[:n])
     interval = float(np.median(steps[steps > 0])) if np.any(steps > 0) else 1 / ep_fps(ep)
-    source = (ep.get('sources') or {}).get(view) or {}
     interval = float(source.get('last_frame_interval_s', interval))
     return [start, float(times[n - 1]) + interval]
 

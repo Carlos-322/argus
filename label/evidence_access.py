@@ -497,6 +497,7 @@ class Access:
         self.ep = ep
         self.supplied = supplied or {}
         self.state_usable = (plan or {}).get('state_usable', not ep['context'].get('state_unaligned'))
+        self.frame_count = (plan or {}).get('n')
         self.fields = {}
         self.receipts = []
         self.images = {}
@@ -1319,8 +1320,11 @@ class Access:
                 'note': 'Uninspected fields cannot support findings. Complete inventory and coverage are saved in the JSON.'}
 
     def bind(self, findings):
+        from label.episode import frame_window
+        window = frame_window(self.ep, self.frame_count)
         doc = {'version': 1, 'interpretation_digest': se.signature(self.ep['context']), 'sensors': [], 'series': [],
                'clock_digest': se._clock_digest(self.ep['context']),
+               'episode_window_s': window,
                'findings': [], 'untimed_findings': [], 'unbound_findings': [], 'coverage': [], 'limitations': []}
         if self.ep.get('dir'):
             doc['source_proof'] = source_proof(self.ep['context'], self.ep['dir'])
@@ -1409,6 +1413,8 @@ class Access:
                 reason = 'missing finite finding interval'
             elif finding['start_s'] > finding['end_s'] or finding.get('adds_beyond_video') is not True:
                 reason = 'invalid interval or no additional information'
+            elif finding['start_s'] < window[0] - 1e-6 or finding['end_s'] > window[1] + 1e-6:
+                reason = 'finding exceeds the episode frame window'
             elif not isinstance(refs, list) or not refs:
                 reason = 'missing evidence references'
             converted, windows = [], []
