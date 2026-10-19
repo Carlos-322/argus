@@ -79,19 +79,7 @@ def _scan(ep, view, pl, gate, scan_limit, image_limit):
         # Side cameras can extend before or after the scene. Rank only captures
         # in its actual frame window, including the final frame's exposure period.
         # A retained duration claim does not extend the available scene footage.
-        n = int(pl['n'])
-        anchor_times = (clocks or {}).get(anchor)
-        start, end = 0., n / me.ep_fps(ep)
-        if anchor_times is not None:
-            anchor_times = np.asarray(anchor_times, dtype=float)
-            start = max(0., float(anchor_times[0]))
-            if n < len(anchor_times):
-                end = float(anchor_times[n])
-            else:
-                steps = np.diff(anchor_times[:n])
-                interval = float(np.median(steps[steps > 0])) if np.any(steps > 0) else 1 / me.ep_fps(ep)
-                interval = float(ep['sources'][anchor].get('last_frame_interval_s', interval))
-                end = float(anchor_times[n - 1]) + interval
+        start, end = me.frame_window(ep, int(pl['n']))
         if own is None:
             first = max(0, int(np.ceil(start * me.ep_fps(ep))))
             stop = min(count, int(np.ceil(end * me.ep_fps(ep))))

@@ -291,6 +291,23 @@ def frame_time(ep: dict, k: int) -> float:
     return k / ep_fps(ep)
 
 
+def frame_window(ep: dict, n: int) -> list[float]:
+    """Actual anchor-frame window, including the final interval, without retained duration claims."""
+    view = anchor(ep)
+    times = (ep.get('times') or {}).get(view)
+    if times is None:
+        return [0., n / ep_fps(ep)]
+    times = np.asarray(times, dtype=float)
+    start = max(0., float(times[0]))
+    if n < len(times):
+        return [start, float(times[n])]
+    steps = np.diff(times[:n])
+    interval = float(np.median(steps[steps > 0])) if np.any(steps > 0) else 1 / ep_fps(ep)
+    source = (ep.get('sources') or {}).get(view) or {}
+    interval = float(source.get('last_frame_interval_s', interval))
+    return [start, float(times[n - 1]) + interval]
+
+
 def camera_sample(ep: dict, view: str, k: int, *, source_frame: int | None = None) -> dict | None:
     """One displayed RGB cell's source capture, separately from its anchor placement."""
     mapping = (ep.get('kmap') or {}).get(view)

@@ -179,7 +179,7 @@ def _groups(meta, entry, a, remaining):
 
 
 def build(ep, pl, *, shown=None, images=None, native_images=None, capture_selection=None):
-    from label.episode import anchor
+    from label.episode import anchor, frame_window
     ctx = ep['context']
     anchor_clock_assumed = bool((ctx.get('camera_clock') or {}).get(anchor(ep)))
     doc = {'version': 1, 'interpretation_digest': signature(ctx), 'clock_digest': _clock_digest(ctx), 'sensors': [], 'series': [],
@@ -192,6 +192,7 @@ def build(ep, pl, *, shown=None, images=None, native_images=None, capture_select
     if not len(times) or not np.isfinite(times).all() or (np.diff(times) <= 0).any():
         doc['limitations'].append('Sensor evidence withheld because the episode clock is not finite and strictly increasing.')
         return doc
+    doc['episode_window_s'] = frame_window(ep, n)
     numeric = []
     for meta in ctx.get('signals') or []:
         name = meta['name']
@@ -560,6 +561,9 @@ def bind(doc, findings):
             if (type(start) not in (float, int) or type(end) not in (float, int) or not math.isfinite(start)
                     or not math.isfinite(end) or end < start or not isinstance(f.get('headline'), str) or not f['headline'].strip()):
                 reason = 'invalid finding interval or headline'
+            window = doc.get('episode_window_s')
+            if reason is None and window is not None and (start < window[0] - 1e-6 or end > window[1] + 1e-6):
+                reason = 'finding exceeds the episode frame window'
             cited = []
             supports_claim = False
             refs = f.get('evidence')

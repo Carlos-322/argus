@@ -54,6 +54,34 @@ def test_missing_side_capture_clock_cannot_support_synchronized_findings():
     assert doc['sensors'][0]['times'] == []
 
 
+def test_boundary_context_images_do_not_authorize_events_outside_the_scene():
+    ep = mapped_episode()
+    ep['times'] = {'exo': np.array([0., 1., 2., 3.9]),
+                   'extra1': np.array([-.04, .2, 3.7, 4.01])}
+    ep['sources']['exo']['last_frame_interval_s'] = .1
+    ep['sources']['extra1']['n_frames'] = 4
+    ep['kmap']['extra1'] = np.arange(4)
+    doc = se.build(ep, {'n': 4, 'ks': [0, 1, 2, 3]}, shown={'extra1': [0, 1, 2, 3]},
+                   images={'extra1': {k: pad(k) for k in range(4)}})
+    assert doc['sensors'][0]['times'] == [-.04, .2, 3.7, 4.01]
+    for start, end, cited, valid in ((-.04, -.04, [-.04], False),
+                                    (4.01, 4.01, [4.01], False),
+                                    (3.7, 4.0000005, [3.7, 4.01], True),
+                                    (3.7, 4.000002, [3.7, 4.01], False),
+                                    (-.0000005, .2, [-.04, .2], True)):
+        finding = {'start_s': start, 'end_s': end, 'headline': 'The pad response changes',
+                   'claim_type': 'image_deformation',
+                   'evidence': [{'sensor_id': 'camera:extra1', 'time_s': cited}]}
+        assert bool(se.bind(doc, [finding])['findings']) is valid
+    assert doc['episode_window_s'] == [0., 4.]
+    assert 'episode_window_s' not in se.prompt(doc)
+    legacy = dict(doc)
+    legacy.pop('episode_window_s')
+    assert se.bind(legacy, [{'start_s': -.04, 'end_s': -.04, 'headline': 'Legacy boundary context',
+        'claim_type': 'image_deformation',
+        'evidence': [{'sensor_id': 'camera:extra1', 'time_s': [-.04]}]}])['findings']
+
+
 def test_declared_fixed_grid_keeps_its_episode_times_without_capture_arrays():
     ep = episode({}, [], cameras={'exo': {'name': 'scene'}, 'extra1': {'name': 'gelsight'}})
     ep['times'] = None
