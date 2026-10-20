@@ -492,6 +492,34 @@ def extrema_rows(field, rows, columns):
     return np.asarray(sorted(keep), dtype=int), stats
 
 
+def _validity_metadata(validity):
+    if validity is None:
+        return {}
+    if len(packed(validity).encode()) <= 1200:
+        return {'component_validity': copy.deepcopy(validity)}
+    return {'component_validity_summary': {
+        'authority': validity['authority'], 'valid_components': len(validity['valid_indices']),
+        'mask_sha256': hashlib.sha256(packed(validity).encode()).hexdigest(),
+        'scope': 'Full source mask retained; inspected components receive exact selected validity.'}}
+
+
+def _prepared_component_validity(ctx, name, meta, width):
+    shape = meta.get('shape')
+    if (not isinstance(shape, (list, tuple)) or any(type(d) is not int or d <= 0 for d in shape)
+            or math.prod(shape) != width):
+        return None
+    return se._sensor_validity({}, {'id': 'signal:' + name, 'name': name,
+        'descriptor_digest': se._descriptor_digest(meta)}, ctx)
+
+
+def _selected_component_validity(validity, columns):
+    if validity is None:
+        return None
+    allowed = set(validity['valid_indices'])
+    return {'columns': list(columns), 'valid': [column in allowed for column in columns],
+            'authority': validity['authority']}
+
+
 class Access:
     def __init__(self, ep, supplied=None, plan=None):
         self.ep = ep
@@ -518,6 +546,7 @@ class Access:
                             'interpretation', 'schema', 'topic'):
                     if key in meta:
                         row['descriptor'][key] = bounded(meta[key], 600)
+        row.update(_validity_metadata(private.get('component_validity')))
         self.fields[ident] = {'public': row, 'value': value, 'descriptor': meta or {}, **private}
         return ident
 
@@ -554,7 +583,9 @@ class Access:
                 shape, _, dtype, _ = header(path, stored['key'])
                 if dtype.kind in 'biuf':
                     private = {'raw_path': path, 'raw_key': stored['key'], 'raw_rows': shape[0]}
-            self.add('numeric', name, a, {**meta, 'interpretation': field_interpretation(ctx, name)}, **private)
+            validity = _prepared_component_validity(ctx, name, meta, math.prod(a.shape[1:]) or 1)
+            self.add('numeric', name, a, {**meta, 'interpretation': field_interpretation(ctx, name)},
+                     component_validity=validity, **private)
         if ctx.get('state_unaligned'):
             for meta in ctx.get('signals') or []:
                 if meta['name'] in self.ep.get('signals', {}):
@@ -564,7 +595,8 @@ class Access:
                     shape, _, dtype, _ = header(path, meta['key'])
                     ident = self.add('array', meta['name'], None, {**meta, 'shape': list(shape),
                         'dtype': str(dtype), 'interpretation': field_interpretation(ctx, meta['name'])},
-                        path=path, key=meta['key'])
+                        path=path, key=meta['key'],
+                        component_validity=_prepared_component_validity(ctx, meta['name'], meta, math.prod(shape[1:]) or 1))
                     self.fields[ident]['public']['shape'] = list(shape)
                 except (OSError, ValueError, KeyError, zipfile.BadZipFile) as error:
                     self.add('unreadable', meta['name'], None, {'reason': str(error)[:200]})
@@ -779,6 +811,7 @@ class Access:
                 'id', 'name', 'kind', 'quantity', 'capabilities', 'response_direction',
                 'episode_alignment_verified', 'timing', 'columns', 'supplied_columns',
                 'calibration', 'coordinate_frame') if key in sensor}
+            summary.update(_validity_metadata(se._sensor_validity(self.supplied, sensor, ctx)))
             if sensor.get('kind') == 'image':
                 summary['supplied_image_times_s'] = sensor.get('times') or []
             summary['interpretation'] = bounded(sensor.get('interpretation') or {}, 1800)
@@ -902,7 +935,7 @@ class Access:
                 allowed.update(('roi', 'regions', 'regions_by_row'))
         if set(request) - allowed:
             raise ValueError('unsupported request fields for this recorded field')
-        result = {'field_id': request['field_id'], 'mode': mode, 'descriptor': field['public'], 'limitations': []}
+        result = {'field_id': request['field_id'], 'mode': mode, 'descriptor': copy.deepcopy(field['public']), 'limitations': []}
         if kind in ('metadata', 'context') and mode == 'metadata':
             value = field['value']
             pointer = request.get('pointer', '')
@@ -990,6 +1023,13 @@ class Access:
         if not isinstance(cols, list) or not cols or len(cols) > MAX_COLUMNS or any(
                 type(c) is not int or not 0 <= c < width for c in cols) or len(set(cols)) != len(cols):
             raise ValueError('columns must be distinct recorded column indices within the channel budget')
+        validity = _selected_component_validity(field.get('component_validity'), cols)
+        if validity is not None:
+            result['selected_component_validity'] = validity
+            result['descriptor'].pop('component_validity', None)
+            if not all(validity['valid']):
+                result['limitations'].append('Components excluded by the recorded validity mask remain raw recorded values; '
+                    'do not interpret them as valid physical sensor responses.')
         if extrema:
             rows, stats = extrema_rows(field, rows, cols)
             result.update(extrema=stats, sampling='component minima and maxima with neighboring rows, plus uniform context',
@@ -1447,6 +1487,10 @@ class Access:
                       'access_field_id': field['id'], 'access_kind': field['kind'],
                       'interpretation': metadata.get('interpretation') or {},
                       'access_descriptor_digest': descriptor_signature(metadata)}
+            validity = _selected_component_validity(self.fields[r['field_id']].get('component_validity'),
+                                                    r.get('columns') or [])
+            if validity is not None:
+                sensor['selected_component_validity'] = validity
             if r.get('presentation_clock'):
                 sensor['presentation_clock'] = copy.deepcopy(r['presentation_clock'])
                 sensor['limitations'] = list(r['limitations'])
