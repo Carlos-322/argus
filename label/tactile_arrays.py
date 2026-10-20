@@ -14,6 +14,16 @@ MAX_FRAMES = 32
 MAX_SCALE_VALUES = 16_000_000
 MAX_NATIVE_VALUES = 65536
 MAX_NATIVE_ROWS = 4096
+# Every tactile change image uses one colour convention, so a colour means the same
+# sign on every sensor in a request. Captions and legends quote these words.
+SIGNED_CHANGE_KEY = 'Orange is negative, dark is zero, blue is positive.'
+SIGNED_CHANGE_LEGEND = 'Orange: lower codes | Blue: higher codes'
+
+
+def signed_change_color(q):
+    """RGB for a change scaled to -1..1: orange below the reference, dark at it, blue above."""
+    q = float(np.clip(q, -1, 1))
+    return (int(70 + 185*max(-q, 0)), int(90 + 80*abs(q)), int(110 + 145*max(q, 0)))
 
 
 def comparison(a, shape, times, ks, value_budget, semantics=None, native_value_budget=None):
@@ -220,8 +230,7 @@ def _render_sheet(sensor, snapshots):
                     q = float(np.clip((value - raw_low) / (raw_high - raw_low or 1), 0, 1))
                     color = (int(25 + 230*q), int(35 + 180*q), int(55 + 50*q))
                 else:
-                    q = float(np.clip(value / (delta_max or 1), -1, 1))
-                    color = (int(225 - 190*max(-q, 0)), int(225 - 160*abs(q)), int(225 - 190*max(q, 0)))
+                    color = signed_change_color(value / (delta_max or 1))
                 left, top = x + 24 + c * 160 / cols, y + offset + 18 + r * 104 / rows
                 draw.rectangle((left, top, left + 160/cols, top + 104/rows), fill=color)
             draw.text((x + 8, y + offset + 17), '0', fill='white', font=font)
@@ -232,7 +241,7 @@ def _render_sheet(sensor, snapshots):
     raw = stream.getvalue()
     caption = (f"TACTILE ARRAY SNAPSHOTS | {sensor['id']} | raw scale {raw_low:g} to {raw_high:g}; "
                f"signed change scale {-delta_max:g} to {delta_max:g}. "
-               'All frames use the same scales. Raw is dark to yellow; signed change is blue (negative), pale (zero), red (positive). '
+               'All frames use the same scales. Raw is dark to yellow. For signed change, ' + SIGNED_CHANGE_KEY[0].lower() + SIGNED_CHANGE_KEY[1:] + ' '
                'Grey means missing. Axes are source array indices, not hand anatomy. '
                + _response_caption(sensor) + ' '
                'The numeric summary gives 10th, 50th and 90th percentiles across finite cells. Read individual spatial patterns from these images; cite sensor_id without series_id for these full-array snapshots.')
@@ -313,12 +322,11 @@ def _render_physical(sensor, snapshots):
                 elif ref is None:
                     color = (110, 85, 125)
                 else:
-                    q = float(np.clip((raw - ref) / maximum, -1, 1))
-                    color = (int(70 + 185*max(-q, 0)), int(90 + 80*abs(q)), int(110 + 145*max(q, 0)))
+                    color = signed_change_color((raw - ref) / maximum)
                 x, y = coordinates[cell]
                 draw.ellipse((ox + x - radius, oy + y - radius, ox + x + radius, oy + y + radius),
                              fill=color, outline='white' if raw == 0 else None)
-            legend = 'Dark to yellow: lower to higher raw codes' if offset == 0 else 'Orange: lower codes | Blue: higher codes'
+            legend = 'Dark to yellow: lower to higher raw codes' if offset == 0 else SIGNED_CHANGE_LEGEND
             draw.text((ox + 8, oy + 334), legend, fill='white', font=small)
             draw.text((ox + 8, oy + 348), layout['authority'], fill='#b7c6d5', font=small)
     stream = io.BytesIO()
@@ -326,7 +334,7 @@ def _render_physical(sensor, snapshots):
     caption = (f"TACTILE ARRAY SNAPSHOTS | {sensor['id']} | Declared physical layout, authority {layout['authority']}. "
                f"Raw scale {raw_low:g} to {raw_high:g}, dark to yellow. Fixed raw-minus-reference color scale {-maximum:g} to {maximum:g} for every instant. "
                f"{color_scale['method']} Underlying raw values and full signed ranges are unchanged. "
-               'Orange is negative, dark is zero, blue is positive; white rings mark raw zero. Grey means missing raw; purple means valid raw with a missing reference, so no change can be computed. '
+               + SIGNED_CHANGE_KEY + ' White rings mark raw zero. Grey means missing raw; purple means valid raw with a missing reference, so no change can be computed. '
                'Source cell IDs and physical coordinates are retained in physical_layout.positions. '
                'Region outlines group declared cells, not measured contact areas. '
                'Regions: ' + ', '.join(regions) + '. ' + ' '.join(layout['limitations']) + ' '
