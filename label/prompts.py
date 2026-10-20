@@ -214,18 +214,18 @@ Rules:
   of progress for the task in front of you. A short task with one such
   unit still gets its start and finish marked.
 - A subgoal is a lasting step toward the goal: a change in the scene that the success_predicate depends
-  on and that still holds once nothing is holding the objects, for example a cup on the stack, the drawer
-  open, a fold made, a screw driven in. A pick, a grasp, a contact or a motion is not a subgoal, because
-  what it gains is lost if the object is let go anywhere else; it keeps a kind of its own. Every
-  successful demonstration of a task passes through the same subgoals whatever the operator's style, and
-  the goal's end-state (each task's, when there are tasks) is the last one, at the goal frame
-  (completed_at_s, judged by its own rule below). Mark each subgoal as a key_event with kind subgoal_complete at the first moment
-  its change holds with nothing holding the objects, labelled with the state reached; nudging or
-  straightening it afterwards neither moves it nor makes a new subgoal. Only the goal's end-state waits, as
-  completed_at_s does, for the last adjustment: when the last piece is set down and then straightened, setting
-  it down is a subgoal of its own at the first moment it holds, and the goal follows once the straightening is
-  done. A pick, a placement that is later undone, a contact and a failed attempt are still key_events of
-  their own kind (a grasp, a placement).
+  on and that still holds once the hand or gripper that made it lets go, for example a cup on the stack,
+  the drawer open, a fold made, a screw driven in. A pick, a grasp, a contact or a motion is not a subgoal,
+  because what it gains is lost if the object is let go anywhere else. Every successful demonstration of a
+  task passes through the same subgoals whatever the operator's style, and the goal's end-state (each
+  task's, when there are tasks) is the last one, at the goal frame (completed_at_s, judged by its own rule
+  below). Mark each subgoal as a key_event with kind subgoal_complete at the first moment its change holds
+  once the hand or gripper that made it lets go, labelled with the state reached; nudging or straightening
+  it afterwards neither moves it nor makes a new subgoal. Only the goal's end-state waits, as completed_at_s
+  does, for the last adjustment: when the last piece is set down and then straightened, setting it down is a
+  subgoal of its own at the first moment it holds, and the goal follows once the straightening is done.
+  Subgoals do not lengthen the list: a pick, a placement that is later undone, a contact or a failed attempt
+  that belongs on it keeps a kind of its own (a grasp, a placement), never subgoal_complete.
 - completion judges the whole task on the BALANCE OF EVIDENCE, the way a fair
   human reviewer would, not as a strict verifier. Grade what the footage shows was
   ACHIEVED, not whether every detail was explicitly confirmed on camera.
@@ -463,18 +463,18 @@ Rules:
   of progress for the task in front of you. A short task with one such
   unit still gets its start and finish marked.
 - A subgoal is a lasting step toward an activity's end-state: a change in the scene that its
-  success_predicate depends on and that still holds once nothing is holding the objects, for example a cup
-  on the stack, the drawer open, a fold made, a screw driven in. A pick, a grasp, a contact or a motion is
-  not a subgoal, because what it gains is lost if the object is let go anywhere else; it keeps a kind of
-  its own. Every successful attempt at an activity passes through the same subgoals whatever the person's
-  style, and each task's end-state is its last one, at that task's completed_at_s. Mark each subgoal as a
-  key_event with kind subgoal_complete at the first moment its change holds with nothing holding the
-  objects, labelled with the state reached; nudging or straightening it afterwards neither moves it nor
+  success_predicate depends on and that still holds once the hand that made it lets go, for example a cup on
+  the stack, the drawer open, a fold made, a screw driven in. A pick, a grasp, a contact or a motion is not a
+  subgoal, because what it gains is lost if the object is let go anywhere else. Every successful attempt at
+  an activity passes through the same subgoals whatever the person's style, and each task's end-state is its
+  last one, at that task's completed_at_s. Mark each subgoal as a key_event with kind subgoal_complete at the
+  first moment its change holds once the hand that made it lets go, even while the other hand still holds
+  the work, labelled with the state reached; nudging or straightening it afterwards neither moves it nor
   makes a new subgoal. Only a task's end-state waits, as its completed_at_s does, for the last adjustment:
   when the last piece is set down and then straightened, setting it down is a subgoal of its own at the
-  first moment it holds, and the task's end follows once the straightening is done. A pick, a placement that
-  is later undone, a contact and a failed attempt are still key_events of their own kind (a grasp, a
-  placement).
+  first moment it holds, and the task's end follows once the straightening is done. Subgoals do not lengthen
+  the list: a pick, a placement that is later undone, a contact or a failed attempt that belongs on it keeps
+  a kind of its own (a grasp, a placement), never subgoal_complete.
 - THIS USES THE HUMAN-HAND ANNOTATION PROFILE: describe the person's work with their own
   hands. Determine viewpoint and camera mounting from the supplied evidence. There is NO robot and usually NO
   single overall goal, especially in a longer clip; the person does a SEQUENCE of
