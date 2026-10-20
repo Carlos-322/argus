@@ -3930,7 +3930,7 @@ def frame_times(video: Path, n: int, depth: bool = False, native: bool = False) 
     """A video's frames' capture times in seconds on its recorder's clock, from the per-frame timestamp array a
     recorder writes beside it (exo_cam-rgb-timestamp.npy beside exo_cam-images-rgb.mp4): a .npy in its folder whose
     name says time and has the video's camera words, holding n rising numbers (seconds, or ms, us or ns, read
-    from their size). Colour over depth when both fit, and depth over colour for a depth video (depth=True, whose
+    by _seconds, the unit rule of every clock). Colour over depth when both fit, and depth over colour for a depth video (depth=True, whose
     stamps exo_cam-depth-timestamp.npy are its own). None when there is none."""
     cands = []
     for p in frame_time_files(video, depth):
@@ -3949,13 +3949,10 @@ def frame_times(video: Path, n: int, depth: bool = False, native: bool = False) 
     chosen = min(cands, key=lambda c: c[:3])
     if native:
         return chosen[4], chosen[3]
-    a = chosen[3].astype(np.float64)
-    # the unit from the frame step (a camera runs at 1 to 1000 fps), so stamps counted from the recording's start
-    # (0, 33.3, 66.7 ms) read as well as stamps since 1970; a single frame falls back to the stamp's own size
-    step = float(np.median(np.diff(a))) if n > 1 else 0.0
-    if step > 0:
-        return a * (1e-9 if step > 1.5e6 else 1e-6 if step > 1.5e3 else 1e-3 if step > 1.5 else 1.0)
-    return a * (1e-9 if a[0] > 1e17 else 1e-6 if a[0] > 1e14 else 1e-3 if a[0] > 1e11 else 1.0)
+    # the unit is read by the rule every clock of a recording is read by (_seconds): its size when that is an epoch
+    # time, else its step between distinct stamps, so stamps counted from the recording's start (0, 33.3, 66.7 ms)
+    # read as well as stamps since 1970, and frames that share a stamp of a coarse clock never shrink the step
+    return _seconds(chosen[3])
 
 
 TABLE_CHUNK_ROWS = 200_000
@@ -7303,8 +7300,9 @@ def _epoch_scale(a: np.ndarray) -> float | None:
 
 def _seconds_scale(a: np.ndarray) -> float:
     """Seconds per unit of a clock: the unit its size settles (_epoch_scale), else the unit its step says (one sample
-    every 1 ms to 10 s), as frame_times reads a recorder's stamps, and for a clock that never steps the unit its size
-    says alone."""
+    every 1 ms to 10 s, judged on its steps between distinct values, so repeated stamps never shrink it), and for a
+    clock that never steps the unit its size says alone. frame_times reads a recorder's per-frame stamps by this same
+    rule."""
     scale = _epoch_scale(a)
     if scale is not None:
         return scale
