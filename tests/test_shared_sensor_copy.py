@@ -2,6 +2,7 @@
 import copy
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -169,12 +170,12 @@ def test_requested_prompt_contract_reaches_both_outputs_and_legacy_stays_legacy(
     legacy = copy.deepcopy(doc)
     legacy.pop('copy_contract_version', None)
     assert 'overlay_detail' in se.prompt(legacy)
-    for version in (None, 2, 3, 4, 999):
+    for version in (None, 2, 3, 4, 5, 999):
         access = ea.Access(ep, plan={'n': 5}, copy_contract_version=version)
         parts, _, _ = ea.final_content([], 0, access, access.record(), [],
             image_limit=100, image_bytes_limit=100000, image_inflation=1)
         text = '\n'.join(p['text'] for p in parts)
-        assert ('overlay_detail' not in text) is (version in (2, 3, 4))
+        assert ('overlay_detail' not in text) is (version in (2, 3, 4, 5))
 
 
 @pytest.mark.parametrize('version', [None, 999])
@@ -235,3 +236,26 @@ assert(!render({...raw,copy_contract_version:2,overlay_detail:''}).includes('gf-
 assert(render({...raw,copy_contract_version:2,overlay_detail:'Reviewed caption.'}).includes('Reviewed caption.'));
 '''
     subprocess.run(['node', '-e', script, str(html)], check=True)
+
+
+def test_version_4_prompts_stay_byte_exact_so_saved_requests_remain_reproducible(tmp_path):
+    doc = se.build(source(tmp_path), {'n': 5})
+    doc['copy_contract_version'] = 4
+    assert hashlib.sha256(se.prompt(doc).encode()).hexdigest() == 'bc285db4cc5197bb22e210ad4a9c9c8df3167129a0199d0583528168f9a24a88'
+    assert hashlib.sha256(ea.final_prompt(4).encode()).hexdigest() == 'd2e5b4eec2215d39cd09ded11f369e5cdf30871d3b67a716a878a1364774320b'
+
+
+def test_version_5_asks_for_plain_english_that_keeps_every_specific(tmp_path):
+    doc = se.build(source(tmp_path), {'n': 5})
+    doc['copy_contract_version'] = 5
+    for text in (se.prompt(doc), ea.final_prompt(5)):
+        assert sensor_copy.SHARED_RULE_V5 in text and sensor_copy.PLAIN_ENGLISH in text
+        assert 'a few plain words' not in text and 'one part of that region' not in text
+        assert sensor_copy.V4_LIMITS in text and sensor_copy.LEGACY_LIMITS_MAPPING not in text
+    assert sensor_copy.VERSION == 5 and sensor_copy.shared(5)
+
+
+def test_the_board_treats_the_same_copy_versions_as_shared():
+    html = (Path(se.__file__).parents[1] / 'board' / 'index.html').read_text()
+    listed = re.search(r'const SHARED_COPY_VERSIONS = \[([0-9, ]*)\];', html).group(1)
+    assert [int(v) for v in listed.split(',')] == list(sensor_copy.SHARED_VERSIONS)

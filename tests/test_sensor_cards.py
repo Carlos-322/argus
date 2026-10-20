@@ -209,3 +209,13 @@ def test_a_context_citation_need_not_span_the_finding_on_its_own():
     assert len(se.bind(doc, [finding])['findings']) == 1
     alone = {**finding, 'evidence': [image]}
     assert se.bind(doc, [alone])['unbound_findings'][0]['reason'] == 'finding exceeds the evidence clock'
+
+
+def test_the_card_prompt_asks_for_the_same_plain_english_as_the_annotation():
+    from label import sensor_copy
+    assert sensor_copy.PLAIN_ENGLISH in sc.PROMPT and 'at most six words' not in sc.PROMPT
+    assert f'at most {sc.HEADLINE_WORDS} words' in sc.PROMPT and f'under {sc.DETAIL_WORDS} words' in sc.PROMPT
+    assert sc.HEADLINE_LIMIT >= sc.HEADLINE_WORDS and sc.DETAIL_LIMIT >= sc.DETAIL_WORDS
+    eight = 'Two spots on the thumb press harder again'
+    assert sc.parse_response(json.dumps({'cards': [{'finding': 0, 'headline': eight,
+        'detail': 'A third spot on the thumb stays the same as the hand pulls back.'}]}), count=1)['cards']
