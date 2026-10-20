@@ -52,6 +52,14 @@ const dense={generic:true,sensors:[{id:'recorded',kind:'numeric'}],series:[{id:'
 const denseF={start:0,end:.06,evidence:[{sensor_id:'recorded',series_id:'recorded:0'}]};
 assert.deepEqual(api.genericSensorSampleTimes(dense,denseF),[0,.03,.06]);
 assert(api.genericSensorSeries(dense,denseF)[0].low<0,'non-depth scale remains zero-inclusive');
+const region={label:'Thumb',times:[0,.03,.06],values:[0,4,9]};
+const mixed=api.genericSensorSeries(dense,{...denseF,display:[region,{series_id:'recorded:0'},{series_id:'uncited'}]},3);
+assert.deepEqual(mixed.map(r=>r.label),['Thumb','Signal'],'a derived row keeps its place and a cited series is drawn as always');
+assert(mixed[0].displayRow&&!mixed[1].displayRow);
+assert.deepEqual(api.genericSensorSeries(dense,{...denseF,display:[{series_id:'recorded:0'}]},3),api.genericSensorSeries(dense,denseF,3),
+  'references alone change nothing');
+assert.deepEqual(api.genericSensorSeries(dense,{...denseF,display:[region]},Infinity).map(r=>r.label),['Signal'],
+  'the expanded panel keeps the raw cited series');
 const many={...dense,series:[{...dense.series[0],times:Array.from({length:12},(_,i)=>i*.03),values:Array.from({length:12},(_,i)=>i)}]};
 const manyF={...denseF,end:1};
 assert(api.genericSensorPanelHtml(many,manyF).includes('data-sensor-sample-select'),'larger sample lists stay compact');
@@ -75,5 +83,25 @@ for(const status of ['rejected','withheld','stale']){
  assert.deepEqual(roi.depthRoiFrames(label,'exo'),[],'stitched ineligible receipts cannot leave depth boxes visible');
 }
 assert.equal(JSON.stringify(saved),before,'viewer does not mutate exported evidence');
+const finding=(start,headline,card)=>({start_s:start,end_s:start+.5,headline,detail:headline+' in full',adds_beyond_video:true,evidence:[],
+  ...(card?{video_card:{version:1,headline:card,detail:card+' on the video.'}}:{})});
+const cardsDoc=chosen=>({sensor_evidence:{version:1,sensors:[],series:[],findings:[finding(0,'Loading builds','Thumb presses harder'),
+  finding(.2,'Local redistribution'),finding(2,'Thumb loading eases','Thumb pressure eases')],...(chosen?{video_cards:{version:1}}:{})}});
+const C=api.sensorEvidence(cardsDoc(true));
+assert.deepEqual(C.overlayFindings.map(f=>f.headline),['Thumb presses harder','Thumb pressure eases'],'the video plays only the chosen cards, in their words');
+assert.equal(C.overlayFindings[1].overlayDetail,'Thumb pressure eases on the video.');
+assert.deepEqual(C.insights.map(f=>f.headline),['Thumb presses harder','Local redistribution','Thumb pressure eases'],
+  'every finding stays in the list, and a carded one reads the same there as on the video');
+assert.equal(C.insights[1].detail,'Local redistribution in full');
+const listed=cardsDoc(true);listed.sensor_evidence.findings[1].list_copy={version:1,headline:'One thumb part presses',detail:'One part presses while another eases.'};
+const L=api.sensorEvidence(listed);
+assert.deepEqual(L.insights.map(f=>f.headline),['Thumb presses harder','One thumb part presses','Thumb pressure eases'],'the list reads in one voice');
+assert.deepEqual(L.overlayFindings.map(f=>f.findingIndex),[0,2],'list copy never puts a finding on the video');
+const late=cardsDoc(true);late.sensor_evidence.findings.reverse();
+assert.deepEqual(api.sensorEvidence(late).insights.map(f=>f.start),[0,.2,2],'findings from separate passes list in playback order');
+assert.deepEqual(C.overlayFindings.map(f=>f.findingIndex),[0,2],'a card keeps its finding identity');
+assert.equal(api.sensorEvidence(cardsDoc(false)).overlayFindings.length,3,'a record without chosen cards plays every finding');
+const none=cardsDoc(true);none.sensor_evidence.findings.forEach(f=>delete f.video_card);
+assert.equal(api.sensorEvidence(none).overlayFindings.length,0,'a run that chose no cards shows none');
 delete global.document;
 console.log('Sparse evidence inspection passed');

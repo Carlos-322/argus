@@ -2577,7 +2577,7 @@ def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int 
         pl["contact"] = []   # wide cells already show contact in detail
     # full size is kept only where a detail view shows it: the first and last instant and the contact instants
     imgs = frames(ep, pl, gate, widths=widths, detail_ks={pl["ks"][0], pl["ks"][-1], *(pl.get("contact") or [])})
-    from label import tactile_capture
+    from label import tactile_capture, sensor_copy
     native_images, capture_selection = tactile_capture.collect(ep, pl, gate)
     native_images, native_parts, native_bytes = tactile_capture.bounded_parts(ep, native_images, detail=detail)
     for view, receipt in capture_selection.items():
@@ -2603,8 +2603,17 @@ def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int 
     cam_labels = [cam_name(ep, v) for v in order_views(imgs)]
     contact = [(k, vs, fullres_stack(ep, imgs, k, "just after a sharp gripper change", frame_time(ep, k), vs))
                for k, vs in ((k, [v for v in vs if recording_at(ep, v, k)]) for k, vs in contact_views(ep, pl)) if vs]
+    from label import sensor_scene
+    pairing_shown = {v: [k for k in pl['ks'] if k in images and recording_at(ep, v, k)]
+                     for v, images in imgs.items()}
+    for k, cameras, _ in contact:
+        for v in cameras:
+            pairing_shown.setdefault(v, []).append(k)
+    scene_parts, scene_pairing, scene_bytes = sensor_scene.collect(ep, pl['sensor_evidence'],
+        shown=pairing_shown, gate=gate, width=max(widths), grid_cols=grid_cols,
+        quality=grid_quality, detail=detail)
     budget = (IMAGE_LIMIT_BYTES / IMAGE_SIZE_INFLATION - DETAIL_VIEW_BYTES_MAX - array_bytes - native_bytes
-              - sum(len(j) for _, _, j in contact))
+              - scene_bytes - sum(len(j) for _, _, j in contact))
     # the blocks follow from the episode and its plan, never from the cell width: found once, for every width and the
     # record
     blocks = present_blocks(ep, pl)
@@ -2619,7 +2628,8 @@ def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int 
     prompt = fixed + episode
     content.extend(array_parts)
     content.extend(native_parts)
-    extra_bytes = array_bytes + native_bytes
+    content.extend(scene_parts)
+    extra_bytes = array_bytes + native_bytes + scene_bytes
     # the first frame, the contact views in time order, then the last frame
     views_sent = []
     for k, name in ((pl["ks"][0], "first frame"), (pl["ks"][-1], "last frame")):
@@ -2665,12 +2675,14 @@ def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int 
         content.append({"type": "image_url", "image_url": {
             "url": "data:image/jpeg;base64," + base64.b64encode(cjpg).decode("ascii"), "detail": detail}})
     from label.evidence_access import Access, needs_inspection
-    access = Access(ep, pl['sensor_evidence'], plan=pl) if inspect_evidence and needs_inspection(ep, pl['sensor_evidence']) else None
+    access = Access(ep, pl['sensor_evidence'], plan=pl, copy_contract_version=sensor_copy.VERSION) if inspect_evidence and needs_inspection(ep, pl['sensor_evidence']) else None
     return {**({"evidence_access": access} if inspect_evidence else {}), "sensor_evidence": pl["sensor_evidence"],
             "content": content, "prompt": prompt, "plan": pl, "n_grids": n_grids + len(native_parts) // 2,
             'native_tactile_frames': sum(len(frames) for frames in native_images.values()),
+            'sensor_scene_pairing': scene_pairing,
+            'sensor_copy_contract_version': sensor_copy.VERSION,
             **({"jaw_evidence": ep["jaw_evidence"]} if ep.get("jaw_evidence") else {}),
-            "n_images": n_grids + len(views_sent) + len(depth_sent) + len(contacts_sent) + len(array_parts) // 2 + len(native_parts) // 2,
+            "n_images": n_grids + len(views_sent) + len(depth_sent) + len(contacts_sent) + len(array_parts) // 2 + len(native_parts) // 2 + len(scene_parts) // 2,
             "image_bytes": grid_bytes + extra_bytes,
             "contact_s": [round(frame_time(ep, k), 3) for k in pl["contact"]],
             "given_prompt": (ep["context"].get("instruction") or "").strip() or None,

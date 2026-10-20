@@ -529,6 +529,82 @@ def test_budget_increase_resumes_undispatched_selection(tmp_path, monkeypatch, i
     assert sent == ['selection', 'final']
 
 
+@pytest.mark.parametrize('cap', [0., .1, 20.])
+def test_known_rate_inspection_uses_the_funded_batch_cap(tmp_path, monkeypatch, cap):
+    from test_camera_timing import recording
+    from label import evidence_access as ea
+    ep = recording(tmp_path, np.arange(12) / 30)
+    context_path = ep / 'context.json'
+    context = json.loads(context_path.read_text())
+    context['instruction'] = 'Source task context. ' * 12000
+    context['new_fact'] = {'value': 7}
+    context_path.write_text(json.dumps(context))
+    request = harness.me.build_request(ep, model=harness.DEFAULT_MODEL, reasoning='medium', cell_w=128,
+                                       inspect_evidence=True)
+    access = request['evidence_access']
+    selection = access.selection_content(request['content']) + [{'type': 'text', 'text': ea.SELECTION +
+                 '\nFIELD INVENTORY\n' + ea.packed(access.page())}]
+    assert harness.final_cost_bound(selection, ea.MAX_SELECTION_TOKENS) > ea.MAX_SELECTION_COST
+    sent = []
+    def provider(request, timeout):
+        assert request.get_method() != 'GET', 'Known model rates require no external quote'
+        selecting = 'FIELD INVENTORY' in json.dumps(json.loads(request.data)['messages'])
+        sent.append('selection' if selecting else 'final')
+        return answer({'requests': []} if selecting else {'task_summary': 'The hand reaches.'})
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', provider)
+    out = tmp_path / 'funded'
+    rc = harness.run_batch([ep], out, keys=['sk-or-test'], concurrency=1, force=False,
+        model=harness.DEFAULT_MODEL, reasoning='medium', max_tokens=100, timeout=1, cell_w=128, max_spend=cap)
+    if 0 < cap < 1:
+        assert rc == 1 and sent == []
+    else:
+        result = json.loads((out / (ep.name + '.json')).read_text())
+        assert rc == 0 and sent == ['selection', 'final']
+        assert result['evidence_inspection']['status'] == 'complete'
+        assert harness.episode_cost(result) == pytest.approx(.02)
+
+
+def test_uncapped_batch_completes_second_inspection_round_and_reuses_paid_output(tmp_path, monkeypatch):
+    from test_camera_timing import recording
+    from label import evidence_access as ea
+    ep = recording(tmp_path, np.arange(12) / 30)
+    context_path = ep / 'context.json'
+    context = json.loads(context_path.read_text())
+    context.update(instruction='Source task context. ' * 2000, new_fact={'value': 7})
+    context_path.write_text(json.dumps(context))
+    request = harness.me.build_request(ep, model=harness.DEFAULT_MODEL, reasoning='medium', cell_w=128,
+                                       inspect_evidence=True)
+    field = next(row for row in request['evidence_access'].inventory() if row['name'] == 'new_fact')
+    sent, reservations = [], []
+    def provider(request, timeout):
+        assert request.get_method() != 'GET'
+        content = json.loads(request.data)['messages'][0]['content']
+        selecting = 'FIELD INVENTORY' in json.dumps(content)
+        sent.append('selection' if selecting else 'final')
+        if selecting:
+            reservations.append(harness.final_cost_bound(content, ea.MAX_SELECTION_TOKENS))
+            if len(reservations) == 1:
+                return answer({'requests': [{'field_id': field['id'], 'mode': 'metadata'}]}, cost=.6)
+            assert 'INSPECTED EVIDENCE' in json.dumps(content)
+            return answer({'requests': []})
+        assert 'INSPECTED EVIDENCE' in json.dumps(content)
+        return answer({'task_summary': 'The hand reaches.'})
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', provider)
+    out = tmp_path / 'uncapped'
+    args = dict(keys=['sk-or-test'], concurrency=1, force=False, max_spend=0.,
+        model=harness.DEFAULT_MODEL, reasoning='medium', max_tokens=100, timeout=1, cell_w=128)
+    assert harness.run_batch([ep], out, **args) == 0
+    result = json.loads((out / (ep.name + '.json')).read_text())
+    inspection = result['evidence_inspection']
+    assert sent == ['selection', 'selection', 'final']
+    assert reservations[0] < ea.MAX_SELECTION_COST < .6 + reservations[1]
+    assert inspection['status'] == 'complete' and len(inspection['rounds']) == 2
+    assert inspection['inspections'][0]['value'] == {'value': 7}
+    assert harness.episode_cost(result) == pytest.approx(.62)
+    assert harness.run_batch([ep], out, **args) == 0
+    assert sent == ['selection', 'selection', 'final']
+
+
 def test_native_search_fee_without_enforceable_ceiling_refuses_paid_dispatch(tmp_path, monkeypatch):
     from test_camera_timing import recording
     ep = recording(tmp_path, np.arange(12) / 30)
@@ -547,7 +623,11 @@ def test_native_search_fee_without_enforceable_ceiling_refuses_paid_dispatch(tmp
     assert harness.episode_cost(receipt) == 0
 
 
-def test_legacy_paid_final_after_budget_pause_requires_explicit_refresh(tmp_path, monkeypatch):
+@pytest.mark.parametrize('limitation', [
+    'Inspection selection exceeds the remaining batch spend cap.',
+    'Inspection selection stopped at the cost or dispatch boundary.',
+])
+def test_legacy_paid_final_after_budget_pause_requires_explicit_refresh(tmp_path, monkeypatch, capsys, limitation):
     from test_camera_timing import recording
     ep = recording(tmp_path, np.arange(12) / 30)
     out = tmp_path / 'out'
@@ -557,7 +637,7 @@ def test_legacy_paid_final_after_budget_pause_requires_explicit_refresh(tmp_path
     record = {'parse_ok': True, 'labels': {'task_summary': 'The hand reaches.'},
               'usage': {'est_cost_usd': .01}, 'input_identity': harness.input_identity(ep, **args),
               'evidence_inspection': {'status': 'incomplete', 'rounds': [], 'cost_usd': 0,
-                  'limitations': ['Inspection selection exceeds the remaining batch spend cap.']}}
+                  'limitations': [limitation]}}
     target = out / (ep.name + '.json')
     target.write_text(json.dumps(record))
     original = target.read_bytes()
@@ -567,6 +647,10 @@ def test_legacy_paid_final_after_budget_pause_requires_explicit_refresh(tmp_path
     assert target.read_bytes() == original
     warning = json.loads((out / ('stale_' + ep.name + '.json')).read_text())
     assert warning['refresh'] == '--force' and 'inspection' in warning['reason']
+    if 'cost or dispatch boundary' in limitation:
+        assert warning['status'] == 'unverified'
+        console = capsys.readouterr()
+        assert 'LIMITED ' + ep.name in console.err and '--force' in console.err
 
 
 @pytest.mark.parametrize('contribution,progress,kept', [

@@ -582,11 +582,16 @@ def test_harness_uses_requested_evidence_in_final_annotation_and_accounts_for_co
                 dst.mux(packet)
         for packet in stream.encode():
             dst.mux(packet)
+    from label import sensor_cards
+    cards = []
     def provider(content, model, reasoning, api_key, max_tokens, timeout, **options):
         selections = [p['text'] for p in content if p.get('type') == 'text' and '\nFIELD INVENTORY\n' in p['text']]
         receipts = [json.loads(p['text'].split('\n', 1)[1]) for p in content
                     if p.get('type') == 'text' and p.get('text', '').startswith('INSPECTED EVIDENCE\n')]
-        if selections:
+        if content[0].get('text', '').startswith(sensor_cards.PROMPT):
+            cards.append(json.loads(content[0]['text'].split('\nRECORDING\n', 1)[1]))
+            text = {'cards': [{'finding': 0, 'headline': 'Force rises', 'detail': 'The recorded force rises across the clip.'}]}
+        elif selections:
             page = json.loads(selections[-1].split('\nFIELD INVENTORY\n')[1])
             field = next(f for f in page['fields'] if f['name'] == 'force')
             camera = next(f for f in page['fields'] if f['kind'] == 'image')
@@ -607,9 +612,12 @@ def test_harness_uses_requested_evidence_in_final_annotation_and_accounts_for_co
     result = harness.label_episode(ep, tmp_path / 'out.json', model='openai/gpt-6-astra', reasoning='medium',
                                    api_key='fixture', max_tokens=2000, timeout=10, cell_w=128)
     assert len(result['sensor_evidence']['findings']) == 1
-    assert harness.episode_cost(result) == pytest.approx(.03)
+    # The video card call reads the bound finding and bills into the same inspection invoice.
+    assert [f['headline'] for f in cards[0]['findings']] == ['Recorded response increases']
+    assert result['sensor_evidence']['findings'][0]['video_card']['headline'] == 'Force rises'
+    assert harness.episode_cost(result) == pytest.approx(.04)
     exported = convert(result)
-    assert exported['evidence_inspection']['cost_usd'] == pytest.approx(.02)
+    assert exported['evidence_inspection']['cost_usd'] == pytest.approx(.03)
     assert exported['sensor_evidence']['series'][0]['values'] == list(np.arange(12, dtype=float))
     assert episode.load(ep)['signals']['force'].shape == (12, 1)
     def unavailable(*args, **kwargs):
@@ -620,7 +628,8 @@ def test_harness_uses_requested_evidence_in_final_annotation_and_accounts_for_co
                               api_key='fixture', max_tokens=2000, timeout=10, cell_w=128)
     failed = json.loads((tmp_path / 'noreply_out.json').read_text())
     assert failed['final_dispatch_outcome'] == 'unverified'
-    assert harness.episode_cost(failed) == pytest.approx(failed['final_reserved_usd'] + .03)
+    # The earlier paid reply, its two inspection calls and its card call stay billed.
+    assert harness.episode_cost(failed) == pytest.approx(failed['final_reserved_usd'] + .04)
     assert failed['final_cost_history'][0]['generation_id'] == 'actual_inspection_fixture'
     assert failed['evidence_inspection']['inspections'][0]['values'][-1] == [11.]
 

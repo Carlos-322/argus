@@ -26,7 +26,9 @@ def options(**extra):
 
 
 def provider_kind(request):
-    return 'selection' if 'FIELD INVENTORY' in json.dumps(json.loads(request.data)['messages']) else 'final'
+    text = json.dumps(json.loads(request.data)['messages'])
+    return ('selection' if 'FIELD INVENTORY' in text else
+            'cards' if 'A person will watch this recording with short cards' in text else 'final')
 
 
 def test_run_fractional_cent_cap_reaches_real_harness_without_rounding(tmp_path, monkeypatch):
