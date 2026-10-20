@@ -335,12 +335,14 @@ class UnpackLimit(UploadInputError):
     """An upload that unpacks to more than one upload may hold: it stops the unpacking, never only one member."""
 
 
-def _archive_members(path: Path):
+def _archive_members(path: Path, max_files: int | None = None):
     """([(parts, size, open)] for every regular file in the archive, how many members were left out, the open archive,
     the members that cannot be read, each named with why, and the members whose owner the archive does not prove,
     [(label, size, open)]). Links, devices, folders, hidden files and __MACOSX are never unpacked. A password-protected member or one in a compression Python does not open is left out by itself,
     and a tar cut short keeps every member whose header comes before the cut, as the upload page does: one bad member
-    had cost the whole archive."""
+    had cost the whole archive. A tar with more than max_files files (what is left of the upload's UNPACK_MAX_FILES)
+    raises UnpackLimit the moment its headers pass it."""
+    max_files = UNPACK_MAX_FILES if max_files is None else max_files
     import stat
     import tarfile
     import zipfile
@@ -439,9 +441,24 @@ def _archive_members(path: Path):
         return out, skipped, zf, bad, unverified
     tf = tarfile.open(path, "r:*")
     members = []
+    files = folders = 0
     try:
         for m in tf:
+            # Every header is held in memory as it is read, so the file budget is spent as the headers are read, never
+            # after all are: a 5.6 MB .tgz of 1.2 million empty members had held 1.26 GB of headers before it was
+            # refused. A file counts as the upload counts it (every member but a folder, written or left out), and
+            # folders are held to the same number, which no upload within the budget needs more of.
             members.append(m)
+            if m.isdir():
+                folders += 1
+            else:
+                files += 1
+            if files > max_files or folders > UNPACK_MAX_FILES:
+                tf.close()
+                raise UnpackLimit(f"{path.name} holds more than one upload can: at most {UNPACK_MAX_FILES:,} files "
+                                  f"and {UNPACK_MAX_BYTES / 1e9:.0f} GB unpacked")
+    except UnpackLimit:
+        raise
     except Exception:
         # cut short: every member whose header came before the cut is listed, and one whose bytes the cut reaches
         # fails as it is unpacked (open_archives)
@@ -606,7 +623,9 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
             apart += [Path(p) for p in recorded if isinstance(p, str) and Path(p).is_dir()]
             continue
         try:
-            members, skipped, handle, bad, unverified = _archive_members(a)
+            members, skipped, handle, bad, unverified = _archive_members(a, UNPACK_MAX_FILES - count)
+        except UnpackLimit:
+            raise
         except ValueError as e:
             notes.append(f"{e}, so it was not opened.")
             continue

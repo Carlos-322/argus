@@ -271,3 +271,61 @@ def test_an_archive_nested_without_end_stops_at_the_budget(tmp_path, monkeypatch
     path.write_bytes(nested(40, 'note.txt', b'x'))
     with pytest.raises(formats.UnpackLimit):
         formats.open_archives(path, tmp_path / 'unpacked')
+
+
+def write_tar(path, names, *, folders=False):
+    import tarfile
+    with tarfile.open(path, 'w:gz') as tf:
+        for name in names:
+            info = tarfile.TarInfo(name)
+            data = b'' if folders else name.encode()
+            if folders:
+                info.type = tarfile.DIRTYPE
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+
+
+def headers_read(monkeypatch):
+    """How many tar headers the reader reads, by archive, as tarfile reads them (opening a tar reads its first header,
+    which its first next() then hands back, so a header is counted once by where it is)."""
+    import tarfile
+    read, seen, original = {}, set(), tarfile.TarFile.next
+
+    def counted(self):
+        member = original(self)
+        if member is not None and (self.name, member.offset) not in seen:
+            seen.add((self.name, member.offset))
+            read[os.path.basename(self.name)] = read.get(os.path.basename(self.name), 0) + 1
+        return member
+    monkeypatch.setattr(tarfile.TarFile, 'next', counted)
+    return read
+
+
+@pytest.mark.parametrize('folders', [False, True])
+def test_a_tar_stops_reading_headers_when_it_passes_the_file_budget(tmp_path, monkeypatch, folders):
+    # every tar header is held as it is read, so the budget is spent while reading, never after: a .tgz of 1.2 million
+    # empty members had held every header (1.26 GB) before it was refused
+    monkeypatch.setattr(formats, 'UNPACK_MAX_FILES', 50)
+    path = tmp_path / 'up.tgz'
+    write_tar(path, [f'd/{i}' if folders else f'd/{i}.txt' for i in range(5000)], folders=folders)
+    read = headers_read(monkeypatch)
+    with pytest.raises(formats.UnpackLimit):
+        formats.open_archives(path, tmp_path / 'unpacked')
+    assert read == {'up.tgz': 51}, read
+
+
+@pytest.mark.parametrize('budget', [60, 50])
+def test_a_tar_is_read_against_what_earlier_archives_left_of_the_budget(tmp_path, monkeypatch, budget):
+    up = tmp_path / 'up'
+    up.mkdir()
+    for name in ('a', 'b'):
+        write_tar(up / f'{name}.tgz', [f'{name}/{i}.txt' for i in range(30)])
+    monkeypatch.setattr(formats, 'UNPACK_MAX_FILES', budget)
+    read = headers_read(monkeypatch)
+    if budget == 60:
+        root, notes, apart = formats.open_archives(up, tmp_path / 'unpacked')
+        assert [len(list((up / name).iterdir())) for name in ('a', 'b')] == [30, 30], notes
+        return
+    with pytest.raises(formats.UnpackLimit):
+        formats.open_archives(up, tmp_path / 'unpacked')
+    assert read == {'a.tgz': 30, 'b.tgz': 21}, read
