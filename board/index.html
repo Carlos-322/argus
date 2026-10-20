@@ -1643,6 +1643,7 @@ h3.section .count {
 .qual-bar { display: block; height: 8px; border-radius: 4px; background: rgba(0,0,0,0.10);
   box-shadow: inset 0 0 0 1px rgba(0,0,0,0.06); overflow: hidden; }
 .qual-bar i { display: block; height: 100%; background: var(--fg); }
+.qual-bar.none { visibility: hidden; }
 .qual-cells { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .qual-cell { padding: 10px 14px 12px; border-right: 1px solid var(--row-divider); min-width: 0; }
 .qual-cell:last-child { border-right: 0; }
@@ -6418,8 +6419,15 @@ function renderEp(d, opts) {
        : `<div class="qc-v">${shown ?? qNum(v)}</div>${bar(v)}${sub ? `<div class="qc-sub">${esc(sub)}</div>` : ''}`) + '</div>';
   const box = (title, v, body, wide, folds) => `<div class="qual-box${wide ? ' wide' : ''}${folds ? ' folds' : ''}${folds
     && SUBS_OPEN ? ' open' : ''}"><div class="qual-head">`
-    + `<span class="qual-title">${title}</span>${v === undefined ? '' : `<span class="qual-score">${qNum(v)}<small>/10</small></span>`}</div>`
-    + (v === undefined ? '' : `<div class="qual-headbar">${bar(v)}</div>`) + body + '</div>';
+    + `<span class="qual-title">${title}</span>${v === undefined ? '' : `<span class="qual-score">${v == null ? '-'
+      : `${qNum(v)}<small>/10</small>`}</span>`}</div>`
+    + (v === undefined ? '' : `<div class="qual-headbar">${v == null ? '<span class="qual-bar none"></span>' : bar(v)}</div>`)
+    + body + '</div>';
+  // what a time was compared with, in words: the same subgoal (or the goal) in other demos of this task, similar
+  // subgoals on the same recording setup across the board, or nothing (a missing basis is nothing)
+  const peerWords = (basis, n, what) => basis === 'task' ? `Median of ${n ?? 'the'} demo${n === 1 ? '' : 's'} of this task`
+    : basis === 'similar' ? `Median of ${n ?? 'the'} similar ${what}${n === 1 ? '' : 's'} on this setup`
+    : 'Nothing comparable on this board';
   // the Subgoals table: one row per subgoal stretch, the first SUBS_FIRST shown and the rest folded; both parts are
   // tables with the same fixed columns so the folded rows line up under the header
   const subCols = `<colgroup>${qIn.tasks_total ? '<col class="q-task">' : ''}<col class="q-no"><col class="q-at">`
@@ -6430,10 +6438,12 @@ function renderEp(d, opts) {
         <td class="num q-no">${st.goal ? (qIn.tasks_total ? 'End' : 'Goal') : ++subRowN}</td>
         <td class="num q-at${!st.reached && st.outcome !== 'unclear' ? ' qc-bad' : ''}">${st.reached ? fmtT(st.end_s)
           : st.outcome === 'unclear' ? 'unclear' : 'not reached'}</td><td class="qt-name">${esc(st.label || '')}</td>
-        <td class="num q-took">${qNum(st.duration_s)}s</td><td class="num q-med">${st.peer_median_s != null ? qNum(st.peer_median_s) + 's' : '-'}</td>
+        <td class="num q-took">${st.duration_s != null ? qNum(st.duration_s) + 's' : '-'}</td><td class="num q-med" title="${
+          esc(peerWords(st.peer_basis ?? null, st.peers, 'subgoal'))}">${st.peer_median_s != null ? qNum(st.peer_median_s) + 's' : '-'}</td>
         <td class="num q-fail${(st.failed_attempts || []).length ? ' qc-bad' : ''}" title="${esc((st.failed_attempts || [])
           .map(k => fmtT(k.t_s) + '  ' + (k.label || '')).join('\n'))}">${(st.failed_attempts || []).length}</td>
-        <td class="q-exec"><span class="qt-score"><b>${qNum(st.execution)}</b>${bar(st.execution)}</span></td></tr>`);
+        <td class="q-exec"><span class="qt-score"><b>${qNum(st.execution)}</b>${st.execution == null ? ''
+          : bar(st.execution)}</span></td></tr>`);
   const subsTable = `${subTable}<thead><tr>${qIn.tasks_total ? '<th class="num q-task">Subtask</th>' : ''}`
     + `<th class="num q-no">#</th><th class="num q-at">Done at</th><th class="qt-name">Subgoal</th><th class="num q-took">Took</th>`
     + `<th class="num q-med">Median</th><th class="num q-fail">Failed tries</th><th class="q-exec">Execution</th></tr></thead>`
@@ -6448,16 +6458,21 @@ function renderEp(d, opts) {
   const goalT = episodeGoalT;
   const qualityHtml = Q ? `<h3 class="section" id="quality">Quality</h3><div class="qual">
     ${box('Execution', Q.execution, `<div class="qual-cells">
-      ${cell('Cleanliness', Q.cleanliness, `${Math.round(100 * (qIn.wasteful_share || 0))}% wasteful, ${nMistakes} mistake${nMistakes === 1 ? '' : 's'}`,
+      ${cell('Cleanliness', Q.cleanliness, Q.cleanliness == null ? 'not measured'
+        : `${Math.round(100 * (qIn.wasteful_share || 0))}% wasteful, ${nMistakes} mistake${nMistakes === 1 ? '' : 's'}`,
         (qIn.penalties || []).map(x => `${x.mistake} (${x.severity}${x.recovered ? ', recovered' : ''}, -${x.points})`).join('\n')
         || 'Share of the work marked wasteful, and points off per operator mistake')}
       ${cell('Speed', Q.efficiency, Q.efficiency == null ? (qIn.tasks_total ? 'several subtasks'
           : qIn.outcome === 'success' ? (qIn.time_to_goal_s == null ? 'no goal time' : 'no peers')
           : qIn.outcome === 'success_then_undone' ? 'goal undone' : 'goal not reached')
         : `${qNum(qIn.time_to_goal_s)}s, median ${qNum(qIn.peer_median_time_to_goal_s)}s`,
-        Q.peers >= 5 ? `Time from the first action to the goal, against ${Q.peers} other successful demos of this task`
-          : 'Fewer than 5 other successful demos of this task to compare with')}
-      ${cell('Steadiness', Q.fluency, `${Math.round(100 * (qIn.hesitation_share || 0))}% waiting`,
+        (Q.peer_basis ?? null) === 'task'
+          ? `Time from the first action to the goal, against the ${peerWords('task', Q.peers).toLowerCase()}`
+          : Q.efficiency == null && (qIn.tasks_total || qIn.outcome !== 'success')
+          ? 'Time from the first action to the goal, measured only on a single task that reached its goal'
+          : Q.efficiency == null && qIn.time_to_goal_s == null ? 'No timed work before the goal to measure'
+          : peerWords(null))}
+      ${cell('Steadiness', Q.fluency, Q.fluency == null ? 'not measured' : `${Math.round(100 * (qIn.hesitation_share || 0))}% waiting`,
         'Share of the work with every arm waiting')}
     </div>`)}
     ${box('Outcome', Q.outcome, `<div class="qual-cells">
