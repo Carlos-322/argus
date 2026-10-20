@@ -3277,7 +3277,8 @@ function foldRows(rows, noun, key) {
 }
 // the fold's button; while the row the video is on sits in the closed fold (data-now, its number), the button says so
 function foldLabel(btn) {
-  if (btn.closest('.fold').classList.contains('open')) return `Show the first ${FOLD_FIRST}`;
+  const f = btn.closest('.fold');
+  if (f && f.classList.contains('open')) return `Show the first ${FOLD_FIRST}`;
   return `Show all ${btn.dataset.n} ${btn.dataset.noun}`
     + (btn.dataset.now ? `<span class="fold-now">, now at ${btn.dataset.now}</span>` : '');
 }
