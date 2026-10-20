@@ -17,7 +17,8 @@ from label import sensor_copy, sensor_display
 from label import sensor_evidence as se
 
 VERSION = 1
-MAX_TOKENS = 16000
+# The cards' JSON answer; the request's output limit adds reasoning room at the episode's effort.
+ANSWER_TOKENS = 16000
 # What the prompt asks for, and the most a reply may use before an entry is left out.
 HEADLINE_WORDS, HEADLINE_LIMIT = 8, 10
 DETAIL_WORDS, DETAIL_LIMIT = 25, 30
@@ -71,7 +72,8 @@ def build(doc, *, task=None, config):
     text = PROMPT + '\nRECORDING\n' + json.dumps({'task': task, 'sensors': sensors, 'findings': rows}, ensure_ascii=True)
     content = [{'type': 'text', 'text': text}]
     settings = {key: copy.deepcopy(config[key]) for key in ('model', 'reasoning') if key in config}
-    request = {'version': VERSION, 'config': {**settings, 'max_tokens': MAX_TOKENS},
+    from label.policy import output_limit
+    request = {'version': VERSION, 'config': {**settings, 'max_tokens': output_limit(ANSWER_TOKENS, settings.get('reasoning'))},
                'finding_keys': [finding_key(f) for f in findings],
                'content_sha256': hashlib.sha256(_packed(content)).hexdigest()}
     return {**request, 'content': content, 'digest': _digest(request)}

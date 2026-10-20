@@ -544,7 +544,7 @@ def test_known_rate_inspection_uses_the_funded_batch_cap(tmp_path, monkeypatch, 
     access = request['evidence_access']
     selection = access.selection_content(request['content']) + [{'type': 'text', 'text': ea.SELECTION +
                  '\nFIELD INVENTORY\n' + ea.packed(access.page())}]
-    assert harness.final_cost_bound(selection, ea.MAX_SELECTION_TOKENS) > ea.MAX_SELECTION_COST
+    assert harness.final_cost_bound(selection, ea.selection_tokens('medium')) > ea.MAX_SELECTION_COST
     sent = []
     def provider(request, timeout):
         assert request.get_method() != 'GET', 'Known model rates require no external quote'
@@ -582,7 +582,7 @@ def test_uncapped_batch_completes_second_inspection_round_and_reuses_paid_output
         selecting = 'FIELD INVENTORY' in json.dumps(content)
         sent.append('selection' if selecting else 'final')
         if selecting:
-            reservations.append(harness.final_cost_bound(content, ea.MAX_SELECTION_TOKENS))
+            reservations.append(harness.final_cost_bound(content, ea.selection_tokens('medium')))
             if len(reservations) == 1:
                 return answer({'requests': [{'field_id': field['id'], 'mode': 'metadata'}]}, cost=.6)
             assert 'INSPECTED EVIDENCE' in json.dumps(content)

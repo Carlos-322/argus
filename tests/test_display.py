@@ -51,7 +51,7 @@ def test_every_rotation_and_mirror_is_shown_as_a_player_shows_it(lossless, tmp_p
     assert im.shape == shown.shape and np.abs(im - shown).mean() < 0.5
     pr = formats.probe(f)
     assert (pr["width"], pr["height"]) == (shown.shape[1], shown.shape[0])
-    assert clips.source_size("ffmpeg", str(f))[:2] == (shown.shape[1], shown.shape[0])
+    assert clips.source_size(str(f))[:2] == (shown.shape[1], shown.shape[0])
     assert pr.get("mirror", False) is flip and "sar" not in pr
 
 
@@ -70,7 +70,7 @@ def test_pixels_that_are_not_square_are_made_square_everywhere(tmp_path):
     pr = formats.probe(f)
     assert (pr["width"], pr["height"], pr["sar"]) == (960, 480, "4:3")
     assert mf.upright(_first_frame(f), display.geometry(str(f))).size == (960, 480)
-    assert clips.source_size("ffmpeg", str(f)) == (960, 480, True)
+    assert clips.source_size(str(f)) == (960, 480, True)
     out = tmp_path / "clip.mp4"
     clips.extract_one(str(f), 0.0, 3, out, "ffmpeg", 1)
     r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",

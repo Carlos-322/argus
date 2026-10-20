@@ -110,7 +110,5 @@ def test_one_frame_secondary_camera_remains_a_usable_recording(tmp_path, monkeyp
     with monkeypatch.context() as patch:
         patch.setattr(Writer, 'write_message', one_frame)
         capture_mcap(root / 'episode.mcap')
-    original = formats.upload_adapters
-    monkeypatch.setattr(formats, 'upload_adapters', lambda kind: [] if kind == 'mcap' else original(kind))
     report = formats.convert(root, 'teleop_arms', tmp_path / 'generic', 'short secondary camera', 900)
     assert not report['failed'] and len(report['episodes']) == 1, report

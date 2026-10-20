@@ -79,25 +79,29 @@ def capture_mcap(path, *, n=6, omit=(), bad_header=None, top='/top-camera', tied
     return {'n': n, 'capture_ns': capture.tolist(), 'source_sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
 
 
-def converted(root, out, monkeypatch, *, legacy):
-    original = formats.upload_adapters
-    with monkeypatch.context() as patch:
-        patch.setattr(formats, 'upload_adapters', lambda kind: [abc130k] if kind == 'mcap' and legacy
-                      else [] if kind == 'mcap' else original(kind))
-        report = formats.convert(root, 'teleop_arms', out, 'native fixture', 900)
+def converted(root, out):
+    """The upload folder root read as Data Review reads it, by the generic reader."""
+    report = formats.convert(root, 'teleop_arms', out, 'native fixture', 900)
     assert not report['failed'] and len(report['episodes']) == 1, report
     path = out / report['episodes'][0]['episode_id']
     return path, json.loads((path / 'context.json').read_text())
 
 
+def published(raw, out):
+    """The episode the published ABC-130k converter (python -m prepare abc130k) writes for this recording."""
+    path = out / 'episode'
+    abc130k.convert(raw, path, path.name, task=raw.stem)
+    return path, json.loads((path / 'context.json').read_text())
+
+
 @pytest.mark.parametrize('top', ['/top-camera', '/top-left-camera'])
-def test_protobuf_capture_clock_and_split_gripper_state_match_public_converter(tmp_path, monkeypatch, top):
+def test_protobuf_capture_clock_and_split_gripper_state_match_public_converter(tmp_path, top):
     root = tmp_path / 'native'
     root.mkdir()
     raw = root / 'episode.mcap'
     proof = capture_mcap(raw, top=top)
-    old_ep, old = converted(root, tmp_path / 'old', monkeypatch, legacy=True)
-    new_ep, new = converted(root, tmp_path / 'generic', monkeypatch, legacy=False)
+    old_ep, old = published(raw, tmp_path / 'old')
+    new_ep, new = converted(root, tmp_path / 'generic')
     assert new['state_kind'] == old['state_kind'] == 'joints'
     assert new['n_state_frames'] == old['n_state_frames'] == proof['n']
     arrays = {}
@@ -151,11 +155,11 @@ def test_protobuf_capture_clock_and_split_gripper_state_match_public_converter(t
                                       'raw numeric samples and distinct integer clocks are additionally retained']}))
 
 
-def test_native_capture_and_arrival_clocks_are_retained_separately(tmp_path, monkeypatch):
+def test_native_capture_and_arrival_clocks_are_retained_separately(tmp_path):
     root = tmp_path / 'clock'
     root.mkdir()
     proof = capture_mcap(root / 'episode.mcap')
-    ep, ctx = converted(root, tmp_path / 'generic', monkeypatch, legacy=False)
+    ep, ctx = converted(root, tmp_path / 'generic')
     with np.load(ep / ctx['recorded_mcap_fields']) as fields:
         camera = next(row for row in ctx['mcap_field_inventory'] if row['topic'] == '/top-camera')
         assert fields[camera['capture_ns']].dtype == np.int64
@@ -181,11 +185,11 @@ def test_native_capture_and_arrival_clocks_are_retained_separately(tmp_path, mon
 @pytest.mark.parametrize('kwargs', [
     {'omit': ['/right-ee-state']}, {'bad_header': '/left-arm-state'}, {'tied': '/left-ee-state'},
     {'bad_header': '/top-camera'}])
-def test_incomplete_or_ambiguous_split_state_retains_every_native_field(tmp_path, monkeypatch, kwargs):
+def test_incomplete_or_ambiguous_split_state_retains_every_native_field(tmp_path, kwargs):
     root = tmp_path / 'fallback'
     root.mkdir()
     capture_mcap(root / 'episode.mcap', **kwargs)
-    ep, ctx = converted(root, tmp_path / 'generic', monkeypatch, legacy=False)
+    ep, ctx = converted(root, tmp_path / 'generic')
     if kwargs.get('omit'):
         assert ctx['state_kind'] == 'none'
         assert not (ep / 'state.npz').exists()
@@ -223,11 +227,11 @@ def test_capture_timestamp_validation_never_substitutes_arrival_silently():
         assert formats.mcap_capture_stamp({'timestamp': stamp})[1]
 
 
-def test_absent_action_never_discards_complete_capture_state(tmp_path, monkeypatch):
+def test_absent_action_never_discards_complete_capture_state(tmp_path):
     root = tmp_path / 'no_action'
     root.mkdir()
     capture_mcap(root / 'episode.mcap', omit=abc130k.ARM_ACT)
-    ep, ctx = converted(root, tmp_path / 'generic', monkeypatch, legacy=False)
+    ep, ctx = converted(root, tmp_path / 'generic')
     assert ctx['state_kind'] == 'joints'
     with np.load(ep / 'state.npz') as arrays:
         assert arrays.files == ['state']
@@ -249,7 +253,7 @@ def test_split_gripper_gaps_and_competing_sources_are_not_interpolated_as_state(
     assert formats.joint_state(formats.compose_mcap_arms(streams, q, 'capture'), q, clock='capture')[0] is None
 
 
-def test_metadata_goal_and_owned_same_clock_sensor_samples_remain_complete(tmp_path, monkeypatch):
+def test_metadata_goal_and_owned_same_clock_sensor_samples_remain_complete(tmp_path):
     from mcap.writer import Writer as McapWriter
     root = tmp_path / 'owned'
     root.mkdir()
@@ -265,7 +269,7 @@ def test_metadata_goal_and_owned_same_clock_sensor_samples_remain_complete(tmp_p
             writer.add_message(channel, stamp, json.dumps(body).encode(), stamp)
         writer.finish()
     originals = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in root.iterdir()}
-    ep, ctx = converted(root, tmp_path / 'generic', monkeypatch, legacy=False)
+    ep, ctx = converted(root, tmp_path / 'generic')
     assert ctx['instruction'] == 'align fabric'
     signal = next(s for s in ctx['signals'] if s['name'] == '/force force')
     expected = np.stack([values, values + 1], axis=1)
@@ -280,23 +284,12 @@ def test_metadata_goal_and_owned_same_clock_sensor_samples_remain_complete(tmp_p
     assert {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in root.iterdir()} == originals
 
 
-def test_retired_upload_discovery_does_not_import_the_published_adapter(monkeypatch):
-    import importlib
-    load = importlib.import_module
-    def declared_only(name, *args, **kwargs):
-        if name == 'prepare.abc130k':
-            pytest.fail('retired adapter imported on the generic path')
-        return load(name, *args, **kwargs)
-    monkeypatch.setattr(importlib, 'import_module', declared_only)
-    assert 'prepare.abc130k' not in [module.__name__ for module in formats.upload_adapters('mcap')]
-
-
-def test_typed_native_numeric_leaves_survive_compatibility_projection(tmp_path, monkeypatch):
+def test_typed_native_numeric_leaves_survive_compatibility_projection(tmp_path):
     root = tmp_path / 'typed'
     root.mkdir()
     capture_mcap(root / 'episode.mcap', typed=True)
     original = hashlib.sha256((root / 'episode.mcap').read_bytes()).hexdigest()
-    ep, ctx = converted(root, tmp_path / 'generic', monkeypatch, legacy=False)
+    ep, ctx = converted(root, tmp_path / 'generic')
     row = next(row for row in ctx['mcap_field_inventory'] if row['topic'] == '/left-arm-state')
     descriptors = {item['field']: item for item in row['exact_numeric_fields']}
     expected = {'counter': np.arange(6, dtype=np.int64) + np.int64(2**53 + 17),

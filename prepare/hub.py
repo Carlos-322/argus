@@ -6,6 +6,7 @@ first (ABC-130k, 10Kh-RealOmin, Egocentric-100K, Gen-HumanEgo).
 """
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import time
@@ -42,7 +43,8 @@ def get(url: str, rng: tuple[int, int] | None = None, timeout: int = 300) -> tup
             if e.code < 500 and e.code not in (408, 429):
                 raise HubReadError(f"GET {url} {rng or ''}: HTTP {e.code}") from e
             last = e
-        except Exception as e:
+        except (OSError, http.client.HTTPException) as e:
+            # a network error, a timeout or a cut response is retried; anything else is our fault and raises now
             last = e
         time.sleep(3 * (attempt + 1))
     error_type = HubReadError if isinstance(last, (urllib.error.URLError, OSError, TimeoutError)) else RuntimeError

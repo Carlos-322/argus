@@ -5,7 +5,6 @@ import math
 from pathlib import Path
 
 
-UPLOAD = None
 BOOKKEEPING_COLUMNS = frozenset({'frame_index', 'episode_index', 'index', 'timestamp'})
 SCOPE_FILES = ('info.json', 'metadata.json', 'dataset.json', 'meta/info.json')
 DESCRIPTION_FIELDS = ('dataset_note', 'dataset_description', 'description', 'collection_note')
@@ -195,7 +194,7 @@ def index_tables(meta, columns, read_jsonl):
                     elif not isinstance(df.index, pd.RangeIndex):
                         row['table_index'] = original(index)
                     cells.append((i, row))
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - any table that does not read is named in its issues
             out[(None, str(path))] = {'labels': {}, 'issues': [{'why': f'table read failed ({error})'}]}
             continue
         # Presence establishes the ownership domain even when the episode owner is invalid.
@@ -361,7 +360,7 @@ def metadata_value(value):
 def episode_metadata(meta, read_jsonl):
     """Full metadata claims by explicit episode owner. Unassigned malformed rows never acquire an owner."""
     import pandas as pd
-    from prepare.formats import recorded_index
+    from prepare.formats import names_annotation, recorded_index
     meta = Path(meta)
     paths = set(meta.glob('*.jsonl')) | set(meta.glob('*.parquet'))
     paths |= set((meta / 'episodes').rglob('*.parquet'))
@@ -394,11 +393,11 @@ def episode_metadata(meta, read_jsonl):
                     if df.index.name is not None:
                         row.setdefault(df.index.name, original(index))
                     rows.append((number, row))
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - any table that does not read is named in unassigned
             unassigned.append({'source': str(path), 'why': f'metadata table read failed ({error})'})
             continue
         for number, row in rows:
-            if 'episode_index' not in row and not (_episode_catalog(path, meta) or 'annotat' in path.name):
+            if 'episode_index' not in row and not (_episode_catalog(path, meta) or names_annotation(path.name)):
                 continue
             claim = {'source': str(path), 'row': number, 'fields': metadata_value(row)}
             try:

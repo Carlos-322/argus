@@ -148,6 +148,9 @@ def test_interrupt_cancels_queued_episodes_and_retains_inflight_reply(tmp_path, 
         return response('{"requests":[]}' if kind == 'selection' else '{"task_summary":"A hand reaches."}')
     monkeypatch.setattr(harness.urllib.request, 'urlopen', transport)
     def work():
+        # a shell starts a background job with SIGINT ignored, and Python then never raises KeyboardInterrupt, so the
+        # worker sets the handler an interactive run has instead of inheriting however the suite was launched
+        signal.signal(signal.SIGINT, signal.default_int_handler)
         try: results.put(harness.run_batch(episodes, tmp_path / 'out', **options()))
         except KeyboardInterrupt: results.put(130)
     worker = ctx.Process(target=work); worker.start()

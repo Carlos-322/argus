@@ -24,10 +24,12 @@ from contextlib import nullcontext
 from pathlib import Path
 
 from label import episode as me
+from label import policy
 
 ROUTE_MODEL = "openai/gpt-6-sol"
 ROUTE_REASONING = "low"
-ROUTE_MAX_TOKENS = 2000
+# The answer is a short JSON object; the limit adds reasoning room at ROUTE_REASONING.
+ROUTE_MAX_TOKENS = policy.output_limit(500, ROUTE_REASONING)
 ROUTE_PROMPT = (
     "You choose the image resolution for labelling one episode of a robot-learning dataset, from its text alone. "
     "The labeller sees the episode's cameras as small frames, about 200 pixels wide. That is enough for most tasks: "
@@ -81,7 +83,7 @@ def request(ep: dict) -> list:
 
 
 def _paid_route(ep, api_key, call_model, timeout, out_path, identity, reserve_dispatch, settle_dispatch, billing_fields, force_refresh):
-    from label.errors import DispatchError, KeyExhausted, SpendCap
+    from label.errors import DispatchError, SpendCap
     from label.harness import OPENAI_PRICES, _verified_final_cost, persist_final_claim, same_input_identity
     text = route_text(ep)
     routing_identity = {'version': 1, 'task_sha256': hashlib.sha256(text.encode()).hexdigest(),
@@ -149,7 +151,7 @@ def _paid_route(ep, api_key, call_model, timeout, out_path, identity, reserve_di
                 settle_dispatch(bound, 0.0)
             raise
         hit.update(why=f'routing failed: {str(error)[:120]}', dispatch_outcome='unverified')
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - recorded as the route's why, its outcome unverified
         hit.update(why=f'routing failed: {str(error)[:120]}', dispatch_outcome='unverified')
     else:
         usage = resp.get('usage') or {}

@@ -36,7 +36,6 @@ from label.presented import presented_pts
 
 REPO = "genrobot2025/Gen-HumanEgo"
 CAMERA_TOPIC = "/robot0/sensor/camera2/compressed"
-CALIB_TOPIC = "/robot0/sensor/camera2/camera_info"
 ANNOTATION_TOPIC = "/robot0/annotation_v2"
 CAMERA_DESC = ("the forward-facing fisheye camera on the headset the person wears (camera2 of the six-camera "
                "DAS-Ego rig), looking out and down at their hands and the work in front of them")
@@ -162,25 +161,6 @@ def extract(mcap: Path, raw: Path, rel: str) -> None:
         meta["invalid_ranges"] = [dict(t0=x.start_time_s, t1=x.end_time_s, code=x.invalid_code,
                                        msg=x.invalid_message) for x in trv.invalid_ranges]
     (raw / "meta.json").write_text(json.dumps(meta))
-
-
-# an uploaded MCAP from this headset (its forward camera and its annotation) is read by this adapter
-UPLOAD = None
-
-
-def recognizes(topics: list[str]) -> bool:
-    return CAMERA_TOPIC in topics and ANNOTATION_TOPIC in topics
-
-
-def convert_upload(item: dict, ep: Path) -> dict:
-    """The forward camera, and the recording's own goal and timed steps (claims for the model to check)."""
-    extract(Path(item["file"]), ep / "source", item["name"])
-    ctx = write_sidecar(ep / "source", ep)
-    ctx["episode_id"] = ep.name
-    if not any(ctx.get("task_label") or []):
-        ctx["task_label"] = [item["name"]]
-    (ep / "instruction.txt").write_text((ctx.get("instruction") or "") + "\n")
-    return ctx
 
 
 def write_sidecar(raw: Path, dst: Path) -> dict:

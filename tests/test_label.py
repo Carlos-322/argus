@@ -1066,7 +1066,7 @@ def test_an_openai_key_sends_the_request_straight_to_openai(monkeypatch):
     assert all("cache_control" not in c for c in b["messages"][0]["content"])
     assert resp["provider"] == "OpenAI"
     assert resp["usage"]["list_cost"] == pytest.approx(60000 * 1e-5 + 40000 * 1e-6 + 2000 * 5e-5)
-    assert harness._cost(resp["usage"]) == resp["usage"]["list_cost"]
+    assert harness._verified_final_cost(resp["usage"], "openai/gpt-6-astra") == (resp["usage"]["list_cost"], "list")
     sol = harness.call_model(content, "openai/gpt-6.1-sol", "high", "sk-proj-x", 64000, 60)
     assert seen["body"]["model"] == "gpt-6.1-sol"
     assert seen["body"]["reasoning_effort"] == "high"

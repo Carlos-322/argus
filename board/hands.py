@@ -62,16 +62,15 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import shutil
 import subprocess
-import sys
 from collections import Counter
 from fractions import Fraction
 from pathlib import Path
 
+from board.clips import clip_path
 from board.to_board import dumps
 from label.atomic import write_bytes_atomic
+from prepare import tools
 
 FORMAT = "board-hand-pose/1"
 STEP = 4
@@ -79,13 +78,6 @@ TOL = 0.5
 B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 B64_INV = {c: i for i, c in enumerate(B64)}
 HEAD_RIG = "ego_head"
-
-
-def _ffprobe() -> str:
-    for c in (os.environ.get("FFPROBE"), shutil.which("ffprobe")):
-        if c and Path(c).exists():
-            return c
-    sys.exit("ffprobe not found")
 
 
 # ---------------------------------------------------------------- VLQ
@@ -203,7 +195,7 @@ def decode_hand(h: dict, n_frames: int, step: int = STEP) -> list:
 def probe_pts(clip: Path) -> tuple:
     """(width, height, time base, every frame's presentation timestamp): packets sorted by pts, which is display
     order, so the i-th is the i-th decoded frame the keypoints are numbered by."""
-    r = subprocess.run([_ffprobe(), "-v", "error", "-select_streams", "v:0", "-show_entries",
+    r = subprocess.run([tools.ffprobe(), "-v", "error", "-select_streams", "v:0", "-show_entries",
                         "stream=width,height,time_base:packet=pts,flags", "-of", "json", str(clip)],
                        capture_output=True, text=True, timeout=300)
     if r.returncode != 0:
@@ -243,9 +235,10 @@ def frame_times(clip_block: dict) -> list:
     return out
 
 
-def retime(doc: dict, clip: Path) -> dict:
+def for_copy(doc: dict, clip: Path) -> dict:
     """The same keypoints timed against another copy of the clip (the static build's web copy, whose timestamps
-    ffmpeg re-bases to start at 0). Refused unless it has the same frames at the same size."""
+    ffmpeg re-bases to start at 0). Refused unless it has the same frames at the same size. Not board/clips.py
+    retime, which puts a clip's own frames on screen at their capture times."""
     cl = probe_clip(clip)
     old = doc["clip"]
     if (cl["frames"], cl["w"], cl["h"]) != (old["frames"], old["w"], old["h"]):
@@ -497,7 +490,7 @@ def build(src: Path, qa: Path, clips: Path, out_dir: Path, jobs: int = 8) -> dic
         if key not in board:
             continue
         label_file, eid = board[key]
-        jobs_.append((key, src / e["hands2d"], label_file, clips / f"{eid}.mp4", out_dir, source))
+        jobs_.append((key, src / e["hands2d"], label_file, clip_path(clips, eid, "exo"), out_dir, source))
     res = _each(build_one, jobs_, jobs)
     written = [r for r in res if "file" in r]
     skipped = [r for r in res if "skip" in r]

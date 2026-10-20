@@ -20,7 +20,6 @@ import tempfile
 import time
 from pathlib import Path
 
-UPLOAD = None                     # reads no dataset of its own (formats.upload_adapters)
 READER_STALL_S = float(os.environ.get('ARGUS_READER_STALL_S') or 300)
 _INLINE = 'ARGUS_READER_INLINE'           # set in a child, whose own reads run in place
 _MODE = 'ARGUS_READER_MODE'
@@ -202,12 +201,12 @@ def _child(request, result):
         fn = getattr(fn, part)
     try:
         outcome = ('ok', fn(*args, **kwargs))
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - the child passes any error back to the parent, which raises it
         outcome = ('error', error)
     try:
         data = pickle.dumps(outcome)
         pickle.loads(data)
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - an outcome that does not pickle is passed back as an error of a known type
         if outcome[0] == 'ok':
             data = pickle.dumps(('error', ReaderStopped(f'returned what could not be passed back '
                                                         f'({type(error).__name__})')))

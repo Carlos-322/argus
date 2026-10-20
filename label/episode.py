@@ -57,7 +57,7 @@ from label import prompts, policy
 from label import sensor_evidence as se
 from label import state as ms
 from prepare.signal_alignment import ALIGNED_CAMERA, ALIGNED_ASSUMED, recorder_arrival, placement_text
-from prepare.state_notes import ASSUMED_CLOCK, LAYOUT, NOT_RECORDED, SHORT, STATE_WHY, UNREADABLE
+from prepare.state_notes import ASSUMED_CLOCK, LAYOUT, NOT_RECORDED, SHORT, UNREADABLE
 
 FPS = 30
 VIEW_ORDER = ("exo", "left", "right")          # stable presentation slots; their order does not establish content
@@ -361,13 +361,13 @@ def describe_spans(ep: dict, spans) -> list[dict]:
 # dataset name or the camera set.
 RIGS = ("teleop_arms", "handheld_gripper", "ego_head")
 STATE_KINDS = ("joints", "ee_pose", "none")
-# One sampled instant every N s for the whole episode, still spans included (a still span is exactly
-# where a stopped recording would hide). Teleop arms move slowly and are seen by up to three cameras, so one
-# instant every 1.5 s is enough. Handheld demonstrations are short and fast, so denser. Egocentric footage has one
-# low-resolution head camera and the hands are the whole point, so it is sampled twice as densely again.
-SAMPLE_EVERY_S = policy.PERIODS
 
 
+# One sampled instant every N s (label/policy.py PERIODS, per rig) for the whole episode, still spans included (a
+# still span is exactly where a stopped recording would hide). Teleop arms move slowly and are seen by up to three
+# cameras, so one instant every 1.5 s is enough. Handheld demonstrations are short and fast, so denser. Egocentric
+# footage has one low-resolution head camera and the hands are the whole point, so it is sampled twice as densely
+# again.
 def every_s(ep: dict) -> float:
     return policy.effective(ep['context'])['sample_every_s']
 
@@ -1046,7 +1046,10 @@ def contact_image(ep: dict, c: dict, gate=None) -> tuple[bytes, dict] | None:
     ks = sorted({_frame_at(ep, t) for _, ts in strips for t in ts} | {kp})
     try:
         got = {v: _decode_view(ep, v, ks if v in vs else [kp], gate) for v in dict.fromkeys(vs + pvs)}
-    except Exception:
+    except Exception as e:
+        # _decode_view already keeps the frames it can; a fault on our side (a missing file) or in our code raises
+        if not _decode_error(e):
+            raise
         return None
     font = mf._grid_font(16)
     pad, strip_h = 8, 24
@@ -1352,10 +1355,6 @@ def _coverage_note(ep: dict, pl: dict) -> str:
     return out
 
 
-def _num(x: float) -> str:
-    return f"{float(x):.3g}"
-
-
 def _depth_note(ep: dict) -> str:
     """Which cameras also record depth, and that each detail view is followed by their depth: what the input is, never
     how to read it."""
@@ -1630,8 +1629,8 @@ def _signals_table(ep: dict, pl: dict) -> str:
                 # named once, as the same at every frame only when it reads at every frame
                 complete = np.isfinite(a).all(axis=1)
                 v = a[complete][0] if complete.any() else sg.finite_range(a)[0]
-                said = name + (f" {_num(v[0])}" if len(v) == 1 else
-                               " [" + ", ".join(_num(x) for x in v) + "]" if len(v) <= sg.PER_VALUE_MAX else "")
+                said = name + (f" {sg.reading_text(v[0])}" if len(v) == 1 else
+                               " [" + ", ".join(sg.reading_text(x) for x in v) + "]" if len(v) <= sg.PER_VALUE_MAX else "")
                 said += wording
                 gaps = sg.gap_words(a)
                 if gaps:
@@ -1661,7 +1660,7 @@ def _signals_table(ep: dict, pl: dict) -> str:
                 lo, hi = sg.finite_range(seg)
                 c = float(np.nanmax(hi - lo)) if np.isfinite(seg).any() else 0.0
                 if c > 0:
-                    ch.append(f"{name} {_num(c)}")
+                    ch.append(f"{name} {sg.reading_text(c)}")
             lines.append(f"    {frame_time(ep, a0):.2f}-{frame_time(ep, min(b0, n - 1)):.2f}s: "
                          + ("; ".join(ch) if ch else "none changed"))
     lines += _readout_of(ep, pl)[0]
@@ -1692,6 +1691,7 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
     touch = _touch(ep, pl)
     ks = pl["ks"]
     rows = []             # (how much the row's values move, the signal's place, the row's place, signal, label, values)
+    unread = {}           # signal: the error that kept its rows out, named below
     for i, (name, a) in enumerate(arrs.items()):
         try:
             if name in touch or not len(a) or not np.isfinite(a).any() or _constant(a):
@@ -1701,12 +1701,16 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
             got = sg.summary_rows(name, a, ks, m.get("shape"), m.get("names"), role=role)
             mv = sg.movements(a)
             by_value = sg.per_value(name, a.shape[1], m.get("shape"), m.get("names"), role=role)
-        except Exception:  # noqa: BLE001 - named as not read in the signals' list (_signals_table), the rest are given
+        except Exception as e:  # noqa: BLE001 - one signal whose rows cannot be made is named below, the rest are given
+            unread[name] = type(e).__name__
             continue
         for j, (lb, v) in enumerate(got):
             rows.append((float(mv[j]) if by_value else float(np.median(mv)), i, j, name, lb, v))
+    # a signal whose rows could not be made is named, so a signal missing from the values is never unexplained
+    not_read = ([f"  The values at each instant leave out {_and_list([f'{nm} ({why})' for nm, why in unread.items()])}"
+                 f", because {'its' if len(unread) == 1 else 'their'} rows could not be read."] if unread else [])
     if not rows:
-        return [], frozenset()
+        return not_read, frozenset()
     lines = []
     head = "    at: " + " ".join(f"{frame_time(ep, k):.2f}" for k in ks)
     text = {(r[1], r[2]): f"    {r[4]}: " + " ".join(r[5]) for r in rows}
@@ -1737,7 +1741,7 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
             reason = (f", because rows are ranked by movement and kept when they fit the {budget} character budget."
                       if chosen else f", because no row fits the {budget} character budget after the times row.")
         lines.append("  The values at each instant leave out " + named + reason)
-    return lines, frozenset(r[3] for r in rows if r[3] not in left)
+    return lines + not_read, frozenset(r[3] for r in rows if r[3] not in left)
 
 
 def _readout_of(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
@@ -1757,10 +1761,11 @@ def _constant(a: np.ndarray) -> bool:
 def _left_out(name: str, a: np.ndarray, m: dict, n_left: int, n_rows: int) -> str:
     """One signal left out of the values at each instant: its name, its size, its rate when known, and how many of its
     rows were left out when some of them were shown."""
+    from label import signals as sg
     shape = m.get("shape")
     size = (" x ".join(str(int(x)) for x in shape) + " values" if shape and len(shape) > 1
             else f"{a.shape[1]} value{'s' if a.shape[1] > 1 else ''}")
-    rate = f", {_num(m['rate_hz'])} Hz" if m.get("rate_hz") else ""
+    rate = f", {sg.reading_text(m['rate_hz'])} Hz" if m.get("rate_hz") else ""
     part = f", {n_left} of its {n_rows} rows" if n_left < n_rows else ""
     return f"{name} ({size}{rate}{part})"
 

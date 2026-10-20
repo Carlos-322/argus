@@ -98,25 +98,6 @@ def mux(packets: list[bytes], ts: list[int], out: Path) -> list[int]:
     return ts
 
 
-# Uploads use recorded pose and gripper fields through the generic reader.
-UPLOAD = None
-
-
-def recognizes(topics: list[str]) -> bool:
-    return all(t in topics for t in CAMERA_TOPICS) and all(t in topics for t in POSE_TOPICS)
-
-
-def convert_upload(item: dict, ep: Path) -> dict:
-    ctx = convert(item["file"], ep, "upload/" + item["name"])
-    # the dataset's task text is its own folder path on Hugging Face; an uploader's folder name is not a task, so the
-    # episode goes to the model with no instruction rather than an invented one
-    for k in ("instruction", "instruction_note"):
-        ctx.pop(k, None)
-    ctx["task_label"] = [item["name"]]
-    (ep / "instruction.txt").write_text("\n")
-    return ctx
-
-
 def convert(mcap_path: Path, ep: Path, rel: str) -> dict:
     from mcap.reader import make_reader
     cam = {v: ([], []) for v in CAMERA_TOPICS.values()}
@@ -257,7 +238,7 @@ def drawn(rel: str, raw: Path, out_root: Path, keep_mcap: bool) -> dict | None:
     try:
         prepare_one(rel, raw, out_root, keep_mcap=keep_mcap)
         return json.loads((out_root / episode_dir_name(rel) / "context.json").read_text())
-    except Exception as e:  # a drawn clip that cannot be read is a finding about the data; listed, not hidden
+    except Exception as e:  # noqa: BLE001 - a drawn clip that cannot be read is printed as FAILED, not hidden
         print(f"FAILED {rel}: {type(e).__name__}: {e}"[:400], file=sys.stderr, flush=True)
         return None
 

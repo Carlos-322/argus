@@ -21,6 +21,13 @@ def episode(root, name='episode_a', instruction='Place the cup.'):
     return ep
 
 
+def route_bound(ep):
+    """The reservation _paid_route holds for one routing call of this episode."""
+    rates = harness.OPENAI_PRICES[route.ROUTE_MODEL.split('/', 1)[-1]][1]
+    text = route.request(route.me.load(ep))[0]['text']
+    return (len(text.encode('utf-8')) + 1024) * rates[0] + route.ROUTE_MAX_TOKENS * rates[2]
+
+
 def build_failure(*args, **kwargs):
     raise RuntimeError('fixture frame decode failure')
 
@@ -442,8 +449,10 @@ def test_concurrent_routes_cannot_dispatch_beyond_reserved_budget(tmp_path, monk
     monkeypatch.setattr(harness.me, 'build_request', build_failure)
     job = tmp_path / 'job'
     with ThreadPoolExecutor(1) as executor:
+        # The cap holds one routing reservation, and not a second beside the first's settled $0.004.
+        cap = max(route_bound(ep) for ep in eps) + .003
         future = executor.submit(harness.run_batch, eps, job / 'run' / 'out',
-            keys=['sk-or-fixture'], concurrency=2, force=False, max_spend=.04, **args())
+            keys=['sk-or-fixture'], concurrency=2, force=False, max_spend=cap, **args())
         try:
             assert entered.wait(2)
         finally:
@@ -569,8 +578,10 @@ def test_route_build_failure_settles_shared_budget_once(tmp_path, monkeypatch):
     monkeypatch.setattr(harness, 'call_model', provider)
     monkeypatch.setattr(harness.me, 'build_request', build_failure)
     job = tmp_path / 'job'
+    # The cap holds two settled $0.004 routes and then a third reservation does not fit.
+    cap = .008 + max(route_bound(ep) for ep in eps) - .0005
     assert harness.run_batch(eps, job / 'run' / 'out', keys=['sk-or-fixture'], concurrency=1,
-                             force=False, max_spend=.043, **args()) == 1
+                             force=False, max_spend=cap, **args()) == 1
     assert calls == [1, 1]
     assert label_spend(job) == pytest.approx(.008)
     assert label_spend_complete(job) is True

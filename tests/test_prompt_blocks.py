@@ -10,6 +10,7 @@ import pytest
 from label import episode as me
 from label import frames as mf
 from label import policy, prompts
+from label import signals as sg
 from label import state as ms
 
 
@@ -770,6 +771,9 @@ def test_per_value_gives_rows_to_named_and_joint_named_flat_vectors_only():
     assert sg.per_value("observation.state", 26)
     assert sg.per_value("hand_joints", sg.JOINT_NAME_MAX)
     assert not sg.per_value("hand_joints", 63)
+    # the name's words are matched whole, as every name word is: a glued robotstate is a state, a statevec is not
+    assert sg.per_value("observation.robotstate", 26) and sg.per_value("left_jointpos", 26)
+    assert not sg.per_value("observation.statevec", 26) and not sg.per_value("jointly", 26)
 
 
 def test_a_rate_is_stated_only_below_nine_tenths_of_the_frame_rate():
@@ -915,7 +919,7 @@ def test_with_no_row_that_fits_each_signal_with_rows_is_named_as_left_out_becaus
     """A budget smaller than the times row or any value row names every omitted signal with the actual reason."""
     ep, pl = _sweeps_wide_and_flags()
     head = len("    at: " + " ".join(f"{me.frame_time(ep, k):.2f}" for k in pl["ks"]))
-    shortest = min(len("    " + name + ": " + " ".join(me._num(x) for x in a[pl["ks"], 0]))
+    shortest = min(len("    " + name + ": " + " ".join(sg.reading_text(x) for x in a[pl["ks"], 0]))
                    for name, a in ep["signals"].items())
     for budget in (head - 1, head + shortest - 1):
         monkeypatch.setattr(me, "SIGNAL_TABLE_MAX_CHARS", budget)
@@ -949,3 +953,17 @@ def test_sensor_contract_follows_visual_rules_without_replacing_them(case):
     assert episode.index('BETWEEN INSTANTS') < episode.index('SENSOR EVIDENCE FOR ADDITIONAL ANNOTATION')
     assert 'VISUAL ANNOTATION CONTRACT' in fixed
     assert 'supplied sensor_findings and evidence_findings fields first' in fixed
+
+
+@pytest.mark.parametrize("rig", ["teleop_arms", "handheld_gripper", "ego_head"])
+@pytest.mark.parametrize("kw", [{}, {"recorded": False}, {"sessions": True}, {"has_instruction": False}])
+def test_every_prompt_defines_a_subgoal_once_as_a_lasting_change_and_keeps_failure_kinds(rig, kw):
+    s = " ".join(prompts.fixed_instructions(rig, **kw).split())
+    assert s.count("A subgoal is a lasting step") == 1
+    assert "kind subgoal_complete" in s and "A pick, a grasp, a contact or a motion is not a subgoal" in s
+    assert "never subgoal_complete" in s and "subgoal_failed" not in s
+    assert "at the goal frame (completed_at_s, judged by its own rule below)" in s or "at that task's completed_at_s" in s
+    assert "at the first moment its change holds once the hand" in s and "lets go" in s
+    assert "neither moves it nor makes a new subgoal" in s and "waits for the last such adjustment" not in s
+    assert "setting it down is a subgoal of its own at the first moment it holds" in s
+    assert "Subgoals do not lengthen the list" in s and "are still key_events of their own kind" not in s

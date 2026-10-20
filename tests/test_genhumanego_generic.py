@@ -90,14 +90,21 @@ def recording(path, *, other_camera=False, explicit_primary=False, both_calibrat
     return {'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'offsets_ns': offsets.tolist(), 'topics': topics}
 
 
-def converted(root, out, monkeypatch, *, legacy):
-    original = formats.upload_adapters
-    with monkeypatch.context() as scope:
-        scope.setattr(formats, 'upload_adapters', lambda kind: [genhumanego] if kind == 'mcap' and legacy
-                      else [] if kind == 'mcap' else original(kind))
-        report = formats.convert(root, 'ego_head', out, 'native structured fixture', 900)
+def converted(root, out):
+    """The upload folder root read as Data Review reads it, by the generic reader."""
+    report = formats.convert(root, 'ego_head', out, 'native structured fixture', 900)
     assert not report['failed'] and len(report['episodes']) == 1, report
     ep = out / report['episodes'][0]['episode_id']
+    return ep, json.loads((ep / 'context.json').read_text())
+
+
+def published(root, out):
+    """The episode the published Gen-HumanEgo preparation (python -m prepare genhumanego) writes for the one
+    recording in root, extracted beside it as prepare_one extracts a download."""
+    raw = root / 'episode.mcap'
+    ep = out / 'episode'
+    genhumanego.extract(raw, ep / 'source', raw.name)
+    genhumanego.write_sidecar(ep / 'source', ep)
     return ep, json.loads((ep / 'context.json').read_text())
 
 
@@ -107,13 +114,13 @@ def rgb(path):
         return [hashlib.sha256(frame.to_ndarray(format='rgb24').tobytes()).hexdigest() for frame in container.decode(video=0)]
 
 
-def test_structured_source_goal_nested_steps_and_false_success_match_legacy(tmp_path, monkeypatch):
+def test_structured_source_goal_nested_steps_and_false_success_match_legacy(tmp_path):
     root = tmp_path / 'native'
     root.mkdir()
     raw = root / 'episode.mcap'
     proof = recording(raw)
-    old_ep, old = converted(root, tmp_path / 'old', monkeypatch, legacy=True)
-    new_ep, new = converted(root, tmp_path / 'generic', monkeypatch, legacy=False)
+    old_ep, old = published(root, tmp_path / 'old')
+    new_ep, new = converted(root, tmp_path / 'generic')
     assert new['instruction'] == old['instruction'] == 'fold the cloth'
     assert new['task_label'] == old['task_label'] == ['folding']
     assert new['annotation_subtasks'] == old['annotation_subtasks']
@@ -127,16 +134,16 @@ def test_structured_source_goal_nested_steps_and_false_success_match_legacy(tmp_
     assert hashlib.sha256(raw.read_bytes()).hexdigest() == proof['sha256']
 
 
-def test_structured_calibration_validity_and_nested_original_fields_are_retained(tmp_path, monkeypatch):
+def test_structured_calibration_validity_and_nested_original_fields_are_retained(tmp_path):
     root = tmp_path / 'native'
     root.mkdir()
     raw = root / 'episode.mcap'
     proof = recording(raw)
-    old_ep, _ = converted(root, tmp_path / 'old', monkeypatch, legacy=True)
-    _, new = converted(root, tmp_path / 'generic', monkeypatch, legacy=False)
+    old_ep, _ = published(root, tmp_path / 'old')
+    _, new = converted(root, tmp_path / 'generic')
     meta = json.loads((old_ep / 'source/meta.json').read_text())
     records = {r['topic']: r['fields'] for r in new['recorded_metadata']['mcap_records']}
-    calibration = records[genhumanego.CALIB_TOPIC]
+    calibration = records[genhumanego.CAMERA_TOPIC.rsplit('/', 1)[0] + '/camera_info']
     assert calibration['D'] == meta['calib2']['D'] and calibration['T_b_c'] == meta['calib2']['T']
     assert calibration['distortion_model'] == meta['calib2']['model']
     assert (calibration['width'], calibration['height'], calibration['frame_id']) == (
@@ -152,13 +159,13 @@ def test_structured_calibration_validity_and_nested_original_fields_are_retained
     assert hashlib.sha256(raw.read_bytes()).hexdigest() == proof['sha256']
 
 
-def test_recorded_primary_metadata_keeps_original_camera_images_and_other_views(tmp_path, monkeypatch):
+def test_recorded_primary_metadata_keeps_original_camera_images_and_other_views(tmp_path):
     root = tmp_path / 'native'
     root.mkdir()
     raw = root / 'episode.mcap'
     proof = recording(raw, other_camera=True, explicit_primary=True, both_calibrated=True)
-    old_ep, old = converted(root, tmp_path / 'old', monkeypatch, legacy=True)
-    new_ep, new = converted(root, tmp_path / 'generic', monkeypatch, legacy=False)
+    old_ep, old = published(root, tmp_path / 'old')
+    new_ep, new = converted(root, tmp_path / 'generic')
     assert new['cameras']['exo']['key'] == genhumanego.CAMERA_TOPIC
     assert 'primary' in new['source']['camera_selection'].lower()
     before = json.loads((old_ep / 'sources.json').read_text())['exo']['packed']
@@ -171,23 +178,23 @@ def test_recorded_primary_metadata_keeps_original_camera_images_and_other_views(
     assert hashlib.sha256(raw.read_bytes()).hexdigest() == proof['sha256']
 
 
-def test_unique_topic_calibration_selects_original_camera_without_physical_claim(tmp_path, monkeypatch):
+def test_unique_topic_calibration_selects_original_camera_without_physical_claim(tmp_path):
     root = tmp_path / 'native'
     root.mkdir()
     raw = root / 'episode.mcap'
     recording(raw, other_camera=True)
-    _, new = converted(root, tmp_path / 'generic', monkeypatch, legacy=False)
+    _, new = converted(root, tmp_path / 'generic')
     assert new['cameras']['exo']['key'] == genhumanego.CAMERA_TOPIC
     assert 'calibration' in new['source']['camera_selection'].lower()
 
 
-def test_multiple_calibrated_cameras_without_primary_keep_policy_and_every_stream(tmp_path, monkeypatch):
+def test_multiple_calibrated_cameras_without_primary_keep_policy_and_every_stream(tmp_path):
     root = tmp_path / 'native'
     root.mkdir()
     raw = root / 'episode.mcap'
     proof = recording(raw, six_cameras=True, both_calibrated=True)
-    old_ep, _ = converted(root, tmp_path / 'old', monkeypatch, legacy=True)
-    new_ep, ctx = converted(root, tmp_path / 'generic', monkeypatch, legacy=False)
+    old_ep, _ = published(root, tmp_path / 'old')
+    new_ep, ctx = converted(root, tmp_path / 'generic')
     assert ctx['cameras']['exo']['key'] == genhumanego.CAMERA_TOPIC
     assert 'compatibility' in ctx['source']['camera_selection']
     assert 'does not establish' in ctx['source']['camera_selection']
@@ -267,13 +274,13 @@ def test_native_inspection_uses_typed_source_fields_and_original_integer_message
     assert hashlib.sha256(raw.read_bytes()).hexdigest() == proof['sha256']
 
 
-def test_unshown_frames_before_recorded_primary_are_preserved(tmp_path, monkeypatch):
+def test_unshown_frames_before_recorded_primary_are_preserved(tmp_path):
     root = tmp_path / 'native'
     root.mkdir()
     raw = root / 'episode.mcap'
     proof = recording(raw, other_camera=True, explicit_primary=True, early_other_ns=100_000_000,
                       other_topic='/robot0/sensor/thermal0/compressed')
-    ep, ctx = converted(root, tmp_path / 'generic', monkeypatch, legacy=False)
+    ep, ctx = converted(root, tmp_path / 'generic')
     camera = next(row for row in ctx['unshown_cameras'] if row['name'] == '/robot0/sensor/thermal0/compressed')
     assert len(rgb(camera['packed'])) == camera['n_frames'] == 6
     assert camera['start_s'] == -.1
@@ -297,7 +304,7 @@ def test_unshown_frames_before_recorded_primary_are_preserved(tmp_path, monkeypa
         # These are exact storage addresses; native message clocks above own presentation timing.
         np.testing.assert_array_equal(times['pts'], formats.probe(camera['packed'])['pts'])
         assert np.all(np.diff(times['pts']) > 0)
-    old_ep, _ = converted(root, tmp_path / 'old', monkeypatch, legacy=True)
+    old_ep, _ = published(root, tmp_path / 'old')
     with np.load(old_ep / 'times.npz') as original_times, np.load(ep / 'times.npz') as times:
         assert original_times['exo'].dtype == times['exo'].dtype
         assert original_times['exo'].tobytes() == times['exo'].tobytes()
@@ -308,27 +315,19 @@ def test_unshown_frames_before_recorded_primary_are_preserved(tmp_path, monkeypa
     assert hashlib.sha256(raw.read_bytes()).hexdigest() == proof['sha256']
 
 
-def test_upload_hand_pose_spec_has_same_unknown_intrinsics_with_original_claims_retained(tmp_path, monkeypatch):
+def test_upload_hand_pose_spec_has_unknown_intrinsics_with_original_claims_retained(tmp_path):
     from board.hand_pose.specs import spec
     root = tmp_path / 'native'
     root.mkdir()
     recording(root / 'episode.mcap')
-    old_ep, _ = converted(root, tmp_path / 'old', monkeypatch, legacy=True)
-    new_ep, _ = converted(root, tmp_path / 'generic', monkeypatch, legacy=False)
-    assert spec(old_ep)['camera'] == spec(new_ep)['camera'] == {'model': 'unknown_pinhole'}
+    new_ep, _ = converted(root, tmp_path / 'generic')
+    assert spec(new_ep)['camera'] == {'model': 'unknown_pinhole'}
 
 
 def test_calibration_dimensions_must_describe_integral_image_size():
     from prepare.mcap_claims import valid_calibration
     fields = {'width': 64.5, 'height': 48, 'K': [32, 0, 32, 0, 32, 24, 0, 0, 1]}
     assert valid_calibration(fields) is False
-
-
-def test_upload_dispatch_retires_wrapper_but_sampling_entry_remains_available():
-    assert genhumanego.UPLOAD is None
-    assert callable(genhumanego.extract) and callable(genhumanego.write_sidecar)
-    assert genhumanego not in formats.upload_adapters('mcap')
-    assert formats.mcap_layout([genhumanego.CAMERA_TOPIC, genhumanego.ANNOTATION_TOPIC]) == 'generic'
 
 
 def test_recorded_double_sphere_model_short_name_is_structural_calibration():
@@ -349,7 +348,7 @@ def test_malformed_nested_claims_stay_recorded_without_failing_usable_recording(
     assert ctx['unknown'] == {'original': True}
 
 
-def test_early_unshown_camera_does_not_extend_selected_step_claim_end(tmp_path, monkeypatch):
+def test_early_unshown_camera_does_not_extend_selected_step_claim_end(tmp_path):
     from mcap.reader import make_reader
     controls = []
     source_ends = []
@@ -364,7 +363,7 @@ def test_early_unshown_camera_does_not_extend_selected_step_claim_end(tmp_path, 
             selected = np.asarray([message.log_time for _, _, message in make_reader(stream).iter_messages(
                 topics=[genhumanego.CAMERA_TOPIC])], dtype=np.int64)
         source_ends.append(round((selected[-1] - selected[0] + np.median(np.diff(selected))) / 1e9, 3))
-        ep, ctx = converted(root, tmp_path / (name + '_prepared'), monkeypatch, legacy=False)
+        ep, ctx = converted(root, tmp_path / (name + '_prepared'))
         with np.load(ep / ctx['recorded_camera_clocks']) as native:
             np.testing.assert_array_equal(native['exo_log_ns'], selected)
         assert ctx['source']['presentation_clock']['basis'] == 'mcap_log_time'

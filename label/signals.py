@@ -37,7 +37,6 @@ A signal is read by how its numbers behave, and only whether it measures touch a
 from __future__ import annotations
 
 import json
-import re
 import warnings
 
 import numpy as np
@@ -61,8 +60,9 @@ DESCRIBE_ROW_MAX_CHARS = 768
 # names, or whose own name says it holds joints or a state: one row per value under its own name. A humanoid's 26
 # joints and a base's x, y, yaw, vx, wz reached that readout as one "largest change" or "total activity" row while
 # it went value by value only up to SMALL. A map (a 2 D shape, whose strongest cell says more than its cells one by
-# one) and a long unnamed vector (audio samples) keep their summary rows.
-JOINT_LIKE = re.compile(r"joint|qpos|state", re.I)
+# one) and a long unnamed vector (audio samples) keep their summary rows. The name's words are matched whole
+# (prepare/formats.py _names_word, as every name word is), so jointly and statevec are not joints or a state.
+JOINT_LIKE = ("joint", "qpos", "state")
 # A signal recorded below this share of the frame rate says its rate: a 6 Hz glove otherwise reads as if it were
 # sampled every frame.
 RATE_SLOWER = 0.9
@@ -189,18 +189,20 @@ def per_value(name: str, d: int, shape=None, names=None, role=None) -> bool:
         return True
     if names and len(names) == d:
         return True
-    return d <= JOINT_NAME_MAX and bool(JOINT_LIKE.search(name))
+    from prepare.formats import _names_word
+    return d <= JOINT_NAME_MAX and _names_word(name, JOINT_LIKE)
 
 
 def names_joints_or_state(name: str) -> bool:
     """Whether a signal's name says it holds joints or a state, as the no state line names it (label/episode.py): a word
     of it is joint or qpos (left_joint1, /left/joint_states, observations/qpos), or its last word is state or states
     (observation.state, observation.leader_state), and no word of it says a command (prepare/formats.py
-    COMMAND_WORDS, so /left/joint_command and leader_cmd_state are not). Words are split as prepare/formats.py tokens
-    splits them (separators and camelCase). A one value battery_state or estop_state is left out by the line's own
-    rule that a named signal has more than one value."""
-    from prepare.formats import COMMAND_WORDS, _names_word, tokens
-    words = tokens(name)
+    COMMAND_WORDS, so /left/joint_command and leader_cmd_state are not). Words are split as every name matcher splits
+    them (prepare/formats.py word_tokens: separators, camelCase and glued known words, so observation.robotstate ends
+    in state). A one value battery_state or estop_state is left out by the line's own rule that a named signal has
+    more than one value."""
+    from prepare.formats import COMMAND_WORDS, _names_word, word_tokens
+    words = word_tokens(name)
     return ((_names_word(name, ("joint", "qpos")) or bool(words) and words[-1] in ("state", "states"))
             and not _names_word(name, COMMAND_WORDS))
 
@@ -208,18 +210,19 @@ def names_joints_or_state(name: str) -> bool:
 def names_scalar_observed_state(name: str) -> bool:
     """A scalar can disprove absent arm state only when its name identifies a joint or observed arm state.
     Sensor readings, bookkeeping and commands do not establish that state, even under observation.*."""
-    from prepare.formats import TOUCH_WORDS, _names_word, tokens
+    from prepare.formats import TOUCH_WORDS, _names_word, word_tokens
     if not names_joints_or_state(name) or _names_word(name, TOUCH_WORDS + (
             "torque", "clock", "time", "timestamp",
             "battery", "estop", "emergency", "health", "status", "mode", "power", "temperature", "voltage",
             "current")):
         return False
-    words = tokens(name)
+    words = [w for w in word_tokens(name) if not w.isdigit()]      # arm0_state's word before state is arm
     return (_names_word(name, ("joint", "qpos")) or len(words) > 1 and words[-1] in ("state", "states")
             and _names_word(words[-2], ("observation", "arm", "robot", "gripper", "leader", "follower")))
 
 
-def _num(x: float) -> str:
+def reading_text(x: float) -> str:
+    """A reading as the request writes it: three significant figures, and - for no reading."""
     return "-" if not np.isfinite(x) else f"{float(x):.3g}"
 
 
@@ -420,20 +423,9 @@ def distance_at(a: np.ndarray, k: int, rest=None, swing=None) -> tuple[np.ndarra
 
 
 def active_at(a: np.ndarray, k: int, rest=None, swing=None) -> np.ndarray:
-    """_active's row k: which values are away from rest at frame k."""
+    """Which values are away from rest at frame k."""
     d, sw = distance_at(a, k, rest, swing)
     return _away(d, sw) if sw > 0 else np.zeros(len(d), dtype=bool)
-
-
-def _active(a: np.ndarray, rest=None, swing=None) -> np.ndarray:
-    a = _float(a)
-    level = resting_level(a, rest)
-    sw = _swing(a, level, swing)
-    out = np.zeros(a.shape, dtype=bool)
-    if sw > 0:
-        for i, c in _rows64(a):
-            out[i:i + len(c)] = _away(np.abs(c - level), sw)
-    return out
 
 
 def activity(a: np.ndarray, rest=None, swing=None) -> np.ndarray:
@@ -731,7 +723,7 @@ def summary_rows(name: str, a: np.ndarray, ks: list[int], shape=None, names=None
     d = a.shape[1]
     if per_value(name, d, shape, names, role):
         labels = names if names and len(names) == d else ([""] if d == 1 else [f"[{i}]" for i in range(d)])
-        return [(f"{name}{(' ' + lb) if lb else ''}", [_num(a[k, i]) for k in ks]) for i, lb in enumerate(labels)]
+        return [(f"{name}{(' ' + lb) if lb else ''}", [reading_text(a[k, i]) for k in ks]) for i, lb in enumerate(labels)]
     rows = []
     if _role(role) not in MOVEMENT_ROLES and localized(a, rest, swing):
         # the distances, the active values and the activity at the sampled instants alone, as the whole would give them
@@ -742,7 +734,7 @@ def summary_rows(name: str, a: np.ndarray, ks: list[int], shape=None, names=None
                for k, v in dist.items()}
         unread = {k: not np.isfinite(a[k]).any() for k in ks}
         m = {k: (np.nan if unread[k] else float(np.where(act[k], dist[k], 0.0).sum())) for k in ks}
-        rows.append((f"{name} total activity", [_num(m[k]) for k in ks]))
+        rows.append((f"{name} total activity", [reading_text(m[k]) for k in ks]))
         rows.append((f"{name} active values", ["-" if unread[k] else str(int(act[k].sum())) for k in ks]))
         if shape and len(shape) == 2:
             h, w = int(shape[0]), int(shape[1])
@@ -761,7 +753,7 @@ def summary_rows(name: str, a: np.ndarray, ks: list[int], shape=None, names=None
             with np.errstate(invalid="ignore"):
                 x = np.abs(np.asarray(a[b0], dtype=np.float64) - np.asarray(a[a0], dtype=np.float64))
             x = x[np.isfinite(x)]
-            ch.append(_num(x.max()) if len(x) else "-")
+            ch.append(reading_text(x.max()) if len(x) else "-")
         rows.append((f"{name} largest change of any value since the instant before", ch))
     return rows
 
@@ -788,7 +780,7 @@ def describe(name: str, a: np.ndarray, shape=None, names=None, rest=None, swing=
             what = (f"{d} named values in value order, value names retained in episode metadata"
                     + (f", {' x '.join(str(int(x)) for x in shape)} shape" if shape and len(shape) > 1 else ""))
     if rate_hz and fps and float(rate_hz) < RATE_SLOWER * float(fps):
-        rate = _num(float(rate_hz))
+        rate = reading_text(float(rate_hz))
         what += (f", recorder arrivals at {rate} Hz" if aligned_by == RECORDER_ARRIVAL else
                  f", estimated at {rate} Hz from assumed placement" if aligned_by == COARSE_CLOCK or clock_problem else
                  f", recorded at {rate} Hz")
@@ -818,19 +810,19 @@ def describe(name: str, a: np.ndarray, shape=None, names=None, rest=None, swing=
     if d > PER_VALUE_MAX:
         if (hi == lo).all():
             return f"{head}: every value constant throughout{tail}"
-        return f"{head}: values from {_num(np.nanmin(lo))} to {_num(np.nanmax(hi))}{tail}"
+        return f"{head}: values from {reading_text(np.nanmin(lo))} to {reading_text(np.nanmax(hi))}{tail}"
     if (hi == lo).all():
-        value = _num(lo[0]) if d == 1 else "[" + ", ".join(_num(x) for x in lo) + "]"
+        value = reading_text(lo[0]) if d == 1 else "[" + ", ".join(reading_text(x) for x in lo) + "]"
         text = f"{head}: {value} throughout{tail}"
     else:
-        text = f"{head}: " + ", ".join(_num(l) if l == h else f"{_num(l)} to {_num(h)}"
+        text = f"{head}: " + ", ".join(reading_text(l) if l == h else f"{reading_text(l)} to {reading_text(h)}"
                                      for l, h in zip(lo, hi)) + tail
     if len(text) <= DESCRIBE_ROW_MAX_CHARS:
         return text
     if named and f" ({named})" in what:
         what = what.replace(f" ({named})", "", 1)
         what += ", value names retained in episode metadata"
-    readings = [_num(l) + " throughout" if l == h else f"{_num(l)} to {_num(h)}" for l, h in zip(lo, hi)]
+    readings = [reading_text(l) + " throughout" if l == h else f"{reading_text(l)} to {reading_text(h)}" for l, h in zip(lo, hi)]
     # Eight ranges fit within the descriptor allowance even at the longest numeric format. The signal name and
     # clock qualifications are never truncated; the allowance bounds value detail, not original source identities.
     groups = [f"    values {i}-{min(i + 7, d - 1)}: " + ", ".join(readings[i:i + 8])

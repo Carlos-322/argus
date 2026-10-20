@@ -436,7 +436,7 @@ def test_abc_unsupported_recorded_codec_keeps_other_cameras(tmp_path):
     ('realomin', '/robot0/sensor/camera0/compressed', 'repeated_data'),
     ('realomin', '/robot0/sensor/magnetic_encoder', 'repeated_value'),
     ('genhumanego', genhumanego.CAMERA_TOPIC, 'repeated_data'),
-    ('genhumanego', genhumanego.CALIB_TOPIC, 'scalar_calibration'),
+    ('genhumanego', genhumanego.CAMERA_TOPIC.rsplit('/', 1)[0] + '/camera_info', 'scalar_calibration'),
     ('genhumanego', genhumanego.ANNOTATION_TOPIC, 'scalar_segments'),
 ])
 def test_incompatible_source_field_cardinality_keeps_other_channels(tmp_path, dataset, topic, failure):

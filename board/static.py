@@ -66,7 +66,6 @@ import json
 import math
 import os
 import re
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -82,13 +81,13 @@ from board import serve as sa
 from board.to_board import dumps
 from board.public_export import project as public_json, public_build_manifest, publication_policy
 from label.atomic import temporary_path, write_atomic, write_bytes_atomic
+from prepare import tools
 
 HERE_DIR = Path(__file__).resolve().parent
 TITLE = "Data Dashboard"
 
 FFMPEG = sa.FFMPEG
-FFPROBE = (str(Path(FFMPEG).with_name("ffprobe")) if FFMPEG and Path(FFMPEG).with_name("ffprobe").exists()
-           else shutil.which("ffprobe"))
+FFPROBE = tools.ffprobe_or_none()     # the one ffprobe every caller runs (prepare/tools.py)
 # the clips' recipe is board/clips.py's (the build records its name)
 ENC_TAG = bc.ENC_TAG
 # every published video's name carries this tag, the recipe's name when the board's media were first built. A static
@@ -106,8 +105,9 @@ clip_path = sa.clip_path   # the source clip board/serve.py's /api/video serves 
 
 
 def media_key(cam: str) -> str:
-    return cam if cam in ("left", "right") or sa.EXTRA_CAM.fullmatch(cam or "") or sa.DEPTH_CAM.fullmatch(cam or "") \
-        else "exo"
+    """The media key of a camera value: the value itself, since every camera has a clip of its own (clip_path), so
+    no two cameras share a key (the page's mediaKey)."""
+    return cam
 
 
 def shown_cams(d: dict) -> list:
@@ -826,7 +826,7 @@ def cmd_site(a):
     hands_res = None
     if hands is not None:
         # the hand pose files, each re-timed against the web copy the static page plays (the copy keeps the clip's
-        # timestamps, and retime refuses a copy whose frames or size differ); an episode whose web copy is not made
+        # timestamps, and board/hands.py for_copy refuses a copy whose frames or size differ); an episode whose web copy is not made
         # yet gets none until the next build
         (stage / "data/hands").mkdir()
         todo = [(e, a.out / "media" / e["media"]["exo"]["rel"]) for e in eps
@@ -838,7 +838,7 @@ def cmd_site(a):
             if not mp4.exists():
                 return f, "no web copy of the clip yet"
             try:
-                doc = hands_overlay.retime(json.loads((hands / f).read_text()), mp4)
+                doc = hands_overlay.for_copy(json.loads((hands / f).read_text()), mp4)
             except (ValueError, RuntimeError) as err:
                 return f, str(err)[:200]
             (stage / "data/hands" / site_file(f)).write_text(dumps(public_json(doc), separators=(",", ":")))
@@ -981,7 +981,10 @@ def main():
         ap.error('No board qa directory exists. A free review stops before board generation; use a built board with labels.')
     a.out = a.out or a.board / "static"
     if not FFMPEG or not FFPROBE:
-        sys.exit("ffmpeg/ffprobe not found")
+        try:
+            tools.ffmpeg(), tools.ffprobe()
+        except tools.Missing as e:
+            sys.exit(e.strerror)
     from board.public_export import publish_uploader_values
     publish_uploader_values(getattr(a, "publish_uploader_values", False))
     return {"measure": cmd_measure, "media": cmd_media, "site": cmd_site, "status": cmd_status}[a.cmd](a) or 0

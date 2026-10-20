@@ -15,7 +15,8 @@ from pathlib import Path, PureWindowsPath
 
 import numpy as np
 
-from label.errors import DispatchError, KeyExhausted
+from label.errors import DispatchError
+from label.policy import output_limit
 
 SCHEMA = 1
 CHUNK_VALUES = 65_536
@@ -23,6 +24,8 @@ REQUEST_BYTES = 512_000
 RESPONSE_BYTES = 256_000
 MODEL = "openai/gpt-6-sol"
 REASONING = "low"
+# The interpretation's answer is at least MAX_TOKENS and at most MAX_OUTPUT_TOKENS; the
+# output limit adds reasoning room at REASONING (request_plan).
 MAX_TOKENS = 8_000
 MAX_OUTPUT_TOKENS = 32_000
 SUMMARY_KEYS = ("minimum", "maximum", "mean", "standard_deviation", "finite_fraction")
@@ -293,7 +296,7 @@ def inventory(episodes: list[Path]) -> dict:
                 for key in sorted(set(members) - keys):
                     numeric(ep, {"name": key}, "bookkeeping", file + "/" + key, file, key)
             except (OSError, zipfile.BadZipFile):
-                pass
+                pass        # the arrays the context names are inventoried above; this only adds unnamed members
         try:
             camera_sources = json.loads((ep / "sources.json").read_text())
             if not isinstance(camera_sources, dict):
@@ -399,7 +402,7 @@ def request_plan(inventory: dict) -> dict:
     content, supplied, deferred = _request(inventory)
     return {'inventory_digest': inventory['digest'], 'content': content, 'field_ids': supplied,
             'deferred_fields': deferred,
-            'max_tokens': max(MAX_TOKENS, min(MAX_OUTPUT_TOKENS, 1000 + 160 * len(supplied)))}
+            'max_tokens': output_limit(max(MAX_TOKENS, min(MAX_OUTPUT_TOKENS, 1000 + 160 * len(supplied))), REASONING)}
 
 
 def _layout(layout, field):
@@ -438,7 +441,7 @@ def _parse(record):
         raise ValueError(f"dictionary response exceeds {RESPONSE_BYTES} bytes")
     try:
         answer = json.loads(raw)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as error:
         prefix = re.match(r'\s*\{\s*"entries"\s*:\s*\[', raw)
         if record.get('finish_reason') != 'length' or not prefix:
             raise
@@ -457,7 +460,7 @@ def _parse(record):
                 break
             position += 1
         if not entries:
-            raise ValueError('dictionary truncated before any complete entry')
+            raise ValueError('dictionary truncated before any complete entry') from error
         answer = {'entries': entries}
         record['response_truncated'] = True
         record['limitations'].append('Dictionary reply was truncated. Only complete entries were recovered; automatic retry is disabled.')
@@ -673,7 +676,7 @@ def prepare_upload(job: Path, episodes: list[Path], api_key, call_model, *, dry_
         result['finish_reason'] = response['choices'][0].get('finish_reason')
         _parse(result)
         result["status"] = "partial" if result.get('response_truncated') or deferred else "success"
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - recorded as failed, with why, in limitations
         result["status"] = "failed"
         result["entries"] = {}
         if not result["attempted"]:

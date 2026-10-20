@@ -75,7 +75,7 @@ from pathlib import Path
 
 import numpy as np
 
-from board.hands import vlq_append, vlq_decode
+from board.hands import vlq_append
 from board.to_board import dumps
 from label.atomic import write_atomic
 
@@ -138,16 +138,6 @@ def quantize(a: np.ndarray, bits: int = 16, per_value: bool = True) -> dict:
     return {"lo": float(lo[0]), "step": float(step[0]), "data": data}
 
 
-def dequantize(block: dict, rows: int, bits: int = 16) -> np.ndarray:
-    """The page's decoder, in Python: rows x values floats, NaN for no reading."""
-    raw = np.frombuffer(base64.b64decode(block["data"]), dtype="<u2" if bits == 16 else "u1").astype(np.float64)
-    q = raw.reshape(rows, -1)
-    lo, step = np.asarray(block["lo"], dtype=np.float64), np.asarray(block["step"], dtype=np.float64)
-    v = lo + q * step
-    v[q == (NONE16 if bits == 16 else NONE8)] = np.nan
-    return v
-
-
 def encode_times(t_s: np.ndarray) -> dict:
     ms = np.round(np.asarray(t_s, dtype=np.float64) * 1000).astype(np.int64)
     gaps = np.diff(ms)
@@ -158,31 +148,20 @@ def encode_times(t_s: np.ndarray) -> dict:
     return {"ms0": int(ms[0]) if len(ms) else 0, "dur": dur, "d": "".join(out)}
 
 
-def decode_times(block: dict) -> np.ndarray:
-    p = block["ms0"]
-    out = [p]
-    for g in vlq_decode(block["d"]):
-        p += block["dur"] + g
-        out.append(p)
-    return np.asarray(out, dtype=np.float64) / 1000.0
-
-
 # ---------------------------------------------------------------- one episode
 
-def clip_times(ep_dir: Path, ctx: dict, n: int) -> np.ndarray:
-    """Seconds on the board clip's clock for each anchor frame: the anchor camera's real capture times (times.npz)
-    minus the explicit clock origin when present, as the request and clips use, else frame / fps."""
-    from label.episode import order_views
-    tp = ep_dir / "times.npz"
+def strip_times(ep_dir: Path, ctx: dict, n: int) -> np.ndarray:
+    """Seconds on the board clip's clock for each of n anchor frames: the main camera's times as its clip plays them
+    (board/clips.py clip_times, which reads context.json real_times and the clock origin), else frame / fps, as its
+    clip plays a camera without capture times."""
+    from board.clips import clip_times, main_cam
     src_p = ep_dir / "sources.json"
-    if tp.exists() and src_p.exists():
-        views = order_views(json.loads(src_p.read_text()))
-        from prepare.camera_clock import load_times
-        z = load_times(ep_dir, ctx)
-        if views and views[0] in z and len(z[views[0]]) >= n > 0:
-            t = np.asarray(z[views[0]][:n], dtype=np.float64)
-            return t - float(ctx.get("clock_zero_s") or 0.0)
     fps = float(ctx.get("fps") or 30.0)
+    if src_p.exists() and n > 0:
+        sources = json.loads(src_p.read_text())
+        t = clip_times(ep_dir, sources, fps, ctx).get(main_cam(sources)) if sources else None
+        if t is not None and len(t) >= n:
+            return np.asarray(t[:n], dtype=np.float64)
     return np.arange(n, dtype=np.float64) / fps
 
 
@@ -359,7 +338,7 @@ def signal_doc(meta: dict, a: np.ndarray, t: np.ndarray, stride: int, in_contact
     return doc
 
 
-def depth_doc(entry: dict, ctx_depth: dict) -> dict:
+def depth_doc(entry: dict) -> dict:
     """One camera's depth: its units and the colour bar of its pictures (label/depth.py)."""
     from label import depth as dp
     out = {"units": "metres" if dp.metric_scale(entry) else "relative",
@@ -417,7 +396,7 @@ def episode_doc(ep_dir: Path) -> dict | None:
         src = json.loads(source_p.read_text()) if source_p.exists() else {}
         anchor = order_views(src)
         n = int(src[anchor[0]]["n_frames"] if anchor else ctx.get("n_state_frames") or 0)
-        t = clip_times(ep_dir, ctx, n)
+        t = strip_times(ep_dir, ctx, n)
         n = min(n, len(t))
         t = t[:n]
         dt = float(np.median(np.diff(t))) if n > 1 else 1.0 / RATE_HZ
@@ -447,11 +426,10 @@ def episode_doc(ep_dir: Path) -> dict | None:
         from label import depth as dp
         entries = dp.load(ep_dir)
         src = json.loads((ep_dir / "sources.json").read_text()) if (ep_dir / "sources.json").exists() else {}
-        cd = ctx.get("depth") or {}
         doc["depth"] = {}
         for view, entry in entries.items():
             unpaired = view not in src or entry.get('paired_camera', view) is None
-            detail = depth_doc(entry, cd.get(view) or {})
+            detail = depth_doc(entry)
             detail['paired_camera'] = None if unpaired else entry.get('paired_camera', view)
             if unpaired:
                 from board.clips import DEPTH_SOURCE_FPS

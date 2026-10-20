@@ -1,7 +1,8 @@
 """Label a long recording in pieces and stitch the labels back into one timeline.
 
-A recording longer than PIECE_MAX_S is one episode on the board, with one clip and one timeline, but the model
-labels it in parts: the recording is cut at frame boundaries within the request limit, preferring the least motion near each evenly
+A recording longer than its part limit (piece_max: the part_max_s that label/policy.py resolve gives, 450s at a
+rig's default sampling and at most 330s at denser sampling) is one episode on the board, with one clip and one
+timeline, but the model labels it in parts: the recording is cut at frame boundaries within the request limit, preferring the least motion near each evenly
 spaced target (from recorded state when available and anchor-camera image change otherwise), each
 part is labelled as its own request, and the parts' labels are shifted back onto the recording's clock and
 joined. Nothing about the recording's episode boundaries is invented: an unsplit recording stays one episode,
@@ -16,8 +17,8 @@ the whole recording, so a part is shown it as context, not as its goal.
     python -m label.pieces plan EP_DIR            # print the cuts
 
 The path for your own data (python -m review) cuts every episode that needs it, labels the parts and stitches
-them, and Data Review runs the same functions on uploads. No episode on the published board is longer than
-PIECE_MAX_S, so none of them is cut.
+them, and Data Review runs the same functions on uploads. No episode on the published board is longer than 450s,
+so none of them is cut.
 """
 from __future__ import annotations
 
@@ -35,8 +36,8 @@ import numpy as np
 from label.atomic import write_atomic
 from label import policy
 
-# the longest recording the published board labels in one request is 443 s (OpenAoE); a recording longer than
-# this is labelled in parts, so an upload is never sent to the model in a longer request than the board's
+# Not read here: the part limit is piece_max (policy part_max_s). Kept because Data Review's vendor check
+# (upload/vendor_repo.py NEEDS in the Data repo) requires this name in this file.
 PIECE_MAX_S = {"teleop_arms": 450.0, "handheld_gripper": 450.0, "ego_head": 450.0}
 SEARCH = 0.3                # a cut is sought within +-30% of a part's length around its target
 SMOOTH_S = 2.0              # motion is averaged over 2 s so a cut lands in a still stretch, not a still frame
@@ -426,8 +427,9 @@ def _write_or_reuse(d: Path, proot: Path, *, refresh_unpaid_interpretation=False
     if names:
         try:
             saved = json.loads(proof_path.read_text())
-        except (OSError, ValueError):
-            raise RuntimeError(f"{d.name}: existing pieces have no verifiable source proof; use an explicit fresh job")
+        except (OSError, ValueError) as error:
+            raise RuntimeError(f"{d.name}: existing pieces have no verifiable source proof; use an explicit fresh job") \
+                from error
         if not same_source_proof(saved, ctx, d):
             from label.harness import billing_record, has_dispatch_receipt
             from label.evidence_access import equivalent_source_proof
@@ -919,6 +921,65 @@ def _last_task(task):
     return (task.get("joined_from") or [task])[-1]
 
 
+def join_scene_objects(objects: list, tasks: list) -> list:
+    """The recording's scene objects from its parts' [(part number, part object)], each part object carrying its own
+    source_piece. Parts are labelled by separate requests, so a name proves nothing across them: two parts' "cup" can be
+    two cups, and one cup can be named differently in each. Objects are joined only where the parts show they are one:
+    a task joined across a cut (join_across_cuts, which already requires its halves to share an object) names the
+    object in both halves, the name in each half answers to exactly one name in the other, and in each half's part
+    exactly one listed object answers to that name. A join never holds two objects of one part: part 1's red cup and
+    blue cup are two objects, so part 2's cup cannot join both of them into one. That holds because an object joins at
+    most one object of the next part and one of the part before (two pairings of one object contradict each other and
+    neither joins), so a joined object is a chain of one record per part. A joined object keeps its first part's
+    record, with every later part's own record under "continues"; every other object stays its own entry."""
+    parent = list(range(len(objects)))
+
+    def root(k):
+        while parent[k] != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
+
+    def join(x, y):
+        parent[root(y)] = root(x)
+
+    def listed(part, name_tokens):
+        hits = [k for k, (n, obj) in enumerate(objects) if n == part
+                and any(a <= name_tokens or name_tokens <= a for a in _object_tokens([obj]))]
+        return hits[0] if len(hits) == 1 else None
+
+    pairs = set()
+    for task in tasks:
+        halves = task.get("joined_from") or []
+        for left, right in zip(halves, halves[1:]):
+            a_part, b_part = (left.get("source_piece") or {}).get("index"), (right.get("source_piece") or {}).get("index")
+            if not isinstance(a_part, int) or b_part != a_part + 1:
+                continue
+            # each half's distinct names: a half naming one object twice (cup and the cup, cups and cup) names it once
+            names_a, names_b = (list(dict.fromkeys(_object_tokens(h.get("objects")))) for h in (left, right))
+            fits = lambda a, b: a <= b or b <= a
+            for a in names_a:
+                for b in names_b:
+                    if fits(a, b) and sum(fits(a, o) for o in names_b) == 1 and sum(fits(o, b) for o in names_a) == 1:
+                        x, y = listed(a_part, a), listed(b_part, b)
+                        if x is not None and y is not None:
+                            pairs.add((x, y))
+    # two tasks that pair one object with two different objects of the next part contradict each other: neither joins.
+    # This alone keeps each joined object to one record per part (the docstring), in whatever order the tasks come.
+    for x, y in sorted(pairs):
+        if sum(p[0] == x for p in pairs) == 1 and sum(p[1] == y for p in pairs) == 1:
+            join(x, y)
+    out, entry = [], {}
+    for k, (_, obj) in enumerate(objects):
+        r = root(k)
+        if r not in entry:
+            entry[r] = copy.deepcopy(obj)
+            out.append(entry[r])
+        else:
+            entry[r].setdefault("continues", []).append(copy.deepcopy(obj))
+    return out
+
+
 def join_across_cuts(tasks: list, cuts_s: list[float]) -> list:
     """Join unambiguous adjacent-part continuations, keeping every source judgment and its outcome evidence."""
     from label.episode import number
@@ -1125,7 +1186,7 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
          "scene_graph": [], "recovery": [], "instruction_variants": [], "data_issues": [], "operator_mistakes": [],
          "tasks": [], "part_assessments": [], "progress_scope": "request_parts"}
     contacts_model, contacts_missing, views, strip_part = {}, [], {"shown": [], "strips": {}}, {}
-    excluded, summaries, reviews, seen_obj = [], [], [], set()
+    excluded, summaries, reviews, scene_objects = [], [], [], []
     usage = {"prompt_tokens": 0, "completion_tokens": 0, "reasoning_tokens": 0, "est_cost_usd": 0.0,
              "cached_tokens": 0, "cache_write_tokens": 0, "latency_s": 0.0}
     still, part_info, dropped, outside = [], [], [], []
@@ -1149,11 +1210,8 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
         off = outside_part(lab, t0, t1)
         if off:
             outside.append({"part": i, "t0_s": t0, "t1_s": t1, **off})
-        for o in (lab.get("scene") or {}).get("objects") or []:
-            key = str(o.get("name", "")).strip().lower()
-            if key and key not in seen_obj:
-                seen_obj.add(key)
-                L["scene"]["objects"].append(o)
+        scene_objects += [(i, {**o, "source_piece": dict(owner)})
+                          for o in (lab.get("scene") or {}).get("objects") or [] if isinstance(o, dict)]
         L["scene"]["setting"] = L["scene"]["setting"] or (lab.get("scene") or {}).get("setting") or ""
         for k in ("timeline", "key_events", "state_changes", "scene_graph", "recovery"):
             L[k] += lab.get(k) or []
@@ -1233,6 +1291,7 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
     for k in ("timeline",):
         L[k].sort(key=lambda s: (s.get("start_s") is None, s.get("start_s") or 0))      # an untimed step last
     L["tasks"] = mark_cut_tasks(join_across_cuts(L["tasks"], cuts_s), cuts_s, L)
+    L["scene"]["objects"] = join_scene_objects(scene_objects, L["tasks"])
     events = []
     for event in L["key_events"]:
         if is_cut_key_event(event, cuts_s):

@@ -455,6 +455,13 @@ def _built_board(tmp: Path) -> Path:
     return board
 
 
+def test_a_built_board_scores_every_episode_in_its_record(tmp_path):
+    from board import scores
+    board = _built_board(tmp_path)
+    eps = sorted((board / "qa").glob("episode_*.json"))
+    assert eps and all(json.loads(p.read_text())["scores"]["version"] == scores.VERSION for p in eps)
+
+
 def test_comparison_lists_and_keypoint_downloads_are_served(tmp_path, monkeypatch):
     board = _built_board(tmp_path)
     httpd, url = _serve(monkeypatch, board, tmp_path / "clips")
@@ -606,6 +613,37 @@ def test_an_extra_cameras_download_is_named_after_that_camera(tmp_path, monkeypa
         httpd.server_close()
     assert (b_main, b_x) == (b"main", b"extra")
     assert h_main["Content-Disposition"] != h_x["Content-Disposition"], h_x["Content-Disposition"]
+
+
+def test_a_camera_of_any_name_is_served_from_where_board_clips_wrote_it(tmp_path, monkeypatch):
+    """board/clips.py wrote every camera but exo, left and right into a folder of its own, while board/serve.py looked
+    in a folder only for extraN, unshownN and depth_*, and served the main camera's clip for any other name. A camera
+    named anything else (top_down here) was written to one place and the page played the main camera in its place."""
+    from board import clips as bc
+    board = _board(tmp_path)
+    clips = tmp_path / "clips"
+    for cam, body in (("exo", b"main camera"), ("top_down", b"top-down camera")):
+        p = bc.clip_path(clips, "episode_000001", cam)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(body)
+    depth = bc.depth_clip(clips, "episode_000001", "top_down")
+    depth.parent.mkdir(parents=True)
+    depth.write_bytes(b"top-down depth")
+    httpd, url = _serve(monkeypatch, board, clips)
+    try:
+        _, _, main = _get(url + "/api/video?id=episode_000001&cam=exo")
+        code, _, top = _get(url + "/api/video?id=episode_000001&cam=top_down")
+        _, saved, _ = _get(url + "/api/video?id=episode_000001&cam=top_down&download=1")
+        _, _, top_depth = _get(url + "/api/video?id=episode_000001&cam=depth_top_down")
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+    assert (main, code, top, top_depth) == (b"main camera", 200, b"top-down camera", b"top-down depth")
+    assert "episode_000001_top_down.mp4" in saved["Content-Disposition"]
+    assert serve.depth_clips(clips, "episode_000001") == {"top_down": depth}
+    # the static build copies the same clip and keeps it apart from the main camera's
+    assert static.clip_path(clips, "episode_000001", "top_down") == bc.clip_path(clips, "episode_000001", "top_down")
+    assert static.media_key("top_down") != static.media_key("exo")
 
 
 def test_a_static_build_made_before_its_frames_gets_a_new_id_once_they_exist(tmp_path):

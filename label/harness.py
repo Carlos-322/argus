@@ -64,13 +64,11 @@ from label.route import route_width
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 DEFAULT_MODEL = "openai/gpt-6-astra"
-DEFAULT_REASONING = "medium"
 DETAIL = "high"
 GRID_COLS = 4
 
-# gpt-6-astra list prices (USD per token), used only when a response carries no billed cost.
+# gpt-6-astra's input list price (USD per token); gate/score.py prices prompt cache reads and writes from it
 PRICE_IN = 1.0e-5
-PRICE_OUT = 5.0e-5
 # OpenAI list prices (USD per token: input, cached input, output), and from LONG_PROMPT_TOKENS prompt tokens the
 # long-context ones, for a call sent straight to OpenAI, whose response carries tokens but no cost
 OPENAI_PRICES = {"gpt-6-astra": ((1.0e-5, 1.0e-6, 5.0e-5), (2.0e-5, 2.0e-6, 7.5e-5)),
@@ -266,8 +264,8 @@ def _post(url: str, body: dict, api_key: str, timeout: int, *, attempts: int = 6
                 # billed; after one, it is just a failure whose cost is unknown
                 if clean and (e.code in (401, 402) or (url == OPENAI_URL and e.code == 429
                                                          and quota == 'insufficient_quota')):
-                    raise KeyExhausted(last, http_status=e.code, first_attempt=True, rejection_code=quota)
-                raise DispatchError(last, http_status=e.code, verified_unpaid=clean, stage='rejected')
+                    raise KeyExhausted(last, http_status=e.code, first_attempt=True, rejection_code=quota) from e
+                raise DispatchError(last, http_status=e.code, verified_unpaid=clean, stage='rejected') from e
             if e.code in UNKNOWN_OUTCOME_STATUS:
                 clean = False
                 unknown_left -= 1
@@ -275,14 +273,14 @@ def _post(url: str, body: dict, api_key: str, timeout: int, *, attempts: int = 6
                     time.sleep(_retry_after(None, tries - 1))
                     continue
                 raise DispatchError(f"model call failed after {tries} HTTP attempts: {last}", http_status=e.code,
-                                    stage='unknown')
+                                    stage='unknown') from e
             if e.code in TRANSIENT_STATUS:
                 unpaid_left -= 1
                 if unpaid_left > 0:
                     time.sleep(_retry_after(e.headers, tries - 1))
                     continue
             raise DispatchError(f"model call failed after {tries} HTTP attempts: {last}", http_status=e.code,
-                                verified_unpaid=clean, stage='rejected')
+                                verified_unpaid=clean, stage='rejected') from e
         except urllib.error.URLError as e:
             last = f"request not sent: {e.reason}"
             unpaid_left -= 1
@@ -828,7 +826,7 @@ def parse_response(text: str) -> tuple[dict, bool]:
         if not substantive_annotation(labels):
             raise ValueError('the reply contains no substantive annotation content')
         return labels, True
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - any reply that does not parse is kept raw, with why
         return {"_raw": text, "_parse_error": f"{type(e).__name__}: {e}"[:300]}, False
 
 
@@ -1209,7 +1207,7 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
         fields['evidence_inspection'] = evidence_access.record()
         if not dry_run:
             def select(parts):
-                response = call_model_once(parts, model, reasoning, api_key, ea.MAX_SELECTION_TOKENS, min(timeout, 120),
+                response = call_model_once(parts, model, reasoning, api_key, ea.selection_tokens(reasoning), min(timeout, 120),
                     **({'pricing_quote': pricing_quote} if pricing_quote is not None else {}))
                 usage = response.get('usage') or {}
                 cost, _ = _verified_final_cost(usage, model)
@@ -1218,7 +1216,7 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
                 return response
             # Reserve the maximum output and a conservative input allowance before each selection dispatch.
             def reserve(parts):
-                return final_cost_bound(parts, ea.MAX_SELECTION_TOKENS, model=model,
+                return final_cost_bound(parts, ea.selection_tokens(reasoning), model=model,
                                         require_known_pricing=require_known_pricing,
                                         **({'pricing_quote': pricing_quote} if pricing_quote is not None else {}))
             cache = Path(out_path).parent / '.evidence' / (Path(out_path).name + '.inspection.json')
@@ -1528,23 +1526,14 @@ def _video_cards(result, out_path, *, model, reasoning, api_key, timeout, pricin
     try:
         receipt = sensor_analysis_run.execute(
             request, inspection, cache, key='sensor_cards', model=model,
-            call=lambda parts: call_model_once(parts, model, reasoning, api_key, sensor_cards.MAX_TOKENS, timeout, **quote),
-            reserve_cost=lambda parts: final_cost_bound(parts, sensor_cards.MAX_TOKENS, model=model,
+            call=lambda parts: call_model_once(parts, model, reasoning, api_key, request['config']['max_tokens'], timeout,
+                                               **quote),
+            reserve_cost=lambda parts: final_cost_bound(parts, request['config']['max_tokens'], model=model,
                                                         require_known_pricing=require_known_pricing, **quote),
             reserve_dispatch=reserve_selection, settle_dispatch=settle_selection, verify_inputs=verify_inputs)
         sensor_cards.apply(evidence, receipt['request'], receipt)
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - the cards are optional; named in the evidence's limitations
         evidence.setdefault('limitations', []).append(f'Video cards were not written: {error}')
-
-
-def _cost(usage: dict) -> float:
-    """The billed cost of a call, or the list-price estimate when the response carries none (list_cost on a call
-    straight to OpenAI)."""
-    if usage.get("cost") is not None:
-        return float(usage["cost"])
-    if usage.get("list_cost") is not None:
-        return float(usage["list_cost"])
-    return usage.get("prompt_tokens", 0) * PRICE_IN + usage.get("completion_tokens", 0) * PRICE_OUT
 
 
 def _served(resp: dict) -> dict:
@@ -1969,7 +1958,7 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                 return ("fail", ep, str(e))
             except SpendCap as e:
                 return ("skip", ep, str(e))
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - one episode's failure is returned with why, the batch goes on
                 failure = out_for(ep).with_name(f"noreply_{out_for(ep).name}")
                 if failure.exists() and not reserved[0]:
                     with spend_lock:

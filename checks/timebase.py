@@ -52,6 +52,7 @@ from pathlib import Path
 
 import numpy as np
 
+from checks.results import stored_number
 from label.atomic import write_atomic
 from prepare.signal_alignment import recorder_arrival, RECORDER_ARRIVAL_LIMITATION
 
@@ -82,18 +83,10 @@ def rule_text(fps: float = 30.0) -> str:
             f"{SPEDUP_NEIGHBOURS} episodes either side <= {n:g} frames")
 
 
-def _num(v) -> float | None:
-    try:
-        v = float(v)
-    except (TypeError, ValueError):
-        return None
-    return None if v != v else v
-
-
 def is_sped_up(lag, skipped_frac, repeated_frac, neighbour_lag, fps: float = 30.0) -> bool:
     """The sped-up rule, the lags in frames at fps. False when any input is missing: no neighbour lag means the
     episode was not scanned with its neighbours (`scan`, then `apply`), and an unscanned episode is never flagged."""
-    lag, sk, rp, nb = (_num(v) for v in (lag, skipped_frac, repeated_frac, neighbour_lag))
+    lag, sk, rp, nb = (stored_number(v) for v in (lag, skipped_frac, repeated_frac, neighbour_lag))
     if None in (lag, sk, rp, nb):
         return False
     if fps == 30:
@@ -129,7 +122,7 @@ def follower_lag_frames(state: np.ndarray, action: np.ndarray, fps: float = 30.0
     would otherwise add a peak at that period."""
     s = np.asarray(state, dtype=np.float64)
     a = np.asarray(action, dtype=np.float64)
-    fps = _num(fps)
+    fps = stored_number(fps)
     if fps is None or not fps > 0:
         return None
     max_lag = max(2, int(np.ceil(max_lag_s * fps)))
@@ -193,7 +186,7 @@ def sample_jitter(state: np.ndarray, fps: float = 30.0) -> dict:
     """Recorder timing faults in the state stream, during motion: single steps ~2x both neighbours
     (a skipped sample stamped as one 1/30 s step) and near-zero steps between moving neighbours (a
     repeated sample). Fractions of moving frames."""
-    fps = _num(fps)
+    fps = stored_number(fps)
     r = _step_ratios(state, fps) if fps and fps > 0 else None
     if r is None:
         return {"skipped_frac": None, "repeated_frac": None}
@@ -223,7 +216,7 @@ def timebase_check(state: np.ndarray, action: np.ndarray, neighbour_lag: float |
     (via context.json, written by `apply`); without it the episode is measured but not flagged."""
     lag = follower_lag_frames(state, action, fps)
     j = sample_jitter(state, fps)
-    result = {"follower_lag_frames": lag, **j, "neighbour_lag_frames": _num(neighbour_lag),
+    result = {"follower_lag_frames": lag, **j, "neighbour_lag_frames": stored_number(neighbour_lag),
             "sped_up_recording": is_sped_up(lag, j["skipped_frac"], j["repeated_frac"], neighbour_lag, fps),
             "rule": rule_text(fps)}
     return arrival_order_only(result) if recorder_arrival(context or {}) else result
@@ -263,7 +256,7 @@ def cmd_scan(args) -> int:
         for i, fu in enumerate(as_completed(futs), 1):
             try:
                 rows += fu.result()
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - a file that fails is printed and left out of the CSV, so a rerun scans it again
                 print(f"FAIL {futs[fu]}: {e}", file=sys.stderr, flush=True)
             if i % 25 == 0 or i == len(todo):
                 pd.DataFrame(rows).to_csv(args.out, index=False)
@@ -321,7 +314,7 @@ def measure_folder(eps: Path) -> int:
         z = np.load(d / "state.npz")
         if "action" not in z.files or z["state"].shape[1] != 14:
             continue
-        lag = follower_lag_frames(z["state"], z["action"], _num(ctx.get("fps")) or 30.0)
+        lag = follower_lag_frames(z["state"], z["action"], stored_number(ctx.get("fps")) or 30.0)
         # the generic LeRobot reader keeps the episode's index at the top of its context, a dataset's own adapter
         # (Galaxea, HABIT) in its source; either is the same number from the dataset's metadata
         src = ctx.get("source") or {}
@@ -373,7 +366,7 @@ def cmd_apply(args) -> int:
                 ctx.pop('timebase_neighbour_lag_frames', None)
                 ctx['timebase_neighbours_in_upload'] = 0
             else:
-                ctx["timebase_neighbour_lag_frames"] = _num(tb.loc[e, "neighbour_lag_frames"])
+                ctx["timebase_neighbour_lag_frames"] = stored_number(tb.loc[e, "neighbour_lag_frames"])
             write_atomic(d / "context.json", ctx)
             n_ctx += 1
     for p in sorted(args.labels.glob("episode_*.json")) if args.labels else []:
@@ -397,7 +390,7 @@ def cmd_apply(args) -> int:
             n_lab += 1
             continue
         e = int(ep_dir.name.split("_")[1])
-        nb = _num(tb.loc[e, "neighbour_lag_frames"])
+        nb = stored_number(tb.loc[e, "neighbour_lag_frames"])
         flag = is_sped_up(t.get("follower_lag_frames"), t.get("skipped_frac"), t.get("repeated_frac"), nb)
         if flag != bool(tb.loc[e, "sped_up_recording"]):
             raise SystemExit(f"{p.name}: label measurements disagree with the scan "

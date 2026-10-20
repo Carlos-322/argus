@@ -1,5 +1,4 @@
 """Offline writer, retry, and invoice boundaries for execution resumes."""
-import copy
 import json
 import multiprocessing as mp
 import sys

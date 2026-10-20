@@ -56,7 +56,7 @@ def run(items: list, prepare_one: Callable[[object], str], jobs: int) -> int:
         for i, f in enumerate(as_completed(futs), 1):
             try:
                 counts[f.result()] += 1
-            except Exception as e:  # an episode that cannot be read is a finding about the data: listed, not hidden
+            except Exception as e:  # noqa: BLE001 - an episode that cannot be read is counted as failed and printed, not hidden
                 counts["failed"] += 1
                 print(f"FAILED {futs[f]}: {type(e).__name__}: {e}"[:400], file=sys.stderr, flush=True)
             if i % 25 == 0 or i == len(futs):

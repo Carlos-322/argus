@@ -32,7 +32,6 @@ from prepare import cli
 from prepare import hub
 from prepare import formats
 
-UPLOAD = None
 
 REPO = "configinc/HABIT"
 META_FILES = ("info.json", "episodes.jsonl", "tasks.jsonl", "subtasks.jsonl", "human_subtasks.jsonl")
@@ -45,7 +44,7 @@ ROLE_NOTE = ("In every HABIT episode a person shares the workspace with the robo
              "actions within their part are the task itself, not a data issue.")
 
 
-# the columns only HABIT ships, by which an uploaded copy of it is recognized
+# the columns only HABIT ships; Data Review's upload page keeps its own copy, checked against this one
 HABIT_COLUMNS = ("is_error_segment", "is_intervention_segment", "human_role_subtask_index")
 
 
@@ -117,17 +116,6 @@ def prepare_one(eidx: int, rows: dict, root: Path, raw: Path, out: Path, force: 
     it = next(i for i in plan if i["kind"] == "lerobot" and i["row"]["eidx"] == eidx)
     write_episode(it, rows[eidx], root, out, REPO)
     return "ok"
-
-
-def recognizes(r: dict) -> bool:
-    """A LeRobot dataset (prepare/formats.py read_root) with HABIT's own columns."""
-    return all(k in (r.get("features") or {}) for k in HABIT_COLUMNS)
-
-
-def convert_upload(item: dict, rig: str, out: Path, dataset: str) -> dict:
-    root = Path(item["root"]["dir"])
-    rows = {int(x["episode_index"]): x for x in formats.read_jsonl(root / "meta" / "episodes.jsonl")}
-    return write_episode(item, rows.get(int(item["row"]["eidx"]), {}), root, out, dataset)
 
 
 # the publisher's own per-frame labels: kept in context["publisher_labels"], never shown to the model as signals

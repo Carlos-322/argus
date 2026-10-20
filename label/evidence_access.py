@@ -29,7 +29,8 @@ MAX_VALUES = 32768
 MAX_REQUESTS = 6
 MAX_IMAGES = 4
 MAX_RESPONSE_BYTES = 48000
-MAX_SELECTION_TOKENS = 2000
+# The selection's JSON answer; its output limit adds reasoning room (selection_tokens).
+SELECTION_ANSWER_TOKENS = 2000
 MAX_SELECTION_COST = 1.0
 MAX_SCAN_BYTES = 256 * 1024 * 1024
 SOURCE_HASH_LIMIT = 16 * 1024 * 1024
@@ -1636,9 +1637,6 @@ Measurements can add useful scale to a change already visible in RGB. A task-rel
 ''')
 
 
-FINAL = final_prompt()
-
-
 def merge(parts, ep_dir=None):
     """Keep each part's exact inspection receipt with an explicit origin, without rewriting source clocks."""
     rows = []
@@ -1720,6 +1718,12 @@ def recover_selection_reservations(doc):
             doc['limitations'].append(note)
         changed = True
     return changed
+
+
+def selection_tokens(reasoning: str) -> int:
+    """The output limit of one selection round, which runs at the episode's reasoning effort."""
+    from label.policy import output_limit
+    return output_limit(SELECTION_ANSWER_TOKENS, reasoning)
 
 
 class InvalidSelection(ValueError):
@@ -1887,7 +1891,6 @@ def discover(access, base_content, call, cache_path, *, rounds=2, reserve_cost=0
         doc['status'] = 'complete'
     count = 0
     skipped = {}
-    inventory = access.inventory()
     # Large inventories remain accessible through metadata inspection; do not silently drop their descriptors.
     for index in range(min(rounds, 2)):
         content = access.selection_content(base_content) + [{'type': 'text', 'text': SELECTION + '\nFIELD INVENTORY\n' + packed(access.page())}] + extra

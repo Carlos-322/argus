@@ -212,7 +212,7 @@ def prepare(job: Path, eps: Path, ids: list[str], *, free: bool, cap: float,
                         errors.append({'episode': path.name, 'error': type(error).__name__})
                 if errors:
                     result = dict(result, context_errors=errors)
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - recorded as failed, with why, in limitations
         result = {'status': 'failed', 'cost_usd': None if (job / 'dictionary.claim').exists() else 0.0,
                   'limitations': [f'dictionary unavailable ({type(error).__name__}); recorded fields remain usable']}
     if prior_error:

@@ -109,6 +109,7 @@ from pathlib import Path
 from board.to_board import (and_list, convert, dumps, field_words, label_failed, label_outputs, off_schema_text,
                             typed)
 from checks import label_consistency
+from board import scores
 from label.atomic import write_atomic
 
 SEVERITIES = ["low", "medium", "high"]
@@ -1115,6 +1116,20 @@ def guarded_episode_file(entry: dict, manifest: dict, fname: str, name: str, r: 
     return episode_file(entry, manifest, fname, name, not_shown(r, err), info, eps, ctx, unread)
 
 
+def add_scores(qa: Path, files: list[str]) -> None:
+    """Each episode's quality scores (board/scores.py), written into its record. They compare an episode with the
+    board's other demonstrations of the same task, so they are computed once every record is written, holding only
+    the fields they read."""
+    records = {}
+    for f in files:
+        d = json.loads((qa / f).read_text())
+        records[f] = {k: d.get(k) for k in scores.FIELDS}
+    for f, s in scores.score_board(records).items():
+        d = json.loads((qa / f).read_text())
+        d["scores"] = s
+        write_atomic(qa / f, d, indent=None, serializer=dumps)
+
+
 def build(board: Path) -> dict:
     recover_publications(board)
     manifest = json.loads((board / "manifest.json").read_text())
@@ -1123,7 +1138,7 @@ def build(board: Path) -> dict:
     if new.exists():
         remove_tree(new)
     new.mkdir(parents=True)
-    counts, built_entries = {}, []
+    counts, built_entries, written = {}, [], []
     board_src = {}      # board file -> the run output its label came from
     episodes = {}       # board file -> its prepared episode folder
     for entry in manifest.get("datasets", []):
@@ -1142,6 +1157,7 @@ def build(board: Path) -> dict:
                 raise RuntimeError(f"{dest.name} comes from two manifest entries; a board holds one label per "
                                    "episode (file_prefix separates datasets whose episode names repeat)")
             write_atomic(dest, d, indent=None, serializer=dumps)
+            written.append(fname)
             if src is not None:
                 board_src[fname] = src
         counts[entry["dataset"]] = {"run_id": json.loads((run / "run.json").read_text())["run_id"],
@@ -1149,6 +1165,7 @@ def build(board: Path) -> dict:
         # BUILT.json names the run that was used, so the board's inputs stay traceable
         built_entries.append(dict(entry, run=os.path.relpath(run, here)) if run != _path(entry["run"], here)
                              else entry)
+    add_scores(new, written)
     compared = build_comparisons(board, manifest, new, board_src) if manifest.get("comparisons") else None
     hands = build_hands(board, manifest["hands"], new, episodes) if manifest.get("hands") else None
     sensors = build_sensors(board, episodes) if manifest.get("sensors", True) is not False else None

@@ -39,7 +39,6 @@ def test_review_direct_file_retains_owned_metadata_without_reading_neighbor_reco
     import hashlib
     import h5py
     from review import __main__ as rv
-    from prepare import formats
     from label import episode, harness
     from test_formats import _camera_mcap, _clip
 

@@ -168,3 +168,33 @@ def test_missing_samples_do_not_inflate_the_number_of_clipped_display_values():
     expected = int(np.count_nonzero(changes > np.nanpercentile(changes, 99.5)))
     assert expected == 1
     assert array['physical_scale']['clipped_values'] == expected
+
+
+def test_both_tactile_renderers_colour_a_signed_change_the_same_way_and_say_so():
+    # One cell falls below its reference and one rises above it. With and without a
+    # declared layout, the falling cell must be orange and the rising cell blue, and
+    # each caption must state that convention.
+    times = np.arange(60) / 30
+    raw = np.full((60, 4), 1000.)
+    raw[30:, 0], raw[30:, 3] = 600, 1400
+
+    def image_and_caption(semantics):
+        array = ta.comparison(raw, [2, 2], times, [], 8192, semantics=semantics)
+        array['frames'] = [frame for frame in array['frames'] if frame['time_s'] >= 1][:1]
+        parts = ta.render({'id': 'signal:pad', 'array_evidence': array})
+        part = next(part for part in parts if part['type'] == 'image_url')
+        image = Image.open(io.BytesIO(base64.b64decode(part['image_url']['url'].split(',')[1]))).convert('RGB')
+        return image, parts[0]['text'].lower()
+
+    sheet, sheet_caption = image_and_caption(None)
+    # Source-grid sheet: the change grid starts 175 px down, cells are 80 x 52 px.
+    sheet_cells = sheet.getpixel((64, 201)), sheet.getpixel((144, 253))
+    layout = {'version': 1, 'positions': [[0., 0.], [1., 0.], [0., 1.], [1., 1.]],
+              'provenance': {'authority': 'recorded'}}
+    physical, physical_caption = image_and_caption(layout)
+    physical_cells = physical.getpixel((30, 404)), physical.getpixel((290, 664))
+    for lower, higher in (sheet_cells, physical_cells):
+        assert lower[0] > lower[2] + 60
+        assert higher[2] > higher[0] + 60
+    for caption in (sheet_caption, physical_caption):
+        assert 'orange is negative, dark is zero, blue is positive' in caption

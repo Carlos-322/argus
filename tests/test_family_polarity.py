@@ -548,7 +548,7 @@ def test_board_compare_gate_and_checks_agree_on_every_derived_value():
             board_view = top is None or SEVS.index(top) <= SEVS.index(bound)
             assert judge({'max_issue_sev': bound}, labels)[0] == board_view
         assert sorted(d.get('_schema_violations') or []) == sorted(m['violations'])
-        assert sorted(metrics.schema_violations(labels, {})) == sorted(m['violations'])
+        assert sorted(metrics.measure(labels, None, {})['violations']) == sorted(m['violations'])
         assert (sorted(f['rule'] for f in label_consistency.check(labels, 60.0))
                 == sorted(f['rule'] for f in label_consistency.check(d, 60.0)))
         for e in d.get('event_labels') or []:

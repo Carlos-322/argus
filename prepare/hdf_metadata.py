@@ -37,7 +37,7 @@ def attribute_values(obj, keys=None, issues=None):
                            + (f' ({type(error).__name__})' if error is not None else '') + '.'})
     try:
         names = list(obj.attrs.keys())
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - h5py on upload bytes raises many types; recorded by note
         note(f'list of {where}', error)
         return []
     if keys is not None:
@@ -51,7 +51,7 @@ def attribute_values(obj, keys=None, issues=None):
                 note(f'{name} of {where}, {size:,} bytes,')
                 continue
             value = obj.attrs[name]
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - h5py on upload bytes raises many types; recorded by note
             note(f'{name} of {where}', error)
             continue
         held = value.nbytes if isinstance(value, np.ndarray) and value.dtype.kind != 'O' else \
@@ -275,7 +275,6 @@ def check_source(source):
 
 
 def read(source, field, pointer):
-    import h5py
     path = check_source(source)
     tokens = [t.replace('~1', '/').replace('~0', '~') for t in pointer.split('/')[1:]]
     with open_hdf5(path) as f:

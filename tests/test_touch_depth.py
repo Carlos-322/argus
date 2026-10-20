@@ -6,7 +6,6 @@ is labelled exactly as before."""
 from __future__ import annotations
 
 import json
-from fractions import Fraction
 from pathlib import Path
 
 import numpy as np

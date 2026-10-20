@@ -1,6 +1,5 @@
 """Bounded recovery of ZIP member bytes, with checksum damage kept explicit."""
 from contextlib import contextmanager
-import os
 import struct
 import zlib
 

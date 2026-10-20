@@ -242,81 +242,21 @@ def test_an_mcap_task_is_its_task_topic_and_its_steps_are_timed():
     assert mcap_task_text_checks() == 0
 
 
-def test_a_gen_humanego_recording_uses_generic_upload_dispatch():
-    """Recorded cameras and annotations use generic upload reading while published sampling stays available."""
-    from prepare import genhumanego as gh
-    cams = [f"/robot0/sensor/camera{i}/compressed" for i in range(6)]
-    hands = ["/robot0/handtracking/left", "/robot0/handtracking/right"]
-    assert f.mcap_layout(cams + hands + [gh.ANNOTATION_TOPIC]) == "generic"
-    assert f.mcap_layout(cams + hands) == "generic"
-
-
-def test_every_adapter_says_whether_it_reads_uploads():
-    """An adapter added to prepare/ is found by the reader without editing it, and cannot be forgotten: it declares
-    UPLOAD, a kind of upload it reads (with recognizes and convert_upload) or None."""
-    import importlib
-    import pkgutil
-    import prepare
-    for m in pkgutil.iter_modules(prepare.__path__):
-        if m.name in f.NOT_ADAPTERS:
-            continue
-        mod = importlib.import_module(f"prepare.{m.name}")
-        assert hasattr(mod, "UPLOAD"), f"prepare/{m.name}.py declares no UPLOAD"
-        if mod.UPLOAD is not None:
-            assert callable(getattr(mod, "recognizes", None)) and callable(getattr(mod, "convert_upload", None)), m.name
-    names = [m.__name__.rsplit(".", 1)[-1] for m in f.upload_adapters("mcap")]
-    assert names == [], names
-
-
-def test_each_mcap_adapter_recognizes_its_own_layout_and_no_other():
-    from prepare import abc130k, genhumanego, realomin
-    layouts = {"abc130k": [abc130k.TOP_TOPICS[0], *abc130k.VIEW_TOPIC.values(), *abc130k.ARM],
-               "realomin": [*realomin.CAMERA_TOPICS, *realomin.POSE_TOPICS],
-               "genhumanego": [genhumanego.CAMERA_TOPIC, genhumanego.ANNOTATION_TOPIC]}
-    for name, topics in layouts.items():
-        assert f.mcap_layout(topics) == "generic", name
-    assert f.mcap_layout(["/camera/color/0/image", "/task", "/task/subtask"]) == "generic"
-
-
-def test_a_lerobot_upload_goes_to_the_adapter_of_its_dataset():
-    """Retired dataset layouts and other LeRobot datasets use the generic reader."""
-    habit = ["action", "episode_index", "frame_index", "human_role_subtask_index", "is_error_segment",
-             "is_high_jerk_segment", "is_intervention_segment", "low_level_task_index", "observation.state",
-             "observation.images.exo_view", "observation.images.left_wrist_view"]
-    galaxea = ["action.left_arm", "action.left_gripper", "coarse_task_index", "episode_index", "frame_index",
-               "observation.images.head_rgb", "observation.state.left_arm", "observation.state.left_gripper",
-               "observation.state.right_arm", "observation.state.right_gripper", "quality_index", "task_index"]
-    yam = ["action", "observation.state", "observation.images.top", "observation.images.left", "episode_index"]
-    pick = lambda feats: next((m.__name__.rsplit(".", 1)[-1] for m in f.upload_adapters("lerobot")
-                               if m.recognizes({"features": {k: {} for k in feats}})), "generic")
-    assert [pick(habit), pick(galaxea), pick(yam)] == ["generic", "generic", "generic"]
-    assert [m.__name__.rsplit(".", 1)[-1] for m in f.upload_adapters("lerobot")] == []
-
-
-def test_a_video_folder_keeps_published_helpers_after_upload_retirement():
-    """Published preparation still recognizes its clips; upload conversion reads structured notes generically."""
+def test_openaoe_published_preparation_reads_a_clips_action_segments():
+    """The published OpenAoE preparation reads a clip's action segments as timed steps."""
     with tempfile.TemporaryDirectory() as t:
-        _video_folder_adapter(Path(t))
+        _openaoe_clip_segments(Path(t))
 
 
-def _video_folder_adapter(tmp_path: Path):
+def _openaoe_clip_segments(tmp_path: Path):
     from prepare import openaoe
     clip = tmp_path / "raw_x_seg_1"
     (clip / "ego_annotation").mkdir(parents=True)
     (clip / "raw_video.mp4").write_bytes(b"")
     (clip / "ego_annotation" / "ego_action_annotation.json").write_text(
         '[{"start_ts": "0.00", "end_ts": "3.00", "atomic_action": [{"verb": "align", "object": "fabric", "hand": "both"}]}]')
-    item = {"dir": clip, "files": [clip / "raw_video.mp4"], "name": "raw_x_seg_1"}
-    assert f.upload_adapters("video") == []
-    assert openaoe.recognizes(item)
     assert openaoe.clip_extra(clip, clip.name)["annotation_subtasks"] == [
         {"t0": 0.0, "t1": 3.0, "label": "align fabric (both hands)", "ok": True}]
-    assert not openaoe.recognizes({**item, "files": [clip / "other.mp4"]})
-    plain = tmp_path / "plain"
-    plain.mkdir()
-    (plain / "raw_video.mp4").write_bytes(b"")
-    assert not openaoe.recognizes({"dir": plain, "files": [plain / "raw_video.mp4"], "name": "plain"})
-    assert openaoe.recognizes({"dir": None, "files": [clip / "raw_video.mp4"], "name": "raw_video"})   # the folder uploaded itself
 
 
 def _clip(path: Path, n: int) -> None:
@@ -1209,7 +1149,6 @@ def test_an_accented_name_keeps_its_letters_in_the_episode_id():
     assert f.episode_name("run-1") == "episode_run_1" and f.episode_name("瓶子") == "episode_0"
 
 
-
 def test_state_that_covers_only_part_of_the_footage_is_not_held_flat_into_a_still_span():
     """Arms recorded moving over 0 to 6 s of 10 s footage: the state must not claim they stood still over the rest
     (np.interp holds the last sample flat), so the episode is labelled from the cameras with a note instead."""
@@ -1497,6 +1436,63 @@ def test_without_a_camera_clock_an_ambiguous_largest_step_clock_is_no_reference(
     assert abs(_step_s(out["encoder"]) - 1e-2) < 1e-9
 
 
+def test_without_a_camera_clock_a_fast_pad_in_nanoseconds_is_read_against_a_clock_of_known_unit():
+    """A 1 kHz pad in nanoseconds from boot steps by 1e6, as a 1 Hz clock in microseconds does, so its step alone
+    left it read as microseconds, 1000 times slow. A 100 Hz encoder in milliseconds beside it has a step only one unit
+    reads as a sampled stream, so the pad is read where its range overlaps the encoder's, and nothing is in doubt."""
+    import numpy as np
+    raw = {"pad": BOOT_NS + np.arange(30000) * 1e6, "encoder": BOOT_NS / 1e6 + np.arange(3000) * 10.0}
+    doubts = {}
+    out = f._clocks_in_seconds(raw, doubts=doubts)
+    assert abs(_step_s(out["pad"]) - 1e-3) < 1e-9 and abs(_step_s(out["encoder"]) - 1e-2) < 1e-9
+    assert doubts == {}
+
+
+def test_a_clock_whose_unit_nothing_settles_keeps_its_reading_and_says_so():
+    """Alone, or beside clocks whose units are in doubt too, the pad keeps its own reading and is reported with both
+    readings, rather than guessed silently."""
+    import numpy as np
+    pad = BOOT_NS + np.arange(3000) * 1e6
+    for raw in ({"pad": pad}, {"pad": pad, "other": BOOT_NS / 1e3 + np.arange(2000) * 1e3}):
+        doubts = {}
+        out = f._clocks_in_seconds(raw, doubts=doubts)
+        assert np.array_equal(out["pad"], f._seconds(pad))
+        assert doubts["pad"] == {"step": 1e6, "units": [1e-9, 1e-6], "kept": 1e-6}
+        issue = f.clock_doubt_issue("pad", doubts["pad"])
+        assert issue["kind"] == "clock_unit_assumed"
+        assert "0.001 s in nanoseconds" in issue["what"] and "1 s in microseconds" in issue["what"]
+
+
+def test_with_a_camera_clock_no_reading_changes_and_nothing_is_reported():
+    import numpy as np
+    cam = BOOT_NS + np.arange(40) * 33_333_333.0
+    for pad in (cam[0] - 1e7 + np.arange(1400) * 1e6, np.arange(100) * 1e7):
+        raw, doubts = {"cam": cam, "pad": pad}, {}
+        assert all(np.array_equal(a, b) for a, b in zip(f._clocks_in_seconds(raw, reference="cam", doubts=doubts).values(),
+                                                         f._clocks_in_seconds(raw, reference="cam").values()))
+        assert doubts == {}
+
+
+def test_an_hdf5_recording_without_a_camera_clock_reports_a_pad_clock_it_cannot_settle(tmp_path):
+    import h5py
+    import numpy as np
+    for name, encoder in (("both.h5", True), ("pad.h5", False)):
+        with h5py.File(tmp_path / name, "w") as h:
+            pad = h.create_group("pad")
+            pad.create_dataset("timestamp", data=(BOOT_NS + np.arange(3000) * 1e6).astype(np.int64))
+            pad["pressure"] = np.arange(3000, dtype=np.float32)
+            if encoder:
+                enc = h.create_group("encoder")
+                enc.create_dataset("timestamp", data=(BOOT_NS / 1e6 + np.arange(300) * 10.0).astype(np.int64))
+                enc["position"] = np.arange(300, dtype=np.float32)
+            st = f.h5_streams(h, "")
+        assumed = [i for i in st["clock_issues"] if i["kind"] == "clock_unit_assumed"]
+        if encoder:
+            assert abs(_step_s(st["clock"]["pad/timestamp"]) - 1e-3) < 1e-9 and not assumed
+        else:
+            assert [i["signal"] for i in assumed] == ["pad/timestamp"]
+
+
 def test_a_reference_clock_that_never_steps_leaves_the_other_clocks_alone():
     """A camera clock stuck at one value says nothing about its unit, so nothing is matched to it."""
     import numpy as np
@@ -1772,36 +1768,6 @@ def test_tactile_camera_names_still_say_they_sense_touch():
     for name in ("tactile_left_heatmap", "gelsight_left", "digit_0", "xense_right", "tactile_left"):
         assert f.is_sensing(name), name
     assert not f.is_sensing("digital_cam")
-
-
-def _mcap_layout_context_with(convert_upload):
-    """mcap_layout_context through a made-up layout whose reader is convert_upload: import_module returns a module
-    already in sys.modules, so only that layout is faked."""
-    import sys, types
-    sys.modules["prepare.fakelayout"] = types.SimpleNamespace(convert_upload=convert_upload)
-    try:
-        return f.mcap_layout_context({"name": "a.mcap"}, "fakelayout", Path("episode_a"), "ds")
-    finally:
-        del sys.modules["prepare.fakelayout"]
-
-
-def test_an_mcap_layout_readers_source_notes_are_kept():
-    """The format and file are added to the layout reader's source instead of replacing it."""
-    ctx = _mcap_layout_context_with(lambda item, ep: {"source": {"unused_signals": ["/imu (not read yet)"],
-                                                                 "invalid_ranges": [[0, 1]]}})
-    assert ctx["source"]["unused_signals"] == ["/imu (not read yet)"]
-    assert ctx["source"]["invalid_ranges"] == [[0, 1]]
-    assert ctx["source"]["format"] == "mcap (fakelayout layout)" and ctx["source"]["file"] == "a.mcap"
-    assert ctx["dataset"] == "ds"
-
-
-def test_an_mcap_layout_reader_that_returns_no_context_is_an_error():
-    try:
-        _mcap_layout_context_with(lambda item, ep: None)
-    except ValueError as e:
-        assert str(e) == "prepare.fakelayout returned no context"
-    else:
-        raise AssertionError("no error for a reader that returned no context")
 
 
 # ---------------------------------------------------------------- no drop: keep what is usable, flag what is wrong
@@ -3020,7 +2986,6 @@ def _lerobot_image_cameras_the_model_is_not_shown_reach_the_board(tmp_path):
         assert str(tmp_path) not in json.dumps(fields)
 
 
-
 def test_lerobot_image_cameras_the_model_is_not_shown_reach_the_board():
     # no pytest fixture: Data Review runs this file's tests as plain functions (upload/test_formats.py)
     with tempfile.TemporaryDirectory() as t:
@@ -4085,7 +4050,6 @@ def test_structured_recordings_read_owned_side_notes():
 
 
 def _camera_metadata_keeps_its_owners_without_becoming_the_task(tmp_path):
-    import json
     videos = ['d/top_ep1.mp4', 'd/wrist_ep1.mp4', 'd/top_ep2.mp4', 'd/wrist_ep2.mp4',
               'd/top_ep1_ir.mp4', 'd/top_ep9_ir.mp4']
     notes = {'d/top.json': {'task': 'calibrate top', 'note': 'top lens glare'},
@@ -4569,7 +4533,6 @@ def test_valid_episode_rows_survive_invalid_and_fractional_recorded_indices():
 
 def test_partial_jsonl_notes_keep_valid_payloads_and_name_bad_lines():
     import json
-    import numpy as np
     with tempfile.TemporaryDirectory() as t:
         root = Path(t) / 'upload'
         root.mkdir()
@@ -4602,7 +4565,6 @@ def test_fractional_task_indices_never_borrow_an_integral_task():
 
 def test_v3_episode_tables_keep_valid_rows_beside_fractional_indices():
     import pandas as pd
-    import numpy as np
     with tempfile.TemporaryDirectory() as t:
         root = Path(t) / 'upload'
         camera = 'observation.images.cam_high'
@@ -4793,7 +4755,6 @@ def _episode_row_upload(root, version, changed):
 
 
 def test_bad_episode_lengths_keep_recorded_owners_and_readable_windows():
-    import json
     with tempfile.TemporaryDirectory() as t:
         for version in ('v2', 'v3'):
             for n, length in enumerate(('bad', {'unknown': 'length'}, 0.5, True, -1, 0, [10, 20])):
@@ -4842,7 +4803,6 @@ def test_bad_episode_tasks_stay_claims_without_asserted_nontext_instructions():
 
 
 def test_invalid_episode_tasks_keep_valid_recorded_table_tasks_and_note_sources():
-    import json
     import numpy as np
     import pandas as pd
     with tempfile.TemporaryDirectory() as t:
@@ -5027,3 +4987,338 @@ def test_trimming_prepared_signals_preserves_native_clocks_and_placement_limits(
                                                          if s['name'] == signal['name'])
                 assert not {'touch', 'rest', 'swing', 'scale_note'} & signal.keys()
         assert not lc.of_episode(me.load(ep))
+
+
+def test_camera_words_are_matched_whole_so_a_laptop_camera_is_not_the_top_camera():
+    """scene_rank matched words inside words: laptop_cam ranked as a top camera and took the scene slot from a front
+    camera, and every name containing cam ranked 8th. The mount and fixed words matched any word they began, so
+    handle_cam was a hand camera."""
+    views, _ = f.assign_views(["laptop_cam", "front_cam"], "teleop_arms")
+    assert views["exo"] == "front_cam"
+    assert f.scene_rank("laptop_cam") == f.scene_rank("camera_0") == f.SCENE_WORDS.index(("cam", "camera"))
+    assert f.scene_rank("top_cam") == f.scene_rank("topcam") == 0 and f.scene_rank("realsense_d435") == 99
+    assert not f.is_mount_named("handle_cam") and f.is_mount_named("wristcam") and f.is_mount_named("cam_left_wrist")
+    # glued and camelCase camera words still split; a stereo camera's model name is still a fixed camera
+    assert f.side_of("leftCam") == f.side_of("leftcam") == "left" and f.mounted_side("zedx_left") is None
+    assert f.word_tokens("RGBCamera2") == ["rgb", "camera", "2"]
+    # an episode's uuid is one id, never letters that read as ee
+    assert not f.is_mount_named("episode_e73c0f86-4739-42cd-81b2-3a7229fe71ee")
+
+
+def test_a_joint_state_topic_that_says_action_inside_a_word_is_a_state_not_a_command():
+    """ACTION_TOPIC matched inside words, so /interaction_arm/joint_states was read as a command and its arm lost from
+    the state. Command words now match whole, as every other name word does (_names_word)."""
+    import numpy as np
+    arm = {"pos": np.zeros((5, 7)), "t": np.arange(5) / 10.0, "names": None}
+    streams = {"/interaction_arm/joint_states": arm, "/leader/joint_states": dict(arm)}
+    assert f.arm_streams(streams, False) == {"only": "/interaction_arm/joint_states"}
+    assert f.arm_streams(streams, True) == {"only": "/leader/joint_states"}
+    assert not f.names_action("extreme_exposure_fraction") and f.names_action("action.arm") and f.names_action("/cmd_vel")
+    assert f.names_text("/task/subtask") and not f.names_text("/multitasking_status")
+    assert f.names_depth("/camera/aligned_depth_to_color/image_raw") and not f.names_depth("/depthai/rgb/image")
+    assert f.names_joint("panda_joint1") and f.names_joint("arm_j2") and not f.names_joint("obj1")
+    assert f.names_gripper("left_finger_joint") and not f.names_gripper("system_fingerprint")
+
+
+# ---------------------------------------------------------------- the words of names
+# The words of camera, topic and field names (prepare/formats.py word_tokens) and every matcher that reads them.
+#
+# Main matched a word anywhere inside a name, so laptop_cam ranked as a top camera and /interaction_arm/joint_states
+# read as a command. Matching whole words fixed that, but at first it also stopped reading names whose words are
+# glued (leftwrist, jointcmd, observation.images.depthmap) and started reading letters cut off digits (l515 as left,
+# cam_3ee4f as an end effector). These tests hold the rule that settles both, and compare it with main on real names.
+import json
+import time
+from pathlib import Path
+
+import pytest
+
+
+MAIN_BEFORE_WHOLE_WORDS = "c916262"     # main before the whole-word matchers (PR 60)
+# main's reading of every corpus name by every matcher below, written once from main's prepare/formats.py at that
+# commit by tests/fixtures/make_name_readings.py, so the comparison needs no git history (CI checks out one commit)
+MAIN_READINGS = Path(__file__).resolve().parent / "fixtures" / f"name_readings_{MAIN_BEFORE_WHOLE_WORDS}.json"
+
+# every camera, topic and field name of the LeRobot datasets in robot-data-audit/data/raw, the subgoal_ab slice's
+# context.json and sources.json, the test fixtures, and the review of PR 61
+NAME_CORPUS = """
+    /action /arm/command /arm/jointcommand /cam_front/image/compressed /cam_wrist/video /camera/depth/image_raw
+    /chunks_size /codebase_version /data_path /follower/cmdvel /fps /head/video /interaction_arm/joint_states
+    /joint_states /leaderarm/joint_states /left_arm/joint_states /right_arm/joint_states /robot/arm_command
+    /robot_type /task /task/subtask /top-depth /video_path IPEC-COMMUNITY/FastUMI_100k_lerobot __index_level_0__
+    _rig access_descriptor_digest access_field_id access_kind action action.arm action0 actionChunk action_semantics
+    actions adapter adapter_commit adds_beyond_video advancing agentview_image allenai/MolmoAct2-BimanualYAM-Dataset
+    alternative annotation_subtasks annotation_tables annotation_unresolved arm arm_cmd_left arm_j2
+    audit_ego_rgb.json audit_franka.json audit_optical_handoff.json audit_umi_rgb.json av1 available_modes
+    base_0_rgb base_s bi_yam_follower both c916262 cam_3ee4f cam_high cam_l cam_left_wrist cam_low cam_r cam_r1
+    cam_top camera.overhead camera:extra3 camera:extra4 camera_key camera_l515 camera_labels camera_mounting
+    camera_views camera_wrist_right cameras capabilities channel channels chunks_size claim claim_type claims
+    clock_mapping cmd2 cmd_vel cmdvel codebase_version codec column column_dtypes columns command commandedPose
+    completed_at_s completion component_names component_units confidence contribution
+    controlled/data/chunk-000/episode_000904.parquet controlled_instruction controlled_recording count counter
+    d360_1_compressed data/chunk_index data/file_index data_files_size_in_mb data_path data_source dataset
+    dataset_from_index dataset_to_index depth depth0 depth:242abc18100117cd depth_image depthcam depthimg desc
+    description descriptor detail dtype dual_arm/Put_Food_into_Electric_Oven duration_s ee_pose eef_pose_cmd eefcam
+    ego_head egocam eight_tasks_all_done end_s episode episode_001283.json
+    episode_0b3c8daeaee44aafbdd48e9596866759.json episode_327f2ad9-a689-4845-b3c4-8aa0dbdb24e7.json
+    episode_Steam_Rice_20250721_008_000015.json episode_dual_arm__Add_Rice_to_Rice_Cooker__000030.json
+    episode_dual_arm__Put_Food_into_Electric_Oven__000039 episode_dual_arm__Put_Food_into_Electric_Oven__000086
+    episode_dual_arm__Put_Food_into_Electric_Oven__000087 episode_habit_007221.json episode_id episode_index
+    episode_length_meta episode_raw_350766_seg_350811.json episode_waveform_sound_probe.json episodes.jsonl
+    event_labels evidence evidence_inspection exo exterior_image_1_left extra1 extra2 extra3 extra4 failure fastumi
+    features field field_id fields file findings float32 foxglove.CompressedVideo fps frame_index frames
+    frames_on_grid front_camera frontal_cam fsr12 goal_finished_while_robot_waits goal_reached_at_s
+    goal_reached_then_undone grip_width gripper gripper_pos gripper_range gripper_value gripperpos gripperwidth
+    handcam handeye handheld_gripper has_audio head head_camera head_left headline height high_level_instruction
+    human_role_subtask_index human_subtasks.jsonl id idle image_response_change image_top images index info
+    input_key inspect_s inspections instruction instruction_key instruction_note int64 interaction interpretation
+    issues j1 joint_cmd jointcmd jointpos joints json key kind known l515 label labels laptop laptop_cam left left0
+    left_gripper left_gripper.pos left_joint_0.pos left_joint_1.pos left_joint_2.pos left_joint_3.pos
+    left_joint_4.pos left_joint_5.pos left_jointpos left_pitch left_roll left_tactile_left left_tactile_right
+    left_wrist_0_rgb left_x left_y left_yaw left_z leftgripper lefthand leftimage leftrgb leftwrist length
+    limitations low_level_instruction low_level_task_index low_level_tasks max mean median_stored medium
+    meta/episodes/chunk_index meta/episodes/file_index metadata_limit min mode molmo motors mpeg4
+    my_msgs/msg/StampedString n_frames n_state_frames name names next_observation notes numeric observation
+    observation.controlled_state observation.images.cam_high_depth observation.images.camera_rgb_image
+    observation.images.depthmap observation.images.head_right observation.images.laptop observation.images.left
+    observation.images.left_camera_rgb_image observation.images.right observation.images.right_camera_rgb_image
+    observation.images.top observation.state observations observations/images observations/images/cam_high operation
+    outcome overhead_cam packed paired_camera panda_finger_joint1 panda_joint1 percentiles_stored pitch pixels
+    prepare.fastumi prepare.molmo preview_rows producer profile progress provenance pts q01 q10 q50 q90 q99 q_target
+    r1_head_camera r1pro_wrist raw_t0 raw_times reader_issues realsense realsense_compressed realsense_infra1_rect
+    recorded_evidence recorded_metadata recorded_uploader_notes recovered regions relationship relative repeat_last
+    represented_source_members reviewed rgb rgbd_depth rgbleft rice_cooker_lid_beyond_instruction right
+    right_gripper right_gripper.pos right_joint_0.pos right_joint_1.pos right_joint_2.pos right_joint_3.pos
+    right_joint_4.pos right_joint_5.pos right_pitch right_roll right_tactile_left right_tactile_right right_x
+    right_y right_yaw right_z rightarm righthand rightwrist robot0_eye_in_hand_image robot_type roi
+    roi_valid_fraction role roll row row_end row_offset row_start rows scale_m scope second_filter_after_goal
+    selected_rows sensor_evidence sensor_id sensor_msgs/msg/CompressedImage sensor_msgs/msg/JointState sensors
+    series series_id session_with_an_unfinished_task setpoint1 shape shoulder_pan sid side source source_current
+    source_frame source_frames source_recording source_shape source_time_s splits start_s state state_dict
+    state_identities state_kind states status std std_msgs/String stream_checks sub_episode_idx subtasks.jsonl
+    success success_then_undone t0 t_s table_key tables tactile_0 target targetPos targetpos task task_completed
+    task_index task_label task_status tasks tasks.jsonl teleop/cmd teleop_arms teleoperator terminal thirdperson
+    time_s times times_s timestamp timing_reason top_camera top_rgb topcam total_chunks total_episodes total_frames
+    total_pixels total_rows_in_window total_tasks total_videos train unavailable_rows unclear
+    unclear_but_labels_reach_one undone_at_s unit unit_name units unshown1 unshown_cameras unspecified
+    uploader_annotation uploader_notes v2.1 v3.0 valid_fraction valid_pixels value values version video
+    video.channels video.codec video.fps video.height video.is_depth_map video.pix_fmt video.width
+    video_files_size_in_mb video_path view what why width wrist_left wristflex wristview x y yaw yuv420p z
+    zed2i_left zedmini zedxm
+""".split()
+
+
+def test_a_glued_run_splits_only_into_known_words_and_short_words_count_only_alone():
+    # a run of letters fully covered by known words is those words; any other run stays one word
+    assert f.word_tokens("leftwrist") == ["left", "wrist"] and f.word_tokens("jointcmd") == ["joint", "cmd"]
+    assert f.word_tokens("observation.images.depthmap") == ["observation", "images", "depth", "map"]
+    assert f.word_tokens("laptop_cam") == ["laptop", "cam"] and f.word_tokens("interaction") == ["interaction"]
+    assert f.word_tokens("backstop") == ["backstop"]    # backs + top would need a plural before another word
+    assert f.word_tokens("gripper") == ["gripper"]      # a known word stays whole, never grip + per
+    # digits are their own pieces; a one or two letter word counts only when it stood alone
+    assert f.word_tokens("l515") == ["515"] and f.word_tokens("cam_3ee4f") == ["cam", "3", "4"]
+    assert f.word_tokens("cam_l") == ["cam", "l"] and f.word_tokens("imageL") == ["image", "l"]
+    assert f.word_tokens("ee_pose") == ["ee", "pose"]
+    assert f.word_tokens("episode_e73c0f86-4739-eef1-81b2-3a7229fe71ee") == [
+        "episode", "e73c0f864739eef181b23a7229fe71ee"]    # a uuid is one id, its eef1 group not eef
+
+
+@pytest.mark.parametrize("name, side, mount", [
+    ("leftwrist", "left", True), ("rightwrist", "right", True), ("lefthand", "left", True),
+    ("righthand", "right", True), ("leftgripper", "left", True), ("rightarm", "right", True),
+    ("leftimage", "left", False), ("leftrgb", "left", False), ("rgbleft", "left", False), ("handeye", None, True),
+    ("wristview", None, True), ("l515", None, False), ("camera_l515", None, False), ("r1_head_camera", None, False),
+    ("r1pro_wrist", None, True), ("cam_r1", None, False), ("cam_3ee4f", None, False), ("cam_l", "left", False),
+    ("left0", "left", False), ("handle_cam", None, False)])
+def test_camera_sides_and_mounts_read_glued_words_and_never_letters_cut_off_digits(name, side, mount):
+    assert f.side_of(name) == side and f.is_mount_named(name) is mount
+
+
+def test_command_depth_joint_and_gripper_names_read_glued_words():
+    for name in ("/leaderarm/joint_states", "jointcmd", "/arm/jointcommand", "targetpos", "cmdvel", "teleoperator"):
+        assert f.names_action(name), name
+    assert not f.names_action("/interaction_arm/joint_states") and not f.names_action("valid_fraction")
+    assert f.names_depth("observation.images.depthmap") and f.names_depth("depthimg")
+    assert not f.names_depth("lerobot_v21_bimanual_7dof_nodepth") and not f.names_depth("/depthai/rgb/image")
+    assert all(f.names_joint(n) for n in ("jointpos", "wristflex", "shoulderpan", "arm_j2", "j_3", "panda_joint1"))
+    assert not f.names_joint("jointly") and not f.names_joint("obj1")
+    assert f.names_gripper("gripperpos") and f.names_gripper("gripperwidth") and not f.names_gripper("fingerprint")
+    assert f.scene_rank("laptop_cam") == f.SCENE_WORDS.index(("cam", "camera")) and f.scene_rank("frontal_cam") == 5
+    assert f.mounted_side("zedmini_left") is None and f.mounted_side("thirdperson_left") is None
+    # a state value's words split glued words the same way, so a velocity is never read as a joint position
+    assert f.state_words("left_jointvel") == ["left", "joint", "vel"]
+    assert f.state_words("eefPosX_m") == ["eef", "pos", "x"]
+
+
+def name_matchers(new):
+    """{matcher: this branch's reading} for every place a name's words are matched. The fixture holds main's reading by
+    each (tests/fixtures/make_name_readings.py main_matchers): main matched some of them with its own patterns
+    (ACTION_TOPIC, DEPTH_TOPIC, the joint and gripper patterns, TEXT_TOPIC and the patterns written inline at their
+    call sites), which this branch reads through word_tokens."""
+    return {
+        "side_of": new.side_of,
+        "recorded_side": lambda n: sorted(filter(None, [new.recorded_state_identity(n)["side"]])),
+        "is_mount_named": new.is_mount_named,
+        "mounted_side": new.mounted_side,
+        "scene_rank": new.scene_rank,
+        "action": new.names_action,
+        "depth": new.names_depth,
+        "joint": new.names_joint,
+        "gripper": new.names_gripper,
+        "text": new.names_text,
+        "instruction_task": lambda s: new._names_word(s, ("instruction", "task")),
+        "disparity": lambda s: new._names_word(s, ("disparity", "disparities", "inverse")),
+        "has_side": lambda s: new.side_of(s) is not None,
+        "arm_topic": lambda s: new._names_word(s, ("arm",)),
+        "ee_topic": lambda s: new._names_word(s, ("ee", "gripper")),
+        "frame_times": new.says_frame_times,
+        "command": lambda s: new._names_word(s, new.COMMAND_WORDS),
+        "touch": new.names_touch,
+        "sensing": new.is_sensing,
+        "not_rgb": new.not_rgb,
+        "camera_named": new.camera_named,
+        "state_words": new.state_words,
+    }
+
+
+# Every reading on the corpus where this branch and main differ, each one where main was wrong.
+# Main matched a word inside a longer word (interaction is not action, laptop not top, overhead not head, handoff not
+# hand, a subtask is not the task, a fraction not an action).
+IN_A_LONGER_WORD = {
+    ('action', '/interaction_arm/joint_states'): (True, False),
+    ('action', 'interaction'): (True, False),
+    ('action', 'roi_valid_fraction'): (True, False),
+    ('action', 'valid_fraction'): (True, False),
+    ('instruction_task', 'annotation_subtasks'): (True, False),
+    ('instruction_task', 'human_role_subtask_index'): (True, False),
+    ('instruction_task', 'human_subtasks.jsonl'): (True, False),
+    ('instruction_task', 'subtasks.jsonl'): (True, False),
+    ('is_mount_named', 'audit_optical_handoff.json'): (True, False),
+    ('scene_rank', 'camera.overhead'): (2, 3),
+    ('scene_rank', 'headline'): (2, 99),
+    ('scene_rank', 'laptop'): (0, 99),
+    ('scene_rank', 'laptop_cam'): (0, 8),
+    ('scene_rank', 'observation.images.laptop'): (0, 99),
+    ('scene_rank', 'overhead_cam'): (2, 3),
+}
+# Main's call site looked only for the words left and right, missing a side letter standing alone that main's own
+# side_of read (cam_l is left).
+A_SIDE_LETTER_ALONE = {
+    ('has_side', 'cam_l'): (False, True),
+    ('has_side', 'cam_r'): (False, True),
+}
+# Main missed known words glued together (leftwrist, jointcmd, depthmap), and a plural (teleop_arms names arms).
+GLUED_WORDS = {
+    ('arm_topic', '/leaderarm/joint_states'): (False, True),
+    ('arm_topic', 'rightarm'): (False, True),
+    ('arm_topic', 'teleop_arms'): (False, True),
+    ('command', '/arm/jointcommand'): (False, True),
+    ('command', '/follower/cmdvel'): (False, True),
+    ('command', 'cmdvel'): (False, True),
+    ('command', 'jointcmd'): (False, True),
+    ('command', 'targetpos'): (False, True),
+    ('ee_topic', 'gripperpos'): (False, True),
+    ('ee_topic', 'gripperwidth'): (False, True),
+    ('ee_topic', 'leftgripper'): (False, True),
+    ('is_mount_named', '/leaderarm/joint_states'): (False, True),
+    ('is_mount_named', 'leftgripper'): (False, True),
+    ('is_mount_named', 'lefthand'): (False, True),
+    ('is_mount_named', 'leftwrist'): (False, True),
+    ('is_mount_named', 'rightarm'): (False, True),
+    ('is_mount_named', 'righthand'): (False, True),
+    ('is_mount_named', 'rightwrist'): (False, True),
+    ('mounted_side', 'rgbleft'): (None, 'left'),
+    ('not_rgb', 'depthcam'): (False, True),
+    ('not_rgb', 'depthimg'): (False, True),
+    ('not_rgb', 'observation.images.depthmap'): (False, True),
+    ('recorded_side', 'rgbleft'): ([], ['left']),
+    ('side_of', 'rgbleft'): (None, 'left'),
+    ('state_words', '/arm/jointcommand'): (['arm', 'jointcommand'], ['arm', 'joint', 'command']),
+    ('state_words', '/follower/cmdvel'): (['follower', 'cmdvel'], ['follower', 'cmd', 'vel']),
+    ('state_words', '/leaderarm/joint_states'): (['leaderarm', 'joint', 'states'],
+                                                 ['leader', 'arm', 'joint', 'states']),
+    ('state_words', 'cmdvel'): (['cmdvel'], ['cmd', 'vel']),
+    ('state_words', 'depthcam'): (['depthcam'], ['depth', 'cam']),
+    ('state_words', 'depthimg'): (['depthimg'], ['depth', 'img']),
+    ('state_words', 'eefcam'): (['eefcam'], ['eef', 'cam']),
+    ('state_words', 'egocam'): (['egocam'], ['ego', 'cam']),
+    ('state_words', 'gripperpos'): (['gripperpos'], ['gripper', 'pos']),
+    ('state_words', 'gripperwidth'): (['gripperwidth'], ['gripper', 'width']),
+    ('state_words', 'handcam'): (['handcam'], ['hand', 'cam']),
+    ('state_words', 'handeye'): (['handeye'], ['hand', 'eye']),
+    ('state_words', 'jointcmd'): (['jointcmd'], ['joint', 'cmd']),
+    ('state_words', 'jointpos'): (['jointpos'], ['joint', 'pos']),
+    ('state_words', 'left_jointpos'): (['left', 'jointpos'], ['left', 'joint', 'pos']),
+    ('state_words', 'leftgripper'): (['leftgripper'], ['left', 'gripper']),
+    ('state_words', 'lefthand'): (['lefthand'], ['left', 'hand']),
+    ('state_words', 'leftimage'): (['leftimage'], ['left', 'image']),
+    ('state_words', 'leftrgb'): (['leftrgb'], ['left', 'rgb']),
+    ('state_words', 'leftwrist'): (['leftwrist'], ['left', 'wrist']),
+    ('state_words', 'observation.images.depthmap'): (['observation', 'images', 'depthmap'],
+                                                     ['observation', 'images', 'depth', 'map']),
+    ('state_words', 'rgbleft'): (['rgbleft'], ['rgb', 'left']),
+    ('state_words', 'rightarm'): (['rightarm'], ['right', 'arm']),
+    ('state_words', 'righthand'): (['righthand'], ['right', 'hand']),
+    ('state_words', 'rightwrist'): (['rightwrist'], ['right', 'wrist']),
+    ('state_words', 'targetpos'): (['targetpos'], ['target', 'pos']),
+    ('state_words', 'thirdperson'): (['thirdperson'], ['third', 'person']),
+    ('state_words', 'topcam'): (['topcam'], ['top', 'cam']),
+    ('state_words', 'wristflex'): (['wristflex'], ['wrist', 'flex']),
+    ('state_words', 'wristview'): (['wristview'], ['wrist', 'view']),
+    ('state_words', 'zedmini'): (['zedmini'], ['zed', 'mini']),
+}
+
+
+def test_on_real_names_the_matchers_differ_from_main_only_where_main_was_wrong():
+    main = json.loads(MAIN_READINGS.read_text())
+    readers = name_matchers(f)
+    assert main["commit"] == MAIN_BEFORE_WHOLE_WORDS
+    assert sorted(main["readings"]) == sorted(readers) and all(
+        sorted(r) == sorted(set(NAME_CORPUS)) for r in main["readings"].values()), (
+        "the corpus or the matchers changed: rerun python tests/fixtures/make_name_readings.py")
+    got = {}
+    for m, read in readers.items():
+        for name in NAME_CORPUS:
+            if main["readings"][m][name] != read(name):
+                got[(m, name)] = (main["readings"][m][name], read(name))
+    assert got == {**IN_A_LONGER_WORD, **A_SIDE_LETTER_ALONE, **GLUED_WORDS}
+
+
+def test_two_letter_words_never_split_out_of_a_glued_run():
+    # ts, ir and the axes rx, ry, rz are words only standing alone: posts is not pos and ts, rgbir not rgb and ir
+    assert f.word_tokens("posts") == ["posts"] and f.word_tokens("rgbir") == ["rgbir"]
+    assert f.word_tokens("toprx") == ["toprx"] and not f.says_frame_times("posts")
+    assert f.word_tokens("pos_ts") == ["pos", "ts"] and f.word_tokens("cam_ir") == ["cam", "ir"]
+
+
+def test_a_frame_times_file_is_any_word_beginning_time_or_stamp():
+    # frame_times keeps a file only when its numbers fit the video, so the name test is wide: a word that begins time
+    # or stamp, inside a longer word too (StampedString, timeline), never one that only contains it (lifetime)
+    for stem in ("exo_cam-rgb-timestamp", "timesteps", "StampedString", "timeline", "frame_times", "stamps_ns"):
+        assert f.says_frame_times(stem), stem
+    for stem in ("lifetime", "untimed", "postmark", "exo_cam-rgb"):
+        assert not f.says_frame_times(stem), stem
+
+
+def test_a_long_glued_run_is_split_in_time_proportional_to_its_length():
+    # trying every split took 22s on a run of 3000 cams; each piece is at most the longest known word (and its plural)
+    for run in ("cam" * 3000, "cam" * 3000 + "q", "x" * 9000, "leftwrist" * 1000):
+        f._GLUED.pop(run, None)
+        start = time.perf_counter()
+        f.glued_words(run)
+        assert time.perf_counter() - start < 1.0, run[:12]
+        f._GLUED.pop(run, None)
+    assert f.glued_words("cam" * 3000) == ("cam",) * 3000
+    assert f.glued_words("cam" * 3000 + "q") == ("cam" * 3000 + "q",)
+    assert f.glued_words("leftwrist" * 1000) == ("left", "wrist") * 1000
+    longest = max(sorted(f.name_vocabulary()), key=len)
+    assert f.glued_words("left" + longest + "s") == ("left", longest + "s")   # the longest word, plural, last
+
+
+@pytest.mark.parametrize("name", ["handheld", "Handheld", "HandHeld", "hand_held", "handheld_left", "HandheldCam",
+                                  "observation.images.handheld", "handhelds", "handheldcam"])
+def test_a_handheld_camera_is_mounted_however_its_name_is_written(name):
+    # 7113ecf read handheld as one word that was no mount, so a handheld camera stopped reading as the gripper's camera
+    # while HandHeld (hand and held) still did; a handheld camera is held in the hand, so it is mounted
+    assert f.is_mount_named(name)
+    assert f.mounted_side("handheld_left") == "left"
