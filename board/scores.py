@@ -30,6 +30,9 @@ SEVERITY_POINTS = {"low": 0.5, "medium": 1.5, "high": 3.0}
 FAILED_ATTEMPT_POINTS = 1.0       # a key event that failed, beyond the mistake that may describe it
 OUTCOME_CAPS = {"success": 1.0, "success_then_undone": 0.7, "partial": 0.9, "failure": 0.4}
 EXECUTION_WEIGHTS = {"cleanliness": 0.5, "efficiency": 0.25, "fluency": 0.25}
+# the record fields the scores read, so a board build can hold every episode at once without its whole record
+FIELDS = ("dataset", "episode_prompt", "task_label", "event_labels", "key_events", "operator_mistakes", "completion",
+          "goal_alignment", "tasks")
 STOP = {"the", "a", "an", "and", "then", "with", "its", "it", "of", "on", "to", "into", "in", "from", "onto", "by", "at",
         "for", "both", "each", "one", "that", "this", "is", "are", "be", "so", "as", "up", "down", "out", "back", "over"}
 
@@ -61,7 +64,8 @@ def _subtract(spans, cut):
 
 def facts(d: dict) -> dict:
     """What one episode's labels measure, before any comparison: its work window, its time split, its attempts."""
-    steps = [e for e in d.get("event_labels") or [] if _num(e.get("t_s")) is not None and _num(e.get("end_s")) is not None]
+    steps = [e for e in d.get("event_labels") or [] if isinstance(e, dict) and _num(e.get("t_s")) is not None
+             and _num(e.get("end_s")) is not None]
     spans = {c: [(e["t_s"], e["end_s"]) for e in steps if e.get("contribution") == c]
              for c in ("advancing", "wasteful", "idle")}
     work = spans["advancing"] + spans["wasteful"]
@@ -166,7 +170,8 @@ def subgoals(d: dict, f: dict) -> list:
                      and _num(k.get("t_s")) is not None), key=lambda k: k["t_s"])
     if f["start_s"] is None or not events:
         return []
-    steps = [e for e in d.get("event_labels") or [] if _num(e.get("t_s")) is not None and _num(e.get("end_s")) is not None]
+    steps = [e for e in d.get("event_labels") or [] if isinstance(e, dict) and _num(e.get("t_s")) is not None
+             and _num(e.get("end_s")) is not None]
     # an episode of several subtasks (human ego, sessions) has no single goal: each subtask is scored on its own, from
     # its start through its subgoals to its own end-state, and the time between subtasks belongs to none of them
     tasks = sorted((t for t in d.get("tasks") or [] if isinstance(t, dict) and _num(t.get("start_s")) is not None
