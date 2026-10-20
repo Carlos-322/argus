@@ -29,7 +29,8 @@ MAX_VALUES = 32768
 MAX_REQUESTS = 6
 MAX_IMAGES = 4
 MAX_RESPONSE_BYTES = 48000
-MAX_SELECTION_TOKENS = 2000
+# The selection's JSON answer; its output limit adds reasoning room (selection_tokens).
+SELECTION_ANSWER_TOKENS = 2000
 MAX_SELECTION_COST = 1.0
 MAX_SCAN_BYTES = 256 * 1024 * 1024
 SOURCE_HASH_LIMIT = 16 * 1024 * 1024
@@ -1720,6 +1721,12 @@ def recover_selection_reservations(doc):
             doc['limitations'].append(note)
         changed = True
     return changed
+
+
+def selection_tokens(reasoning: str) -> int:
+    """The output limit of one selection round, which runs at the episode's reasoning effort."""
+    from label.policy import output_limit
+    return output_limit(SELECTION_ANSWER_TOKENS, reasoning)
 
 
 class InvalidSelection(ValueError):

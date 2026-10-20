@@ -9,6 +9,18 @@ ASTRA = 'openai/gpt-6-astra'
 SOL61 = 'openai/gpt-6.1-sol'
 PERIODS = {'teleop_arms': 1.5, 'handheld_gripper': 1.0, 'ego_head': 0.5}
 TASK_MODES = ('episode', 'session')
+# OpenAI counts reasoning tokens inside max_completion_tokens, so a call's output limit is
+# the answer it writes plus room to reason at its effort. Medium is about twice the most
+# reasoning any call used in the October 2026 Astra runs (2,128 tokens, a sensor analysis;
+# evidence selection used at most 239), and each effort step doubles it.
+REASONING_TOKENS = {'none': 0, 'minimal': 1000, 'low': 2000, 'medium': 4000, 'high': 8000, 'xhigh': 16000}
+
+
+def output_limit(answer_tokens: int, reasoning: str) -> int:
+    """max_completion_tokens for a call that writes up to answer_tokens at this reasoning effort."""
+    if reasoning not in REASONING_TOKENS:
+        raise ValueError(f'unsupported reasoning effort {reasoning!r}')
+    return answer_tokens + REASONING_TOKENS[reasoning]
 
 
 def is_astra(model: str) -> bool:
@@ -30,7 +42,7 @@ def resolve(ctx: dict, *, model: str | None = None, reasoning: str | None = None
         raise ValueError('model must be a nonempty identifier')
     prior_reasoning = saved.get('reasoning') if saved.get('model') == model else None
     reasoning = reasoning or prior_reasoning or ('high' if model.split('/')[-1] == 'gpt-6.1-sol' else 'medium')
-    if reasoning not in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh'):
+    if reasoning not in REASONING_TOKENS:
         raise ValueError('unsupported reasoning effort')
     if sample_fps is None:
         sample_fps = saved.get('sample_fps')
