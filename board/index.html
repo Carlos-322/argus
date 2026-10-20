@@ -6394,6 +6394,9 @@ function renderEp(d, opts) {
     </div>`;
   }
 
+  // when the episode's goal was met, for the Outcome box, the caption on the video and the score chip beside it: the
+  // local goal, else the first time the goal was reached (a goal later undone has only that one)
+  const episodeGoalT = comp.completed_at_s ?? comp.goal_reached_at_s ?? null;
   // the episode's quality scores (board/scores.py): a chip on the video when each subgoal or the goal is reached, and
   // a Quality section below that sets each score beside what it measured
   const Q = d.scores && d.scores.version === 1 ? d.scores : null;
@@ -6435,7 +6438,7 @@ function renderEp(d, opts) {
       + `: 'Show all ${subRows.length} subgoals'">${SUBS_OPEN ? `Show the first ${SUBS_FIRST}` : `Show all ${subRows.length} subgoals`}</button>`
       : '');
   const nMistakes = (qIn.penalties || []).length;
-  const goalT = comp.completed_at_s ?? comp.goal_reached_at_s;
+  const goalT = episodeGoalT;
   const qualityHtml = Q ? `<h3 class="section" id="quality">Quality</h3><div class="qual">
     ${box('Execution', Q.execution, `<div class="qual-cells">
       ${cell('Cleanliness', Q.cleanliness, `${Math.round(100 * (qIn.wasteful_share || 0))}% wasteful, ${nMistakes} mistake${nMistakes === 1 ? '' : 's'}`,
@@ -6619,26 +6622,33 @@ function renderEp(d, opts) {
   // a key event's mark by kind: the goal and a subgoal green, a failure red, the rest ink
   const keyColor = k => (k.kind === 'goal_reached' || k.kind === 'subgoal_complete') ? 'var(--success)'
     : ((k.outcome || '').toLowerCase() === 'failure' ? 'var(--danger)' : 'var(--fg-2)');
+  // a key event's kind in words, the same in the list, its mark, the feed and the caption on the video; a key event
+  // tagged subgoal_complete is "Subgoal N", numbered like the Quality table when the episode is scored, else in order
+  const subNo = new Map();
+  subs.filter(st => !st.goal).forEach((st, i) => subNo.set(Math.round(st.end_s * 100), i + 1));
+  let subN = 0;
+  const keySubNo = keyEvents.map(k => k.kind !== 'subgoal_complete' ? null
+    : Q ? subNo.get(Math.round(k.t_s * 100)) ?? null : ++subN);
+  const keyKindName = k => {
+    const i = keyEvents.indexOf(k);
+    return k.kind === 'subgoal_complete' ? `Subgoal${i >= 0 && keySubNo[i] ? ' ' + keySubNo[i] : ''}` : kindName(k.kind);
+  };
   let keyMarkersHtml = '';
   for (const k of keyEvents) {
     const pct = (onTl(k.t_s) / duration) * 100;
     const oc = (k.outcome || '').toLowerCase();
     keyMarkersHtml += `<div class="marker key" style="left:${pct}%;background:${keyColor(k)}" data-t="${esc(k.t_s)}"><div `
-      + `class="tip">${esc(fmtT(k.t_s))}   ${k.kind ? esc(kindName(k.kind)) + ': ' : ''}${esc(k.label || '')}${oc
+      + `class="tip">${esc(fmtT(k.t_s))}   ${k.kind ? esc(keyKindName(k)) + ': ' : ''}${esc(k.label || '')}${oc
       ? '  [' + esc(oc) + ']' : ''}</div></div>`;
   }
   const keyRows = [];
   const untimed = untimedRows(d, keyEvents.length + 1);
   // each key event names its kind, and the ones tagged subgoal_complete say which subgoal they end (Quality scores them)
-  let subN = 0;
-  const subNo = new Map();
-  subs.filter(st => !st.goal).forEach((st, i) => subNo.set(st.end_s, i + 1));
   keyEvents.forEach((k, i) => {
     const oc = (k.outcome || '').toLowerCase();
     const goalish = k.kind === 'goal_reached' || k.kind === 'subgoal_complete';
-    const no = Q ? subNo.get(k.t_s) : ++subN;
-    const kindChip = k.kind === 'subgoal_complete' ? `<span class="ke-kind sub">Subgoal${no ? ' ' + no : ''}</span>`
-      : k.kind ? `<span class="ke-kind">${esc(kindName(k.kind))}</span>` : '';
+    const kindChip = k.kind ? `<span class="ke-kind${k.kind === 'subgoal_complete' ? ' sub' : ''}">${esc(keyKindName(k))}</span>`
+      : '';
     keyRows.push(`<div class="key-ev ${esc(oc)}${goalish ? ' goal' : ''}" data-t="${esc(k.t_s)}">
       <span class="ke-num">${i + 1}</span>
       <span class="ke-time">${fmtT(k.t_s)}</span>
@@ -7017,7 +7027,7 @@ function renderEp(d, opts) {
   feedItems.forEach((it, idx) => {
     if (it.kind === 'key') {
       const k = it.k; const oc = (k.outcome || '').toLowerCase();
-      const kindChip = k.kind ? `<span class="ke-kind">${esc(kindName(k.kind))}</span>` : '';
+      const kindChip = k.kind ? `<span class="ke-kind">${esc(keyKindName(k))}</span>` : '';
       feedHtml += `<div class="ev keyrow" data-t="${esc(k.t_s)}" data-idx="${idx}">
         <span class="t">${fmtT(k.t_s)}</span>
         <span class="ke-col"><span class="ke-badge">&#9670; key event</span></span>
@@ -7268,7 +7278,7 @@ function renderEp(d, opts) {
     const ev = w.ev;
     const cc = contribClass(ev.contribution);
     const cl = contribText(ev.contribution) || '-';
-    const goalT = comp.completed_at_s;
+    const goalT = episodeGoalT;
     const atEpisodeGoal = goalT != null && t >= goalT - 0.3 && t <= goalT + 3.0;
     const atTaskGoal = taskGoalTimes.some(gt => t >= gt - 0.3 && t <= gt + 3.0);
     const k = activeKey(t);
@@ -7280,7 +7290,7 @@ function renderEp(d, opts) {
     const goalHtml = (atEpisodeGoal || atTaskGoal)
       ? `<div class="vo-goal"><span class="vo-goal-badge">&#10003; ${atTaskGoal && !atEpisodeGoal ? 'task done'
         : 'goal reached'}</span></div>` : '';
-    const keyHtml = k ? `<div class="vo-key"><span class="vo-key-badge">&#9670; ${esc(kindName(k.kind)
+    const keyHtml = k ? `<div class="vo-key"><span class="vo-key-badge">&#9670; ${esc(keyKindName(k)
       || 'key event')}</span><span class="vo-key-label">${esc(k.label || '')}</span>${kOc
       ? `<span class="vo-key-outcome ${esc(kOc)}">${esc(kOc)}</span>` : ''}</div>` : '';
     overlay.innerHTML = `
@@ -7294,18 +7304,19 @@ function renderEp(d, opts) {
     overlay.classList.add('active', cc);
   }
 
-  // the score chip shows a subgoal's execution while the caption shows that subgoal (its key event's window), and the
-  // episode's execution and outcome while it shows the goal reached
+  // the score chip shows a subgoal's execution while the caption's key event is that subgoal (activeKey, the caption's
+  // own window), and the episode's execution and outcome while the caption shows the goal reached; beside a caption
+  // about anything else (a contact, a grasp) it stays hidden
   // (it is first called while the page is still being wired, so it looks up what it needs itself)
   let _scSig = null, _subByT = null;
   function renderScoreChip(t) {
     const scoreChip = document.getElementById('score-chip');
     if (!scoreChip) return;
     const subByT = _subByT || (_subByT = new Map(subs.filter(st => !st.goal).map(st => [Math.round(st.end_s * 100), st])));
-    const goalT = comp.completed_at_s;
+    const goalT = episodeGoalT;
     const atGoal = goalT != null && t >= goalT - 0.3 && t <= goalT + 3.0;
-    const k = keyEvents.find(k => k.kind === 'subgoal_complete' && t >= k.t_s - 0.3 && t <= k.t_s + 2.5);
-    const st = k ? subByT.get(Math.round(k.t_s * 100)) : null;
+    const k = activeKey(t);
+    const st = k && k.kind === 'subgoal_complete' ? subByT.get(Math.round(k.t_s * 100)) : null;
     const sig = atGoal ? 'goal' : st ? String(st.end_s) : '';
     if (sig === _scSig) return;
     _scSig = sig;
