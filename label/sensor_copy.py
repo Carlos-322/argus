@@ -12,9 +12,13 @@ SHARED_RULE_V3 = (
     'Headline and detail appear together on the video while the finding plays, for someone watching the clip. '
     'The headline says what changed in a few plain words. The detail is one short sentence, under 25 words, giving the comparison '
     'that makes it worth knowing: what changes relative to another part, the start, an earlier phase or the visible motion. '
-    'Name parts and quantities in everyday words the recording supports. Keep component IDs, values, method and qualifications about '
-    'mapping, convention, calibration or reference levels out of these two fields; they belong in observation, claim and alternative, '
-    'which the viewer shows on request. When the interpretation is uncertain, one plain word such as likely is enough. '
+    'Name each part by the name the source declares for it, such as a declared region, and the measured quantity in everyday words; '
+    'on the card these names need no qualification. Components inside a named part are parts of it, such as one part of that region, '
+    'not cells, patches or sensors. Describe a change in the direction the recording declares as a stronger response, '
+    'for example pressing harder or easing for a pressure response, never as raw readings rising or falling. '
+    'Keep component IDs, values, method and qualifications about mapping, convention, calibration or reference levels out of these two '
+    'fields; they belong in observation, claim and alternative, which the viewer shows on request. '
+    'When the interpretation is uncertain, one plain word such as likely is enough. '
     'Use plain hyphens rather than typographic dashes.')
 SENSOR_RULE = (
     'Also provide overlay_detail: one short sentence explaining the added information and any uncertainty needed to read the headline correctly. '
