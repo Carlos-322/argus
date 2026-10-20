@@ -45,7 +45,9 @@ jobs:
           package-manager-cache: false
       - name: Install video tools
         run: |
-          sudo apt-get update
+          # the runner image lists third-party repositories (packages.microsoft.com among them) whose index can
+          # refuse a fetch; that must not fail the job, and the install below still fails if Ubuntu's index is missing
+          sudo apt-get update || echo "some package indexes could not be fetched; installing from those that were"
           sudo apt-get install --yes --no-install-recommends ffmpeg
           node --version
           ffmpeg -version
