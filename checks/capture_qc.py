@@ -1647,7 +1647,7 @@ def _one(d: str) -> tuple[str, dict, str | None, float]:
     t0 = time.time()
     try:
         return d, run_episode(Path(d)), None, time.time() - t0
-    except Exception as e:  # reported per episode and recorded on every check, never silently skipped
+    except Exception as e:  # noqa: BLE001 - reported per episode and recorded on every check, never silently skipped
         return d, errored_record(e), results.error_text(e), time.time() - t0
 
 

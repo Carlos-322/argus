@@ -21,16 +21,16 @@ as a bad one. A dimension with too few peers to compare against is None, never a
 """
 from __future__ import annotations
 
-import math
 import re
 import statistics
 
 from board.families import union_seconds as _union
+from checks.results import stored_number
 
 
 def _num(x):
-    """A stored number the scores can compare as it is: a finite int or float, never text, true or false."""
-    return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) else None
+    """A stored number the scores can compare as it is: a finite int or float (stored_number), never text."""
+    return stored_number(x) if isinstance(x, (int, float)) else None
 
 
 VERSION = 1

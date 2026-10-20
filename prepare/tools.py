@@ -15,8 +15,6 @@ import os
 import shutil
 from pathlib import Path
 
-UPLOAD = None                     # reads no dataset of its own (formats.upload_adapters)
-
 INSTALL_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin")
 
 
