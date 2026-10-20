@@ -235,9 +235,10 @@ def frame_times(clip_block: dict) -> list:
     return out
 
 
-def retime(doc: dict, clip: Path) -> dict:
+def for_copy(doc: dict, clip: Path) -> dict:
     """The same keypoints timed against another copy of the clip (the static build's web copy, whose timestamps
-    ffmpeg re-bases to start at 0). Refused unless it has the same frames at the same size."""
+    ffmpeg re-bases to start at 0). Refused unless it has the same frames at the same size. Not board/clips.py
+    retime, which puts a clip's own frames on screen at their capture times."""
     cl = probe_clip(clip)
     old = doc["clip"]
     if (cl["frames"], cl["w"], cl["h"]) != (old["frames"], old["w"], old["h"]):

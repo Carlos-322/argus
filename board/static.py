@@ -826,7 +826,7 @@ def cmd_site(a):
     hands_res = None
     if hands is not None:
         # the hand pose files, each re-timed against the web copy the static page plays (the copy keeps the clip's
-        # timestamps, and retime refuses a copy whose frames or size differ); an episode whose web copy is not made
+        # timestamps, and board/hands.py for_copy refuses a copy whose frames or size differ); an episode whose web copy is not made
         # yet gets none until the next build
         (stage / "data/hands").mkdir()
         todo = [(e, a.out / "media" / e["media"]["exo"]["rel"]) for e in eps
@@ -838,7 +838,7 @@ def cmd_site(a):
             if not mp4.exists():
                 return f, "no web copy of the clip yet"
             try:
-                doc = hands_overlay.retime(json.loads((hands / f).read_text()), mp4)
+                doc = hands_overlay.for_copy(json.loads((hands / f).read_text()), mp4)
             except (ValueError, RuntimeError) as err:
                 return f, str(err)[:200]
             (stage / "data/hands" / site_file(f)).write_text(dumps(public_json(doc), separators=(",", ":")))
