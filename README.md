@@ -13,7 +13,7 @@
 
 ### \* Episode quality scores (October 2026)
 
-Argus now scores each episode's execution and outcome out of 10, along with the execution of each subgoal it reaches. Every score is measured from the annotations rather than asked of the model, and speed is judged against other demonstrations of the same task. A subgoal is a lasting change the goal depends on, such as a block placed in the row, so a pick or a grasp is a key event but never a subgoal.
+Argus now scores each episode's execution and outcome out of 10, along with the execution of the work toward each subgoal. Every score is measured from the annotations rather than asked of the model, and speed is judged against at least five other demonstrations of the same task that reached the goal. A subgoal is a lasting change the goal depends on, such as a block placed in the row, so a pick or a grasp is a key event but never a subgoal.
 
 ### \* DiverseUMI (October 2026)
 
@@ -89,7 +89,7 @@ uv run python -m board serve --board data/review/mine --clips data/review/mine/c
 |---|---|
 | Astra, the default | [`openai/gpt-6-astra`](label/policy.py), medium reasoning; a regular sample every 1.5s for teleop, 1s for UMI and 0.5s for human ego, plus the edges of still spans and the first and last frames. |
 | Sol 6.1 High | [`--model openai/gpt-6.1-sol --reasoning high`](label/policy.py); defaults to 1 FPS on all recording setups and requires at least 1 FPS. |
-| Gemini 4 Argon High | [`--model google/gemini-4-argon --reasoning high`](label/policy.py) with an OpenRouter key; a capped run prices it from OpenRouter's published rates, fetched when the run starts ([`label/pricing.py`](label/pricing.py)). |
+| Gemini 4 Argon High | [`--model google/gemini-4-argon --reasoning high`](label/policy.py) with an OpenRouter key; a capped run prices it from OpenRouter's published rates, fetched before each episode is labelled ([`label/pricing.py`](label/pricing.py)). |
 | Faster actions | [`--sample-fps 2`](label/policy.py) is recommended for subsecond fumbles and rapid recoveries. More images shorten the available request window and can increase cost. |
 | Task scope | Episode/session scope follows source metadata; [`--task-mode episode`](label/policy.py) or [`session`](label/policy.py) overrides it. A missing instruction does not automatically imply a session. Human ego uses the activities schema. |
 
@@ -138,7 +138,7 @@ This is an excerpt from a pressure glove episode's downloadable JSON. In the lis
 }
 ```
 
-A free review job stops after prepared [`episodes/`](review/__main__.py) and base requests in [`dry/`](review/__main__.py). Paid annotation adds model inputs and receipts in [`run/`](review/__main__.py), rejoined labels in [`run_final/`](review/__main__.py), and the board; `review` exits 1 when any unit failed, and the board is still built. Action phases distinguish advancing, wasteful and idle behavior, and [`board/scores.py`](board/scores.py) turns them, with operator mistakes and failed attempts, into execution and outcome scores for each episode and subgoal. Sensor findings include evidence, confidence and alternative explanations; inconclusive evidence need not produce a finding.
+A free review job stops after prepared [`episodes/`](review/__main__.py) and base requests in [`dry/`](review/__main__.py). Paid annotation adds model inputs and receipts in [`run/`](review/__main__.py), rejoined labels in [`run_final/`](review/__main__.py), and the board; `review` exits 1 when any unit failed, and the board is still built. Action phases distinguish advancing, wasteful and idle behavior. When the board is built, [`board/scores.py`](board/scores.py) combines them with the completion judgment, operator mistakes and failed attempts into execution and outcome scores for each episode and an execution score for each subgoal. Sensor findings include evidence, confidence and alternative explanations; inconclusive evidence need not produce a finding.
 
 Public exports, meaning the static site, downloads and [`/api/export`](board/serve.py), name the uploader's own metadata (file attributes, sidecar fields, publisher fields) but leave out its values, because no filter can recognize every secret a person writes there. A board served on 127.0.0.1 without `--allow-host` shows those values in its pages, and its downloads still leave them out. Add [`--publish-uploader-values`](board/serve.py) to `board serve` or `board static site` to publish them. Exports also redact access attributes, recognizable credential values and private access locations in every field.
 
