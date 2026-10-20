@@ -689,6 +689,65 @@ def movements(a: np.ndarray) -> np.ndarray:
     return _score(*_range_and_step(a))
 
 
+# A value's readings at the sampled instants resolve it when each reading stands for the stretch of frames its instant
+# represents (the share of the sampled readings' variance their stretch means explain, at least RESOLVED_STAND), or
+# when consecutive readings follow one another (lag-1 autocorrelation of the sampled readings at least RESOLVED_FOLLOW)
+# and the readings are no further from their stretch means than from their own average (stand at least 0, so a
+# vibration sampled near its own period, whose readings drift slowly while the frames around them swing, is not
+# taken for a slow value). A joint or gripper position passes; a velocity or a noisy effort read once a second does
+# not, because its reading at an instant says nothing about the second around it. On 21 bimanual teleop requests at
+# 1 instant per second, velocity rows sent fell from 284 to 22 and effort rows from 276 to 179, joint position rows
+# rose from 523 to 528 (the budget no longer cut them), and the only gripper rows left out were of grippers that did
+# not move in that request (0.999 to 1), whose readings only jitter.
+RESOLVED_FOLLOW = 0.5
+RESOLVED_STAND = 0.85
+# Below this many instants neither score is estimated well enough to drop a row (a lag-1 autocorrelation of n readings
+# has a standard error near 1 / sqrt(n)), and a row of so few readings costs little: every row is kept.
+RESOLVED_MIN_INSTANTS = 12
+
+
+def is_resolved(follow: np.ndarray, stand: np.ndarray) -> np.ndarray:
+    """The rule above, on resolution's (follow, stand)."""
+    return (stand >= RESOLVED_STAND) | ((follow >= RESOLVED_FOLLOW) & (stand >= 0))
+
+
+def resolution(a: np.ndarray, ks: list[int]) -> tuple[np.ndarray, np.ndarray]:
+    """(follow, stand) per value of a (frames by values) at the sampled instants ks: the lag-1 autocorrelation of its
+    readings at ks, and the share of their variance explained by the mean of the frames each instant stands for (from
+    halfway to the instant before to halfway to the instant after). Missing readings are left out of both. A value
+    whose sampled readings do not vary scores 0 on both: its readings at the instants say nothing of how it changed.
+    With fewer than RESOLVED_MIN_INSTANTS instants both are 1."""
+    a = columns(a)
+    ks = np.asarray(ks, dtype=int)
+    d = a.shape[1]
+    follow, stand = np.zeros(d), np.zeros(d)
+    if len(ks) < RESOLVED_MIN_INSTANTS:
+        return np.ones(d), np.ones(d)
+    edges = np.concatenate([[ks[0]], (ks[1:] + ks[:-1] + 1) // 2, [ks[-1] + 1]])
+    with np.errstate(all="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        for j in range(d):
+            col = np.asarray(a[:, j], dtype=np.float64)
+            v = col[ks]
+            means = np.array([np.nanmean(col[edges[i]:edges[i + 1]]) for i in range(len(ks))])
+            ok = np.isfinite(v)
+            dv = v[ok] - v[ok].mean() if ok.any() else np.zeros(0)
+            total = float((dv * dv).sum())
+            if total <= 0:
+                continue
+            both = ok[1:] & ok[:-1]
+            centred = np.where(ok, v - v[ok].mean(), 0.0)
+            follow[j] = float((centred[1:] * centred[:-1])[both].sum() / total)
+            fit = ok & np.isfinite(means)
+            stand[j] = float(1 - ((v[fit] - means[fit]) ** 2).sum() / total)
+    return follow, stand
+
+
+def resolved(a: np.ndarray, ks: list[int]) -> np.ndarray:
+    """Per value of a, whether its readings at the sampled instants resolve it (resolution)."""
+    return is_resolved(*resolution(a, ks))
+
+
 def quiet_spans(arrs: dict, need: int) -> list[tuple[int, int]]:
     """[(a, b)] frame spans of at least need frames over which every moving value of every signal (movements at least
     MOVING_MIN) stays within MOVING_MIN of its own typical steps: where a recording with no arm state shows nothing

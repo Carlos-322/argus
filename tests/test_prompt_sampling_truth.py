@@ -190,13 +190,14 @@ def test_oversized_row_does_not_starve_a_smaller_lower_ranked_row():
     ep = episode()
     t = np.arange(600)
     huge = "observed.joints." + "coordinate" * 2000
-    ep["signals"] = {huge: np.sin(t / 500)[:, None], "flag": (t % 2)[:, None]}
+    # a flag that holds for 4 s at a time, so its readings once a second resolve it (label/signals.py resolved)
+    ep["signals"] = {huge: np.sin(t / 500)[:, None], "flag": ((t // 120) % 2)[:, None]}
     pl = {"n": 600, "ks": list(range(0, 600, 30)), "spans": [], "touch": frozenset()}
     lines, whole = me._signal_readout(ep, pl)
     assert whole == {"flag"}
     text = "\n".join(lines)
     assert huge in text and "move least" not in text
-    assert "ranked by movement and kept when they fit" in text
+    assert "then by movement, and kept when they fit" in text
     assert "character budget" in text
 
 

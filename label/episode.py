@@ -1692,6 +1692,8 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
     ks = pl["ks"]
     rows = []             # (how much the row's values move, the signal's place, the row's place, signal, label, values)
     unread = {}           # signal: the error that kept its rows out, named below
+    aliased = {}          # signal: [labels of its rows whose readings at the instants do not resolve it]
+    counts = {}           # signal: how many rows it has
     for i, (name, a) in enumerate(arrs.items()):
         try:
             if name in touch or not len(a) or not np.isfinite(a).any() or _constant(a):
@@ -1701,23 +1703,46 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
             got = sg.summary_rows(name, a, ks, m.get("shape"), m.get("names"), role=role)
             mv = sg.movements(a)
             by_value = sg.per_value(name, a.shape[1], m.get("shape"), m.get("names"), role=role)
+            # a row of a value's own readings is sent only when those readings resolve it at this sampling
+            # (label/signals.py resolved); rows that summarise a large array are not readings of one value
+            if by_value:
+                follow, stand = sg.resolution(a, ks)
+                ok = sg.is_resolved(follow, stand)
+            else:
+                ok, stand = np.ones(len(got), dtype=bool), np.ones(len(got))
         except Exception as e:  # noqa: BLE001 - one signal whose rows cannot be made is named below, the rest are given
             unread[name] = type(e).__name__
             continue
+        counts[name] = len(got)
         for j, (lb, v) in enumerate(got):
-            rows.append((float(mv[j]) if by_value else float(np.median(mv)), i, j, name, lb, v))
+            if not ok[j]:
+                aliased.setdefault(name, []).append(lb)
+                continue
+            # ranked for the budget by how well each reading stands for its instant, then by movement: movement alone
+            # ranks a gripper that opens and closes a few times (a few large steps) below a noisy effort, so a budget
+            # cut the gripper first. A summary row's numbers are made at each instant, so they stand for it.
+            rows.append(((round(float(stand[j]), 2), float(mv[j]) if by_value else float(np.median(mv))),
+                         i, j, name, lb, v))
     # a signal whose rows could not be made is named, so a signal missing from the values is never unexplained
     not_read = ([f"  The values at each instant leave out {_and_list([f'{nm} ({why})' for nm, why in unread.items()])}"
                  f", because {'its' if len(unread) == 1 else 'their'} rows could not be read."] if unread else [])
+    # rows left out because their readings at the instants do not resolve them are named, with why
+    step = float(np.median(np.diff([frame_time(ep, k) for k in ks]))) if len(ks) > 1 else every_s(ep)
+    unresolved = ([f"  The values at each instant leave out "
+                   + _and_list([f"{nm} ({len(lbs)} of its {counts[nm]} rows)" if len(lbs) < counts[nm] else nm
+                                for nm, lbs in aliased.items()])
+                   + f", because one instant every {_seconds_number(step, 2)} s does not resolve their readings: they "
+                     "swing faster than that or only jitter by their noise, so a reading at one instant does not stand "
+                     "for the time around it. Their ranges are given above."] if aliased else [])
     if not rows:
-        return not_read, frozenset()
+        return unresolved + not_read, frozenset()
     lines = []
     head = "    at: " + " ".join(f"{frame_time(ep, k):.2f}" for k in ks)
     text = {(r[1], r[2]): f"    {r[4]}: " + " ".join(r[5]) for r in rows}
     budget = signal_readout_budget(len(ks))
     room, chosen = budget - len(head), set()
     skipped, kept_after_skip = False, False
-    for r in sorted(rows, key=lambda r: (-r[0], r[1], r[2])):
+    for r in sorted(rows, key=lambda r: (-r[0][0], -r[0][1], r[1], r[2])):
         if len(text[r[1], r[2]]) > room:
             skipped = True
             continue
@@ -1735,13 +1760,14 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
     if left:
         named = _and_list([_left_out(nm, arrs[nm], meta.get(nm) or {}, len(left[nm]), sum(r[3] == nm for r in rows))
                            for nm in left])
-        reason = (", because these move least and there is no more room." if chosen else
+        reason = (", because these rank lowest and there is no more room." if chosen else
                   ", because not even one row fits.")
         if kept_after_skip or budget != SIGNAL_TABLE_MIN_CHARS:
-            reason = (f", because rows are ranked by movement and kept when they fit the {budget} character budget."
+            reason = (", because rows are ranked by how well each reading stands for its instant, then by movement, "
+                      f"and kept when they fit the {budget} character budget."
                       if chosen else f", because no row fits the {budget} character budget after the times row.")
         lines.append("  The values at each instant leave out " + named + reason)
-    return lines + not_read, frozenset(r[3] for r in rows if r[3] not in left)
+    return lines + unresolved + not_read, frozenset(r[3] for r in rows if r[3] not in left and r[3] not in aliased)
 
 
 def _readout_of(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
@@ -2391,10 +2417,35 @@ def _frames_head(ep: dict, cell_w: int, cell_h: int, native: tuple, *, capture_m
         "small detail (lettering, a display, fine alignment)." + _excluded_camera_clock_notes(ep))
 
 
-def _camera_capture_text(ep: dict, pl: dict) -> str:
-    """Expose nonidentity cell timing without repeating clocks shared by every row."""
-    mapping = {}
+def camera_frame_interval_s(ep: dict, view: str) -> float:
+    """A camera's own frame interval: the median positive step of its capture clock, or one frame at the episode's
+    fps when it has none."""
+    recorded = (ep.get('recorded_times') or {}).get(view)
+    own = (ep.get('times') or {}).get(view) if recorded is None else recorded
+    if own is not None:
+        t = np.asarray(own, dtype=np.float64)
+        steps = np.diff(t[np.isfinite(t)])
+        steps = steps[steps > 0]
+        if len(steps):
+            return float(np.median(steps))
+    return 1.0 / ep_fps(ep)
+
+
+def _ms(x: float | None) -> float | None:
+    return None if x is None else round(float(x), 3)
+
+
+def _camera_capture_rows(ep: dict, pl: dict) -> tuple[dict, dict]:
+    """({view: [[display s, source frame, capture s, offset s], ...]}, {view: largest offset left out, in s}).
+    A capture offset is listed only when it is at least half a frame interval, of the camera's own clock or of the
+    anchor's, whichever is shorter: a smaller one is finer than the column times themselves resolve and finer than the
+    camera's own frames, so it cannot change which capture a cell shows or which column an event falls in. Listing
+    those (a wrist camera stamped 10 ms after the anchor at every instant) repeated one sub-frame number per instant.
+    Times are rounded to the millisecond. An unavailable capture time is always listed."""
+    mapping, small = {}, {}
+    base = camera_frame_interval_s(ep, anchor(ep))
     for view in views(ep):
+        half = 0.5 * min(camera_frame_interval_s(ep, view), base)
         rows = []
         for k in pl.get('ks') or []:
             if not recording_at(ep, view, k):
@@ -2403,13 +2454,35 @@ def _camera_capture_text(ep: dict, pl: dict) -> str:
             if sample is None:
                 continue
             delta = sample['capture_offset_s']
-            if delta is None or abs(delta) > 1e-6:
-                rows.append([sample['display_time_s'], sample['source_frame'], sample['source_time_s'], delta])
+            if delta is None or abs(delta) >= half:
+                rows.append([_ms(sample['display_time_s']), sample['source_frame'], _ms(sample['source_time_s']),
+                             _ms(delta)])
+            elif abs(delta) > 1e-6:
+                small[view] = max(small.get(view, 0.0), abs(delta))
         if rows:
             mapping[view] = rows
-    if not mapping:
+    return mapping, small
+
+
+def _small_offsets_text(ep: dict, small: dict) -> str:
+    if not small:
         return ''
+    each = _and_list([f"{1000 * s:.1f} ms for {cam_name(ep, v)}" for v, s in small.items()])
+    return (f"Capture offsets shorter than half a frame interval are not listed; the largest left out is {each}.")
+
+
+def _camera_capture_text(ep: dict, pl: dict) -> str:
+    """Expose nonidentity cell timing without repeating clocks shared by every row (_camera_capture_rows), and say how
+    large the sub-frame offsets left out were, so that fact is kept."""
+    mapping, small = _camera_capture_rows(ep, pl)
+    if not mapping:
+        if not small:
+            return ''
+        each = _and_list([f"{1000 * s:.1f} ms for {cam_name(ep, v)}" for v, s in small.items()])
+        return ("\nCAMERA CAPTURE TIMES: every camera's captures are within half a frame interval of their column "
+                f"times, at most {each}.")
     return ('\nCAMERA CAPTURE MAPPING\n'
+            + (_small_offsets_text(ep, small) + ' ' if small else '') +
             'Each row is [anchor display seconds, source frame, capture seconds, capture minus display seconds]. '
             'Only differing or unavailable capture times are listed. Null capture times cannot establish synchronized '
             'events. Camera clock qualifications still apply. Reused source frames are one capture, not separate '
@@ -2524,7 +2597,7 @@ def episode_text(ep: dict, pl: dict, cell_w: int, cell_h: int, native: tuple,
     capture_text = _camera_capture_text(ep, pl)
     return (EPISODE_HEADER + _intro_head(ep) + got["intro"] + "\n" + camera_desc(ep, is_recorded(ep, pl, blocks))
             + "\n"
-            + _frames_head(ep, cell_w, cell_h, native, capture_mapped=bool(capture_text))
+            + _frames_head(ep, cell_w, cell_h, native, capture_mapped="CAMERA CAPTURE MAPPING" in capture_text)
             + capture_text + got["frames_detail"] + "\n" + _instants_line(ep, pl)
             + got["frames"] + got["state"] + got["signals"] + BETWEEN_INSTANTS + got["after_frames"] + "\n"
             + task_block(ep) + got["after_task"] + got['evidence']

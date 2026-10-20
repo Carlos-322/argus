@@ -831,7 +831,7 @@ def test_the_values_at_each_instant_keep_what_moves_most_and_name_the_rest():
     assert "would not fit" not in table
     readout = table.split("at every instant you receive")[1]
     left = [l for l in table.splitlines() if l.startswith("  The values at each instant leave out ")]
-    assert len(left) == 1 and left[0].endswith(", because these move least and there is no more room.")
+    assert len(left) == 1 and left[0].endswith(", because these rank lowest and there is no more room.")
     body = readout.split(left[0])[0]
     # the budget counts the instants' row and the value rows, without their line breaks
     assert sum(len(l) for l in body.splitlines() if l.startswith("    ")) <= me.SIGNAL_TABLE_MAX_CHARS
@@ -910,7 +910,8 @@ def test_signal_readout_skips_an_oversized_row_without_discarding_smaller_eviden
     omitted = set(ep["signals"]) - expected
     if omitted:
         assert all(name in lines[-1] for name in omitted)
-        assert "ranked by movement" in lines[-1] and "move least" not in lines[-1]
+        assert "ranked by how well each reading stands for its instant, then by movement" in lines[-1]
+        assert "move least" not in lines[-1]
     else:
         assert "leave out" not in "\n".join(lines)
 
