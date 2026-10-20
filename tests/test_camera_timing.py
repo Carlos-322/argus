@@ -107,6 +107,25 @@ def test_fallback_search_reads_each_capture_once_and_keeps_only_endpoint_details
     assert all(widths == [128] for ks, widths in decodes if ks not in full)
 
 
+def test_the_sensor_strips_play_on_the_clips_clock_when_the_real_times_are_in_another_file(tmp_path):
+    """board/clips.py read the capture times from context.json real_times, while board/sensors.py looked only for a
+    literal times.npz and fell back to frame / fps without it, so the video and the sensor strips under it ran on two
+    clocks. Both now read the one clock board/clips.py clip_times gives."""
+    ep = recording(tmp_path, np.arange(90) / 30)
+    real = 0.004 + np.arange(90) / 29.5          # the capture times, a little slower than the nominal rate
+    with np.load(ep / "times.npz") as z:
+        saved = {k: z[k] for k in z.files}
+    np.savez(ep / "capture_times.npz", **{**saved, "exo": real})
+    (ep / "times.npz").unlink()
+    ctx = json.loads((ep / "context.json").read_text())
+    ctx["real_times"] = "capture_times.npz"
+    (ep / "context.json").write_text(json.dumps(ctx))
+    source = json.loads((ep / "sources.json").read_text())
+    video_clock = clips.clip_times(ep, source, 30.0)["exo"]
+    assert np.array_equal(video_clock, real)
+    assert np.array_equal(sensors.strip_times(ep, ctx, 90), video_clock)
+
+
 def test_board_and_sensor_times_use_the_request_zero_when_the_first_capture_is_above_zero(tmp_path):
     main = 0.0122 + np.arange(90) / 30
     side = main - 0.008
@@ -114,7 +133,7 @@ def test_board_and_sensor_times_use_the_request_zero_when_the_first_capture_is_a
     source = json.loads((ep / "sources.json").read_text())
     ctx = json.loads((ep / "context.json").read_text())
     assert np.array_equal(clips.clip_times(ep, source)["exo"], main)
-    assert np.array_equal(sensors.clip_times(ep, ctx, 90), main)
+    assert np.array_equal(sensors.strip_times(ep, ctx, 90), main)
 
 
 def test_an_explicit_clock_zero_is_shared_by_request_and_board(tmp_path):
@@ -131,7 +150,7 @@ def test_an_explicit_clock_zero_is_shared_by_request_and_board(tmp_path):
     (ep / "context.json").write_text(json.dumps(ctx))
     loaded = episode.load(ep)
     assert episode.frame_time(loaded, 0) == 0
-    assert sensors.clip_times(ep, ctx, 10)[0] == 0
+    assert sensors.strip_times(ep, ctx, 10)[0] == 0
     assert loaded["context"]["contacts"][0]["start_s"] == pytest.approx(0.1)
     assert loaded["context"]["contacts"][0]["dips_s"] == pytest.approx([0.16])
     assert loaded["context"]["annotation_subtasks"][0]["t0"] == pytest.approx(0.05)
@@ -247,7 +266,7 @@ def test_removing_the_main_camera_moves_state_contacts_and_depth_on_one_clock(tm
         assert np.allclose(z["depth_left"], np.arange(10) / 30)
     assert ctx["contacts"][0]["start_s"] == pytest.approx(0.1)
     assert ctx["contacts"][0]["dips_s"] == pytest.approx([4 / 30], abs=0.001)
-    assert np.allclose(clips.clip_times(ep, src)["left"], sensors.clip_times(ep, ctx, 10))
+    assert np.allclose(clips.clip_times(ep, src)["left"], sensors.strip_times(ep, ctx, 10))
 
 
 def test_composed_mixed_rate_footage_keeps_each_cameras_current_frame(tmp_path):

@@ -35,34 +35,24 @@ the output schema, not from any one episode:
 """
 from __future__ import annotations
 
-import math
+from checks.results import stored_number
 
 REACHED = ("success", "success_then_undone")
 NOT_REACHED = ("failure", "partial", "unclear")
 OTHER_TASK = ("different", "unrelated")
 
 
-def _num(x):
-    if isinstance(x, bool):
-        return None
-    try:
-        value = float(x)
-        return value if math.isfinite(value) else None
-    except (TypeError, ValueError):
-        return None
-
-
 def _levels(steps: list[dict]) -> list[tuple[float, float]]:
     """The timeline's progress in time order, each value at its step's end; an idle step counts only when it raises
     the level (a parked arm's step would otherwise read as a drop), as the board's chart reads it."""
     def end(s):
-        a, b = _num(s.get("start_s", s.get("t_s"))), _num(s.get("end_s"))
+        a, b = stored_number(s.get("start_s", s.get("t_s"))), stored_number(s.get("end_s"))
         return b if b is not None and a is not None and b >= a else a
-    rows = sorted(((end(s), i, s) for i, s in enumerate(steps) if end(s) is not None and _num(s.get("progress")) is not None),
+    rows = sorted(((end(s), i, s) for i, s in enumerate(steps) if end(s) is not None and stored_number(s.get("progress")) is not None),
                   key=lambda r: (r[0], r[1]))
     out, cur = [], 0.0
     for t, _, s in rows:
-        p = _num(s.get("progress"))
+        p = stored_number(s.get("progress"))
         if not 0 <= p <= 1:
             continue
         if str(s.get("contribution") or "").lower() == "idle" and p <= cur:
@@ -82,7 +72,7 @@ def check(label: dict, duration_s: float | None = None) -> list[dict]:
     c = label.get("completion") or {}
     outcome = str(c.get("task_completed") or "").lower()
     rel = str((label.get("goal_alignment") or {}).get("relation") or "").lower()
-    goal, undone = _num(c.get("goal_reached_at_s")), _num(c.get("undone_at_s"))
+    goal, undone = stored_number(c.get("goal_reached_at_s")), stored_number(c.get("undone_at_s"))
     out = []
     if outcome in REACHED and rel in OTHER_TASK:
         out.append({"rule": "outcome_vs_alignment",
@@ -101,19 +91,19 @@ def check(label: dict, duration_s: float | None = None) -> list[dict]:
             out.append({"rule": "undone_timing",
                         "note": "The outcome is success then undone, but the goal and undo times are missing or the "
                                 "undo does not come after the goal."})
-        elif not any((_num((s or {}).get("t_s")) or -1) > goal for s in label.get("state_changes") or []
+        elif not any((stored_number((s or {}).get("t_s")) or -1) > goal for s in label.get("state_changes") or []
                      if isinstance(s, dict)):
             out.append({"rule": "nothing_after_goal",
                         "note": "The outcome is success then undone, but the label records no state change after "
                                 "the goal was reached."})
     # the harness returns timeline rows; the board stores them as event_labels
     steps = label.get('timeline') or []
-    peak = max((p for p in (_num(s.get("progress")) for s in steps) if p is not None), default=None)
+    peak = max((p for p in (stored_number(s.get("progress")) for s in steps) if p is not None), default=None)
     if outcome in NOT_REACHED and peak is not None and peak >= 0.99:
         out.append({"rule": "progress_vs_outcome",
                     "note": f"The outcome is {outcome}, but the timeline's progress reaches {peak:.0%}, the level kept "
                             f"for the moment the goal is reached."})
-    done = _num(c.get("completed_at_s"))
+    done = stored_number(c.get("completed_at_s"))
     if outcome == "success" and done is not None and goal is not None and abs(goal - done) > 0.5:
         out.append({"rule": "goal_times_differ",
                     "note": f"The outcome is success, but the goal is reached at {goal:.1f} s and the goal frame is "
@@ -137,7 +127,7 @@ def check(label: dict, duration_s: float | None = None) -> list[dict]:
                                 "were handled."})
     if duration_s:
         for key in ("goal_reached_at_s", "undone_at_s", "completed_at_s"):
-            t = _num(c.get(key))
+            t = stored_number(c.get(key))
             if t is not None and t > duration_s + 1.0:
                 out.append({"rule": "time_past_end",
                             "note": f"{key} is {t:.1f} s, after the episode ends at {duration_s:.1f} s."})

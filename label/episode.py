@@ -1352,10 +1352,6 @@ def _coverage_note(ep: dict, pl: dict) -> str:
     return out
 
 
-def _num(x: float) -> str:
-    return f"{float(x):.3g}"
-
-
 def _depth_note(ep: dict) -> str:
     """Which cameras also record depth, and that each detail view is followed by their depth: what the input is, never
     how to read it."""
@@ -1630,8 +1626,8 @@ def _signals_table(ep: dict, pl: dict) -> str:
                 # named once, as the same at every frame only when it reads at every frame
                 complete = np.isfinite(a).all(axis=1)
                 v = a[complete][0] if complete.any() else sg.finite_range(a)[0]
-                said = name + (f" {_num(v[0])}" if len(v) == 1 else
-                               " [" + ", ".join(_num(x) for x in v) + "]" if len(v) <= sg.PER_VALUE_MAX else "")
+                said = name + (f" {sg.reading_text(v[0])}" if len(v) == 1 else
+                               " [" + ", ".join(sg.reading_text(x) for x in v) + "]" if len(v) <= sg.PER_VALUE_MAX else "")
                 said += wording
                 gaps = sg.gap_words(a)
                 if gaps:
@@ -1661,7 +1657,7 @@ def _signals_table(ep: dict, pl: dict) -> str:
                 lo, hi = sg.finite_range(seg)
                 c = float(np.nanmax(hi - lo)) if np.isfinite(seg).any() else 0.0
                 if c > 0:
-                    ch.append(f"{name} {_num(c)}")
+                    ch.append(f"{name} {sg.reading_text(c)}")
             lines.append(f"    {frame_time(ep, a0):.2f}-{frame_time(ep, min(b0, n - 1)):.2f}s: "
                          + ("; ".join(ch) if ch else "none changed"))
     lines += _readout_of(ep, pl)[0]
@@ -1757,10 +1753,11 @@ def _constant(a: np.ndarray) -> bool:
 def _left_out(name: str, a: np.ndarray, m: dict, n_left: int, n_rows: int) -> str:
     """One signal left out of the values at each instant: its name, its size, its rate when known, and how many of its
     rows were left out when some of them were shown."""
+    from label import signals as sg
     shape = m.get("shape")
     size = (" x ".join(str(int(x)) for x in shape) + " values" if shape and len(shape) > 1
             else f"{a.shape[1]} value{'s' if a.shape[1] > 1 else ''}")
-    rate = f", {_num(m['rate_hz'])} Hz" if m.get("rate_hz") else ""
+    rate = f", {sg.reading_text(m['rate_hz'])} Hz" if m.get("rate_hz") else ""
     part = f", {n_left} of its {n_rows} rows" if n_left < n_rows else ""
     return f"{name} ({size}{rate}{part})"
 

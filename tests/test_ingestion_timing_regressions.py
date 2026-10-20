@@ -209,7 +209,12 @@ def test_portrait_probe_and_decoded_picture_agree_without_ffprobe(tmp_path, monk
     _clip(source, 3)
     subprocess.run([ffmpeg, '-v', 'error', '-y', '-display_rotation', '90', '-i', str(source),
                     '-c', 'copy', str(portrait)], check=True)
+    # no ffprobe anywhere: none on PATH, none in the install places prepare/tools.py also looks in
+    from prepare import tools
     monkeypatch.setenv('PATH', '')
+    monkeypatch.delenv('FFPROBE', raising=False)
+    monkeypatch.delenv('FFMPEG', raising=False)
+    monkeypatch.setattr(tools, 'INSTALL_DIRS', ())
     display._geometry.cache_clear()
     geometry = display.geometry(str(portrait))
     assert geometry['stored'] == (0, 0)

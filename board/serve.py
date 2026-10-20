@@ -73,30 +73,19 @@ import uuid
 from collections import OrderedDict, deque
 from pathlib import Path
 
+from board.clips import DEPTH, clip_path    # one rule for where a camera's clip is, for the writer and this server
 from board.families import Families
 from board.public_export import project as public_json
 from board.to_board import dumps, finite
+from prepare import tools
 from compare.metrics import model_names, reasoning_effort
 from label.atomic import (cached_while_unchanged, file_version, remove_if, small_file, sweep_removals,
                           write_atomic)
 
 
-def _find_ffmpeg() -> str | None:
-    """$FFMPEG (as board/clips.py reads it, so the frames come from the same binary as the clips), else the ffmpeg on
-    PATH, else the usual install places."""
-    if os.environ.get("FFMPEG") and os.access(os.environ["FFMPEG"], os.X_OK):
-        return os.environ["FFMPEG"]
-    found = shutil.which("ffmpeg")
-    if found:
-        return found
-    # a server started outside a login shell may not have Homebrew or /usr/local on its PATH
-    for c in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"):
-        if os.access(c, os.X_OK):
-            return c
-    return None
-
-
-FFMPEG = _find_ffmpeg()
+# the ffmpeg board/clips.py cuts the clips with (prepare/tools.py), so the frames come from the same binary; None
+# when there is none, and the board then serves no frames or footage
+FFMPEG = tools.ffmpeg_or_none()
 
 
 # Frames cut from the clips (goal frames, per-task goal frames, posters) are asked for again and again, and each
@@ -125,15 +114,10 @@ def _still_clip(mp4, key: tuple) -> bool:
         return False
 
 
-def _ffprobe() -> str:
-    probe = Path(FFMPEG).with_name("ffprobe") if FFMPEG else None
-    return str(probe) if probe and probe.exists() else "ffprobe"
-
-
 @cached_while_unchanged(2048, lambda *key: _still_clip(key[0], key))
 def _read_clip_times(*key) -> list:
     try:
-        r = subprocess.run([_ffprobe(), "-v", "error", "-select_streams", "v:0", "-show_entries",
+        r = subprocess.run([tools.ffprobe(), "-v", "error", "-select_streams", "v:0", "-show_entries",
                             "packet=pts_time,flags", "-of", "csv=p=0", key[0]], capture_output=True, text=True,
                            timeout=60)
         return sorted(float(a) for a, *f in (ln.split(",") for ln in r.stdout.split() if ln)
@@ -154,7 +138,7 @@ def _clip_times(mp4: Path) -> list:
 @cached_while_unchanged(2048, lambda *key: _still_clip(key[0], key))
 def _read_clip_comment(*key) -> str:
     # an ffprobe that cannot run raises, so its failure is never kept as the clip's answer
-    r = subprocess.run([_ffprobe(), "-v", "error", "-show_entries", "format_tags=comment", "-of",
+    r = subprocess.run([tools.ffprobe(), "-v", "error", "-show_entries", "format_tags=comment", "-of",
                         "default=nw=1:nk=1", key[0]], capture_output=True, text=True, timeout=60)
     return r.stdout.strip()
 
@@ -390,29 +374,18 @@ def _remember_frame(key, jpg: bytes) -> None:
             _FRAME_CACHE.popitem(last=False)
 
 
-# any other camera the recording has, and a camera the model is not shown (board/clips.py clip_path, unshown_views)
+# any other camera the recording has, and a camera the model is not shown (board/clips.py unshown_views)
 EXTRA_CAM = re.compile(r"(?:extra|unshown)\d{1,2}")
-DEPTH_CAM = re.compile(r"depth_(exo|left|right|extra\d{1,2}|depth_stream\d{1,6})")
 
 
 def depth_clips(clips: Path, eid: str) -> dict:
-    """Available paired and independent depth clips, keyed by their prepared stream view."""
+    """Available paired and independent depth clips, keyed by their prepared stream view: every folder board/clips.py
+    depth_clip writes, depth_<view>/."""
     if not clips.is_dir():
         return {}
-    return {folder.name[6:]: folder / f'{eid}.mp4' for folder in sorted(clips.iterdir())
-            if folder.is_dir() and DEPTH_CAM.fullmatch(folder.name) and (folder / f'{eid}.mp4').is_file()}
-
-
-def clip_path(clips: Path, eid: str, cam: str) -> Path:
-    """The clip of one camera: cam "left" and "right" are the mounted cameras, extra1, extra2, ... the others,
-    depth_<camera> a camera's depth clip, anything else the main one."""
-    if cam == "left":
-        return clips / "wrist_left" / f"{eid}.mp4"
-    if cam == "right":
-        return clips / "wrist_right" / f"{eid}.mp4"
-    if EXTRA_CAM.fullmatch(cam or "") or DEPTH_CAM.fullmatch(cam or ""):
-        return clips / cam / f"{eid}.mp4"
-    return clips / f"{eid}.mp4"
+    found = {folder.name[len(DEPTH):]: clip_path(clips, eid, folder.name) for folder in sorted(clips.iterdir())
+             if folder.is_dir() and folder.name.startswith(DEPTH) and len(folder.name) > len(DEPTH)}
+    return {view: path for view, path in found.items() if path.is_file()}
 
 
 def _under(base: Path, p: Path) -> bool:
@@ -520,9 +493,11 @@ def footage_cams(clips: Path, eid: str, label: dict | None = None) -> list:
     """Playable cameras in the current episode's presentation order, with legacy discovery as fallback."""
     extra = sorted((d.name for d in clips.iterdir() if d.is_dir() and EXTRA_CAM.fullmatch(d.name)),
                    key=lambda n: (n.startswith("unshown"), int(re.sub(r"\D", "", n)))) if clips.is_dir() else []
-    cams = [(c, clip_path(clips, eid, c)) for c in ("exo", "left", "right", *extra)
-            if clip_path(clips, eid, c).is_file()]
     label = footage_label(eid) if label is None else label
+    # the label's own cameras too, so a camera of any name (board/clips.py clip_path) is found where it was written
+    named = [str(v) for v in label.get('camera_views') or [] if isinstance(v, str)]
+    cams = [(c, clip_path(clips, eid, c)) for c in dict.fromkeys(("exo", "left", "right", *extra, *named))
+            if clip_path(clips, eid, c).is_file()]
     unpaired = {row.get('view') for row in label.get('unshown_cameras') or []
                 if isinstance(row, dict) and row.get('clock_alignment') == 'unverified'}
     cams = [(cam, path) for cam, path in cams if cam not in unpaired]
@@ -613,8 +588,7 @@ def _probe_uncached(p: Path) -> tuple:
     a frame half a step long, which puts its average rate above the camera's own and the footage canvas
     (footage_command) at a rate that samples on the frames' boundaries."""
     p = _source_path(p)
-    probe = Path(FFMPEG).with_name("ffprobe") if FFMPEG else None
-    r = subprocess.run([str(probe) if probe and probe.exists() else "ffprobe", "-v", "error", "-select_streams", "v:0",
+    r = subprocess.run([tools.ffprobe(), "-v", "error", "-select_streams", "v:0",
                         "-show_entries", "stream=width,height,avg_frame_rate:format=duration",
                         "-of", "json", str(p)], capture_output=True, text=True, timeout=30, check=True,
                        **_source_process_options())
@@ -2359,10 +2333,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not _under(MP4_DIR, mp4) or not mp4.exists():
                 self._send(404, {"error": "video not found"})
                 return
-            # download=1: one camera's clip saved as a file of its own, named after its camera, so an extra camera never
+            # download=1: one camera's clip saved as a file of its own, named after its camera, so another camera never
             # takes the main camera's name
-            own = cam in ("left", "right") or EXTRA_CAM.fullmatch(cam) or DEPTH_CAM.fullmatch(cam)
-            name = f"{eid}_{cam if own else 'main'}.mp4" \
+            name = f"{eid}_{'main' if cam == 'exo' else cam}.mp4" \
                 if (q.get("download") or [""])[0] == "1" \
                 else None
             self._send_file(mp4, "video/mp4", name, validate=name is None)

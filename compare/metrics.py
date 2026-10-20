@@ -230,10 +230,6 @@ def episode_identity(eps: Path, name: str, bidx: dict) -> dict:
 
 # ---------------------------------------------------------------- per response
 
-def _num(x) -> bool:
-    return isinstance(x, (int, float)) and not isinstance(x, bool)
-
-
 def _list(L: dict, key: str) -> list:
     """L[key] when it is a list, else an empty list."""
     return L[key] if isinstance(L.get(key), list) else []

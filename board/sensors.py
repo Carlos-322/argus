@@ -150,20 +150,18 @@ def encode_times(t_s: np.ndarray) -> dict:
 
 # ---------------------------------------------------------------- one episode
 
-def clip_times(ep_dir: Path, ctx: dict, n: int) -> np.ndarray:
-    """Seconds on the board clip's clock for each anchor frame: the anchor camera's real capture times (times.npz)
-    minus the explicit clock origin when present, as the request and clips use, else frame / fps."""
-    from label.episode import order_views
-    tp = ep_dir / "times.npz"
+def strip_times(ep_dir: Path, ctx: dict, n: int) -> np.ndarray:
+    """Seconds on the board clip's clock for each of n anchor frames: the main camera's times as its clip plays them
+    (board/clips.py clip_times, which reads context.json real_times and the clock origin), else frame / fps, as its
+    clip plays a camera without capture times."""
+    from board.clips import clip_times, main_cam
     src_p = ep_dir / "sources.json"
-    if tp.exists() and src_p.exists():
-        views = order_views(json.loads(src_p.read_text()))
-        from prepare.camera_clock import load_times
-        z = load_times(ep_dir, ctx)
-        if views and views[0] in z and len(z[views[0]]) >= n > 0:
-            t = np.asarray(z[views[0]][:n], dtype=np.float64)
-            return t - float(ctx.get("clock_zero_s") or 0.0)
     fps = float(ctx.get("fps") or 30.0)
+    if src_p.exists() and n > 0:
+        sources = json.loads(src_p.read_text())
+        t = clip_times(ep_dir, sources, fps, ctx).get(main_cam(sources)) if sources else None
+        if t is not None and len(t) >= n:
+            return np.asarray(t[:n], dtype=np.float64)
     return np.arange(n, dtype=np.float64) / fps
 
 
@@ -398,7 +396,7 @@ def episode_doc(ep_dir: Path) -> dict | None:
         src = json.loads(source_p.read_text()) if source_p.exists() else {}
         anchor = order_views(src)
         n = int(src[anchor[0]]["n_frames"] if anchor else ctx.get("n_state_frames") or 0)
-        t = clip_times(ep_dir, ctx, n)
+        t = strip_times(ep_dir, ctx, n)
         n = min(n, len(t))
         t = t[:n]
         dt = float(np.median(np.diff(t))) if n > 1 else 1.0 / RATE_HZ

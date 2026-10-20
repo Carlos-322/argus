@@ -67,21 +67,19 @@ from pathlib import Path
 
 from label.atomic import temporary_path, write_atomic
 from label.presented import presented, presented_pts
+from prepare import tools
 from prepare.isolation import run_while_progressing
 
 CAMS = ("exo", "left", "right")
 
 
-def find_ffmpeg() -> str:
-    """$FFMPEG, else the ffmpeg on PATH."""
-    c = os.environ.get("FFMPEG") or shutil.which("ffmpeg")
-    if not c:
-        raise SystemExit("ffmpeg not found: put it on PATH or set FFMPEG")
-    return c
+find_ffmpeg = tools.ffmpeg       # the one ffmpeg every caller runs (prepare/tools.py)
 
 
 def clip_path(mp4_dir: Path, eid: str, cam: str) -> Path:
-    """One camera's clip: the scene camera at the top, the mounted ones and any others in their own folders."""
+    """One camera's clip, where this file writes it and board/serve.py, board/static.py and board/hands.py read it:
+    the fixed or head camera (exo) at the top, the mounted ones in wrist_left/ and wrist_right/, and every other
+    camera in a folder named after it (extra1/, unshown1/, depth_exo/, or any other name)."""
     if cam in ("left", "right"):
         return mp4_dir / f"wrist_{cam}" / f"{eid}.mp4"
     if cam == "exo":
@@ -89,9 +87,12 @@ def clip_path(mp4_dir: Path, eid: str, cam: str) -> Path:
     return mp4_dir / cam / f"{eid}.mp4"
 
 
+DEPTH = "depth_"     # a camera's depth clip is the clip of the camera depth_<camera> (depth_exo, depth_left, ...)
+
+
 def depth_clip(mp4_dir: Path, eid: str, cam: str) -> Path:
     """One camera's depth clip."""
-    return mp4_dir / f"depth_{cam}" / f"{eid}.mp4"
+    return clip_path(mp4_dir, eid, DEPTH + cam)
 
 
 def clip_paths(mp4_dir: Path, eid: str, cams=CAMS) -> dict:
@@ -181,18 +182,14 @@ def clip_threads(clips: int, jobs: int, threads: int) -> int:
     return max(threads, (jobs * threads) // clips)
 
 
-def source_size(ffmpeg: str, path: str) -> tuple:
+def source_size(path: str) -> tuple:
     """(width, height, resample) of a video's first stream as it is shown (prepare/display.py, the reader's rule):
     pixels that are not square made square (resample says they must be), and a rotation of 90 or 270 degrees
     swapping the stored size, since ffmpeg turns the frames upright before scaling. Scaling a portrait phone video to
     its stored landscape size squashed it."""
     from prepare import display
-    probe = Path(ffmpeg).with_name("ffprobe")
-    exe = str(probe) if probe.exists() else shutil.which("ffprobe")
-    if not exe:
-        # a missing tool is the machine's (machine_stopped), never a size the video does not have
-        raise FileNotFoundError(errno.ENOENT, "ffprobe not found beside ffmpeg or on PATH", "ffprobe")
-    g = display.geometry(str(path), exe)
+    # a missing ffprobe raises tools.Missing, the machine's (machine_stopped), never a size the video does not have
+    g = display.geometry(str(path), tools.ffprobe())
     if not g["stored"][0]:
         raise RuntimeError(f"ffprobe could not read the size of {path}")
     w, h = display.shown_size(g)
@@ -234,25 +231,27 @@ def start_offsets(ep_dir: Path, sources: dict, fps: float = 30.0) -> dict:
     return out
 
 
-def clip_times(ep_dir: Path, sources: dict, fps: float = 30.0) -> dict:
-    """{camera: its frames' capture times on the episode's clock} for each camera times.npz holds one per frame of
-    (sources.json n_frames): the times label/episode.py chooses the model's frames by (frame_time, and each paired
-    camera's kmap, nearest in time). The clock starts where start_offsets puts it."""
+def clip_times(ep_dir: Path, sources: dict, fps: float = 30.0, ctx: dict | None = None) -> dict:
+    """{camera: its frames' capture times on the episode's clock} for each camera the real-times file (context.json
+    real_times, else times.npz) holds one per frame of (sources.json n_frames): the times label/episode.py chooses
+    the model's frames by (frame_time, and each paired camera's kmap, nearest in time). The clock starts where
+    start_offsets puts it. The clips play on these times (retime) and the sensor strips are drawn on the main
+    camera's (board/sensors.py strip_times), so the video and the strips keep one clock. ctx is the episode's
+    context.json, read from ep_dir when not given."""
     import numpy as np
-    ctx = _context(ep_dir)
+    ctx = _context(ep_dir) if ctx is None else ctx
     tp = ep_dir / (ctx.get("real_times") or "times.npz")
     cams = cams_of(sources)
     if not tp.exists() or not cams:
         return {}
     from prepare.camera_clock import load_times
-    z = load_times(ep_dir, _context(ep_dir))
+    z = load_times(ep_dir, ctx)
     t = {c: np.asarray(z[c], dtype=np.float64) for c in cams if c in z
          and len(z[c]) == int(sources[c].get("n_frames") or -1)}
     main = main_cam(sources)
     if main not in t:
         return {}
-    zero = _context(ep_dir).get("clock_zero_s")
-    ref = float(zero or 0.0)
+    ref = float(ctx.get("clock_zero_s") or 0.0)
     return {c: tc - ref for c, tc in t.items()}
 
 
@@ -281,7 +280,7 @@ def extract_one(packed: str, base_s: float, n_frames: int, out_mp4: Path,
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
     # a temporary file of this call's own, so two builders (processes or threads) on one clip never share one
     tmp = temporary_path(out_mp4, '.mp4')
-    w, h, resample = source_size(ffmpeg, packed)
+    w, h, resample = source_size(packed)
     want = int(n_frames) - int(skip)
     dense = False
     timing = ((f"select=gte(n\\,{int(skip)})",) if skip else ()) + ("setpts=PTS-STARTPTS",)
@@ -1362,26 +1361,21 @@ def recheck(ep_dir: Path) -> None:
     """Run again, for an episode a camera was taken out of, the deterministic checks whose results in its context.json
     read its cameras or the frames its state is on (checks/stream_pairing.py, checks/capture_qc.py, checks/sensors.py),
     so no result names a camera the episode no longer has. A check that crashes now is recorded as errored, the way
-    each check's own runner records it (stream_pairing._safe, capture_qc.run_episode, sensors._safe), never left
-    describing the episode as it was and never taken out, so a finding that had fired never vanishes unseen."""
+    each check's own runner records it (each module's _safe, checks/results.py run_safely), never left describing the
+    episode as it was and never taken out, so a finding that had fired never vanishes unseen."""
+    from functools import partial
     from checks import capture_qc
+    from checks import results
     from checks import sensors
     from checks import stream_pairing
     ctx = _context(ep_dir)
-
-    def capture(d):
-        try:
-            return capture_qc.run_episode(d)
-        except Exception as e:  # noqa: BLE001 - recorded on every check, as run_episode records a crash inside it
-            return capture_qc.errored_record(e)
-    runs = {key: (lambda d, m=mode: stream_pairing._safe(m, str(d))[1])
-            for mode, (key, _, _) in stream_pairing.MODES.items()}
-    runs.update(capture_qc=capture, sensor_checks=lambda d: sensors._safe(str(d))[1])
+    runs = {key: partial(stream_pairing._safe, mode) for mode, (key, _, _) in stream_pairing.MODES.items()}
+    runs.update(capture_qc=capture_qc._safe, sensor_checks=sensors._safe)
     for key, fn in runs.items():
         if key not in ctx:
             continue
         old = ctx[key]
-        new = fn(ep_dir)
+        new = fn(str(ep_dir))[1]
         if key == "sensor_checks" and isinstance(new, dict) and isinstance(old, dict):
             # dead values are judged across a whole folder (checks/sensors.py main), not by run_episode: kept as found
             dead = [n for n in old.get("notes") or [] if isinstance(n, dict) and n.get("check") == "dead_values"]
@@ -1389,7 +1383,7 @@ def recheck(ep_dir: Path) -> None:
                 new["notes"] = (new.get("notes") or []) + dead
                 for c in new.get("checks") or []:
                     if c.get("check") == "dead_values":
-                        c["status"] = "fired"
+                        c["status"] = results.FIRED
         ctx[key] = new
     write_atomic(ep_dir / "context.json", ctx, indent=1)
 
@@ -1544,7 +1538,10 @@ def main() -> int:
                          "run/out beside the episodes folder, as python -m review and Data Review lay a job out)")
     args = ap.parse_args()
 
-    ffmpeg = find_ffmpeg()
+    try:
+        ffmpeg = find_ffmpeg()
+    except tools.Missing as e:
+        raise SystemExit(e.strerror) from e
     labels = args.labels or args.episodes.parent / "run" / "out"
     if args.only:
         want = {x.strip() for x in args.only.split(",") if x.strip()}

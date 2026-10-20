@@ -96,7 +96,7 @@ def test_the_clip_step_gives_an_encoders_frames_their_length(tmp_path, monkeypat
         assert cmd[0] == "ffmpeg-7.0.2"
         shutil.copy(FIXTURES / "clip_without_frame_lengths.mp4", cmd[-1])
         return subprocess.CompletedProcess(cmd, 0, b"", b"")
-    monkeypatch.setattr(clips, "source_size", lambda ffmpeg, path: (64, 48, False))
+    monkeypatch.setattr(clips, "source_size", lambda path: (64, 48, False))
     monkeypatch.setattr(clips, "run_while_progressing", ffmpeg_702)
     out = tmp_path / "clips" / "episode_000000.mp4"
     clips.extract_one("src.mp4", 0.0, 20, out, "ffmpeg-7.0.2", 1, fps=20.0)

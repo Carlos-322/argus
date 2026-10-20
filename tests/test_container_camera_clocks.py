@@ -157,7 +157,7 @@ def test_hdf_board_and_parts_show_every_tied_frame_and_keep_native_clock_provena
     monkeypatch.setattr(episode, "_decode_view", trace)
     request = episode.build_request(ep)
     assert {(v, k) for v, k in decoded} == {(v, k) for v in sources for k in request["plan"]["ks"]}
-    np.testing.assert_allclose(sensors.clip_times(ep, ctx, 40), np.arange(40) / 10)
+    np.testing.assert_allclose(sensors.strip_times(ep, ctx, 40), np.arange(40) / 10)
     monkeypatch.setattr(episode, "_decode_view", actual_decode)
     monkeypatch.setattr(pieces, "choose_cuts", lambda *_: [{"frame": 17, "t_s": 1.7}])
     parts = pieces.write_pieces(ep, tmp_path / "parts")

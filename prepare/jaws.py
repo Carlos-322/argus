@@ -18,6 +18,7 @@ import numpy as np
 from scipy import ndimage
 
 from label.atomic import write_atomic
+from prepare import tools
 from prepare.isolation import run_while_progressing
 
 PROFILE = 'orange_pair_rows_640x480_v1'
@@ -132,14 +133,14 @@ def read_frames(video, *, frame_start, frame_count):
     validates the declared profile's encoded dimensions before image decoding.
     """
     info = json.loads(subprocess.run([
-        'ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries',
+        tools.ffprobe(), '-v', 'error', '-select_streams', 'v:0', '-show_entries',
         'stream=width,height', '-of', 'json', str(video)], check=True, capture_output=True,
         text=True, timeout=30).stdout)['streams'][0]
     if (info['width'], info['height']) != (W, H):
         raise ValueError('unsupported_image_geometry')
     vf = f'trim=start_frame={frame_start}:end_frame={frame_start + frame_count}'
     process = subprocess.Popen([
-        'ffmpeg', '-nostdin', '-v', 'error', '-noautorotate', '-i', str(video),
+        tools.ffmpeg(), '-nostdin', '-v', 'error', '-noautorotate', '-i', str(video),
         '-map', '0:v:0', '-vf', vf, '-fps_mode', 'passthrough',
         '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-'], stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL, bufsize=W * H * 3 * 4)
@@ -405,7 +406,7 @@ def for_episode(ep: dict, output_dir: Path | None, *, read_only=False) -> dict:
             # ffprobe reports actual decoded frame PTS. Packet counts or nominal FPS
             # cannot establish a frame-index window for variable-rate sources.
             # it decodes every frame, so it is bound by its progress (each frame it reports), not by a fixed time
-            probe = run_while_progressing(['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+            probe = run_while_progressing([tools.ffprobe(), '-v', 'error', '-select_streams', 'v:0',
                 '-show_frames', '-show_entries', 'frame=pts', '-of', 'json', str(path)], check=True, text=True)
             decoded = [frame.get('pts') for frame in json.loads(probe.stdout)['frames']]
             starts = [index for index, value in enumerate(decoded) if value == int(pts[0])]
