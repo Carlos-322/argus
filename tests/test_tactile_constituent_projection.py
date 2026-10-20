@@ -18,7 +18,7 @@ def test_shared_clock_numeric_matrix_preserves_opposing_neighboring_cells():
     ep['times']['exo'] = times
     before = raw.copy()
     doc = se.build(ep, {'n': len(raw), 'ks': [0, 103, 185]})
-    sent = json.loads(se.prompt(doc).splitlines()[-1])
+    sent = expand_prompt(json.loads(se.prompt(doc).splitlines()[-1]))
     array = sent['sensors'][0]['array_evidence']
     table = array['constituents']
     assert sent['sensors'][0]['array_supplied_columns'] == len(semantics['valid_indices'])
@@ -70,7 +70,7 @@ def test_prompt_pressure_reduces_array_rows_before_removing_local_evidence(monke
     # Force the reducer to share its byte budget between several distinct
     # modalities while keeping complete columns for every retained snapshot.
     monkeypatch.setattr(se, 'MAX_PROMPT_BYTES', 24000)
-    sent = json.loads(se.prompt(doc).splitlines()[-1])
+    sent = expand_prompt(json.loads(se.prompt(doc).splitlines()[-1]))
     for sensor in sent['sensors']:
         array = sensor['array_evidence']
         table = array['constituents']
@@ -138,7 +138,7 @@ def test_native_constituents_preserve_an_event_between_map_snapshots():
     raw[event, [10, 26]] = 500
     raw[event, [90, 106]] = 1500
     doc = se.build(ep, {'n': len(raw)})
-    array = json.loads(se.prompt(doc).splitlines()[-1])['sensors'][0]['array_evidence']
+    array = expand_prompt(json.loads(se.prompt(doc).splitlines()[-1]))['sensors'][0]['array_evidence']
     table = array['constituents']
     assert times[event] not in {frame['time_s'] for frame in array['frames']}
     assert table['times_s'] == times.tolist()
@@ -157,7 +157,7 @@ def test_native_constituent_value_budget_is_shared_without_losing_columns(monkey
                   for name in ['right_pressure', 'left_pressure']])
     ep['times']['exo'] = times
     doc = se.build(ep, {'n': len(raw)})
-    arrays = [sensor['array_evidence'] for sensor in json.loads(se.prompt(doc).splitlines()[-1])['sensors']]
+    arrays = [sensor['array_evidence'] for sensor in expand_prompt(json.loads(se.prompt(doc).splitlines()[-1]))['sensors']]
     tables = [array['constituents'] for array in arrays]
     assert sum(len(table['values']) * len(table['source_columns']) for table in tables) <= 128
     for table in tables:
@@ -173,10 +173,10 @@ def test_byte_thinned_native_rows_cannot_be_cited_as_supplied(monkeypatch):
                                           'sensor_semantics': semantics}])
     ep['times']['exo'] = times
     doc = se.build(ep, {'n': len(raw)})
-    full = json.loads(se.prompt(doc).splitlines()[-1])['sensors'][0]['array_evidence']['constituents']
+    full = expand_prompt(json.loads(se.prompt(doc).splitlines()[-1]))['sensors'][0]['array_evidence']['constituents']
     assert full['times_s'] == times.tolist()
     monkeypatch.setattr(se, 'MAX_PROMPT_BYTES', int(len(se.prompt(doc).encode()) * .8))
-    projected = json.loads(se.prompt(doc).splitlines()[-1])['sensors'][0]['array_evidence']['constituents']
+    projected = expand_prompt(json.loads(se.prompt(doc).splitlines()[-1]))['sensors'][0]['array_evidence']['constituents']
     omitted = next(time for time in full['times_s'] if time not in projected['times_s'])
     assert projected['omitted_rows'] == len(times) - len(projected['times_s'])
     assert projected['sampled']
@@ -209,7 +209,7 @@ def test_two_small_pads_keep_every_native_valid_cell_including_constant_cells():
     # Two full native pads fit the value budget, but their readable JSON must
     # still coexist within the independent model byte budget.
     doc = se.build(ep, {'n': len(raw)})
-    projected = json.loads(se.prompt(doc).splitlines()[-1])
+    projected = expand_prompt(json.loads(se.prompt(doc).splitlines()[-1]))
     assert len(se.prompt(doc).encode()) <= se.MAX_PROMPT_BYTES
     assert len(projected['sensors']) == 2
     for sensor in projected['sensors']:
@@ -238,11 +238,128 @@ def test_long_sources_keep_bounded_native_rows_with_explicit_omissions():
 def test_native_tables_preserve_large_integer_codes_and_float_representation():
     integers = (np.arange(5 * 16, dtype=np.int64) + 2**53).reshape(5, 4, 4)
     ep = episode({'pressure': integers}, [{'name': 'pressure', 'shape': [4, 4]}])
-    array = json.loads(se.prompt(se.build(ep, {'n': 5})).splitlines()[-1])['sensors'][0]['array_evidence']
+    array = expand_prompt(json.loads(se.prompt(se.build(ep, {'n': 5})).splitlines()[-1]))['sensors'][0]['array_evidence']
     assert array['constituents']['values'][1] == integers[1].reshape(-1).tolist()
     assert all(type(value) is int for value in array['constituents']['values'][1])
     floating = np.full((5, 4, 4), 1e100)
     ep = episode({'pressure': floating}, [{'name': 'pressure', 'shape': [4, 4]}])
-    array = json.loads(se.prompt(se.build(ep, {'n': 5})).splitlines()[-1])['sensors'][0]['array_evidence']
+    array = expand_prompt(json.loads(se.prompt(se.build(ep, {'n': 5})).splitlines()[-1]))['sensors'][0]['array_evidence']
     assert type(array['constituents']['values'][0][0]) is float
     assert array['constituents']['values'][0][0] == 1e100
+
+
+def expand_prompt(payload):
+    """Read the public compact encoding as a consumer, retaining exact source values."""
+    payload = copy.deepcopy(payload)
+    clocks = payload.pop('sample_clocks', {})
+    for row in payload.get('series', []):
+        if 'time_clock' in row:
+            row['times'] = clocks[row.pop('time_clock')]
+        if 'valid_count' in row:
+            row['valid_counts'] = [row.pop('valid_count')] * len(row['times'])
+    for sensor in payload.get('sensors', []):
+        table = (sensor.get('array_evidence') or {}).get('constituents')
+        if not table:
+            continue
+        if 'time_clock' in table:
+            table['times_s'] = clocks[table.pop('time_clock')]
+        if 'constant_column_values' in table:
+            constants = table.pop('constant_column_values')
+            varying = table.pop('varying_column_positions')
+            rows = []
+            for values in table['values']:
+                row = [constants.get(str(i)) for i in range(len(table['source_columns']))]
+                for i, value in zip(varying, values):
+                    row[i] = value
+                rows.append(row)
+            table['values'] = rows
+    return payload
+
+
+def test_prompt_encoding_roundtrips_nulls_counts_ids_and_exact_values():
+    clocks = [0., .12345678901234567, .2, .3]
+    payload = {'series': [
+        {'id': 'a', 'times': clocks, 'values': [None, 1.125, 2, 3], 'valid_counts': [2, 2, 2, 2]},
+        {'id': 'b', 'times': clocks, 'values': [3, 2, 1, 0], 'valid_counts': [2, 1, 0, 2]},
+        {'id': 'c', 'times': [0., .3], 'values': [1, 2]}],
+        'sensors': [{'id': 'pad', 'array_evidence': {'shape': [2, 2], 'reference': {}, 'constituents': {
+            'source_columns': [3, 9, 17, 25], 'series_ids': ['c3', 'c9', 'c17', 'c25'], 'times_s': clocks,
+            'values': [[None, 1e100, 2**53 + 1, i + .125] for i in range(4)]}}}]}
+    before = copy.deepcopy(payload)
+    packed = se._prompt_projection(payload)
+    assert 'sample_clocks' in packed and 'times' not in packed['series'][0]
+    assert packed['series'][0]['valid_count'] == 2
+    assert packed['series'][1]['valid_counts'] == [2, 1, 0, 2]
+    assert packed['series'][2]['times'] == [0., .3]
+    table = packed['sensors'][0]['array_evidence']['constituents']
+    assert table['constant_column_values'] == {'0': None, '1': 1e100, '2': 2**53 + 1}
+    assert table['varying_column_positions'] == [3]
+    assert expand_prompt(json.loads(se._json(packed))) == before
+    assert se._prompt_projection(packed) == packed
+    assert payload == before
+
+
+def test_lossless_encoding_keeps_native_cells_and_dense_curves_under_byte_pressure(monkeypatch):
+    n, width = 186, 169
+    times = [i / 30 for i in range(n)]
+    raw = [[2000 + (i * j % 700) if j < 112 else 1000 for j in range(width)] for i in range(n)]
+    table = {'source_columns': list(range(width)), 'series_ids': ['pad:array:' + str(i) for i in range(width)],
+             'times_s': times, 'values': raw, 'reference_values': raw[0],
+             'source_rows': list(range(n)), 'preserved_rows': [0, n - 1], 'native_samples': n,
+             'omitted_rows': 0, 'sampled': False}
+    array = {'shape': [13, 13], 'reference': {}, 'constituents': table}
+    payload = {'sensors': [{'id': 'pad', 'array_evidence': array}],
+        'series': [{'id': 'derived:' + str(i), 'sensor_id': 'pad', 'derivation_id': 'derived',
+                    'times': times, 'values': [j / (i + 1) for j in range(n)], 'valid_counts': [20] * n,
+                    'columns': [], 'sampled': False} for i in range(19)], 'limitations': []}
+    expanded = se._array_projection(payload)
+    compressed = se._prompt_projection(payload)
+    assert len(se._json(expanded).encode()) > se.MAX_PROMPT_BYTES
+    assert len(se._json(compressed).encode()) < se.MAX_PROMPT_BYTES
+    # The actual budget path must use this exact same lossless representation.
+    text, retained = se._prompt(payload)
+    assert len((text + se._json(se._prompt_projection(retained))).encode()) <= se.MAX_PROMPT_BYTES
+    restored = expand_prompt(se._prompt_projection(retained))
+    assert restored == expanded
+    assert len(restored['sensors'][0]['array_evidence']['constituents']['values']) == n
+    assert all(len(row['values']) == n for row in restored['series'])
+
+
+def test_byte_thinning_updates_native_and_selected_endpoint_coverage(monkeypatch):
+    from label import semantic_evidence as sem
+    times = np.arange(186) / 30
+    for source_rows in (None, list(range(0, len(times), 2))):
+        available = len(times) if source_rows is None else len(source_rows)
+        feature = sem._feature('Source response', np.sin(np.arange(available)), [0], 'source comparison',
+                               counts=list(range(available)), source_rows=source_rows)
+        feature = sem._bounded_feature(feature, times, native_quota=1000)
+        original_coverage = copy.deepcopy(feature['coverage'])
+        row = {'id': 'derived', 'sensor_id': 'pad', 'derivation_id': 'derived', 'columns': [],
+               'times': feature['times'], 'values': feature['values'], 'coverage': feature['coverage'],
+               'valid_counts': feature['counts'], 'native_samples': len(times), 'sampled': False}
+        if source_rows is not None:
+            row['source_rows'] = feature['rows']
+        payload = {'sensors': [{'id': 'pad', 'kind': 'numeric', 'capabilities': ['response_change']}],
+                   'series': [row], 'limitations': []}
+        monkeypatch.setattr(se, 'MAX_PROMPT_BYTES', 256000)
+        monkeypatch.setattr(se, 'MAX_PROMPT_BYTES', len(se.prompt(payload).encode()) - 100)
+        sent = expand_prompt(json.loads(se.prompt(payload).splitlines()[-1]))['series'][0]
+        assert len(sent['times']) < len(row['times'])
+        assert sent['coverage']['scope'] == original_coverage['scope']
+        assert sent['coverage']['native_samples'] == available
+        assert sent['coverage']['valid_samples'] == original_coverage['valid_samples']
+        assert sent['coverage']['supplied_samples'] == len(sent['times'])
+        assert sent['coverage']['omitted_samples'] == available - len(sent['times'])
+        assert sent['valid_counts'] == [row['valid_counts'][row['times'].index(t)] for t in sent['times']]
+        if source_rows is not None:
+            assert sent['source_rows'] == [row['source_rows'][row['times'].index(t)] for t in sent['times']]
+        assert payload['series'][0]['coverage'] == original_coverage
+        omitted = next(t for t in row['times'] if t not in sent['times'])
+        finding = {'headline': 'A supported response', 'start_s': omitted, 'end_s': omitted,
+                   'claim_type': 'response_change', 'evidence': [
+                       {'sensor_id': 'pad', 'series_id': 'derived', 'time_s': [omitted]}]}
+        assert not se.bind(payload, [finding])['findings']
+        retained = sent['times'][0]
+        finding.update(start_s=retained, end_s=retained)
+        finding['evidence'][0]['time_s'] = [retained]
+        assert se.bind(payload, [finding])['findings']

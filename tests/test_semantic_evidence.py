@@ -8,6 +8,7 @@ import pytest
 from label import episode as me, sensor_evidence as se
 from tests.test_label import _packed_mp4
 from tests.test_tactile_contract import episode
+from tests.test_tactile_constituent_projection import expand_prompt
 
 
 def descriptor(**extra):
@@ -129,7 +130,7 @@ def test_unknown_layout_keeps_raw_path_and_derived_payload_is_bounded():
     assert derived(doc)
     assert all(len(row['times']) <= 48 for row in derived(doc))
     assert len(json.dumps(doc['derivations'])) < 50000
-    payload = json.loads(se.prompt(doc).splitlines()[-1])
+    payload = expand_prompt(json.loads(se.prompt(doc).splitlines()[-1]))
     assert any(row.get('derivation_id') for row in payload['series'])
     assert len(se.prompt(doc).encode()) <= se.MAX_PROMPT_BYTES
     unknown = region_episode(semantics={'version': 42})
@@ -276,7 +277,7 @@ def test_actual_prompt_preserves_sample_specific_coverage_when_means_have_missin
     monkeypatch.setattr(se, 'MAX_PROMPT_BYTES', 15000)
     larger = region_episode(500)
     larger['signals']['pad'][30:50, 0] = np.nan
-    prompt = json.loads(se.prompt(se.build(larger, {'n': 500})).splitlines()[-1])
+    prompt = expand_prompt(json.loads(se.prompt(se.build(larger, {'n': 500})).splitlines()[-1]))
     for trace in prompt['series']:
         if trace.get('derivation_id'):
             assert len(trace['valid_counts']) == len(trace['times']) == len(trace['values'])
@@ -326,3 +327,58 @@ def test_declared_regions_work_for_a_64_by_64_pad_over_a_short_recording():
     trace = next(row for row in derived(doc) if row['label'] == 'left half relative response')
     assert max(trace['values']) == 20
     assert all(value == 2048 for value in trace['valid_counts'])
+
+
+def test_short_source_trajectories_keep_native_regional_pose_and_curl_times():
+    from pathlib import Path
+    from label import derived_measurements as dm
+    schemas = json.loads((Path(__file__).parents[1] / 'configs/sensor_schemas/opentouch_hdf5_v1.json').read_text())['signals']
+    n = 186
+    times = np.arange(n) / 30
+    pressure = np.full((n, 256), 100.)
+    pressure[17:27, schemas['right_pressure']['regions'][0]['indices']] = np.arange(10)[:, None] + 50
+    base = np.column_stack((np.arange(21.), np.arange(21.) % 3, np.arange(21.) % 5))
+    points = np.repeat(base[None], n, axis=0)
+    points[18:27, 4, 1] += np.arange(9) / 100
+    ep = episode({'right_pressure': pressure, 'right_hand_landmarks': points}, [
+        {'name': 'right_pressure', 'shape': [16, 16], 'sensor_semantics': schemas['right_pressure']},
+        {'name': 'right_hand_landmarks', 'shape': [21, 3], 'sensor_semantics': schemas['right_hand_landmarks']}])
+    ep['times']['exo'] = times
+    doc = se.build(ep, {'n': n, 'ks': [0, n - 1]})
+    sent = expand_prompt(json.loads(se.prompt(doc).splitlines()[-1]))
+    ordinary = [row for row in sent['series'] if row.get('derivation_id') and 'comparison_from_s' not in row]
+    assert ordinary
+    assert all(row['times'] == times.tolist() for row in ordinary)
+    assert all(not row['sampled'] and row['coverage']['omitted_samples'] == 0 for row in ordinary)
+    thumb = next(row for row in ordinary if row['label'] == 'thumb relative response')
+    pose = next(row for row in ordinary if row['label'] == 'Point-set shape from previous frame')
+    curl = next(row for row in ordinary if row['label'] == 'thumb curl')
+    expected_region = dm.regional_response(pressure, times, schemas['right_pressure'])['traces'][0]['values']
+    expected_pose = dm.pointset_shape(points, times, schemas['right_hand_landmarks'])
+    assert thumb['values'] == expected_region
+    assert pose['values'] == expected_pose['adjacent_rms']
+    assert curl['values'] == expected_pose['curls'][0]['values']
+    # Selected endpoint comparisons retain their separate source-row receipts.
+    selected = next(row for row in sent['series'] if row.get('comparison_from_s'))
+    assert len(selected['times']) <= 48
+    assert len(selected['times']) < len(pose['times'])
+    for feature in [thumb, pose, curl]:
+        finding = {'start_s': float(times[19]), 'end_s': float(times[20]), 'headline': 'Regional response and estimated geometry differ',
+                   'claim_type': 'response_change', 'adds_beyond_video': True,
+                   'evidence': [{'sensor_id': thumb['sensor_id'], 'series_id': thumb['id'], 'time_s': [float(times[19]), float(times[20])]},
+                                {'sensor_id': feature['sensor_id'], 'series_id': feature['id'], 'time_s': [float(times[19]), float(times[20])]}]}
+        assert se.bind(doc, [finding])['findings']
+
+
+def test_many_short_derived_trajectories_share_the_native_value_cap(monkeypatch):
+    from label import semantic_evidence as sem
+    monkeypatch.setattr(sem, 'MAX_NATIVE_VALUES', 1024)
+    signals = {f'pad_{i}': np.tile(np.arange(4.), (186, 1)) for i in range(6)}
+    ep = episode(signals, [{'name': name, 'shape': [4], 'sensor_semantics': descriptor()} for name in signals],
+                 {name: {'role': 'touch'} for name in signals})
+    doc = se.build(ep, {'n': 186})
+    rows = derived(doc)
+    assert {row['sensor_id'] for row in rows} == {f'signal:{name}' for name in signals}
+    assert sum(len(row['values']) for row in rows) <= 1024
+    assert all(row['sampled'] and row['coverage']['omitted_samples'] > 0 for row in rows)
+    assert all(len(row['times']) <= 48 for row in rows)

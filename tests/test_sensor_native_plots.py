@@ -9,9 +9,12 @@ import pytest
 
 from label import sensor_evidence as se
 from tests.test_semantic_evidence import region_episode
+from tests.test_tactile_constituent_projection import expand_prompt
 
 
-def test_native_plot_survives_prompt_sampling_without_becoming_citable():
+def test_native_plot_survives_prompt_sampling_without_becoming_citable(monkeypatch):
+    from label import semantic_evidence
+    monkeypatch.setattr(semantic_evidence, 'MAX_NATIVE_ROWS', 48)
     ep = region_episode(126)
     doc = se.build(ep, {'n': 126})
     row = next(r for r in doc['series'] if r['label'] == 'branch A relative response')
@@ -19,7 +22,7 @@ def test_native_plot_survives_prompt_sampling_without_becoming_citable():
     assert row['plot']['times'] == pytest.approx(np.arange(126) / 10)
     assert row['plot']['values'][3] == 60
     assert len(row['plot']['values']) == 126
-    payload = json.loads(se.prompt(doc).split('\n')[-1])
+    payload = expand_prompt(json.loads(se.prompt(doc).split('\n')[-1]))
     assert all('plot' not in r for r in payload['series'])
     missing = next(t for t in row['plot']['times'] if t not in row['times'])
     finding = {'start_s': missing, 'end_s': missing, 'headline': 'An unsupported quoted instant',
@@ -100,7 +103,7 @@ def test_constituent_citations_resolve_only_supplied_cells_and_samples():
     a[:, 1, 1] -= np.arange(126)
     ep = episode({'pressure': a}, [{'name': 'pressure', 'shape': [16, 16], 'units': 'ADC'}])
     doc = se.build(ep, {'n': 126})
-    table = json.loads(se.prompt(doc).split('\n')[-1])['sensors'][0]['array_evidence']['constituents']
+    table = expand_prompt(json.loads(se.prompt(doc).split('\n')[-1]))['sensors'][0]['array_evidence']['constituents']
     times = table['times_s'][:2]
     finding = {'start_s': times[0], 'end_s': times[-1], 'headline': 'Neighboring cells diverge',
                'adds_beyond_video': True, 'claim_type': 'response_change',

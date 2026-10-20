@@ -14,6 +14,8 @@ MAX_SOURCE_VALUES = 16_000_000  # At most 128 MB when a real-valued source is co
 MAX_DERIVED_SERIES = 24
 MAX_REGIONS = 8
 MAX_SAMPLES = 48
+MAX_NATIVE_ROWS = 512
+MAX_NATIVE_VALUES = 8192
 POINT_ROLES = frozenset(('landmarks', 'hand_pose', 'pose'))
 
 
@@ -72,12 +74,14 @@ def _feature(label, values, columns, operation, unit=None, counts=None, source_r
             'unit': unit, 'counts': counts, 'source_rows': source_rows, 'audit': audit}
 
 
-def _bounded_feature(feature, times):
+def _bounded_feature(feature, times, native_quota=MAX_SAMPLES):
     from label import sensor_evidence as se
     source_rows = feature.get('source_rows')
     feature_times = np.asarray(times) if source_rows is None else np.asarray(times)[source_rows]
+    complete = source_rows is None and len(feature_times) <= min(MAX_NATIVE_ROWS, native_quota)
+    limit = len(feature_times) if complete else max(2, min(MAX_SAMPLES, native_quota))
     ts, values = se._samples(feature_times,
-        np.asarray([np.nan if value is None else value for value in feature['values']]), MAX_SAMPLES)
+        np.asarray([np.nan if value is None else value for value in feature['values']]), limit)
     positions = np.searchsorted(feature_times, ts).tolist()
     rows = positions if source_rows is None else [source_rows[i] for i in positions]
     counts = feature['counts'] or [0] * len(feature_times)
@@ -88,7 +92,9 @@ def _bounded_feature(feature, times):
     return {**feature, 'values': values, 'times': ts, 'rows': rows, 'source_columns': columns,
             **({'plot': plot} if plot is not None else {}),
             'coverage': {'scope': 'all native derivation rows' if source_rows is None else 'selected endpoint comparisons', 'valid_count_min': min(counts),
-                         'valid_count_max': max(counts), 'valid_samples': sum(value is not None for value in feature['values'])},
+                         'valid_count_max': max(counts), 'valid_samples': sum(value is not None for value in feature['values']),
+                         'native_samples': len(feature_times), 'supplied_samples': len(ts),
+                         'omitted_samples': len(feature_times) - len(ts)},
             'counts': [counts[i] for i in positions],
             'audit': {key: [items[i] for i in positions] for key, items in feature['audit'].items()}}
 
@@ -234,7 +240,6 @@ def append(ep, pl, doc, times):
         result.pop('times_s')
         result['limitations'].extend(note for note in (semantics or {}).get('limitations') or []
                                      if isinstance(note, str) and note not in result['limitations'])
-        features = [_bounded_feature(feature, times) for feature in features]
         if len(result.get('stale_intervals') or []) > 16:
             result['stale_intervals_total'] = len(result['stale_intervals'])
             result['stale_intervals'] = result['stale_intervals'][:16]
@@ -260,6 +265,8 @@ def append(ep, pl, doc, times):
             summary['limitations'].append('Only the first bounded declared regions are derived; other raw readings remain available.')
         candidates.append((sensor, result, summary, features))
     emitted = []
+    feature_count = min(MAX_DERIVED_SERIES, sum(len(item[3]) for item in candidates))
+    native_quota = MAX_NATIVE_VALUES // max(1, feature_count)
     positions = [0] * len(candidates)
     while len(emitted) < MAX_DERIVED_SERIES:
         progress = False
@@ -268,8 +275,13 @@ def append(ep, pl, doc, times):
             if position >= len(features) or len(emitted) >= MAX_DERIVED_SERIES:
                 continue
             progress = True
-            feature = features[position]
+            feature = _bounded_feature(features[position], times, native_quota)
             positions[index] += 1
+            if feature.get('source_rows') is None and feature['coverage']['omitted_samples']:
+                note = 'Native derived trajectories exceed the shared row/value budget; only retained exact source samples may support findings.'
+                if note not in summary['limitations']:
+                    summary['limitations'].append(note)
+                    result['limitations'].append(note)
             ts, values, rows = feature['times'], feature['values'], feature['rows']
             trace_id = result['id'] + ':' + str(position)
             row = {'id': trace_id, 'sensor_id': sensor['id'], 'derivation_id': result['id'],
