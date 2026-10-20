@@ -11,10 +11,6 @@
   </tr>
 </table>
 
-### \* Episode quality scores (October 2026)
-
-Argus now scores each episode's execution and outcome out of 10, along with the execution of the work toward each subgoal. Every score is measured from the annotations rather than asked of the model, and speed is judged against at least five other demonstrations of the same task that reached the goal. A subgoal is a lasting change the goal depends on, such as a block placed in the row, so a pick or a grasp is a key event but never a subgoal.
-
 ### \* DiverseUMI (October 2026)
 
 We released [DiverseUMI](https://huggingface.co/datasets/Pantheon-inc/DiverseUMI-sample100), 99.6 hours of bimanual UMI annotated by Argus. It spans 12,219 episodes across 179 skills, each with dense action, outcome and progress labels, key events, object state changes, scene graphs and operator recoveries, alongside SLAM-tracked wrist poses and gripper actions.
@@ -23,19 +19,21 @@ We released [DiverseUMI](https://huggingface.co/datasets/Pantheon-inc/DiverseUMI
 
 Recently, [Midcentury AI](https://www.midcentury.xyz/blog/optimizing-argus) pushed an adaptation of Argus to SOTA (**50.2% semantic F1**) on WGO-Bench. However, this result uses **Sol 6.1 High**, so its advantage over older-model baselines cannot be attributed to the harness alone.
 
-### \* Depth and tactile annotations (October 2026)
+### \* Argus improvements (October 2026)
 
 Argus now annotates depth, tactile and other sensor data jointly with video, state and actions. The most informative sensor findings are overlaid on the video as they occur, and every finding is exported with its evidence and uncertainty.
+
+It also scores each episode's execution and outcome out of 10, along with the execution of the work toward each subgoal. Every score is measured from the annotations rather than asked of the model, and speed is judged against at least five other demonstrations of the same task that reached the goal. A subgoal is a lasting change the goal depends on, such as a block placed in the row, so a pick or a grasp is a key event but never a subgoal.
 
 ## Overview
 
 To my knowledge, Argus is the most advanced open-source robot learning annotation harness (as of 2026).
 
-It is the only harness to combine native multi-format ingestion (rather than restricting inputs eg to LeRobot, as [LeRobot's annotation pipeline](https://huggingface.co/docs/lerobot/main/annotation_pipeline) does), joint visual/sensor reasoning, and dense annotations of **actions, subgoals, outcomes, operator mistakes, recoveries and object-state changes**. It reads multi-view RGB alongside state/action trajectories, depth, tactile and other recorded fields, preserving their timing and measurement semantics. The VLM can inspect additional samples or image regions to support a finding; evidence, confidence and limitations remain available in the viewer and JSON exports.
+It is the only harness to combine native multi-format ingestion (rather than restricting inputs eg to LeRobot, as [LeRobot's annotation pipeline](https://huggingface.co/docs/lerobot/main/annotation_pipeline) does), joint visual/sensor reasoning, dense annotations of **actions, subgoals, outcomes, operator mistakes, recoveries and object-state changes**, and execution and outcome scores for each episode and subgoal. It reads multi-view RGB alongside state/action trajectories, depth, tactile and other recorded fields, preserving their timing and measurement semantics. The VLM can inspect additional samples or image regions to support a finding; evidence, confidence and limitations remain available in the viewer and JSON exports.
 
 <p align="center">
-  <a href="https://raw.githubusercontent.com/Pantheon-Industries-Inc/argus/refs/heads/main/media/architecture.svg?v=7b256d10278c">
-    <img src="media/architecture.svg?v=7b256d10278c" width="1900" alt="Annotation pipeline: format ingestion, field interpretation, visual, state and sensor evidence, optional evidence inspection, VLM annotation of behavior, state changes and sensor findings with a separate regional pass for tactile arrays, issue detection, temporal stitching, and a viewer with chosen sensor cards, quality scores and JSON exports.">
+  <a href="https://raw.githubusercontent.com/Pantheon-Industries-Inc/argus/refs/heads/main/media/architecture.svg?v=e0add7e70818">
+    <img src="media/architecture.svg?v=e0add7e70818" width="1900" alt="Annotation pipeline: format ingestion, field interpretation, visual, state and sensor evidence, optional evidence inspection, VLM annotation of behavior, state changes and sensor findings with a separate regional pass for tactile arrays, issue detection, temporal stitching, and a viewer with chosen sensor cards, quality scores and JSON exports.">
   </a>
 </p>
 
