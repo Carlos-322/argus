@@ -266,8 +266,8 @@ def _post(url: str, body: dict, api_key: str, timeout: int, *, attempts: int = 6
                 # billed; after one, it is just a failure whose cost is unknown
                 if clean and (e.code in (401, 402) or (url == OPENAI_URL and e.code == 429
                                                          and quota == 'insufficient_quota')):
-                    raise KeyExhausted(last, http_status=e.code, first_attempt=True, rejection_code=quota)
-                raise DispatchError(last, http_status=e.code, verified_unpaid=clean, stage='rejected')
+                    raise KeyExhausted(last, http_status=e.code, first_attempt=True, rejection_code=quota) from e
+                raise DispatchError(last, http_status=e.code, verified_unpaid=clean, stage='rejected') from e
             if e.code in UNKNOWN_OUTCOME_STATUS:
                 clean = False
                 unknown_left -= 1
@@ -275,14 +275,14 @@ def _post(url: str, body: dict, api_key: str, timeout: int, *, attempts: int = 6
                     time.sleep(_retry_after(None, tries - 1))
                     continue
                 raise DispatchError(f"model call failed after {tries} HTTP attempts: {last}", http_status=e.code,
-                                    stage='unknown')
+                                    stage='unknown') from e
             if e.code in TRANSIENT_STATUS:
                 unpaid_left -= 1
                 if unpaid_left > 0:
                     time.sleep(_retry_after(e.headers, tries - 1))
                     continue
             raise DispatchError(f"model call failed after {tries} HTTP attempts: {last}", http_status=e.code,
-                                verified_unpaid=clean, stage='rejected')
+                                verified_unpaid=clean, stage='rejected') from e
         except urllib.error.URLError as e:
             last = f"request not sent: {e.reason}"
             unpaid_left -= 1
@@ -828,7 +828,7 @@ def parse_response(text: str) -> tuple[dict, bool]:
         if not substantive_annotation(labels):
             raise ValueError('the reply contains no substantive annotation content')
         return labels, True
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - any reply that does not parse is kept raw, with why
         return {"_raw": text, "_parse_error": f"{type(e).__name__}: {e}"[:300]}, False
 
 
@@ -1533,7 +1533,7 @@ def _video_cards(result, out_path, *, model, reasoning, api_key, timeout, pricin
                                                         require_known_pricing=require_known_pricing, **quote),
             reserve_dispatch=reserve_selection, settle_dispatch=settle_selection, verify_inputs=verify_inputs)
         sensor_cards.apply(evidence, receipt['request'], receipt)
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - the cards are optional; named in the evidence's limitations
         evidence.setdefault('limitations', []).append(f'Video cards were not written: {error}')
 
 
@@ -1969,7 +1969,7 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                 return ("fail", ep, str(e))
             except SpendCap as e:
                 return ("skip", ep, str(e))
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - one episode's failure is returned with why, the batch goes on
                 failure = out_for(ep).with_name(f"noreply_{out_for(ep).name}")
                 if failure.exists() and not reserved[0]:
                     with spend_lock:

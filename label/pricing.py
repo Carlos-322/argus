@@ -134,7 +134,7 @@ def image_sizes(content: list) -> list:
                 raw = base64.b64decode(part['image_url']['url'].split(',', 1)[1])
                 with Image.open(io.BytesIO(raw)) as image:
                     sizes.append(image.size)
-            except Exception:
+            except Exception:  # noqa: BLE001 - an image whose size does not read is priced at the largest size
                 sizes.append(LARGEST_CHARGED_SIZE)
     return sizes
 

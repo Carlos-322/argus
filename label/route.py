@@ -149,7 +149,7 @@ def _paid_route(ep, api_key, call_model, timeout, out_path, identity, reserve_di
                 settle_dispatch(bound, 0.0)
             raise
         hit.update(why=f'routing failed: {str(error)[:120]}', dispatch_outcome='unverified')
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - recorded as the route's why, its outcome unverified
         hit.update(why=f'routing failed: {str(error)[:120]}', dispatch_outcome='unverified')
     else:
         usage = resp.get('usage') or {}
