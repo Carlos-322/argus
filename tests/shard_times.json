@@ -93,6 +93,7 @@
  "tests/test_optical_selection.py": 1.25,
  "tests/test_original_root_identity.py": 4.0,
  "tests/test_original_video_identity.py": 4.0,
+ "tests/test_output_budget.py": 1.1,
  "tests/test_output_consumers.py": 8.5,
  "tests/test_overlay_stack.py": 0.2,
  "tests/test_ownership_context.py": 4.5,
