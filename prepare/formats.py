@@ -1118,13 +1118,19 @@ def nearest(src_t: np.ndarray, q: np.ndarray) -> np.ndarray:
 
 
 # Camera words, each matched whole (_names_word), so laptop_cam is not a top camera and handle_cam is not on a hand.
-# A camera word glued after another (leftcam, topcam) is split off (word_tokens); ZED X and ZED Mini name themselves
-# zedx and zedm, and a top-down camera topdown.
-SCENE_WORDS = ("top", "high", "head", "overhead", "exo", "front", "scene", "main", ("cam", "camera"))
-FIXED_WORDS = ("top", "topdown", "high", "overhead", "exterior", "front", "scene", "exo", "zed", "zedm", "zedx",
-               "stereo", "low", "static", "third")
+# ZED X and ZED Mini name themselves zedx, zedm and zedxm, a top-down camera topdown and a front one frontal.
+SCENE_WORDS = (("top", "topdown"), "high", "head", "overhead", "exo", ("front", "frontal"), "scene", "main",
+               ("cam", "camera"))
+FIXED_WORDS = ("top", "topdown", "high", "overhead", "exterior", "front", "frontal", "scene", "exo", "zed", "zedm",
+               "zedx", "zedxm", "stereo", "low", "static", "third")
 MOUNTED_WORDS = ("wrist", "hand", "gripper", "arm", "eef", "ee")
 SIDE_WORDS = {"l": "left", "left": "left", "r": "right", "right": "right"}
+# words that appear in camera, topic and field names glued to the words the matchers look for (jointpos, depthmap,
+# wristview, cmdvel, leaderarm, zedmini, thirdperson, shoulderpan) without being looked for themselves; with every
+# matcher's own words they are the vocabulary a glued run of letters is split into (name_vocabulary)
+NAME_WORDS = ("state", "states", "observation", "robot", "base", "follower", "operator", "joint", "qpos", "pos",
+              "vel", "flex", "pan", "lift", "width", "map", "img", "view", "eye", "mini", "person", "body", "odom",
+              "info", "meta", "step", "ego")
 
 
 def tokens(name: str) -> list[str]:
@@ -1133,20 +1139,64 @@ def tokens(name: str) -> list[str]:
     return [t for t in re.split(r"[^a-z0-9]+", spaced.lower()) if t]
 
 
+def name_vocabulary() -> frozenset:
+    """Every word a name matcher looks for (the word sets of _names_word's callers and side words) and the
+    common words of names (NAME_WORDS): the only words word_tokens splits a glued run of letters into."""
+    global _NAME_VOCABULARY
+    if _NAME_VOCABULARY is None:
+        sets = (SCENE_WORDS, FIXED_WORDS, MOUNTED_WORDS, SIDE_WORDS, NAME_WORDS, SENSING_WORDS, TOUCH_WORDS,
+                COMMAND_WORDS, ACTION_WORDS, NOT_RGB_WORDS, TEXT_WORDS, TIME_WORDS, STATE_GRIPPER_WORDS,
+                STATE_JOINT_WORDS, STATE_POSITION_WORDS, STATE_NOT_POSITION_WORDS, STATE_FRAME_WORDS, STATE_AXIS_WORDS,
+                GENERIC_VIDEO_WORDS, DEPTH_WORDS)
+        flat = lambda ws: [x for w in ws for x in (w if isinstance(w, tuple) else (w,))]
+        _NAME_VOCABULARY = frozenset(w for ws in sets for w in flat(ws))
+    return _NAME_VOCABULARY
+
+
+_NAME_VOCABULARY = None
+_GLUED = {}
+UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
+
+
+def glued_words(run: str) -> tuple:
+    """A run of letters as the known words it is glued from (leftwrist is left and wrist, jointcmd is joint and cmd),
+    when the whole run is exactly a sequence of words of three or more letters of name_vocabulary (the last one may
+    be plural), the fewest of them; otherwise the run itself, one word, so laptop never yields top, interaction never
+    action and backstop never top. A run that is a known word stays whole (gripper is not grip and per)."""
+    if run not in _GLUED:
+        vocab = name_vocabulary()
+        known = lambda w, last=True: len(w) >= 3 and (w in vocab or last and w.endswith("s") and w[:-1] in vocab)
+        best = {0: ()}
+        if not known(run):
+            for i in range(len(run)):
+                if i in best:
+                    for j in range(i + 3, len(run) + 1):
+                        if known(run[i:j], j == len(run)) and (j not in best or len(best[i]) + 1 < len(best[j])):
+                            best[j] = best[i] + (run[i:j],)
+        _GLUED[run] = best.get(len(run)) or (run,)
+    return _GLUED[run]
+
+
 def word_tokens(name) -> list[str]:
-    """The words every name-word match reads (_names_word, side_of): tokens (split at anything but letters and digits,
-    so at _ / . - and spaces, and at camelCase), each split again between letters and digits (fsr0, zed2i,
-    panda_joint1) and where a camera word ends a longer word (leftcam, wristcam, RGBCamera), so that a word is only
-    ever matched whole. A run of eight or more hex digits (an episode's uuid) is an id, kept whole, so its letters
-    never read as words (3a7229fe71ee is not ee)."""
+    """The words of a name that every name-word match reads (_names_word, side_of, recorded_state_identity). A name is
+    split at separators (anything but a letter or digit) and camelCase (tokens), each piece again between letters and
+    digits, and a glued run of letters into known words (glued_words: leftwrist, jointpos, RGBCamera). Digits are their
+    own pieces and never form a word, and a word of one or two letters (l, r, ee) counts only when it stood alone
+    between separators: l515 and r1_head_camera name no side, cam_3ee4f names no end effector. A uuid, or a run of
+    eight or more hex digits, is an id, kept whole, so its letters never read as words (an eef1 group is not eef)."""
     out = []
-    for t in tokens(str(name)):
+    for t in tokens(UUID.sub(lambda m: m[0].replace("-", ""), str(name))):
         if re.fullmatch(r"[0-9a-f]{8,}", t) and re.search(r"[0-9]", t) and re.search(r"[a-f]", t):
             out.append(t)
             continue
-        for run in re.findall(r"[a-z]+|[0-9]+", t):
-            glued = re.fullmatch(r"([a-z]{2,}?)(cam|camera)", run)
-            out += [glued[1], glued[2]] if glued else [run]
+        runs = re.findall(r"[a-z]+|[0-9]+", t)
+        for run in runs:
+            if run.isdigit():
+                out.append(run)
+            elif len(run) > 2:
+                out += glued_words(run)
+            elif len(runs) == 1:
+                out.append(run)
     return out
 
 
@@ -2146,9 +2196,12 @@ def names_gripper(name: str) -> bool:
 
 
 def names_joint(name: str) -> bool:
-    words = word_tokens(name)
+    """Whether a state value's name says a joint: a word of STATE_JOINT_WORDS (_names_word), or j with its number as
+    one piece or the next (j1, arm_j2, j_3), which is a joint's index rather than a word."""
+    words = tokens(name)
     return _names_word(name, STATE_JOINT_WORDS) or any(
-        a == "j" and b.isdigit() for a, b in zip(words, words[1:]))
+        re.fullmatch(r"j[0-9]+", a) or a == "j" and b.isdigit() for a, b in zip(words, words[1:] + [""]))
+
 STATE_QUAT_NAME = re.compile(r"(^|[._/ -])q[._/ -]?[wxyz]$|(^|[^a-z])quat", re.I)
 STATE_WORD_SPLIT = re.compile(r"[._/ -]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Za-z])(?=[0-9])")
 STATE_UNIT_WORDS = {"m", "mm", "cm", "rad", "deg", "degree", "degrees"}
@@ -2167,10 +2220,21 @@ STATE_UNAXED_NOTE = ("Kinematic checks unavailable: the recorded state's value n
                      "axes our checks read ({}), not six joints and a gripper per arm.")
 
 
+def state_parts(name: str) -> list[str]:
+    """A state value's name split at . _ / space and hyphen, at a camelCase boundary and before a number, lowercased,
+    and a glued run of known words split as every name is (glued_words: jointvel is joint and vel). Unlike word_tokens
+    it keeps a one letter axis cut off its number (x1 is x and 1), since state_layout reads axes."""
+    out = []
+    for w in STATE_WORD_SPLIT.split(str(name)):
+        w = w.lower()
+        out += glued_words(w) if len(w) > 2 and w.isalpha() else [w] if w else []
+    return out
+
+
 def state_words(name: str) -> list[str]:
-    """The words of a state value's name for state_layout: split at . _ / space and hyphen, at a camelCase boundary
-    and before a number, lowercased, with a unit word after the last word dropped (x_m is x, eefPosX is eef pos x)."""
-    words = [w.lower() for w in STATE_WORD_SPLIT.split(str(name)) if w]
+    """The words of a state value's name for state_layout (state_parts), with a unit word after the last word dropped
+    (x_m is x, eefPosX is eef pos x)."""
+    words = state_parts(name)
     return words[:-1] if len(words) > 1 and words[-1] in STATE_UNIT_WORDS else words
 
 
@@ -2300,7 +2364,7 @@ def state_units(metadata: dict, names: list[str] | None, dims: int) -> list[str 
             columns.append(["invalid unit declaration"] * dims)
     suffixes = []
     for name in names or [""] * dims:
-        parts = [word.lower() for word in STATE_WORD_SPLIT.split(str(name)) if word]
+        parts = state_parts(name)
         suffixes.append(canonical(parts[-1]) if parts and parts[-1] in STATE_UNIT_WORDS else None)
     columns.append(suffixes)
     result = []
@@ -4085,12 +4149,18 @@ def depth_videos(rels: list[str]) -> dict[str, str]:
     return out
 
 
+def says_frame_times(stem: str) -> bool:
+    """Whether a .npy's name may hold a video's frame times (exo_cam-rgb-timestamp, timesteps): a word of it begins
+    time or stamp. frame_times opens every such file beside a video and keeps one only when its numbers fit, so
+    unread_files counts the same files as read."""
+    return any(t.startswith(('time', 'stamp')) for t in tokens(stem))
+
+
 def frame_time_files(video: Path, depth: bool = False) -> list[Path]:
     """Timestamp sidecars named for this camera, shared by reading and direct-file ownership."""
     cam = set(tokens(video.stem)) - GENERIC_VIDEO_WORDS - (NON_COLOUR if depth else set())
     return [p for p in sorted(video.parent.glob('*.npy'))
-            if p.is_file() and (tk := set(tokens(p.stem)))
-            and any(t.startswith(('time', 'stamp')) for t in tk) and cam <= tk]
+            if p.is_file() and (tk := set(tokens(p.stem))) and says_frame_times(p.stem) and cam <= tk]
 
 
 def frame_times(video: Path, n: int, depth: bool = False, native: bool = False,
@@ -9202,7 +9272,7 @@ GRIPPER_KEYS = ("gripper_pos", "gripper_position", "gripper", "gripper_width", "
 # a topic or field of commands names one of these words, whole (_names_word): /leader/joint_states, action.arm,
 # /cmd_vel; never /interaction_arm/joint_states
 ACTION_WORDS = ("leader", "action", "command", "commanded", "cmd", "target", "teleop", "teleoperated",
-                "teleoperation")
+                "teleoperation", "teleoperator")
 
 
 def names_action(name: str) -> bool:
@@ -12315,7 +12385,7 @@ def unread_files(root: Path, det: dict, items: list[dict]) -> list[str]:
             continue
         if x in VIDEO_EXT or x in H5_EXT or x in TABLE_EXT or x == ".mcap" or ARCHIVE_RE.search(p.name):
             continue
-        if x == ".npy" and p.parent in vid_dirs and _names_word(p.stem, TIME_WORDS):
+        if x == ".npy" and p.parent in vid_dirs and says_frame_times(p.stem):
             continue
         out.append(p.relative_to(root).as_posix())
     return out
