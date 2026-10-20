@@ -220,7 +220,7 @@ def drawn(meta: dict, ep: dict, raw: Path, out: Path) -> dict | None:
         prepare_one(meta, ep, raw, out)
         return json.loads((out / episode_dir_name(meta["folder"], int(ep["episode_index"])) / "context.json")
                           .read_text())
-    except Exception as e:  # a drawn episode that cannot be read is a finding about the data; listed, not hidden
+    except Exception as e:  # noqa: BLE001 - a drawn episode that cannot be read is printed as FAILED, not hidden
         print(f"FAILED {meta['folder']}/{ep['episode_index']}: {type(e).__name__}: {e}"[:400], file=sys.stderr,
               flush=True)
         return None

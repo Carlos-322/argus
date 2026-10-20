@@ -60,7 +60,7 @@ def download(clip: str, raw: Path) -> Path:
         if not (raw / clip / f).exists():
             try:
                 hub.download(REPO, f"{clip}/{f}", raw)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - a sample download: the video is required and raises, an optional file is printed
                 if f == "raw_video.mp4":
                     raise
                 print(f"{clip}: no {f} ({type(e).__name__})", file=sys.stderr)

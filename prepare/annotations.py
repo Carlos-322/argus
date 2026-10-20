@@ -195,7 +195,7 @@ def index_tables(meta, columns, read_jsonl):
                     elif not isinstance(df.index, pd.RangeIndex):
                         row['table_index'] = original(index)
                     cells.append((i, row))
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - any table that does not read is named in its issues
             out[(None, str(path))] = {'labels': {}, 'issues': [{'why': f'table read failed ({error})'}]}
             continue
         # Presence establishes the ownership domain even when the episode owner is invalid.
@@ -394,7 +394,7 @@ def episode_metadata(meta, read_jsonl):
                     if df.index.name is not None:
                         row.setdefault(df.index.name, original(index))
                     rows.append((number, row))
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - any table that does not read is named in unassigned
             unassigned.append({'source': str(path), 'why': f'metadata table read failed ({error})'})
             continue
         for number, row in rows:
