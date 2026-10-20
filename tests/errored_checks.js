@@ -73,6 +73,13 @@ check(hs.slice(hs.indexOf('Signal never changes')).includes('>not applicable<')
   && hs.includes('no signal could be checked'), 'a sensor check run on no signal says why, as not applicable');
 check(!hs.includes('Depth pictures mostly'), 'a sensor check with nothing to run on is left out');
 check(/0 of 1 noted/.test(hs), 'the sensor checks\' line counts only the checks that ran');
+// checks/sensors.py writes not_applicable now (checks/results.py); a result saved with na before then reads the same
+const hsNow = T.checksSection({_rig: 'teleop_arms', dataset_checks: {sensor_checks: {notes: [], checks: [
+  {check: 'pinned', name: 'Values pinned at the end of their range', status: 'clear',
+   not_run_on: 'probe empty (it has no rows)'},
+  {check: 'constant', name: 'Signal never changes', status: 'not_applicable', why: 'no signal could be checked: probe empty'},
+  {check: 'depth_invalid', name: 'Depth pictures mostly without readings', status: 'not_applicable'}]}}});
+check(hsNow === hs, 'a sensor result written with not_applicable reads as one saved with na');
 for (const [field, words] of [['placed_within_stamp_intervals', 'stamp interval'],
   ['placed_row_per_frame', 'row per frame'], ['placed_with_unspecified_alignment', 'unspecified alignment assumption']]) {
   const html = T.checksSection({_rig: 'teleop_arms', dataset_checks: {contact_checks: {

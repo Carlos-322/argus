@@ -26,6 +26,7 @@
  "tests/test_camera_presentation_clock.py": 4.4,
  "tests/test_camera_timing.py": 1.2,
  "tests/test_capture_checks.py": 2.2,
+ "tests/test_check_results.py": 0.5,
  "tests/test_check_stage_contract.py": 1.0,
  "tests/test_checks.py": 4.6,
  "tests/test_clip_cameras.py": 11.4,

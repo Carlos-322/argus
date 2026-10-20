@@ -960,7 +960,7 @@ def test_a_one_dimensional_or_empty_signal_never_costs_the_others(tmp_path):
     np.savez(only / "signals.npz", s4=np.zeros((0, 3), np.float32))
     (only / "context.json").write_text(json.dumps({**ctx, "state_kind": "none", "signals": ctx["signals"][-1:]}))
     st = {c["check"]: c for c in sc.run_episode(only)["checks"]}
-    assert st["constant"]["status"] == "na" and st["constant"]["why"].startswith("no signal could be checked")
+    assert st["constant"]["status"] == "not_applicable" and st["constant"]["why"].startswith("no signal could be checked")
     assert st["no_reading"]["status"] == "fired"
 
 
