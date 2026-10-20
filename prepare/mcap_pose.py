@@ -23,7 +23,7 @@ def camera_roles(path, topics):
         if raw:
             try:
                 parsed = json.loads(raw)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, RecursionError):  # a map nested past the recursion limit is unparsed too
                 return {}, {'limitation': 'Recorded actor map could not be parsed.'}
             if not isinstance(parsed, dict) or any(value not in ('left', 'right') for value in parsed.values()) \
                     or len(set(parsed.values())) != len(parsed):

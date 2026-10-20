@@ -274,6 +274,23 @@ def test_native_inspection_uses_typed_source_fields_and_original_integer_message
     assert hashlib.sha256(raw.read_bytes()).hexdigest() == proof['sha256']
 
 
+def test_one_message_that_cannot_be_copied_costs_that_message_only(tmp_path, monkeypatch):
+    from prepare import mcap_claims
+    raw = tmp_path / 'episode.mcap'
+    proof = recording(raw, six_cameras=True, both_calibrated=True, explicit_primary=True)
+    whole, _ = mcap_claims.inspect(raw, proof['topics'])
+    copy = mcap_claims.snapshot
+
+    def deep(value):
+        if getattr(value, 'bold_mark', None):                         # the annotation message, nested too deep to copy
+            raise RecursionError('maximum recursion depth exceeded')
+        return copy(value)
+    monkeypatch.setattr(mcap_claims, 'snapshot', deep)
+    records, metadata = mcap_claims.inspect(raw, proof['topics'])
+    assert [r['topic'] for r in records] == [r['topic'] for r in whole if r['topic'] != genhumanego.ANNOTATION_TOPIC]
+    assert mcap_claims.select_primary(records, metadata, proof['topics'])[0] == genhumanego.CAMERA_TOPIC
+
+
 def test_unshown_frames_before_recorded_primary_are_preserved(tmp_path):
     root = tmp_path / 'native'
     root.mkdir()

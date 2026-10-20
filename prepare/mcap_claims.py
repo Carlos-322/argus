@@ -55,13 +55,15 @@ def inspect(path, camera_topics):
             decoder = decoders[channel.id]
             if decoder is None:
                 continue
+            # one message's bytes cost that message only: decoding it, or copying what it decoded to (a value nested
+            # past the recursion limit, a field no copy reads), never stops the episode
             try:
                 decoded = decoder(message.data)
-            except Exception:  # noqa: BLE001, S112 - a decoder on upload bytes raises many types
+                if not is_claim(decoded):
+                    continue
+                fields = snapshot(decoded)
+            except Exception:  # noqa: BLE001, S112 - a decoder and the copy of its value on upload bytes raise many types
                 continue  # it carries no claim; formats.mcap_signals names undecodable signal messages
-            if not is_claim(decoded):
-                continue
-            fields = snapshot(decoded)
             if is_claim(fields):
                 records.append({'topic': channel.topic, 'schema': schema.name if schema else None,
                                 'log_ns': int(message.log_time), 'publish_ns': int(message.publish_time),
