@@ -159,7 +159,7 @@ def test_unknown_or_noncanonical_axis_order_cannot_be_physical_state(names):
     assert formats.state_layout(7, 'teleop_arms', names)[0] == 'none'
 
 
-@pytest.mark.parametrize('unit,expected', [(None, 'none'), ('degrees', 'none'), ('rad', 'joints')])
+@pytest.mark.parametrize('unit,expected', [(None, 'none'), ('rad', 'joints')])
 def test_generic_joint_units_are_declared_without_rescaling_values(tmp_path, unit, expected):
     root = tmp_path / 'native'
     original = native_state(root, JOINTS + ['gripper'])
@@ -175,6 +175,87 @@ def test_generic_joint_units_are_declared_without_rescaling_values(tmp_path, uni
     if expected == 'none':
         assert 'unit' in ctx['state_note']
         assert any(s['name'] == 'observation.state' for s in ctx['signals'])
+
+
+def degree_state(root, readings, *, units=None, action_units=None):
+    """A LeRobot episode whose state is the given readings and whose action is half a degree past it, both named six
+    joints and a gripper."""
+    native_state(root, JOINTS + ['gripper'])
+    path = root / 'data/chunk-000/episode_000000.parquet'
+    df = pd.read_parquet(path)
+    df['observation.state'] = list(readings)
+    df['action'] = list(readings + np.float32(.5))
+    df.to_parquet(path)
+    info_path = root / 'meta/info.json'
+    info = json.loads(info_path.read_text())
+    info['features']['action']['names'] = JOINTS + ['gripper']
+    if units:
+        info['features']['observation.state']['units'] = units
+    if action_units:
+        info['features']['action']['units'] = action_units
+    info_path.write_text(json.dumps(info))
+
+
+# per-joint ranges of a recorded Realman arm, which declares no unit: all six of its joints read past 2 pi
+REALMAN = np.linspace([-25.2, 5.6, 20.1, -46.6, 5.5, -211.4, 0], [98.0, 79.6, 130.1, 81.3, 99.6, 120.0, 1],
+                      8).astype(np.float32)
+
+
+@pytest.mark.parametrize('units,basis', [(None, 'readings'), (['degrees'] * 6 + ['fraction'], 'declared')])
+def test_joint_degrees_are_read_as_radians_when_declared_or_proven_by_the_readings(tmp_path, units, basis):
+    root = tmp_path / 'native'
+    degree_state(root, REALMAN, units=units, action_units=units)
+    path, ctx = converted(root, tmp_path / 'prepared')
+    assert ctx['state_kind'] == 'joints' and 'state_note' not in ctx
+    with np.load(path / 'state.npz') as values:
+        for key, recorded in (('state', REALMAN), ('action', REALMAN + np.float32(.5))):
+            expected = recorded.astype(np.float64)
+            expected[:, :6] = np.deg2rad(expected[:, :6])
+            np.testing.assert_allclose(values[key], expected, rtol=1e-6)
+    proof = ctx['state_contract']
+    assert proof['units'][:6] == ['rad'] * 6 and proof['unit_conversion']['basis'] == basis
+    assert proof['unit_conversion']['columns'] == list(range(6))
+    assert proof['action']['unit_conversion']['basis'] == basis
+    from prepare.state_contract import prepared_state_problem
+    assert prepared_state_problem(ctx, 7, has_action=True) is None
+
+
+@pytest.mark.parametrize('change', ['two joints past one turn', 'a joint past two turns of degrees',
+                                    'a joint with no reading', 'a declared radian'])
+def test_joint_readings_that_do_not_prove_degrees_keep_the_state_as_recorded(tmp_path, change):
+    readings = REALMAN.copy()
+    units = None
+    if change == 'two joints past one turn':
+        readings[:, [0, 1, 3, 4]] = np.clip(readings[:, [0, 1, 3, 4]], -6, 6)
+    elif change == 'a joint past two turns of degrees':
+        readings[3, 5] = 900
+    elif change == 'a joint with no reading':
+        readings[:, 2] = np.nan
+    else:
+        units = ['rad'] * 6 + ['fraction']
+    root = tmp_path / 'native'
+    degree_state(root, readings, units=units)
+    path, ctx = converted(root, tmp_path / 'prepared')
+    if change == 'a declared radian':
+        assert ctx['state_kind'] == 'joints' and 'unit_conversion' not in ctx['state_contract']
+        with np.load(path / 'state.npz') as values:
+            np.testing.assert_array_equal(values['state'], readings)
+    else:
+        assert ctx['state_kind'] == 'none' and 'state_contract' not in ctx
+        assert any(s['name'] == 'observation.state' for s in ctx['signals'])
+
+
+def test_two_arms_convert_only_when_each_arm_proves_degrees():
+    names = [f'{side}_{name}' for side in ('left', 'right') for name in JOINTS + ['gripper']]
+    both = np.concatenate([REALMAN, REALMAN], axis=1)
+    found = formats.joint_degrees(both, names, None, [None] * 14, 'teleop_arms')
+    assert found['columns'] == list(range(6)) + list(range(7, 13)) and found['joints_beyond_one_turn'] == [6, 6]
+    small = both.copy()
+    small[:, 7:13] = np.deg2rad(small[:, 7:13])
+    assert formats.joint_degrees(small, names, None, [None] * 14, 'teleop_arms') is None
+    # a name that carries its own unit is left to that unit
+    suffixed = [f'{name}_deg' if i % 7 < 6 else name for i, name in enumerate(names)]
+    assert formats.joint_degrees(both, suffixed, None, formats.state_units({}, suffixed, 14), 'teleop_arms') is None
 
 
 @pytest.mark.parametrize('units,expected', [(None, 'none'), (['mm'] * 3 + ['rad'] * 3 + ['m'], 'none'),
@@ -212,7 +293,7 @@ def test_unqualified_commands_remain_signals_beside_valid_state(tmp_path):
     info_path = root / 'meta/info.json'
     info = json.loads(info_path.read_text())
     info['features']['observation.state']['units'] = ['rad'] * 6 + ['fraction']
-    info['features']['action'].update(names=JOINTS + ['gripper'], units=['degrees'] * 6 + ['fraction'])
+    info['features']['action'].update(names=JOINTS + ['gripper'], units=['mm'] * 6 + ['fraction'])
     info_path.write_text(json.dumps(info))
     path, ctx = converted(root, tmp_path / 'prepared')
     assert ctx['state_kind'] == 'joints'
