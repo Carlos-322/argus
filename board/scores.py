@@ -153,13 +153,21 @@ def subgoals(d: dict, f: dict) -> list:
     if f["start_s"] is None or not events:
         return []
     steps = [e for e in d.get("event_labels") or [] if _num(e.get("t_s")) is not None and _num(e.get("end_s")) is not None]
-    bounds, a = [], f["start_s"]
-    for k in events:
-        if k["t_s"] > a:
-            bounds.append((a, k["t_s"], k.get("label"), k.get("outcome"), False))
-            a = k["t_s"]
-    if f["end_s"] is not None and f["end_s"] > a + 0.5:
-        bounds.append((a, f["end_s"], (d.get("completion") or {}).get("success_predicate"), f["outcome"], True))
+    # an episode of several subtasks (human ego, sessions) has no single goal: each subtask is scored on its own, from
+    # its start through its subgoals to its own end-state, and the time between subtasks belongs to none of them
+    tasks = sorted((t for t in d.get("tasks") or [] if isinstance(t, dict) and _num(t.get("start_s")) is not None
+                    and _num(t.get("end_s")) is not None), key=lambda t: t["start_s"])
+    spans = ([(t["start_s"], _num(t.get("completed_at_s")) if _num(t.get("completed_at_s")) is not None else t["end_s"],
+               t.get("task"), t.get("outcome"), t["end_s"]) for t in tasks] if tasks
+             else [(f["start_s"], f["end_s"], (d.get("completion") or {}).get("success_predicate"), f["outcome"], None)])
+    bounds = []
+    for a, end, goal_label, goal_outcome, last in spans:
+        for k in events:
+            if k["t_s"] > a and (last is None or k["t_s"] <= last + 0.5):
+                bounds.append((a, k["t_s"], k.get("label"), k.get("outcome"), False))
+                a = k["t_s"]
+        if end is not None and end > a + 0.5:
+            bounds.append((a, end, goal_label, goal_outcome, True))
     out = []
     for a, b, label, outcome, goal in bounds:
         clip = lambda spans: [(max(a, x), min(b, y)) for x, y in spans if min(b, y) > max(a, x)]

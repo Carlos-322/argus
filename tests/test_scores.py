@@ -85,3 +85,16 @@ def test_failed_attempts_belong_to_the_subgoal_they_precede_and_cost_only_when_n
     assert [k["label"] for k in last["failed_attempts"]] == ["right handle missed"]
     assert last["goal"] and not last["reached"]
     assert last["cleanliness"] == 0.0                                 # all wasteful, then one unexplained failure
+
+
+def test_with_subtasks_each_subgoal_stretch_starts_in_its_own_subtask_and_the_gap_between_them_is_not_charged():
+    rec = _record("wash the bowl, then peel the carrot", None,
+                  [(0, 10, "advancing", 1.0), (10, 30, "idle", 0.0), (30, 40, "advancing", 0.5), (40, 50, "advancing", 1.0)],
+                  [(10, "bowl rinsed"), (40, "carrot half peeled")])
+    rec["completion"] = {}
+    rec["tasks"] = [{"start_s": 0, "end_s": 10, "task": "wash the bowl", "outcome": "success", "completed_at_s": 10},
+                    {"start_s": 30, "end_s": 50, "task": "peel the carrot", "outcome": "success", "completed_at_s": 50}]
+    subs = scores.score_board({"ego.json": rec})["ego.json"]["subgoals"]
+    assert [(st["start_s"], st["end_s"], st["label"], st["goal"]) for st in subs] == [
+        (0, 10, "bowl rinsed", False), (30, 40, "carrot half peeled", False), (40, 50, "peel the carrot", True)]
+    assert all(st["steady"] == 10.0 for st in subs)                   # the 20s between the two never counts
