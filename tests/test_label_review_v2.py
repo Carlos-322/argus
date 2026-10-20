@@ -685,3 +685,64 @@ def test_ego_short_row_does_not_guess_whether_text_is_handwear_or_notes():
     assert ok and labels['timeline'][0]['action'] == 'reach'
     assert 'hands_wearing' not in labels['timeline'][0] and 'notes' not in labels['timeline'][0]
     assert labels['_dropped'][0]['value'] == ambiguous
+
+
+# Endpoint pricing published for google/gemini-4-argon on 2026-10-19 (standard tier): audio prices and a search price
+# beside the token rates.
+GEMINI_PRICING = {'prompt': '0.000002', 'completion': '0.00001', 'image': '0.000002', 'audio': '0.000002',
+                  'input_audio_cache': '0.0000001', 'web_search': '0.014', 'internal_reasoning': '0.00001',
+                  'input_cache_read': '0.0000001', 'input_cache_write': '0.0000001875', 'discount': 0.5}
+
+
+def test_quote_caps_a_gemini_request_whose_audio_and_search_prices_cannot_apply(tmp_path, monkeypatch):
+    """Gemini lists audio prices and a search price. Requests carry text and images only and never ask for search (the
+    web plugin or :online), so the quote accepts both and caps the request by its token and image rates."""
+    from test_camera_timing import recording
+    ep = recording(tmp_path, np.arange(12) / 30)
+    model = 'google/gemini-4-argon'
+    sent = []
+    def provider(request, timeout):
+        sent.append(request.get_method())
+        if request.get_method() == 'GET':
+            return io.BytesIO(json.dumps({'data': {'id': model, 'endpoints': [{
+                'context_length': 1_048_576, 'pricing': GEMINI_PRICING}]}}).encode())
+        body = json.loads(request.data)
+        assert body['provider']['max_price'] == {'prompt': 2., 'completion': 10., 'image': .000002, 'request': 0.}
+        assert 'plugins' not in body and ':online' not in body['model']
+        selection = 'FIELD INVENTORY' in json.dumps(body['messages'])
+        return answer({'requests': []} if selection else {'task_summary': 'The hand reaches.'})
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', provider)
+    out = tmp_path / 'out'
+    assert harness.run_batch([ep], out, keys=['sk-or-test'], concurrency=1, force=False, model=model,
+        reasoning='medium', max_tokens=64000, timeout=1, cell_w=128, max_spend=8.) == 0
+    assert sent == ['GET', 'POST', 'POST']
+    quoted = json.loads((out / (ep.name + '.json')).read_text())['config']['pricing_quote']
+    # the output rate carries the reasoning charge; the input rate is the prompt rate, never an audio one
+    assert quoted['input_usd_per_token'] == .000002 and quoted['output_usd_per_token'] == pytest.approx(.00002)
+
+
+@pytest.mark.parametrize('model, pricing, words', [
+    ('google/gemini-4-argon', {**GEMINI_PRICING, 'video_seconds': '0.001'}, 'unsupported endpoint charge: video_seconds'),
+    ('google/gemini-4-argon:online', GEMINI_PRICING, 'native search fees'),
+    ('perplexity/sonar-x', {'prompt': '0.000001', 'completion': '0.000001', 'web_search': '0.005'}, 'native search fees'),
+])
+def test_a_charge_that_could_apply_still_blocks_the_quote(monkeypatch, model, pricing, words):
+    """Accepting Gemini's unsent-input and on-request search prices is scoped to exactly those: a charge the quote does
+    not know, a variant that searches, or a model that always searches still has no verified ceiling."""
+    from label import pricing as pricing_module
+    def provider(request, timeout):
+        return io.BytesIO(json.dumps({'data': {'id': model, 'endpoints': [{'context_length': 100_000, 'pricing': pricing}]}}).encode())
+    monkeypatch.setattr(pricing_module.urllib.request, 'urlopen', provider)
+    with pytest.raises(ValueError, match=words):
+        pricing_module.quote(model, 5)
+
+
+def test_a_request_part_with_no_verified_bound_is_refused():
+    """The quote accepts audio prices only because requests carry no audio; a part that is not text or an image would
+    break that, so the bound refuses it rather than leave it out."""
+    from label import pricing as pricing_module
+    quote = {'prompt_token_bound': 100_000, 'input_usd_per_token': 1e-6, 'output_usd_per_token': 1e-5,
+             'request_usd': 0., 'image_usd': 0.}
+    assert pricing_module.cost_bound([{'type': 'text', 'text': 'hello'}], 100, quote) > 0
+    with pytest.raises(ValueError, match='no verified bound: input_audio'):
+        pricing_module.cost_bound([{'type': 'text', 'text': 'hello'}, {'type': 'input_audio', 'input_audio': {}}], 100, quote)
