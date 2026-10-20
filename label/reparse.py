@@ -135,6 +135,13 @@ def rebind(record: dict) -> None:
         evidence.setdefault(key, []).extend(additional[key])
     evidence['provenance'] = provenance
     restore_analysis()
+    receipt = inspection.get('sensor_cards')
+    if isinstance(receipt, dict) and receipt.get('state') == 'received':
+        from label import sensor_cards
+        try:
+            sensor_cards.apply(evidence, receipt['request'], receipt)
+        except (ValueError, KeyError, TypeError) as error:
+            evidence.setdefault('limitations', []).append(f'Video cards withheld: {error}')
 
 
 def refresh_received(record: dict) -> dict:

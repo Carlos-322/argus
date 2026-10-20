@@ -83,5 +83,17 @@ for(const status of ['rejected','withheld','stale']){
  assert.deepEqual(roi.depthRoiFrames(label,'exo'),[],'stitched ineligible receipts cannot leave depth boxes visible');
 }
 assert.equal(JSON.stringify(saved),before,'viewer does not mutate exported evidence');
+const finding=(start,headline,card)=>({start_s:start,end_s:start+.5,headline,detail:headline+' in full',adds_beyond_video:true,evidence:[],
+  ...(card?{video_card:{version:1,headline:card,detail:card+' on the video.'}}:{})});
+const cardsDoc=chosen=>({sensor_evidence:{version:1,sensors:[],series:[],findings:[finding(0,'Loading builds','Thumb presses harder'),
+  finding(.2,'Local redistribution'),finding(2,'Thumb loading eases','Thumb pressure eases')],...(chosen?{video_cards:{version:1}}:{})}});
+const C=api.sensorEvidence(cardsDoc(true));
+assert.deepEqual(C.overlayFindings.map(f=>f.headline),['Thumb presses harder','Thumb pressure eases'],'the video plays only the chosen cards, in their words');
+assert.equal(C.overlayFindings[1].overlayDetail,'Thumb pressure eases on the video.');
+assert.deepEqual(C.insights.map(f=>f.headline),['Loading builds','Local redistribution','Thumb loading eases'],'every finding stays in the list');
+assert.deepEqual(C.overlayFindings.map(f=>f.findingIndex),[0,2],'a card keeps its finding identity');
+assert.equal(api.sensorEvidence(cardsDoc(false)).overlayFindings.length,3,'a record without chosen cards plays every finding');
+const none=cardsDoc(true);none.sensor_evidence.findings.forEach(f=>delete f.video_card);
+assert.equal(api.sensorEvidence(none).overlayFindings.length,0,'a run that chose no cards shows none');
 delete global.document;
 console.log('Sparse evidence inspection passed');

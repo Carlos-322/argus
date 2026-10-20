@@ -4803,6 +4803,8 @@ function sensorEvidence(d) {
       quotedTimeOffset: finite(f.quoted_time_offset_s) ? f.quoted_time_offset_s : 0,
       generic: !!grip.generic, evidence: grip.generic && Array.isArray(f.evidence) ? f.evidence : [],
       display: grip.generic && f.display && f.display.version === 1 && Array.isArray(f.display.rows) ? f.display.rows : null,
+      videoCard: grip.generic && f.video_card && f.video_card.version === 1 && text(f.video_card.headline) && text(f.video_card.detail)
+        ? {headline: text(f.video_card.headline), detail: text(f.video_card.detail)} : null,
       addsBeyond: f.adds_beyond_video === true || f.adds_beyond_rgb_pose === true, cellGroups: Array.isArray(f.cell_groups) ? f.cell_groups : []});
   }
   for (const [i, c] of (d.contacts || []).entries()) {
@@ -4837,14 +4839,18 @@ function sensorEvidence(d) {
     headline: 'Visible grasp has no covering sensor-activity interval', reading: 'No covering contact', visual: 'Reported from video',
     detail: [text(m.hand), text(m.object)].filter(Boolean).join(' '), priority: 6, index: -1, timing: ''});
   moments.sort((a, b) => a.t - b.t || b.priority - a.priority);
-  const overlayFindings = [...insights, ...warnings.map((w, i) => ({
+  // When the run chose video cards, the video plays only those, in their own words; every finding stays in the list.
+  const carded = !!generic && generic.video_cards?.version === 1;
+  const onVideo = carded ? insights.filter(f => f.videoCard).map(f => ({...f, headline: f.videoCard.headline,
+    detail: f.videoCard.detail, overlayDetail: f.videoCard.detail})) : insights;
+  const overlayFindings = [...onVideo, ...warnings.map((w, i) => ({
     findingIndex: insights.length + i, start: w.start_s, end: w.end_s, t: w.start_s,
     headline: w.headline, detail: w.detail, kind: 'quality', priority: 6, generic: true, evidence: []
   }))];
   // Keep existing contact anomalies visible when a sensor finding or quality card owns the dock.
   for (const anomaly of [...contacts, ...moments].filter(f => f.priority >= 3)) {
     const moment = Number.isFinite(anomaly.t);
-    overlayFindings.push({...anomaly, findingIndex: overlayFindings.length, kind: 'anomaly',
+    overlayFindings.push({...anomaly, findingIndex: insights.length + overlayFindings.length - onVideo.length, kind: 'anomaly',
       start: moment ? anomaly.t : anomaly.start,
       end: moment ? anomaly.t : anomaly.end,
       t: moment ? anomaly.t : anomaly.start, generic: true, evidence: []});
@@ -5283,7 +5289,7 @@ function setupSensorEvidence(E, seek, on, inspectContact, d = null, file = null,
     const allFindings = E.overlayFindings || E.insights || [];
     const ended = media?.ended === true;
     const available = ended ? [] : displayGripFindings(E, t, presentationWindows);
-    const explicit = allFindings.find(f => f.findingIndex === chosenGrip);
+    const explicit = allFindings.find(f => f.findingIndex === chosenGrip) || (E.insights || []).find(f => f.findingIndex === chosenGrip);
     // A manual inspection follows its source interval, even after another onset replaces its automatic card.
     if (!ended && explicit && explicit.start <= t && t <= explicit.end + 1e-6
         && !available.some(f => f.findingIndex === explicit.findingIndex))

@@ -264,7 +264,10 @@ def test_prompt_pressure_reduces_array_rows_before_removing_local_evidence(monke
     initial = copy.deepcopy(doc)
     # Force the reducer to share its byte budget between several distinct
     # modalities while keeping complete columns for every retained snapshot.
-    monkeypatch.setattr(se, 'MAX_PROMPT_BYTES', 24000)
+    # The budget leaves the same room for evidence whatever the length of the card copy rule.
+    from label import sensor_copy
+    rule_growth = len(sensor_copy.rule('sensor', sensor_copy.VERSION).encode()) - len(sensor_copy.rule('sensor', 2).encode())
+    monkeypatch.setattr(se, 'MAX_PROMPT_BYTES', 24000 + max(0, rule_growth))
     sent = expand_prompt(json.loads(se.prompt(doc).splitlines()[-1]))
     for sensor in sent['sensors']:
         array = sensor['array_evidence']

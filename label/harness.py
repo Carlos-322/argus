@@ -1489,6 +1489,11 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
             generation_id=result.get('generation_id'), method='episode annotation with bounded evidence inspection')
     if bound_sensor_analysis is not None:
         sensor_analysis.attach(result, bound_sensor_analysis)
+    if parse_ok and isinstance(result.get('sensor_evidence'), dict) and isinstance(result.get('evidence_inspection'), dict) \
+            and result['evidence_inspection'].get('digest'):
+        _video_cards(result, out_path, model=model, reasoning=reasoning, api_key=api_key, timeout=timeout,
+                     pricing_quote=pricing_quote, require_known_pricing=require_known_pricing,
+                     reserve_selection=reserve_selection, settle_selection=settle_selection, verify_inputs=verify_inputs)
     if msg.get("reasoning"):
         # the reasoning text or summary the provider returned, when it returns one
         result["reasoning_text"] = msg["reasoning"][:20000]
@@ -1499,6 +1504,31 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
     print(f"[{Path(ep_dir).name}] timesteps={c.get('n_timesteps')} images={n_images} "
           f"in={n_in} out={n_out} {cost_text} {elapsed:.0f}s parse_ok={parse_ok} -> {out_path}", flush=True)
     return result
+
+
+def _video_cards(result, out_path, *, model, reasoning, api_key, timeout, pricing_quote, require_known_pricing,
+                 reserve_selection, settle_selection, verify_inputs):
+    """Choose and write the video cards from the bound sensor findings (label/sensor_cards.py), billed into the
+    inspection invoice. The annotation is already paid for and bound, so a failure here is recorded and the record
+    is still written: its findings stay in the list, and the board shows them as it did before cards existed."""
+    from label import sensor_analysis_run, sensor_cards
+    evidence, inspection = result['sensor_evidence'], result['evidence_inspection']
+    request = sensor_cards.build(evidence, task=(result.get('labels') or {}).get('task_summary'),
+                                 config={'model': model, 'reasoning': reasoning})
+    if request is None:
+        return
+    cache = Path(out_path).parent / '.evidence' / (Path(out_path).name + '.inspection.json')
+    quote = {'pricing_quote': pricing_quote} if pricing_quote is not None else {}
+    try:
+        receipt = sensor_analysis_run.execute(
+            request, inspection, cache, key='sensor_cards', model=model,
+            call=lambda parts: call_model_once(parts, model, reasoning, api_key, sensor_cards.MAX_TOKENS, timeout, **quote),
+            reserve_cost=lambda parts: final_cost_bound(parts, sensor_cards.MAX_TOKENS, model=model,
+                                                        require_known_pricing=require_known_pricing, **quote),
+            reserve_dispatch=reserve_selection, settle_dispatch=settle_selection, verify_inputs=verify_inputs)
+        sensor_cards.apply(evidence, receipt['request'], receipt)
+    except Exception as error:
+        evidence.setdefault('limitations', []).append(f'Video cards were not written: {error}')
 
 
 def _cost(usage: dict) -> float:

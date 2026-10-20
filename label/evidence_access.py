@@ -42,6 +42,7 @@ IMPLEMENTATION_SHA256 = hashlib.sha256(b''.join(path.read_bytes() for path in (
     Path(__file__).with_name('sensor_copy.py'),
     Path(__file__).with_name('sensor_scene.py'),
     Path(__file__).with_name('sensor_analysis.py'), Path(__file__).with_name('sensor_analysis_run.py'),
+    Path(__file__).with_name('sensor_cards.py'), Path(__file__).with_name('sensor_display.py'),
     Path(__file__).with_name('sensor_analysis_media.py'),
     Path(__file__).with_name('regional_analysis.py'),
     Path(__file__).with_name('optical_motion.py'), Path(__file__).with_name('tactile_arrays.py'),
