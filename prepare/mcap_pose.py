@@ -12,10 +12,12 @@ def camera_roles(path, topics):
     from mcap.reader import make_reader
     mappings = []
     with open(path, 'rb') as stream:
+        metadata = []
         try:
-            metadata = list(make_reader(stream).iter_metadata())
-        except Exception:
-            metadata = []
+            for record in make_reader(stream).iter_metadata():
+                metadata.append(record)
+        except Exception:  # noqa: BLE001, S110 - the mcap reader on upload bytes; named by formats.retain_mcap_fields
+            pass  # the records before the damage are kept; the same failure is named on the episode there
     for record in metadata:
         raw = record.metadata.get('actor_map')
         if raw:
@@ -46,10 +48,12 @@ def pose_contract(path):
     keys = ("position_unit", "orientation_order")
     claims = {key: set() for key in keys}
     with open(path, 'rb') as stream:
+        records = []
         try:
-            records = list(make_reader(stream).iter_metadata())
-        except Exception:
-            records = []
+            for record in make_reader(stream).iter_metadata():
+                records.append(record)
+        except Exception:  # noqa: BLE001, S110 - the mcap reader on upload bytes; named by formats.retain_mcap_fields
+            pass  # the records before the damage are kept; the same failure is named on the episode there
     for record in records:
         for key in keys:
             if key in record.metadata:
@@ -79,7 +83,7 @@ def pose_state(paths, q, clock):
                 decoder = decoders[channel.id]
                 try:
                     decoded = decoder(message.data) if decoder else None
-                except Exception:
+                except Exception:  # noqa: BLE001 - a decoder on upload bytes; named in failures just below
                     decoded = None
                 if decoded is None:
                     failures.append(channel.topic + ' cannot be decoded')

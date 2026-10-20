@@ -338,7 +338,7 @@ def decode_gray(ep: dict, v: str) -> dict:
                         break
     except FileNotFoundError:
         raise
-    except Exception as e:  # decoder failure on an existing file
+    except Exception as e:  # noqa: BLE001 - PyAV on an existing file raises many types; recorded in info error
         info["error"] = f"{type(e).__name__}: {e}"[:300]
     info["frames"] = frames
     info["got"] = got

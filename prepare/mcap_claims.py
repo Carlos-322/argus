@@ -42,10 +42,10 @@ def inspect(path, camera_topics):
     metadata, records, decoders = [], [], {}
     with open(path, 'rb') as stream:
         try:
-            metadata = [{'name': item.name, 'metadata': dict(item.metadata)}
-                        for item in make_reader(stream).iter_metadata()]
-        except Exception:
-            pass
+            for item in make_reader(stream).iter_metadata():
+                metadata.append({'name': item.name, 'metadata': dict(item.metadata)})
+        except Exception:  # noqa: BLE001, S110 - the mcap reader on upload bytes; named by formats.retain_mcap_fields
+            pass  # the records before the damage are kept; the same failure is named on the episode there
     topics = [topic for topic, _ in formats.mcap_channels(path) if topic not in camera_topics]
     factories = formats._decoders()
     with open(path, 'rb') as stream:
@@ -57,11 +57,11 @@ def inspect(path, camera_topics):
                 continue
             try:
                 decoded = decoder(message.data)
-                if not is_claim(decoded):
-                    continue
-                fields = snapshot(decoded)
-            except Exception:
+            except Exception:  # noqa: BLE001, S112 - a decoder on upload bytes raises many types
+                continue  # it carries no claim; formats.mcap_signals names undecodable signal messages
+            if not is_claim(decoded):
                 continue
+            fields = snapshot(decoded)
             if is_claim(fields):
                 records.append({'topic': channel.topic, 'schema': schema.name if schema else None,
                                 'log_ns': int(message.log_time), 'publish_ns': int(message.publish_time),

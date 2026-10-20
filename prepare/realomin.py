@@ -238,7 +238,7 @@ def drawn(rel: str, raw: Path, out_root: Path, keep_mcap: bool) -> dict | None:
     try:
         prepare_one(rel, raw, out_root, keep_mcap=keep_mcap)
         return json.loads((out_root / episode_dir_name(rel) / "context.json").read_text())
-    except Exception as e:  # a drawn clip that cannot be read is a finding about the data; listed, not hidden
+    except Exception as e:  # noqa: BLE001 - a drawn clip that cannot be read is printed as FAILED, not hidden
         print(f"FAILED {rel}: {type(e).__name__}: {e}"[:400], file=sys.stderr, flush=True)
         return None
 

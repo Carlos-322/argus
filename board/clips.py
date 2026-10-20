@@ -169,7 +169,7 @@ def decode_lead_s(packed: str, seek_s: float) -> float:
             source.seek(int(seek_s / stream.time_base), stream=stream, backward=True, any_frame=False)
             packet = next(p for p in source.demux(stream) if p.pts is not None)
             return max(0.0, seek_s - float(packet.pts * stream.time_base))
-    except Exception:
+    except Exception:  # noqa: BLE001 - PyAV raises many types; an unread index means the whole lead is decoded
         return seek_s
 
 
@@ -787,7 +787,7 @@ def clip_frames(mp4: Path) -> int:
         import av
         with av.open(str(mp4)) as c:
             return sum(1 for _ in presented(c, c.streams.video[0]))
-    except Exception:
+    except Exception:  # noqa: BLE001 - PyAV raises many types; a clip that does not read counts as not cut, so it is cut again
         return 0
 
 
@@ -1581,7 +1581,7 @@ def main() -> int:
                     ok += 1
                     unshown_cut.setdefault(ep, set()).add(cam)
                     made.setdefault(ep, []).append(o)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - one clip's failure is named in unshown_broken, the others are cut
                     fail += 1
                     if machine_stopped(e):
                         machine(ep, cam, o, e)
@@ -1598,7 +1598,7 @@ def main() -> int:
                     short.setdefault(ep, {})[cam] = counts
                     sys.stderr.write(f"clip SHORT {o}: {counts['clip_frames']} frames, episode has "
                                      f"{counts['episode_frames']}\n")
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - one clip's failure is named in broken, the others are cut
                 fail += 1
                 if machine_stopped(e):
                     machine(ep, cam, o, e)
@@ -1625,14 +1625,17 @@ def main() -> int:
         if cams and cams <= set(broken.get(d.name, {})):
             failed[d.name] = broken[d.name]
             continue
+        keep = labelled(d, labels)
         main = record_cameras(d, short.get(d.name, {}), broken.get(d.name, {}), cut.get(d.name, set()),
-                              keep_clock=labelled(d, labels))
-        if main:
+                              keep_clock=keep)
+        while main:
             # every camera left is cut again: the camera that is main now was cut as a side camera and is cut at the
             # main camera's size, and the episode's clock may have moved to the earliest camera left (reanchor), so
             # every clip is timed on it (start_offsets); each camera's frames are recorded as they come out
-            # the cameras the model is not shown too, at their start on the moved clock (CLOCK_TIME_KEYS)
-            redo, again, u_cut, u_broken = {}, set(), set(), {}
+            # the cameras the model is not shown too, at their start on the moved clock (CLOCK_TIME_KEYS). A shown
+            # camera whose cut fails now is taken out as broken, like one that failed the first cut; when that moves
+            # the main camera again the loop cuts what is left once more, and each pass takes a camera out, so it ends
+            redo, again, u_cut, u_broken, rebroken = {}, set(), set(), {}, {}
             for (pk, b, du, o, fps, is_main, off, skip, t, q, km, pts, end, ep, cam) in episode_jobs(d, args.out, True,
                                                                                     args.name_prefix):
                 try:
@@ -1645,7 +1648,7 @@ def main() -> int:
                     again.add(cam)
                     if counts:
                         redo[cam] = counts
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - every failed clip is named: u_broken, rebroken or machine
                     if machine_stopped(e):
                         # the clip from before the main camera went is timed on the old clock: removed, so the rerun
                         # cuts it on the episode as it is now
@@ -1654,9 +1657,16 @@ def main() -> int:
                         continue
                     if cam.startswith(UNSHOWN):
                         u_broken[cam] = str(e)[:400]
+                    else:
+                        rebroken[cam] = str(e)[:400]
+                        Path(o).unlink(missing_ok=True)      # its clip from before is timed on the old clock
                     sys.stderr.write(f"clip FAIL {o} cut again after the main camera went: {str(e)[:160]}\n")
-            record_cameras(d, redo, {}, again)
             record_unshown(d, u_cut, u_broken)
+            left = set(json.loads((d / "sources.json").read_text()))
+            if rebroken and left <= set(rebroken):
+                failed[d.name] = rebroken                    # no camera of the episode decodes on the moved clock
+                break
+            main = record_cameras(d, redo, rebroken, again, keep_clock=keep)
     # the depth clips, after the colour clips they are timed against; one that comes out imperfect is kept, and one
     # that cannot be cut is left out (the page then offers no depth for that camera), never costing the episode; either
     # is recorded on the episode as a reader issue (record_depth), which the board shows
@@ -1674,7 +1684,7 @@ def main() -> int:
                 try:
                     record_depth(d, cam, f.result())
                     dok += 1
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - one depth clip's failure is recorded by record_depth, the others are cut
                     sys.stderr.write(f"depth clip FAIL {out}: {str(e)[:160]}\n")
                     record_depth(d, cam, [depth_failed(d, cam, e)])
         print(f"clips: depth ok={dok} fail={len(djobs) - dok}")

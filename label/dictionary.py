@@ -296,7 +296,7 @@ def inventory(episodes: list[Path]) -> dict:
                 for key in sorted(set(members) - keys):
                     numeric(ep, {"name": key}, "bookkeeping", file + "/" + key, file, key)
             except (OSError, zipfile.BadZipFile):
-                pass
+                pass        # the arrays the context names are inventoried above; this only adds unnamed members
         try:
             camera_sources = json.loads((ep / "sources.json").read_text())
             if not isinstance(camera_sources, dict):
@@ -441,7 +441,7 @@ def _parse(record):
         raise ValueError(f"dictionary response exceeds {RESPONSE_BYTES} bytes")
     try:
         answer = json.loads(raw)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as error:
         prefix = re.match(r'\s*\{\s*"entries"\s*:\s*\[', raw)
         if record.get('finish_reason') != 'length' or not prefix:
             raise
@@ -460,7 +460,7 @@ def _parse(record):
                 break
             position += 1
         if not entries:
-            raise ValueError('dictionary truncated before any complete entry')
+            raise ValueError('dictionary truncated before any complete entry') from error
         answer = {'entries': entries}
         record['response_truncated'] = True
         record['limitations'].append('Dictionary reply was truncated. Only complete entries were recovered; automatic retry is disabled.')
@@ -676,7 +676,7 @@ def prepare_upload(job: Path, episodes: list[Path], api_key, call_model, *, dry_
         result['finish_reason'] = response['choices'][0].get('finish_reason')
         _parse(result)
         result["status"] = "partial" if result.get('response_truncated') or deferred else "success"
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - recorded as failed, with why, in limitations
         result["status"] = "failed"
         result["entries"] = {}
         if not result["attempted"]:

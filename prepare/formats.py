@@ -356,7 +356,7 @@ def _archive_members(path: Path, max_files: int | None = None):
         try:
             zf = zipfile.ZipFile(path)
             infos = zf.infolist()
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - zipfile on upload bytes raises many types; recorded as an ArchiveNote
             # the directory is one of a ZIP's two indexes; the members' own headers are the other
             out, skipped, bad = local_members(path, _member_parts, UNPACK_MAX_FILES, UNPACK_MAX_BYTES,
                                               ArchiveNote(f"{path.name} has a ZIP directory that could not be read "
@@ -455,7 +455,7 @@ def _archive_members(path: Path, max_files: int | None = None):
                                   f"and {UNPACK_MAX_BYTES / 1e9:.0f} GB unpacked")
     except UnpackLimit:
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001 - tarfile on upload bytes raises many types; recorded as an ArchiveNote
         # cut short: every member whose header came before the cut is listed, and one whose bytes the cut reaches
         # fails as it is unpacked (open_archives)
         from prepare.archive_recovery import ArchiveNote
@@ -468,7 +468,7 @@ def _archive_members(path: Path, max_files: int | None = None):
             # archive's own members only, never on disk); read.js resolveLinks, the same rule
             try:
                 target = tf._find_link_target(m)
-            except Exception:                   # not in the archive, or after the cut of one cut short
+            except Exception:  # noqa: BLE001 - not in the archive, or after the cut of one cut short (recorded at 462)
                 target = None
             if target is None or not target.isreg():
                 skipped += 1
@@ -625,7 +625,7 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
         except ValueError as e:
             notes.append(f"{e}, so it was not opened.")
             continue
-        except Exception:
+        except Exception:  # noqa: BLE001 - any archive that does not open is named in the notes
             notes.append(f"{a.name} could not be opened as an archive; it may be damaged.")
             continue
         with handle:
@@ -666,7 +666,7 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
                             dst.write(buf)
                 except UnpackLimit:
                     raise
-                except Exception as error:
+                except Exception as error:  # noqa: BLE001 - a member that does not unpack is named with why
                     bad.append(f"{why_label or label} ({_member_why(error)})")
                     return False
                 total += got
@@ -722,7 +722,7 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
                     if tmp is not None:
                         tmp.unlink(missing_ok=True)
                     raise
-                except Exception as error:
+                except Exception as error:  # noqa: BLE001 - a member that does not unpack is named with why
                     # a member cut short or damaged (a tar cut inside it, a zip member that fails its check), or one the
                     # filesystem will not hold, is left out by itself and named; the members before and after it are
                     # unpacked
@@ -933,7 +933,7 @@ def display_rotation(path: Path) -> int:
         with open_video(path) as c:
             fr = next(c.decode(c.streams.video[0]), None)
             return int(round(getattr(fr, "rotation", 0) or 0)) % 360 if fr is not None else 0
-    except Exception:
+    except Exception:  # noqa: BLE001 - PyAV on upload bytes; a camera that does not open is named by open_cameras
         return 0
 
 
@@ -1009,7 +1009,7 @@ def open_cameras(files: dict, extra: dict) -> dict:
             prs[v] = probe(Path(path))
             if not len(prs[v]["pts"]):
                 raise ValueError("it holds no frame")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - PyAV on upload bytes raises many types; named in broken
             broken[v] = (name, plain_error(e))
             prs.pop(v, None)
             del files[v]
@@ -1336,7 +1336,7 @@ def unshown_entry(name: str, path: Path, why: str, base_s: float = 0.0, n_frames
     if n_frames is None or fps is None:
         try:
             pr = probe(Path(path))
-        except Exception:
+        except Exception:  # noqa: BLE001 - PyAV on upload bytes raises many types; a None entry is named by set_unshown
             return None
         n_frames = len(pr["pts"]) if n_frames is None else n_frames
         fps = fps or measured_fps(seconds(pr)) or pr["fps"]
@@ -2645,7 +2645,7 @@ def signal_metadata(metadata) -> dict:
         try:
             value = json.loads(value)
         except (ValueError, RecursionError):
-            pass
+            pass                        # not JSON: the recorded text is kept as it is
     if 'sensor_semantics' in out:
         # Validation belongs to consumers. Unknown versions and invalid source declarations stay auditable.
         out['sensor_semantics'] = value
@@ -2987,7 +2987,7 @@ def _image_value(cell):
     try:
         with Image.open(io.BytesIO(bytes(payload))) as image:
             return np.asarray(image)
-    except Exception:
+    except Exception:  # noqa: BLE001 - PIL on upload bytes; a None cell is counted as unreadable by its caller
         return None
 
 
@@ -3088,7 +3088,7 @@ def _cell_shape(col, dims: int):
     """The shape of one cell of a table column (a 16 x 16 list of lists), when it holds exactly dims numbers."""
     try:
         s = np.asarray(_nested(col.iloc[0]), dtype=np.float64).shape
-    except Exception:
+    except (TypeError, ValueError, IndexError, OverflowError):  # a cell that is not numbers has no shape
         return None
     return s if s and int(np.prod(s)) == dims else None
 
@@ -3750,7 +3750,7 @@ def video_views_episode(ep: Path, files: dict, rig: str, dataset: str, extra: di
     for v, d in (depth or {}).items():
         try:
             pd_ = probe_depth(Path(d["path"]))
-        except Exception:
+        except Exception:  # noqa: BLE001 - PyAV on upload bytes raises many types; named in unused_depth
             extra.setdefault("source", {}).setdefault("unused_depth", []).append(
                 f"{Path(d['path']).name} (could not be read)")
             continue
@@ -3837,7 +3837,7 @@ def finish_views(ep: Path, files: dict, rig: str, dataset: str, extra: dict, **k
     it is not shown by."""
     try:
         return video_views_episode(ep, files, rig, dataset, extra, **kw)
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - recorded as part_unreadable, or raised when nothing optional is left to drop
         if not any(kw.get(key) is not None and len(kw[key]) for key in ('signals', 'depth', 'state', 'action')
                    if hasattr(kw.get(key), '__len__')):
             raise
@@ -4093,25 +4093,44 @@ def frame_time_files(video: Path, depth: bool = False) -> list[Path]:
             and any(t.startswith(('time', 'stamp')) for t in tk) and cam <= tk]
 
 
-def frame_times(video: Path, n: int, depth: bool = False, native: bool = False) -> np.ndarray | tuple | None:
+def frame_times(video: Path, n: int, depth: bool = False, native: bool = False,
+                ctx: dict | None = None) -> np.ndarray | tuple | None:
     """A video's frames' capture times in seconds on its recorder's clock, from the per-frame timestamp array a
     recorder writes beside it (exo_cam-rgb-timestamp.npy beside exo_cam-images-rgb.mp4): a .npy in its folder whose
     name says time and has the video's camera words, holding n rising numbers (seconds, or ms, us or ns, read
     by _seconds, the unit rule of every clock). Colour over depth when both fit, and depth over colour for a depth video (depth=True, whose
-    stamps exo_cam-depth-timestamp.npy are its own). None when there is none."""
-    cands = []
+    stamps exo_cam-depth-timestamp.npy are its own). None when there is none. With ctx (the episode's context), a
+    camera left with no frame times although stamp files sit beside it has each of them named on the episode as a
+    camera_timestamp_invalid issue (it does not load, holds another number of stamps or runs backwards), so a clock
+    the recorder wrote is never dropped unseen. A file passed over while another fits, or one of the other kind of
+    stream (depth stamps beside a colour video), is another stream's and is not named."""
+    cands, rejected = [], []
+
+    def unused(path, why):
+        if bool(set(tokens(path.stem)) & NON_COLOUR) == depth:   # a stamp file of this camera's own kind of stream
+            rejected.append((path, why))
+
     for p in frame_time_files(video, depth):
         tk = set(tokens(p.stem))
         try:
             a = np.load(p, allow_pickle=False)
-        except Exception:
+        except Exception as error:  # noqa: BLE001 - numpy's loader on upload bytes; the file is named as unused below
+            unused(p, f"it does not load ({plain_error(error)})")
             continue
-        if a.ndim != 1 or len(a) != n or not np.issubdtype(a.dtype, np.number):
+        if a.ndim != 1 or not np.issubdtype(a.dtype, np.number):
+            unused(p, "it is not one list of numbers")
+            continue
+        if len(a) != n:
+            unused(p, f"it holds {len(a)} stamps for {n} frames")
             continue
         if n > 1 and not (np.isfinite(a).all() and np.all(np.diff(a) >= 0)):
-            continue                      # never backwards (a recorder can stamp two frames alike)
+            unused(p, "its stamps are not all finite and in order")   # never backwards; two frames may share one
+            continue
         cands.append((bool(tk & NON_COLOUR) != depth, -len(os.path.commonprefix([p.stem, video.stem])), p.name, a, p))
     if not cands:
+        for path, why in rejected if ctx is not None else ():
+            add_issue(ctx, "camera_timestamp_invalid", f"{path.name} beside {video.name} is not used as its frame "
+                                                       f"times: {why}.", camera=video.stem, clock_problem=why)
         return None
     chosen = min(cands, key=lambda c: c[:3])
     if native:
@@ -4369,7 +4388,7 @@ def table_signals(paths: list[Path], real_anchor, pr_anchor: dict, extra: dict) 
             num, text, stride, rows = read_number_table(p)
             out.issues += [{"kind": "table_number_ambiguous", "what": f"{p.name}: {why}"}
                            for why in num.attrs.get("number_inferences", [])]
-        except Exception:
+        except Exception:  # noqa: BLE001 - any table that does not read is named in left_out
             out.left_out.append((p.name, "could not be read as a table"))
             continue
         if stride > 1:
@@ -4584,7 +4603,7 @@ def plan_video(det: dict, root: Path, grouping: dict | None = None,
             else:
                 try:
                     durations[r] = _duration(root / r)
-                except Exception:
+                except Exception:  # noqa: BLE001 - PyAV on upload bytes; a length unknown here is measured on conversion
                     durations[r] = None
         return durations[r]
     eps, unsettled = group_videos(rels, length_of, grouping)
@@ -4655,7 +4674,7 @@ def plan_video(det: dict, root: Path, grouping: dict | None = None,
             it["seconds"] = (max(length_of(Path(f).relative_to(root).as_posix()) for f in it["files"])
                              if declared_lengths is not None else
                              max((durations.get(Path(f).relative_to(root).as_posix()) or _duration(f)) for f in it["files"]))
-        except Exception:
+        except Exception:  # noqa: BLE001 - PyAV on upload bytes; measured on conversion, or reported as unreadable
             it["seconds"] = None          # unreadable header: measured on conversion, or reported as unreadable
     # a table of numbers beside an episode's videos (FreeTacMan's Hold_10_traj.csv beside Hold_10_camera1.mp4): the CSVs
     # in a folder of one episode, or the CSVs whose name gives the same take as the episode's videos (name_parts)
@@ -4767,7 +4786,7 @@ def convert_video(item: dict, rig: str, out: Path, dataset: str) -> dict:
                                                "could not be opened.", camera=Path(dp).stem)
             extra["source"].setdefault("unused_depth", []).append(
                 f"{Path(dp).name} (its colour camera could not be opened)")
-    real = {v: frame_times(Path(p), len(prs[v]["pts"])) for v, (_, p) in files.items()}
+    real = {v: frame_times(Path(p), len(prs[v]["pts"]), ctx=extra) for v, (_, p) in files.items()}
     native = {v: frame_times(Path(p), len(prs[v]["pts"]), native=True) for v, (_, p) in files.items()}
     native = {v: source for v, source in native.items() if source is not None}
     state = action = state_names = None
@@ -4867,7 +4886,7 @@ def convert_video(item: dict, rig: str, out: Path, dataset: str) -> dict:
             try:
                 pr_d = probe_depth(dp)
                 n_d = len(pr_d["pts"])
-            except Exception:
+            except Exception:  # noqa: BLE001 - PyAV on upload bytes; named when probed again (unused_depth)
                 pr_d, n_d = None, 0
             if pr_d is not None and not str(pr_d["pix_fmt"] or "").startswith("gray"):
                 k = 1 + sum(1 for x in files if x.startswith("extra"))
@@ -4875,9 +4894,9 @@ def convert_video(item: dict, rig: str, out: Path, dataset: str) -> dict:
                 descs[f"extra{k}"] = (f"the depth of {files[v][0]}, stored by the recorder as an ordinary picture, with "
                                       "its own shading of near and far")
                 prs[f"extra{k}"] = probe(Path(dp))
-                real[f"extra{k}"] = frame_times(Path(dp), len(prs[f"extra{k}"]["pts"]), depth=True)
+                real[f"extra{k}"] = frame_times(Path(dp), len(prs[f"extra{k}"]["pts"]), depth=True, ctx=extra)
                 continue
-            depth[v] = {"path": dp, "real": frame_times(Path(dp), n_d, depth=True) if n_d else None,
+            depth[v] = {"path": dp, "real": frame_times(Path(dp), n_d, depth=True, ctx=extra) if n_d else None,
                         "scale_m": depth_scale_from(Path(dp).parent), "source": Path(dp).name}
     # the cameras the model is not shown go to the board (unshown_cameras), timed on the recorder's clock when the
     # videos carry capture times, else from their own first frame as every separate video file is
@@ -4888,7 +4907,7 @@ def convert_video(item: dict, rig: str, out: Path, dataset: str) -> dict:
             return 0.0
         try:
             t = frame_times(Path(path), _frame_count(Path(path)))
-        except Exception:
+        except Exception:  # noqa: BLE001 - PyAV on upload bytes; an unshown camera without stamps starts with the episode
             t = None
         return float(t[0] - zero) if t is not None and len(t) else 0.0
     shown = [nm for nm, _ in files.values()]
@@ -5040,7 +5059,7 @@ def _read_json(p: Path, reads: dict | None = None) -> dict | None:
         if reads is not None:
             reads["metadata_read"].add(p.resolve())
         return d
-    except Exception as error:
+    except (OSError, ValueError, RecursionError) as error:
         if reads is not None and p.exists():
             metadata_failure(reads, p, plain_error(error))
         return None
@@ -5302,7 +5321,7 @@ def _episodes_v3(root: dict, rdir: Path, data_files: list[Path], vids: list[Path
         try:
             rows = pd.read_parquet(p).to_dict("records")
             root["metadata_read"].add(p.resolve())
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - pyarrow on upload bytes raises many types; named by metadata_failure
             metadata_failure(root, p, plain_error(error))
             continue
         for n, row in enumerate(rows, 1):
@@ -5315,15 +5334,19 @@ def _episodes_v3(root: dict, rdir: Path, data_files: list[Path], vids: list[Path
         root["used"].append(f"Episode list{where} from meta/episodes ({len(eps)} listed).")
         rel_tpl = info.get("video_path", "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4")
         data_tpl = info.get("data_path", "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet")
-        skipped, no_video = 0, []
+        skipped, no_video, unlocated = 0, [], {}
         for e, p in sorted(eps, key=lambda r: recorded_index(r[0]["episode_index"])):
             eidx = int(scalar(e["episode_index"]))
-            vids_e = {}
+            vids_e, unplaced = {}, {}
             for key in root["cams"] + root["depth_cams"]:
                 try:
                     mp4 = inside(rdir, rdir / rel_tpl.format(video_key=key, chunk_index=int(scalar(e[f"videos/{key}/chunk_index"])),
                                                              file_index=int(scalar(e[f"videos/{key}/file_index"]))))
-                except (KeyError, ValueError):
+                except (KeyError, ValueError) as error:
+                    # the camera stays named on the episode with this reason (convert_lerobot's unplaced)
+                    unplaced[key] = ("its place in meta/episodes could not be read ("
+                                     + (f"no {error.args[0]}" if isinstance(error, KeyError) else plain_error(error))
+                                     + ")")
                     continue
                 if mp4.exists():
                     vids_e[key] = (mp4, float(scalar(e[f"videos/{key}/from_timestamp"])), float(scalar(e[f"videos/{key}/to_timestamp"])))
@@ -5332,8 +5355,9 @@ def _episodes_v3(root: dict, rdir: Path, data_files: list[Path], vids: list[Path
                 dp = inside(rdir, rdir / data_tpl.format(chunk_index=int(scalar(e["data/chunk_index"])),
                                                          file_index=int(scalar(e["data/file_index"]))))
                 data = dp if dp.exists() else None
-            except (KeyError, ValueError):
-                pass
+            except (KeyError, ValueError) as error:
+                why = f"no {error.args[0]}" if isinstance(error, KeyError) else plain_error(error)
+                unlocated.setdefault(p, []).append((eidx, why))
             if not vids_e:
                 if data is not None:
                     no_video.append(data)
@@ -5341,7 +5365,13 @@ def _episodes_v3(root: dict, rdir: Path, data_files: list[Path], vids: list[Path
                     skipped += 1
                 continue
             fields = episode_row_fields(root, p, e, eidx)
-            root["episodes"].append({"eidx": eidx, **fields, "data": data, "videos": vids_e})
+            root["episodes"].append({"eidx": eidx, **fields, "data": data, "videos": vids_e,
+                                     **({"unplaced": unplaced} if unplaced else {})})
+        for p, bad in unlocated.items():
+            # an episode whose data file cannot be located is read from its video alone; the metadata says why
+            shown = ", ".join(f"episode {i} ({why})" for i, why in bad[:20]) + (
+                f" and {len(bad) - 20} more" if len(bad) > 20 else "")
+            metadata_failure(root, p, f"the data file of {shown} could not be located")
         if skipped:
             root["used"].append(f"The metadata{where} lists {skipped} more episodes than there is uploaded video for; the "
                                 "uploaded ones were labelled.")
@@ -5365,7 +5395,9 @@ def _episodes_v3(root: dict, rdir: Path, data_files: list[Path], vids: list[Path
             have = pq.ParquetFile(dp).schema_arrow.names
             df = pd.read_parquet(dp, columns=[c for c in ("episode_index", "frame_index", "timestamp", "task_index")
                                               if c in have])
-        except Exception:
+        except Exception as error:  # noqa: BLE001 - pyarrow on upload bytes raises many types; named below
+            # its episodes cannot be found without it: the data file is named with why, the others are still read
+            metadata_failure(root, dp, f"{plain_error(error)}; its episodes could not be found")
             continue
         if "episode_index" not in df.columns:
             continue
@@ -5532,7 +5564,7 @@ def plan_lerobot(det: dict, root: Path) -> tuple[list[dict], list[str], list[str
 def _safe_duration(p: Path) -> float | None:
     try:
         return _duration(p)
-    except Exception:
+    except Exception:  # noqa: BLE001 - PyAV on upload bytes; a length unknown here is measured on conversion
         return None
 
 
@@ -5733,14 +5765,14 @@ def lerobot_annotations(ctx, root, df, data_path, *, image_clock=False):
                 if not np.isfinite(offset):
                     offset = None
         except (TypeError, ValueError, OverflowError):
-            pass
+            pass                        # no offset: each step is named below as having incomplete timing
     elif frames is not None and fps and n:
         try:
             indices = [recorded_index(x) for x in frames]
             if len(set(indices)) == len(indices) and all(x < n for x in indices):
                 mapped = [x / fps for x in indices]
         except (TypeError, ValueError):
-            pass
+            pass                        # no mapping: each step is named below as having incomplete timing
     spans, unresolved, table_notes = [], [], {}
     for column in columns:
         selected = {key: table for key, table in tables.items() if key[0] == column}
@@ -5835,7 +5867,7 @@ def _cells_rows(col) -> tuple[np.ndarray | None, int]:
     for x in col.to_numpy():
         try:
             v = np.asarray(_nested(x), dtype=np.float64).reshape(-1)
-        except Exception:
+        except (TypeError, ValueError, OverflowError):  # not numbers: a row of NaN, counted as unreadable below
             v = None
         if v is not None and v.size == 0:
             v = None
@@ -5939,7 +5971,11 @@ def archive_lerobot_state(ep: Path, ctx: dict, df, data_path) -> None:
             rows = [np.asarray(value) for value in df[column]]
             if rows and len({(row.shape, str(row.dtype)) for row in rows}) == 1 and rows[0].dtype.kind in "buif":
                 arrays[key] = np.stack(rows)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as error:
+            # its rows are not one numeric array, so the column is not retained, and the episode says so
+            add_issue(ctx, "part_unreadable", f"The {column} column could not be retained as one array "
+                      f"({type(error).__name__}); the episode keeps its cameras without it.", source=str(data_path))
+            write_atomic(ep / "context.json", ctx, indent=1, default=str)
             continue
     if "state" in arrays:
         np.savez(ep / "state.npz", **arrays)
@@ -6236,7 +6272,7 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
             table_metadata_damage = df.attrs.get('argus_metadata_damage', [])
             if not len(df):
                 df = None
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - the table is optional; named in notes
             # the table is an optional part: the episode is labelled from its video, whatever the table raised
             notes.append("Labelled from the video: the episode's data file could not be opened"
                          + ("" if isinstance(error, TableSourceError) else f" ({type(error).__name__}: {error})") + ".")
@@ -6273,7 +6309,7 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
     if not tasks and df is not None and task_column in df.columns and len(df):
         try:
             tasks = constant_index_task(df[task_column], r["tasks_by_index"])
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - named by metadata_failure
             metadata_failure(r, row["data"], f"{task_column}: {plain_error(error)}; no task was inferred")
     annotated = r["annotated"].get(eidx)
     extra = {"task_label": tasks or [item["name"]], "episode_index": eidx, "robot_type": r["robot_type"],
@@ -6391,7 +6427,7 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
             try:
                 pr = readable[key] if key in readable else packed_video_window(
                     Path(mp4), base, to, fps=fps, query=row.get("_packed_queries", {}).get(key))
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - PyAV on upload bytes raises many types; named in broken
                 broken[key] = error if isinstance(error, PackedOwnershipError) else plain_error(error)
                 continue
             n = len(pr["pts"])
@@ -6589,7 +6625,7 @@ def finish_lerobot(ep, ctx, sources, state, action, times, signals, df, row):
     add_part_issues(ctx, parts)
     try:
         ctx = finish_episode(ep, ctx, sources, state, action, times=times, signals=signals)
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - recorded as part_unreadable, or raised when nothing optional is left to drop
         if state is None and action is None and not signals:
             raise
         detail = str(error).strip().splitlines()[0][:200] if str(error).strip() else ""
@@ -6643,7 +6679,7 @@ def colour_depth_views(r: dict, row: dict, vmap: dict) -> dict:
             continue
         try:
             pf = str(probe_depth(Path(src[0] if isinstance(src, tuple) else src))["pix_fmt"] or "")
-        except Exception:
+        except Exception:  # noqa: BLE001, S112 - PyAV on upload bytes; lerobot_depth lists it with the reason
             continue                          # lerobot_depth lists it with the reason
         if pf.startswith("gray"):
             continue
@@ -6668,7 +6704,7 @@ def lerobot_unshown(row: dict, keys: list[str], rig: str, shown: list[str],
             mp4, base, to = src
             try:
                 facts = packed_video_window(Path(mp4), base, to, fps=fps, query=row.get("_packed_queries", {}).get(k))
-            except Exception:
+            except Exception:  # noqa: BLE001 - PyAV on upload bytes; a None entry is named by set_unshown
                 e = None
             else:
                 rate = fps or measured_fps(seconds(facts)) or facts["fps"] or 30.0
@@ -6720,7 +6756,7 @@ def lerobot_depth(ep: Path, r: dict, row: dict, vmap: dict, fps: float, n: int, 
         v = available_depth_view(camera, dep)
         try:
             pr = probe_depth(Path(path))
-        except Exception:
+        except Exception:  # noqa: BLE001 - PyAV on upload bytes raises many types; named by leave
             leave(key, "the depth video could not be opened")
             continue
         if not str(pr["pix_fmt"] or "").startswith("gray"):
@@ -7103,7 +7139,7 @@ def _convert_image_episode(item, rig, ep, dataset, df, fps, state, action, extra
     for key in video_keys:
         try:
             video_facts(key)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - PyAV on upload bytes raises many types; named in broken
             broken[key] = error if isinstance(error, PackedOwnershipError) else plain_error(error)
     note_broken_cameras(extra, broken, bool(paths))
     vmap, unused = pick_cameras(list(paths), rig, list(r["features"]))
@@ -7257,7 +7293,7 @@ def convert_recording(item: dict, rig: str, out: Path, dataset: str) -> dict:
             order = [c for c in ("episode_index", "frame_index") if c in df.columns]
             df = df.sort_values(order, kind="stable") if order else df
             n = _frame_count(lead)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - pyarrow on upload bytes raises many types; named in left_out
             signals.left_out.append((Path(item["data"]).name, f"could not be read ({type(e).__name__})"))
         else:
             if len(df) == n:
@@ -7292,7 +7328,7 @@ def plan_mcap(det: dict, root: Path) -> list[dict]:
         try:
             with open(f, "rb") as fh:
                 s = make_reader(fh, validate_crcs=True).get_summary()
-        except Exception:
+        except Exception:  # noqa: BLE001 - mcap on upload bytes; a plan without a summary is read and named on conversion
             s = None
         st = s.statistics if s else None
         secs = (st.message_end_time - st.message_start_time) / 1e9 if st and st.message_count else None
@@ -7564,14 +7600,14 @@ def h5_kind(name: str, ds) -> str | None:
                                                               and not is_time_name(leaf)):
         try:
             first = _h5_bytes(ds[0])
-        except Exception:
+        except Exception:  # noqa: BLE001 - h5py on upload bytes; a first value that does not read is no encoded camera
             first = None
         if first is not None and _is_image_bytes(first):
             return "camera"
         if dt.kind == "O":
             try:
                 return "text" if isinstance(ds[0], (str, bytes)) else None
-            except Exception:
+            except Exception:  # noqa: BLE001 - h5py on upload bytes; an array whose first value does not read is not text
                 return None
     if dt.kind in "SU" or dt.names:
         return "text"
@@ -7626,7 +7662,7 @@ def _picture_frames(ds) -> np.ndarray | None:
         n = len(ds)
         idx = sorted({int(x) for x in np.linspace(0, n - 1, PICTURE_SAMPLE_FRAMES)}) if n else []
         return np.stack([np.asarray(ds[i], dtype=np.float64) for i in idx]) if idx else None
-    except Exception:
+    except Exception:  # noqa: BLE001 - h5py on upload bytes; the scale is not judged, frames are named when written
         return None
 
 
@@ -7755,7 +7791,7 @@ def h5_fps(f, group: str, represented: dict | None = None) -> float | None:
             if isinstance(x, (bool, np.bool_)):
                 return None
             x = float(x)
-        except Exception:
+        except (TypeError, ValueError, IndexError, OverflowError):  # a value that is not one number is not a number
             return None
         return x if FPS_RANGE[0] <= x <= FPS_RANGE[1] else None
 
@@ -7901,10 +7937,17 @@ def h5_text(f, group: str, texts: list[dict], issues: list | None = None) -> tup
         while isinstance(v, list) and len(v) == 1:
             v = v[0]
         return v.strip() if isinstance(v, str) and 0 < len(v) < 400 else None
+    def unread(name, error):
+        # a text array that does not read is left out of the notes and named, the others are kept
+        if issues is not None:
+            issues.append({"kind": "metadata_unreadable", "signal": name,
+                           "what": f"The HDF5 text {name} could not be read ({type(error).__name__}), so it is not "
+                                   "among the episode's notes."})
     for s in texts:
         try:
             v = val(f[s["path"]][()])
-        except Exception:
+        except Exception as error:  # noqa: BLE001 - h5py on upload bytes raises many types; named by unread
+            unread(s["name"], error)
             continue
         notes[s["name"]] = v
         if instr is None and TASK_KEY.search(s["name"].rsplit("/", 1)[-1]):
@@ -7918,7 +7961,8 @@ def h5_text(f, group: str, texts: list[dict], issues: list | None = None) -> tup
                 continue
             try:
                 notes[f"file {p}"] = val(ds[()])
-            except Exception:
+            except Exception as error:  # noqa: BLE001 - h5py on upload bytes raises many types; named by unread
+                unread(f"file {p}", error)
                 continue
     from prepare.hdf_metadata import attribute_values
     for where, g in (("episode", f[group] if group else None), ("file", f)):
@@ -7943,7 +7987,7 @@ def plan_hdf5(det: dict, root: Path) -> list[dict]:
     try:
         return run_isolated(with_hdf5_sources, sources, plan_hdf5_files, files, root)
     except ReaderStopped:
-        pass
+        pass                            # one file stopped the reader: each is planned alone below
     items = []
     for fpath in files:
         try:
@@ -7988,7 +8032,7 @@ def plan_hdf5_files(files: list, root: Path) -> list[dict]:
                     rel = Path(fpath).relative_to(root).with_suffix("").as_posix()
                     items.append({"kind": "hdf5", "name": f"{rel}/{g.rsplit('/', 1)[-1]}" if g else rel,
                                   "file": Path(fpath), "group": g, "seconds": secs, "has_camera": bool(cams)})
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - h5py on upload bytes raises many types; named by hdf5_unplanned
             items.append(hdf5_unplanned(fpath, root, f"the HDF5 file could not be opened ({type(e).__name__})"))
         progress()
     return items
@@ -8498,7 +8542,7 @@ def convert_hdf5(item: dict, rig: str, out: Path, dataset: str, *, source_scope:
             goes wrong reading it costs that camera alone."""
             try:
                 w, t, n = write_rows(s, path)
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - h5py on upload bytes raises many types; named in unused
                 written.pop(s["name"], None)
                 unused.append(f"{s['name']} (it could not be read: {type(error).__name__})")
                 undecoded.append(s["name"])
@@ -8532,7 +8576,7 @@ def convert_hdf5(item: dict, rig: str, out: Path, dataset: str, *, source_scope:
             s = by_name[nm]
             try:
                 w, t, n_u = write_rows(s, ep / f"unshown{i + 1}.mp4")
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - h5py on upload bytes raises many types; named as camera_not_decodable
                 written.pop(nm, None)
                 parts.append({"kind": "camera_not_decodable", "camera": nm,
                               "what": f"The camera {nm} could not be read ({type(error).__name__}), so it is not shown."})
@@ -8562,7 +8606,7 @@ def convert_hdf5(item: dict, rig: str, out: Path, dataset: str, *, source_scope:
                     try:
                         sample = ds[i]
                     except OSError:
-                        continue
+                        continue        # counted and named below as depth_not_read
                     before = len(dw.pts)
                     dw.add(float(display_t[i]), sample, scale)
                     if len(dw.pts) > before:
@@ -8664,7 +8708,7 @@ def convert_hdf5(item: dict, rig: str, out: Path, dataset: str, *, source_scope:
                         value = value[0]
                     value = json.loads(value) if isinstance(value, str) else value
                 except ValueError:
-                    continue
+                    continue            # not JSON: the note is kept whole
                 selected = unrepresented_json(value, paths)
                 if selected is None:
                     del notes[note_name]
@@ -8853,7 +8897,7 @@ def h5_has_camera(path: Path) -> bool:
     try:
         with open_hdf5(path) as f:
             return any(h5_kind(p, ds) == "camera" for p, ds in _h5_datasets(f))
-    except Exception:
+    except Exception:  # noqa: BLE001 - h5py on upload bytes; a file that does not open is a sensor file, named by no_time_why
         return False
 
 
@@ -8880,7 +8924,7 @@ def h5_file_signals(paths: list[Path], q_abs: np.ndarray, n_anchor: int, fps: fl
                                       if k and i["what"].startswith(k) else i)
                 out.left_out += [(named(s["name"]), "no clock to place it against the videos") for s in st["signal"]
                                  if not s["clock"]]
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - h5py on upload bytes raises many types; named in left_out
             out.left_out.append((p.name, f"could not be read ({type(e).__name__})"))
     return out
 
@@ -8981,7 +9025,7 @@ def _mcap_stream(path: Path, topics: set | None = None, damaged: list | None = N
                 block = BytesIO(fh.read(ci.chunk_length))
                 stream = StreamReader(block, skip_magic=True, emit_chunks=True, validate_crcs=True)
                 yield next(iter(stream.records)), next_time
-            except Exception:
+            except Exception:  # noqa: BLE001 - mcap on upload bytes; the lost span is recorded in missing
                 damage = True
                 missing.append((ci.message_start_time / 1e9, ci.message_end_time / 1e9))
 
@@ -8995,7 +9039,7 @@ def _mcap_stream(path: Path, topics: set | None = None, damaged: list | None = N
                             serial += 1
                         else:
                             yield msg
-                except Exception:
+                except Exception:  # noqa: BLE001 - mcap on upload bytes; the lost span is recorded in missing
                     damage = True
                     if isinstance(r, Chunk):
                         missing.append((r.message_start_time / 1e9, r.message_end_time / 1e9))
@@ -9003,7 +9047,7 @@ def _mcap_stream(path: Path, topics: set | None = None, damaged: list | None = N
                     # Only overlapping chunks remain buffered. Equal stamps wait for every chunk at that instant.
                     while pending and (next_time is None or pending[0][0] < next_time):
                         yield heapq.heappop(pending)[2]
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - mcap on upload bytes raises many types; recorded as damage
             if isinstance(exc, CRCValidationError) or not sensor_cut(path):
                 damage = True
     while pending:
@@ -9026,7 +9070,7 @@ def mcap_messages(fh, path: Path, topics, damaged: list | None = None):
     from mcap.reader import make_reader
     try:
         summary = make_reader(fh, validate_crcs=True).get_summary()
-    except Exception:
+    except Exception:  # noqa: BLE001 - mcap on upload bytes; without a summary the messages are read by the recovery below
         summary = None
     fh.seek(0)
     if summary is None:
@@ -9039,7 +9083,7 @@ def mcap_messages(fh, path: Path, topics, damaged: list | None = None):
                 topics=sorted(topics), log_time_order=True):
             seen[key(ch, msg)] += 1
             yield schema, ch, msg
-    except Exception:
+    except Exception:  # noqa: BLE001 - mcap on upload bytes raises many types; recovered below and recorded in damaged
         recovered = []
         for schema, ch, msg in _mcap_stream(path, set(topics), recovered, summary):
             k = key(ch, msg)
@@ -9083,7 +9127,7 @@ def mcap_message_counts(path: Path) -> dict[str, int]:
     try:
         with open(path, "rb") as fh:
             s = make_reader(fh, validate_crcs=True).get_summary()
-    except Exception:
+    except Exception:  # noqa: BLE001 - mcap on upload bytes; an unknown count is read as a channel with messages
         return {}
     if s is None or s.statistics is None:
         return {}
@@ -9121,7 +9165,7 @@ def _mcap_channels_by_scan(path: Path) -> list[tuple[str, str]]:
                     schemas[r.id] = r.name
                 elif isinstance(r, Channel):
                     seen.setdefault(r.topic, schemas.get(r.schema_id, ""))
-        except Exception:
+        except Exception:  # noqa: BLE001 - mcap on upload bytes; the channels are found by the recovery read
             for schema, ch, _ in _mcap_stream(path):
                 seen.setdefault(ch.topic, schema.name if schema is not None else "")
     return sorted(seen.items())
@@ -9137,7 +9181,7 @@ def mcap_channels(path: Path) -> list[tuple[str, str]]:
     try:
         with open(path, "rb") as fh:
             s = make_reader(fh, validate_crcs=True).get_summary()
-    except Exception:
+    except Exception:  # noqa: BLE001 - mcap on upload bytes; the channels are found by a scan
         s = None
     if s is None:
         return _mcap_channels_by_scan(path)
@@ -9382,7 +9426,7 @@ def mcap_joint_streams(paths: list[Path], q: np.ndarray | None = None, unread: l
                     decs[ch.id] = _decoder_for(ch.message_encoding, schema, facs)
                 try:
                     m = decs[ch.id](msg.data) if decs[ch.id] else None
-                except Exception:
+                except Exception:  # noqa: BLE001, S112 - a decoder on upload bytes raises many types
                     continue  # A malformed message does not classify the whole topic as non-joint.
                 row = _joint_row(m) if m is not None else None
                 if row is None:
@@ -9725,7 +9769,7 @@ def mcap_signals(paths: list[Path], q: np.ndarray, used: dict | None = None, *, 
                 except McapSchemaError as error:
                     schema_errors[(Path(p), ch.topic)] = str(error)
                     continue
-                except Exception:
+                except Exception:  # noqa: BLE001 - a decoder on upload bytes; counted, named as mcap_message_unreadable
                     key = (Path(p), ch.topic)
                     decode_errors[key] = decode_errors.get(key, 0) + 1
                     continue
@@ -10281,9 +10325,15 @@ def retain_mcap_fields(path: Path, ep: Path, ctx: dict, *, archive_name="recorde
     metadata = []
     with open(path, "rb") as fh:
         try:
-            metadata = [{"name": m.name, "metadata": dict(m.metadata)} for m in make_reader(fh).iter_metadata()]
-        except Exception:
-            pass
+            for m in make_reader(fh).iter_metadata():
+                metadata.append({"name": m.name, "metadata": dict(m.metadata)})
+        except Exception as error:  # noqa: BLE001 - the mcap reader on upload bytes raises many types; named here
+            # the records read before the damage are kept, and the episode says the rest were not read. The camera
+            # and pose readers (mcap_claims, mcap_pose) read the same records, so this one entry names it for them. A
+            # file cut short is already named as cut (mcap_messages), which covers every record past the cut
+            if not sensor_cut(path):
+                add_issue(ctx, "metadata_unreadable", f"{path.name} MCAP metadata records could not be fully read: "
+                          f"{plain_error(error)}; {len(metadata)} read before it were kept.", source=str(path))
     ctx.setdefault("recorded_metadata", {})["mcap_metadata"] = metadata
     ctx.setdefault("source", {})["recorded_file"] = str(path.resolve())
     rows, decs, factories = {}, {}, _decoders()
@@ -10300,9 +10350,15 @@ def retain_mcap_fields(path: Path, ep: Path, ctx: dict, *, archive_name="recorde
                     add_issue(ctx, 'mcap_schema_unreadable',
                               f'{path.name}: {channel.topic} schema could not be read: {schema_error}. '
                               'Other channels were retained.', signal=channel.topic)
-            except Exception:
+                undecoded = None
+            except Exception as decode_error:  # noqa: BLE001 - a decoder on upload bytes raises many types; named below
                 decoded = None
+                undecoded = (f"The message could not be decoded ({type(decode_error).__name__}), so its fields and "
+                             "capture time were not retained.")
+            else:
+                undecoded = None
             capture, error = mcap_capture_stamp(decoded)
+            error = error or undecoded
             row = rows.setdefault(channel.topic, {"schema": schema.name if schema else None,
                                   "log_ns": [], "publish_ns": [], "capture_ns": [], "capture_valid": [],
                                   "fields": {}, "exact": {}, "errors": [], "text": [], "capture_fields": []})
@@ -10376,6 +10432,7 @@ def retain_mcap_fields(path: Path, ep: Path, ctx: dict, *, archive_name="recorde
 
 
 def _decoders():
+    # each decoder package is optional here, and all three are pinned dependencies in pyproject.toml
     facs = []
     try:
         from mcap_protobuf.decoder import DecoderFactory as P
@@ -10543,7 +10600,7 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
     with open(item["file"], "rb") as fh:
         try:
             summ = make_reader(fh, validate_crcs=True).get_summary()
-        except Exception:
+        except Exception:  # noqa: BLE001 - mcap on upload bytes; the channels are found by a scan
             summ = None
     if summ is not None:
         chans = list(summ.channels.values())
@@ -10661,7 +10718,7 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
                         stamp = capture if capture is not None else int(msg.log_time)
                         registration.observe(ch.topic, info, stamp, camera_info=True)
                         capture_ns.setdefault(ch.topic, []).append(stamp)
-                    except Exception:
+                    except Exception:  # noqa: BLE001 - a decoder on upload bytes raises many types; recorded by invalid_info
                         registration.invalid_info(ch.topic)
                     continue
                 if ch.id not in decs:
@@ -11278,6 +11335,9 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
             retained = {}
             retain_mcap_fields(path, ep, retained, archive_name=f"recorded_sensor_mcap{i}.npz",
                                supplied=used if path in sensor_mcaps else {})
+            # what could not be retained from a sensor file is named on the episode, not only inside its entry
+            for issue in retained.pop("reader_issues", []):
+                add_issue(extra, **issue)
             extra.setdefault("recorded_sensor_fields", []).append({"source": str(path), **retained})
     if use_log_clock:
         from prepare.signal_alignment import RECORDER_ARRIVAL
@@ -11998,7 +12058,7 @@ def original_video_items(root: Path, items: list[dict], context: dict, descripto
                 raise ValueError("a selected video is absent from the original filename registry")
             try:
                 lengths[rel] = _duration(file)
-            except Exception:
+            except Exception:  # noqa: BLE001 - PyAV on upload bytes; a length unknown here is measured on conversion
                 lengths[rel] = None
     original = plan_video({"files": [root / r for r in rels]}, root, choices, declared_lengths=lengths)
     found = set()
@@ -12200,7 +12260,7 @@ def _table_has_text(p: Path) -> bool:
         with open(p, newline="", errors="replace") as fh:
             reader = csv.DictReader(fh, delimiter=table_separator(p))
             return any(_has_text(r) for _, r in zip(range(TABLE_TEXT_ROWS), reader))
-    except Exception:
+    except (OSError, csv.Error):  # a table that does not read holds no text notes; annotation_tables names it
         return False
 
 
@@ -12381,7 +12441,7 @@ def _read_file_times(p: Path) -> np.ndarray | None:
             try:
                 with open(p, "rb") as fh:
                     s = make_reader(fh, validate_crcs=True).get_summary()
-            except Exception:
+            except Exception:  # noqa: BLE001 - mcap on upload bytes; cut short, no footer to find the summary by
                 s = None                  # cut short: no footer to find the summary by
             st = s.statistics if s is not None else None
             if st and st.message_count:
@@ -12392,7 +12452,7 @@ def _read_file_times(p: Path) -> np.ndarray | None:
             clocks = [np.sort(t[np.isfinite(t)]) for t in h5_streams(f, "")["clock"].values() if len(t)]
         clocks = [t for t in clocks if len(t)]
         return max(clocks, key=len) if clocks else None
-    except Exception:
+    except Exception:  # noqa: BLE001 - mcap or h5py on upload bytes; no times is explained by no_time_why
         return None
 
 
@@ -12409,7 +12469,7 @@ def no_time_why(p: Path) -> str:
         else:
             with open_hdf5(p):
                 pass
-    except Exception:
+    except Exception:  # noqa: BLE001 - mcap or h5py on upload bytes; returns the reason it is named with
         return "it could not be opened; it may be damaged or cut short"
     return NO_TIME_WHY
 
@@ -12455,7 +12515,7 @@ def h5_state_arrays(p: Path) -> list[str]:
         with open_hdf5(p) as f:
             return sorted(s["name"] for s in h5_streams(f, "")["signal"]
                           if H5_STATE_NAME.search(s["name"]) and not H5_ACTION_GROUP.search(s["name"]))
-    except Exception:
+    except Exception:  # noqa: BLE001 - h5py on upload bytes; a file that does not open is named by no_time_why
         return []
 
 
@@ -12695,7 +12755,7 @@ def note_sensors(extra: dict, signals: Signals, by_clock: list, assumed: list, u
                 metadata = h5_original_metadata(f, '', [])
             extra.setdefault('recorded_sensor_fields', []).append(
                 {'source': str(path), 'recorded_hdf5_metadata': metadata})
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - h5py on upload bytes raises many types; named as sensor_metadata_not_read
             add_issue(extra, 'sensor_metadata_not_read',
                       f'Original metadata from {path.name} could not be inventoried ({type(error).__name__}).')
     for p in [*by_clock, *assumed]:
@@ -12777,10 +12837,11 @@ def annotation_tables(root: Path, reads: dict | None = None) -> list[tuple[str, 
         if p.suffix.lower() not in TABLE_EXT:
             continue
         big = p.stat().st_size > TABLE_MAX_BYTES
+        bad = []
         try:
             if p.suffix.lower() == ".jsonl":
                 rows = [r for r in read_jsonl(p, reads) if isinstance(r, dict)] if not big else \
-                    [r for r in _jsonl_rows(p) if _has_text(r)][:TABLE_NOTE_ROWS_MAX]
+                    [r for r in _jsonl_rows(p, bad) if _has_text(r)][:TABLE_NOTE_ROWS_MAX]
             else:
                 with open(p, newline="", errors="replace") as fh:
                     reader = csv.DictReader(fh, delimiter=table_separator(p))
@@ -12788,10 +12849,13 @@ def annotation_tables(root: Path, reads: dict | None = None) -> list[tuple[str, 
                     # name an episode; a large table of numbers is a recording (table_signals), not notes
                     rows = list(reader) if not big else [r for _, r in zip(range(TABLE_NOTE_ROWS_MAX), (
                         r for r in reader if _has_text(r)))]
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - any table that does not read is named with why, the others are read
             if reads is not None:
                 metadata_failure(reads, p, plain_error(error))
             continue
+        if bad and reads is not None:
+            lines = _and_words([str(n) for n in bad[:20]] + ([f"{len(bad) - 20} more"] if len(bad) > 20 else []))
+            metadata_failure(reads, p, f"lines {lines} were not JSON; valid rows were kept")
         if rows:
             out.append((p.relative_to(root).as_posix(), rows))
     return out
@@ -12800,12 +12864,16 @@ def annotation_tables(root: Path, reads: dict | None = None) -> list[tuple[str, 
 TABLE_NOTE_ROWS_MAX = 100_000
 
 
-def _jsonl_rows(p: Path):
+def _jsonl_rows(p: Path, bad: list | None = None):
+    """The JSON object rows of a JSON Lines file, read line by line. A line that is not JSON is skipped and its number
+    put on bad, when given, so the caller can name it as read_jsonl does."""
     with open(p, errors="replace") as fh:
-        for line in fh:
+        for n, line in enumerate(fh, 1):
             try:
                 r = json.loads(line)
             except ValueError:
+                if bad is not None and line.strip():
+                    bad.append(n)
                 continue
             if isinstance(r, dict):
                 yield r
@@ -12985,7 +13053,7 @@ def _convert_upload(root, rig, out, dataset, max_seconds, grouping, ownership_co
         except UploadInputError as error:
             alone_notes.append(f"{folder.name}, read on its own, holds no recording: {error}.")
             continue
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - a folder that does not plan is named in the notes
             alone_notes.append(f"{folder.name}, read on its own, was left out: {error}")
             continue
         source = {"tables": folder_det.get("annotation_tables", []), "declared": declared, "metadata_root": folder}
@@ -13038,7 +13106,7 @@ def _convert_upload(root, rig, out, dataset, max_seconds, grouping, ownership_co
                     own_context = source_context(Path(item_root), rig)
             scope = merge_source_contexts(rig, source["declared"], own_context)
             ctx = read_episode(it, rig, out, dataset, scope)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - one episode's failure is named in the report, the others go on
             # Every optional part of an episode has its own boundary (part), so what reaches here is an episode
             # none of whose cameras could be shown, or a reader fault. Either way it costs this episode alone: any
             # exception, not a list of expected types, is reported with its type, and what the reader left half
@@ -13132,7 +13200,7 @@ def sensor_lines(out: Path, episodes: list[dict]) -> tuple[list[str], list[str]]
     for e in episodes:
         try:
             ctx = json.loads((Path(out) / e["episode_id"] / "context.json").read_text())
-        except Exception:
+        except (OSError, ValueError):  # named when the board is built (context_unreadable)
             continue
         for name, how in ((ctx.get("source") or {}).get("sensor_files") or {}).items():
             by.setdefault(name, {}).setdefault(how, []).append(e["name"])
@@ -13179,8 +13247,17 @@ def measure_contacts(out: Path, ids: list[str]) -> int:
             sig = ep.get("signals") or {}
             n = len(next(iter(sig.values()))) if sig else 0
             found = lc.find(sig, ep.get("signal_meta") or {}, np.array([me.frame_time(ep, k) for k in range(n)]))
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - one episode whose contacts cannot be measured is named, the rest go on
             print(f"contacts: {i}: {type(e).__name__}: {e}", file=sys.stderr)
+            # the episode says its contacts were not measured, so no contact list never reads as no contact. One
+            # whose context does not read is reported when it is built (context_unreadable)
+            try:
+                ctx = json.loads((d / "context.json").read_text())
+            except (OSError, ValueError):
+                continue
+            add_issue(ctx, "part_unreadable", f"The contacts could not be measured from the recorded signals "
+                      f"({type(e).__name__}); the episode keeps its cameras and signals without them.")
+            write_atomic(d / "context.json", ctx, indent=1, default=str)
             continue
         ctx = json.loads((d / "context.json").read_text())
         ctx["contacts"] = found
@@ -13205,7 +13282,7 @@ def measure_depth_ranges(out: Path, ids: list[str]) -> dict:
             continue
         try:
             ep = me.load(d)
-        except Exception:
+        except Exception:  # noqa: BLE001, S112 - named when it is labelled; the range is read from the others
             continue
         streams = {**(ep.get("depth") or {}), **(ep.get('additional_depth') or {})}
         for v, e in streams.items():

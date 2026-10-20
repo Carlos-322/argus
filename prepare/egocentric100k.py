@@ -167,7 +167,7 @@ def drawn(shard: str, seed: int, raw: Path, out_root: Path) -> dict | None:
             return None
         prepare_one(shard, member, raw, out_root)
         return json.loads((out_root / episode_dir_name(member) / "context.json").read_text())
-    except Exception as e:  # a drawn clip that cannot be read is a finding about the data; listed, not hidden
+    except Exception as e:  # noqa: BLE001 - a drawn clip that cannot be read is printed as FAILED, not hidden
         print(f"FAILED {shard}: {type(e).__name__}: {e}"[:400], file=sys.stderr, flush=True)
         return None
 

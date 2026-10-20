@@ -427,8 +427,9 @@ def _write_or_reuse(d: Path, proot: Path, *, refresh_unpaid_interpretation=False
     if names:
         try:
             saved = json.loads(proof_path.read_text())
-        except (OSError, ValueError):
-            raise RuntimeError(f"{d.name}: existing pieces have no verifiable source proof; use an explicit fresh job")
+        except (OSError, ValueError) as error:
+            raise RuntimeError(f"{d.name}: existing pieces have no verifiable source proof; use an explicit fresh job") \
+                from error
         if not same_source_proof(saved, ctx, d):
             from label.harness import billing_record, has_dispatch_receipt
             from label.evidence_access import equivalent_source_proof

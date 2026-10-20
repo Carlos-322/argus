@@ -1046,7 +1046,10 @@ def contact_image(ep: dict, c: dict, gate=None) -> tuple[bytes, dict] | None:
     ks = sorted({_frame_at(ep, t) for _, ts in strips for t in ts} | {kp})
     try:
         got = {v: _decode_view(ep, v, ks if v in vs else [kp], gate) for v in dict.fromkeys(vs + pvs)}
-    except Exception:
+    except Exception as e:
+        # _decode_view already keeps the frames it can; a fault on our side (a missing file) or in our code raises
+        if not _decode_error(e):
+            raise
         return None
     font = mf._grid_font(16)
     pad, strip_h = 8, 24
@@ -1688,6 +1691,7 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
     touch = _touch(ep, pl)
     ks = pl["ks"]
     rows = []             # (how much the row's values move, the signal's place, the row's place, signal, label, values)
+    unread = {}           # signal: the error that kept its rows out, named below
     for i, (name, a) in enumerate(arrs.items()):
         try:
             if name in touch or not len(a) or not np.isfinite(a).any() or _constant(a):
@@ -1697,12 +1701,16 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
             got = sg.summary_rows(name, a, ks, m.get("shape"), m.get("names"), role=role)
             mv = sg.movements(a)
             by_value = sg.per_value(name, a.shape[1], m.get("shape"), m.get("names"), role=role)
-        except Exception:  # noqa: BLE001 - named as not read in the signals' list (_signals_table), the rest are given
+        except Exception as e:  # noqa: BLE001 - one signal whose rows cannot be made is named below, the rest are given
+            unread[name] = type(e).__name__
             continue
         for j, (lb, v) in enumerate(got):
             rows.append((float(mv[j]) if by_value else float(np.median(mv)), i, j, name, lb, v))
+    # a signal whose rows could not be made is named, so a signal missing from the values is never unexplained
+    not_read = ([f"  The values at each instant leave out {_and_list([f'{nm} ({why})' for nm, why in unread.items()])}"
+                 f", because {'its' if len(unread) == 1 else 'their'} rows could not be read."] if unread else [])
     if not rows:
-        return [], frozenset()
+        return not_read, frozenset()
     lines = []
     head = "    at: " + " ".join(f"{frame_time(ep, k):.2f}" for k in ks)
     text = {(r[1], r[2]): f"    {r[4]}: " + " ".join(r[5]) for r in rows}
@@ -1733,7 +1741,7 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
             reason = (f", because rows are ranked by movement and kept when they fit the {budget} character budget."
                       if chosen else f", because no row fits the {budget} character budget after the times row.")
         lines.append("  The values at each instant leave out " + named + reason)
-    return lines, frozenset(r[3] for r in rows if r[3] not in left)
+    return lines + not_read, frozenset(r[3] for r in rows if r[3] not in left)
 
 
 def _readout_of(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
