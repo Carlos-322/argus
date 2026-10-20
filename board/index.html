@@ -1284,6 +1284,10 @@ aside.left .cam-row-grippers.cam-main-scene:has(.sensor-overlay-stack) .cam-cell
 .key-ev.untimed .ke-time, .feed .ev.untimed .t { font-size: 10.5px; white-space: nowrap; }
 .key-ev .ke-body { min-width: 0; }
 .key-ev .ke-row1 { display: flex; align-items: baseline; gap: 10px; justify-content: space-between; }
+.key-ev .ke-kind { display: inline-block; margin-right: 8px; padding: 1px 7px; border-radius: var(--r-pill);
+  font-family: var(--mono); font-size: 10px; font-weight: 600; color: var(--fg-2); border: 1px solid var(--line);
+  vertical-align: 1px; }
+.key-ev .ke-kind.sub { background: var(--fg); color: var(--bg, #fff); border-color: var(--fg); }
 .key-ev .ke-label { color: var(--fg); font-size: 13px; line-height: 1.4; }
 .key-ev .outcome {
   flex: 0 0 auto; font-size: 10px; font-family: var(--mono); font-weight: 600;
@@ -6536,14 +6540,18 @@ function renderEp(d, opts) {
   }
   let keyPanelHtml = '';
   const untimed = untimedRows(d, keyEvents.length + 1);
+  // each key event names its kind, and the ones tagged subgoal_complete say which subgoal they end (Quality scores them)
+  let subN = 0;
   keyEvents.forEach((k, i) => {
     const oc = (k.outcome || '').toLowerCase();
     const goalish = k.kind === 'goal_reached' || k.kind === 'subgoal_complete';
+    const kindChip = k.kind === 'subgoal_complete' ? `<span class="ke-kind sub">Subgoal ${++subN}</span>`
+      : k.kind ? `<span class="ke-kind">${esc(kindName(k.kind))}</span>` : '';
     keyPanelHtml += `<div class="key-ev ${esc(oc)}${goalish ? ' goal' : ''}" data-t="${esc(k.t_s)}">
       <span class="ke-num">${i + 1}</span>
       <span class="ke-time">${fmtT(k.t_s)}</span>
       <div class="ke-body">
-        <div class="ke-row1"><span class="ke-label">${esc(k.label || '')}</span>${oc
+        <div class="ke-row1"><span class="ke-label">${kindChip}${esc(k.label || '')}</span>${oc
           ? `<span class="outcome ${esc(oc)}">${esc(oc)}</span>` : ''}</div>
         ${k.note ? `<div class="ke-note">${esc(k.note)}</div>` : ''}
       </div>
@@ -6868,8 +6876,8 @@ function renderEp(d, opts) {
 
     ${pubHtml}
     ` : `
-    <h3 class="section">Key events <span class="count">${keyEvents.length + untimed.keys.length}</span>${Q
-      ? '<span class="ke-what">(each "subgoal complete" ends one of the subgoals scored under Quality)</span>' : ''}</h3>
+    <h3 class="section">Key events <span class="count">${keyEvents.length + untimed.keys.length}</span>${Q && subs.some(st => !st.goal)
+      ? `<span class="ke-what">(${subs.filter(st => !st.goal).length} are subgoals, scored under Quality)</span>` : ''}</h3>
     <div class="info-block"><div class="key-events">${keyPanelHtml || '<span style="color:var(--fg-3)">none</span>'}`
       + `</div></div>
 
