@@ -359,11 +359,17 @@ def label_episode(ep_dir: Path, out_path: Path, *, model: str, reasoning: str, a
         # the recording's contacts (label/contacts.py) and the strips each one shown was drawn with (checks/contacts.py)
         **({"contacts": req["contacts"], "contact_views": req["contact_views"]} if req.get("contact_views") else {}),
         "config": {"views": req["views"], "cam_labels": req["cam_labels"], "layout": "grid",
+                   **({'sensor_copy_contract_version': req['sensor_copy_contract_version']}
+                      if 'sensor_copy_contract_version' in req else {}),
+                   **({'sensor_scene_pairing': req['sensor_scene_pairing']}
+                      if (req.get('sensor_scene_pairing', {}).get('snapshot_times')
+                          or any(req.get('sensor_scene_pairing', {}).get('omissions', {}).values())) else {}),
                    **({'camera_observation_views': req['camera_observation_views'],
                        'camera_observation_labels': req['camera_observation_labels']}
                       if 'camera_observations' in req['schema_fields'] else {}),
                    "grid_cols": req["grid_cols"], "cell": req["cell"],
-                   "n_timesteps": len(pl["ks"]), "n_frames_sent": len(pl["ks"]) * len(req["cam_labels"]) + req.get("native_tactile_frames", 0),
+                   "n_timesteps": len(pl["ks"]), "n_frames_sent": len(pl["ks"]) * len(req["cam_labels"]) + req.get("native_tactile_frames", 0)
+                   + req.get('sensor_scene_pairing', {}).get('supplemental_captures', 0),
                    "n_image_parts": req["n_images"], "fullres_frames": ["first", "last"],
                    "contact_detail_s": req["contact_s"], "resolution_route": route,
                    "timesteps_s": req["timesteps"], "detail": DETAIL, "circular_image": req["lens"],
@@ -1197,6 +1203,7 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
         raise RuntimeError(f"payload {img_bytes} B exceeds the image-size cap; refusing to send")
     if evidence_access is not None:
         from label import evidence_access as ea
+        evidence_access.copy_contract_version = (fields.get('config') or {}).get('sensor_copy_contract_version')
         fields = copy.deepcopy(fields)
         fields['evidence_inspection'] = evidence_access.record()
         if not dry_run:
@@ -1276,6 +1283,53 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
     fields = copy.deepcopy(fields)
     fields.setdefault('config', {})['request_images'] = input_grids.receipt(content,
         {**fields, 'model': model, 'reasoning_effort': reasoning})
+    bound_sensor_analysis = None
+    if not dry_run and isinstance(fields.get('sensor_evidence'), dict):
+        from label import sensor_analysis, sensor_analysis_run
+        analysis_request = sensor_analysis.build(content, fields['sensor_evidence'], config={
+            **fields['config'], 'model': model, 'reasoning': reasoning, 'max_tokens': max_tokens,
+            'input_identity': fields.get('input_identity')},
+            ep=evidence_access.ep if evidence_access is not None else None)
+        if analysis_request is not None:
+            content = sensor_analysis.local_content(content)
+            prompt_text = '\n'.join(part['text'] for part in content if part.get('type') == 'text')
+            fields['config']['request_images'] = input_grids.receipt(content,
+                {**fields, 'model': model, 'reasoning_effort': reasoning})
+            analysis_doc = fields.get('evidence_inspection')
+            if not isinstance(analysis_doc, dict) or not analysis_doc.get('digest'):
+                raise ValueError('Required sensor analysis has no durable inspection owner; no dispatch.')
+            analysis_cache = Path(out_path).parent / '.evidence' / (Path(out_path).name + '.inspection.json')
+            def analysis_call(parts):
+                return call_model_once(parts, model, reasoning, api_key, max_tokens, timeout,
+                    **({'pricing_quote': pricing_quote} if pricing_quote is not None else {}))
+            def analysis_reserve(parts):
+                return final_cost_bound(parts, max_tokens, model=model, require_known_pricing=require_known_pricing,
+                    **({'pricing_quote': pricing_quote} if pricing_quote is not None else {}))
+            analysis_dispatch = reserve_selection
+            if callable(reserve_selection) and callable(settle_selection):
+                analysis_final_floor = analysis_reserve(content)
+                def analysis_dispatch(amount):
+                    if not reserve_selection(amount + analysis_final_floor):
+                        return False
+                    settle_selection(analysis_final_floor, 0.0)
+                    return True
+            try:
+                analysis_receipt = sensor_analysis_run.execute(analysis_request, analysis_doc, analysis_cache,
+                    call=analysis_call, reserve_cost=analysis_reserve, model=model,
+                    reserve_dispatch=analysis_dispatch, settle_dispatch=settle_selection,
+                    verify_inputs=verify_inputs)
+                fields['sensor_analysis'] = copy.deepcopy(analysis_receipt)
+                bound_sensor_analysis = sensor_analysis.bind(analysis_request, analysis_receipt)
+            except Exception as error:
+                if isinstance(analysis_doc.get('sensor_analysis'), dict):
+                    fields['sensor_analysis'] = copy.deepcopy(analysis_doc['sensor_analysis'])
+                persist_final_claim(Path(out_path).with_name(f'noreply_{Path(out_path).name}'), {
+                    'episode_dir': str(ep_dir), 'model': model, 'reasoning_effort': reasoning, **fields,
+                    'parse_ok': False, 'final_dispatch_outcome': 'not dispatched', 'final_reserved_usd': 0.0,
+                    'no_reply': f'Sensor analysis incomplete: {error}',
+                    **({'no_reply_kind': 'spend_cap'} if isinstance(error, SpendCap) else {})})
+                raise
+            verify_inputs()
     if dry_run:
         fields['config']['request_images']['dispatch_status'] = 'dry_run'
         import io
@@ -1420,7 +1474,8 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
     if isinstance(fields.get("sensor_evidence"), dict):
         from label.sensor_evidence import bind
         result["sensor_evidence"] = bind(fields["sensor_evidence"], labels.get("sensor_findings"),
-                                         ep=evidence_access.ep if evidence_access is not None else None)
+                                         ep=evidence_access.ep if evidence_access is not None else None,
+                                         copy_contract_version=(fields.get('config') or {}).get('sensor_copy_contract_version'))
         result["sensor_evidence"]["provenance"] = {"model": result.get("model_served") or model,
             "generation_id": result.get("generation_id"), "method": "same episode annotation request"}
     if evidence_access is not None:
@@ -1432,6 +1487,8 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
                 evidence.setdefault(key, []).extend(additional[key])
         evidence.setdefault('provenance', {}).update(model=result.get('model_served') or model,
             generation_id=result.get('generation_id'), method='episode annotation with bounded evidence inspection')
+    if bound_sensor_analysis is not None:
+        sensor_analysis.attach(result, bound_sensor_analysis)
     if msg.get("reasoning"):
         # the reasoning text or summary the provider returned, when it returns one
         result["reasoning_text"] = msg["reasoning"][:20000]

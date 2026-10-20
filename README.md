@@ -85,6 +85,7 @@ uv run python -m board serve --board data/review/mine --clips data/review/mine/c
 | Task scope | Episode/session scope follows source metadata; [`--task-mode episode`](label/policy.py) or [`session`](label/policy.py) overrides it. A missing instruction does not automatically imply a session. Human ego uses the activities schema. |
 
 Optical tactile cameras supply comparisons across the sampled episode plus bounded native-frame comparisons around image changes.
+For tactile arrays with regional and individual-cell evidence, a separate model pass compares regional responses with hand configuration and camera evidence. The primary pass examines local spatial patterns independently. Both passes use source-bound measurements and share the spending cap; their findings retain separate request provenance.
 
 Each recording produces one public episode. Long recordings are split to fit API request limits and rejoined on the original timeline; internal chunk boundaries are not treated as recording truncation. Session mode annotates activities within the recording. Preparation limits, missing chunks and processing failures are reported alongside any usable results.
 

@@ -24,27 +24,56 @@ from label.run import commit
 
 def rebind(record: dict) -> None:
     """Rebuild derived projections from saved request evidence without a provider call."""
-    from label import sensor_evidence as se, evidence_access as ea
+    from label import sensor_evidence as se, evidence_access as ea, sensor_copy, sensor_analysis
     labels = record['labels']
+    copy_version = (record.get('config') or {}).get('sensor_copy_contract_version')
     def finding_key(finding):
         fields = se.finding_fields(finding)
         fields.pop('review_status', None)
+        if sensor_copy.shared(finding.get('copy_contract_version')):
+            fields.pop('overlay_detail', None)
         return json.dumps(fields, sort_keys=True, separators=(',', ':'), allow_nan=False)
     def unbound_findings(doc):
         return [row['finding'] for row in doc.get('unbound_findings') or []
                 if isinstance(row, dict) and isinstance(row.get('finding'), dict)]
-    reviewed = {}
+    reviewed, overlay_overrides = {}, {}
     for doc in (record.get('sensor_evidence') or {}, record.get('evidence_inspection') or {}):
-        for finding in [*doc.get('findings', []), *doc.get('untimed_findings', []), *doc.get('withheld_findings', []),
-                        *unbound_findings(doc)]:
+        bound = [*doc.get('findings', []), *doc.get('untimed_findings', []), *doc.get('withheld_findings', [])]
+        for finding in [*bound, *unbound_findings(doc)]:
             if isinstance(finding, dict) and finding.get('review_status') is not None:
                 reviewed[finding_key(finding)] = finding['review_status']
+        for finding in bound:
+            if (isinstance(finding, dict) and sensor_copy.shared(finding.get('copy_contract_version'))
+                    and isinstance(finding.get('overlay_detail'), str)):
+                overlay_overrides[finding_key(finding)] = finding['overlay_detail']
     def retain_reviews(findings):
         for finding in findings:
             status = reviewed.get(finding_key(finding))
             if status is not None:
                 finding['review_status'] = status
+            if sensor_copy.shared(finding.get('copy_contract_version')):
+                key = finding_key(finding)
+                if key in overlay_overrides:
+                    finding['overlay_detail'] = overlay_overrides[key]
     problem = harness.saved_input_problem(record, Path(record['episode_dir'])) if record.get('episode_dir') else None
+    current_context = None
+    def restore_analysis():
+        receipt = record.get('sensor_analysis') or (record.get('evidence_inspection') or {}).get('sensor_analysis')
+        if not isinstance(receipt, dict):
+            return
+        try:
+            request = receipt['request']
+            stage = sensor_analysis.bind(request, receipt)
+            if problem or current_context is None or not se.compatible(stage, current_context, record.get('episode_dir')):
+                stage['withheld_findings'] = stage.pop('findings')
+                stage['findings'] = []
+                stage.setdefault('limitations', []).append(problem or 'Regional analysis source or interpretation changed.')
+            sensor_analysis.attach(record, stage)
+            retain_reviews(record['sensor_evidence']['findings'])
+            retain_reviews(record['sensor_evidence'].get('withheld_findings') or [])
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as error:
+            record.setdefault('sensor_evidence', {'version': 1}).setdefault('limitations', []).append(
+                f'Regional analysis binding withheld: {error}')
     provenance = {'model': record.get('model_served') or record.get('model'),
                   'generation_id': record.get('generation_id'), 'method': 'stored episode reply reparsed'}
     if 'camera_observations' in labels:
@@ -54,7 +83,7 @@ def rebind(record: dict) -> None:
     evidence = record.get('sensor_evidence')
     if isinstance(evidence, dict):
         # Inspected fields have their separate request receipts and binder below.
-        native = copy.deepcopy(evidence)
+        native = sensor_analysis.without_attached(evidence)
         native['sensors'] = [s for s in native.get('sensors', []) if 'access_field_id' not in s]
         sensor_ids = {s['id'] for s in native['sensors']}
         native['series'] = [r for r in native.get('series', []) if r['sensor_id'] in sensor_ids]
@@ -62,10 +91,11 @@ def rebind(record: dict) -> None:
         if not problem and record.get('episode_dir'):
             try:
                 source_context = json.loads((Path(record['episode_dir']) / 'context.json').read_text())
+                current_context = source_context
             except (OSError, ValueError):
                 pass
         record['sensor_evidence'] = se.bind(native, labels.get('sensor_findings'),
-                                            source_context=source_context)
+                                            source_context=source_context, copy_contract_version=copy_version)
         retain_reviews(record['sensor_evidence']['findings'])
         retain_reviews(unbound_findings(record['sensor_evidence']))
         record['sensor_evidence']['provenance'] = provenance
@@ -76,12 +106,14 @@ def rebind(record: dict) -> None:
             bound.setdefault('limitations', []).append(problem)
     inspection = record.get('evidence_inspection')
     if not isinstance(inspection, dict):
+        restore_analysis()
         return
     try:
         ep = harness.me.load(Path(record['episode_dir']))
+        current_context = ep['context']
         if not ea.same_source_proof(inspection.get('source_proof'), ep['context'], ep['dir']):
             raise ValueError('saved inspected source proof changed or is unavailable')
-        access = ea.Access(ep)
+        access = ea.Access(ep, copy_contract_version=copy_version)
         receipts = copy.deepcopy(inspection.get('inspections') or [])
         if any(r.get('field_id') not in access.fields for r in receipts):
             raise ValueError('saved inspection field is no longer available')
@@ -102,6 +134,7 @@ def rebind(record: dict) -> None:
     for key in ('sensors', 'series', 'findings', 'unbound_findings', 'coverage', 'limitations'):
         evidence.setdefault(key, []).extend(additional[key])
     evidence['provenance'] = provenance
+    restore_analysis()
 
 
 def refresh_received(record: dict) -> dict:

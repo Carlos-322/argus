@@ -4772,7 +4772,8 @@ function sensorEvidence(d) {
       visual: f.confidence === 'high' ? 'High confidence' : f.confidence === 'medium' ? 'Medium confidence' : 'Low confidence',
       t: finite(f.inspect_s) && f.inspect_s >= f.start_s && f.inspect_s <= f.end_s ? f.inspect_s : f.start_s,
       timing: '', alternative: copy(f.alternative), observation: copy(f.observation), claim: copy(f.claim),
-      overlayDetail: typeof f.overlay_detail === 'string' ? copy(f.overlay_detail) : null,
+      overlayDetail: typeof f.overlay_detail === 'string' ? copy(f.overlay_detail)
+        : f.copy_contract_version === 2 ? copy(f.detail) : null,
       quotedTimeOffset: finite(f.quoted_time_offset_s) ? f.quoted_time_offset_s : 0,
       generic: !!grip.generic, evidence: grip.generic && Array.isArray(f.evidence) ? f.evidence : [],
       addsBeyond: f.adds_beyond_video === true || f.adds_beyond_rgb_pose === true, cellGroups: Array.isArray(f.cell_groups) ? f.cell_groups : []});

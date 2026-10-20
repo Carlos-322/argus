@@ -19,6 +19,7 @@ import numpy as np
 from label.atomic import write_atomic
 from label.dictionary_context import _public_source, field_interpretation, native_field_name, prepared_interpretation
 from label import sensor_evidence as se
+from label import sensor_copy
 from prepare.mcap_fields import SAMPLE_RATE_KEY
 from prepare.signal_alignment import RECORDER_ARRIVAL, RECORDER_ARRIVAL_LIMITATION, recorder_arrival
 
@@ -38,6 +39,10 @@ IMPLEMENTATION_SHA256 = hashlib.sha256(b''.join(path.read_bytes() for path in (
     Path(__file__).with_name('episode.py'), Path(__file__).with_name('signals.py'), Path(__file__).with_name('contacts.py'),
     Path(__file__).with_name('derived_measurements.py'), Path(__file__).with_name('semantic_evidence.py'),
     Path(__file__).with_name('tactile_capture.py'),
+    Path(__file__).with_name('sensor_copy.py'),
+    Path(__file__).with_name('sensor_scene.py'),
+    Path(__file__).with_name('sensor_analysis.py'), Path(__file__).with_name('sensor_analysis_run.py'),
+    Path(__file__).with_name('regional_analysis.py'),
     Path(__file__).with_name('optical_motion.py'), Path(__file__).with_name('tactile_arrays.py'),
     Path(__file__).parent.parent / 'prepare' / 'hdf_metadata.py',
     Path(__file__).parent.parent / 'prepare' / 'mcap_fields.py',
@@ -521,8 +526,9 @@ def _selected_component_validity(validity, columns):
 
 
 class Access:
-    def __init__(self, ep, supplied=None, plan=None):
+    def __init__(self, ep, supplied=None, plan=None, *, copy_contract_version=None):
         self.ep = ep
+        self.copy_contract_version = copy_contract_version
         self.supplied = supplied or {}
         self.state_usable = (plan or {}).get('state_usable', not ep['context'].get('state_unaligned'))
         self.frame_count = (plan or {}).get('n')
@@ -1555,7 +1561,7 @@ class Access:
                                 for row in rows for col in columns):
                             valid = False
                 if valid:
-                    doc['untimed_findings'].append(clean(se.finding_fields(finding)))
+                    doc['untimed_findings'].append(clean(se.bound_finding_fields(finding, self.copy_contract_version)))
                     continue
                 reason = 'untimed finding lacks inspected source-row or metadata citations'
             elif any(type(finding.get(k)) not in (int, float) or not math.isfinite(finding[k]) for k in ('start_s', 'end_s')):
@@ -1609,8 +1615,9 @@ class Access:
             if reason:
                 doc['unbound_findings'].append({'finding': clean(finding), 'reason': reason})
             else:
-                doc['findings'].append({**clean(se.finding_fields(finding)), 'evidence': converted, 'claim_type': 'recorded_evidence',
-                                        'detail': finding.get('detail') or finding.get('claim') or finding.get('observation')})
+                doc['findings'].append({**clean(se.bound_finding_fields(finding, self.copy_contract_version)), 'evidence': converted, 'claim_type': 'recorded_evidence',
+                                        'detail': finding.get('detail') if sensor_copy.shared(self.copy_contract_version)
+                                        else finding.get('detail') or finding.get('claim') or finding.get('observation')})
         cited = {ref.get('series_id') for finding in doc['findings'] for ref in finding['evidence']}
         for series in doc['series']:
             if series['id'] in cited and len(series.get('columns') or []) == 1:
@@ -1630,10 +1637,14 @@ At most 3 requests per round. Numeric samples preserve separate components (at m
 The inventory includes recorded schema names and field counts across the complete recording. Request {"mode":"inventory","query":"field name or schema substring"} to jump to relevant fields without paging through unrelated sensors. Search is case-insensitive and matches field names or schemas. If next_offset is not null, request {"mode":"inventory","offset":next_offset,"query":"the same query, if used"} for more matching fields. No descriptor is silently discarded. Search and paging consume the same request budget as measurements.
 '''
 
-FINAL = '''Additional inspected evidence follows. Produce the normal episode annotation and optional "evidence_findings": [{"start_s":number,"end_s":number,"headline":"plain English","detail":"what this adds","overlay_detail":"short explanation for the video overlay","observation":"actual readings or images","claim":"interpretation with uncertainty","alternative":"other plausible explanation","confidence":"high|medium|low","adds_beyond_video":true,"evidence":[{"evidence_id":"exact inspection id","time_s":[exact supplied times],"columns":[supplied component indices, for numeric data]}]}]. Empty findings are valid. Cite only aligned inspected samples/images. The finding interval must be covered by the cited inspection windows together, with no uncovered gap. Use separate findings for distinct brief events. Do not span disconnected spikes or attempts with one continuous event interval. Keep headlines short and describe the specific added observation or supported interpretation in plain language. Saying only that a signal changes is not informative. Omit a finding if neither a concrete added observation nor a useful supported implication can be stated. If physical meaning is unresolved, describe the concrete observed pattern. Supply overlay_detail as one short sentence explaining what this adds and essential uncertainty. These two fields appear together on video; avoid repeating the headline or filling the card with technical measurements. Preserve the concrete added information across headline and overlay_detail, including any supported comparison, temporal pattern or contrast with recorded state. State what the sensor adds to the visible action. Its timing may coincide with that action; the added information can be localized loading, its redistribution, measured state, or a supported contrast that ordinary scene RGB alone cannot establish. Do not invent a comparison or physical explanation to make a finding sound informative. Before comparing repetitions, align corresponding manipulation phases using the scene and relevant recorded state, then review active and quieter portions with usable measurements. Comparing whole-attempt peaks or a different phase does not replace that comparison. Preserve a quieter sampled response when it provides a useful contrast, without inferring continuous stability or requiring a finding for each repetition. Sparse readings do not establish that a signal remained elevated between samples. Contextual images can cover a shorter interval than the supporting measurements. For useful native data without verified episode alignment, use null start_s and end_s and cite "rows": [exact inspected source-row indices] instead of time_s. For useful original metadata, also use null start_s/end_s and cite {"evidence_id":"exact inspection id","pointer":"exact inspected JSON pointer"}. Metadata findings must reason about an implication or discrepancy, not merely repeat a field. Untimed findings are recording-level information, never synchronized events. Do not repeat existing sensor findings. Do not infer calibrated physical quantities, world directions, object identity or slip from an unexplained measurement. No more evidence requests.
+def final_prompt(copy_contract_version=None):
+    return ('''Additional inspected evidence follows. Produce the normal episode annotation and optional "evidence_findings": [{"start_s":number,"end_s":number,"headline":"plain English",''' + sensor_copy.schema('inspection', copy_contract_version) + '''"observation":"actual readings or images","claim":"interpretation with uncertainty","alternative":"other plausible explanation","confidence":"high|medium|low","adds_beyond_video":true,"evidence":[{"evidence_id":"exact inspection id","time_s":[exact supplied times],"columns":[supplied component indices, for numeric data]}]}]. Empty findings are valid. Cite only aligned inspected samples/images. The finding interval must be covered by the cited inspection windows together, with no uncovered gap. Use separate findings for distinct brief events. Do not span disconnected spikes or attempts with one continuous event interval. Keep headlines short and describe the specific added observation or supported interpretation in plain language. Saying only that a signal changes is not informative. Omit a finding if neither a concrete added observation nor a useful supported implication can be stated. If physical meaning is unresolved, describe the concrete observed pattern. ''' + sensor_copy.rule('inspection', copy_contract_version) + ''' State what the sensor adds to the visible action. Its timing may coincide with that action; the added information can be localized loading, its redistribution, measured state, or a supported contrast that ordinary scene RGB alone cannot establish. Do not invent a comparison or physical explanation to make a finding sound informative. Before comparing repetitions, align corresponding manipulation phases using the scene and relevant recorded state, then review active and quieter portions with usable measurements. Comparing whole-attempt peaks or a different phase does not replace that comparison. Preserve a quieter sampled response when it provides a useful contrast, without inferring continuous stability or requiring a finding for each repetition. Sparse readings do not establish that a signal remained elevated between samples. Contextual images can cover a shorter interval than the supporting measurements. For useful native data without verified episode alignment, use null start_s and end_s and cite "rows": [exact inspected source-row indices] instead of time_s. For useful original metadata, also use null start_s/end_s and cite {"evidence_id":"exact inspection id","pointer":"exact inspected JSON pointer"}. Metadata findings must reason about an implication or discrepancy, not merely repeat a field. Untimed findings are recording-level information, never synchronized events. Do not repeat existing sensor findings. Do not infer calibrated physical quantities, world directions, object identity or slip from an unexplained measurement. No more evidence requests.
 Apply measurement limits to the headline and video overlay, not only to the alternative explanation. Without a supplied physical layout, describe cells or channel groups rather than anatomical locations. A publisher_candidate layout supports only a conditional interpretation under that layout, not a verified hardware match. When supplied regional response, hand geometry or gripper state, and video agree, assess the supported manipulation hypothesis, such as relative grip tightening, regional easing or changing contact while the jaw stays fixed. Keep the candidate mapping dependency explicit in the interpretation and retain essential uncertainty in the headline or overlay. A mapping or response convention from a publisher is not a physical force calibration. Compare the whole supplied trajectory: differing minima, a net change, and the first onset of recovery are different observations. Earlier rebounds followed by another dip do not establish delayed recovery. Discrete endpoints alone cannot establish which response began first or whether a change persisted between samples.
 Measurements can add useful scale to a change already visible in RGB. A task-relevant change in finger response, camera-relative surface depth or measured effort can add information even when the visual action already has a subgoal. Explain what the measurement establishes and what it cannot establish. For depth, verify the marked regions cover the intended surfaces; distinguish region medians from tracked-point displacement or world-space clearance. Do not turn arbitrary region statistics into an annotation without a useful interpretation.
-'''
+''')
+
+
+FINAL = final_prompt()
 
 
 def merge(parts, ep_dir=None):
@@ -1688,7 +1699,10 @@ def recover_selection_reservations(doc):
     if not isinstance(doc.get('limitations'), list):
         raise ValueError('saved inspection limitations are invalid')
     changed = False
-    for round_record in doc['rounds']:
+    analysis = doc.get('sensor_analysis')
+    if analysis is not None and not isinstance(analysis, dict):
+        raise ValueError('saved sensor analysis receipt is invalid')
+    for round_record in [*doc['rounds'], *([analysis] if analysis is not None else [])]:
         if not isinstance(round_record, dict):
             raise ValueError('saved inspection round is invalid')
         if round_record.get('state') == 'rejected unpaid' and not rejected_selection_proof(round_record):
@@ -1696,6 +1710,10 @@ def recover_selection_reservations(doc):
             changed = True
         if round_record.get('state') != 'dispatched':
             continue
+        if round_record is analysis:
+            reserve = round_record.get('reserved_cost_usd')
+            if type(reserve) not in (int, float) or not math.isfinite(reserve) or reserve <= 0:
+                raise ValueError('saved sensor analysis reservation is invalid')
         doc['status'] = 'incomplete'
         doc['cost_is_conservative_estimate'] = True
         if round_record.get('reservation_accounted') is True:
@@ -1705,7 +1723,7 @@ def recover_selection_reservations(doc):
             reserve = MAX_SELECTION_COST
         doc['cost_usd'] += reserve
         round_record['reservation_accounted'] = True
-        note = 'Selection dispatch outcome unknown; reserved cost retained and no automatic retry.'
+        note = ('Sensor analysis' if round_record is analysis else 'Selection') + ' dispatch outcome unknown; reserved cost retained and no automatic retry.'
         if note not in doc.setdefault('limitations', []):
             doc['limitations'].append(note)
         changed = True
@@ -1790,7 +1808,8 @@ def replay_selection(access, saved):
 def final_content(content, image_bytes, access, doc, extra, *, image_limit, image_bytes_limit, image_inflation):
     """The evidence suffix shared by dispatch and offline request verification."""
     from label import prompts
-    addition = [{'type': 'text', 'text': prompts.EVIDENCE_CONTRACT + '\nINSPECTED EVIDENCE CONTRACT\n' + FINAL
+    addition = [{'type': 'text', 'text': prompts.EVIDENCE_CONTRACT + '\nINSPECTED EVIDENCE CONTRACT\n'
+                + final_prompt(access.copy_contract_version)
                 + '\nINSPECTION COVERAGE\n' + packed(Access.coverage_summary(doc))}] + extra
     addition.append({'type': 'text', 'text': prompts.EVIDENCE_REVIEW})
     extra_images = [part for part in addition if part.get('type') == 'image_url']
@@ -1864,6 +1883,10 @@ def discover(access, base_content, call, cache_path, *, rounds=2, reserve_cost=0
                         for row in doc['rounds'])):
             doc.update(status='complete', limitations=[note for note in doc['limitations'] if note != budget_note])
             doc.pop('pause_reason', None)
+            analysis = doc.get('sensor_analysis') or {}
+            if analysis.get('state') == 'not dispatched' and analysis.get('pause_reason') == 'spend_cap':
+                from label.sensor_analysis_run import CAP_NOTE
+                doc['limitations'] = [note for note in doc['limitations'] if note != CAP_NOTE]
     extra = []
     # Field reads are replayed locally from saved selections. Their old failures
     # are diagnostic output, never durable dispatch or billing state.

@@ -268,8 +268,10 @@ def test_normal_request_and_reply_use_shared_contract(tmp_path, monkeypatch):
     monkeypatch.setattr(harness, 'call_model', provider_reply)
     out = harness.label_episode(ep_dir, tmp_path / 'result.json', model='test-provider', reasoning='low',
                                 api_key='sk-or-fixture', max_tokens=1000, timeout=1, cell_w=192)
-    assert out['sensor_evidence']['findings'] == [finding]
-    assert to_board.convert(out, 'unfamiliar_sensor')['sensor_evidence']['findings'] == [finding]
+    assert out['sensor_evidence']['findings'] == [{**finding, 'copy_contract_version': 2}]
+    assert out['labels']['sensor_findings'] == [finding]
+    assert to_board.convert(out, 'unfamiliar_sensor')['sensor_evidence']['findings'] == [
+        {**finding, 'copy_contract_version': 2}]
 
 
 def test_shared_viewer_uses_cited_channels_units_and_optical_evidence():
