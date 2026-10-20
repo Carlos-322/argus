@@ -111,16 +111,22 @@ def test_unknown_direction_plots_the_signed_change():
     assert rows[0]['values'][-1] < 0
 
 
-def test_at_most_two_rows_and_other_series_keep_their_label():
+def test_at_most_two_rows_and_other_series_are_left_to_the_board():
     cells = [_ramp(REF, 2000), _flat(), _flat(), _flat(), _ramp(REF, 2500), _flat()]
     doc = _doc(cells)
     doc['series'].append({'id': 'depth:median', 'sensor_id': 'depth', 'label': 'Median depth in inspected region',
                           'times': TIMES, 'values': _ramp(10, 20)})
-    rows = sd.rows_for(doc, _finding([{'sensor_id': 'depth', 'series_id': 'depth:median', 'time_s': [0.5]}]))
-    assert [r['label'] for r in rows] == ['Median depth in inspected region']
+    depth_only = _finding([{'sensor_id': 'depth', 'series_id': 'depth:median', 'time_s': [0.5]}])
+    assert sd.rows_for(doc, depth_only) == [{'series_id': 'depth:median'}]
+    rows = sd.rows_for(doc, _finding(_cite('signal:p:derivation:regional_response:10')
+                                     + [{'sensor_id': 'depth', 'series_id': 'depth:median', 'time_s': [0.5]}]))
+    assert [r.get('label') or r['series_id'] for r in rows] == ['Thumb', 'depth:median']
     rows = sd.rows_for(doc, _finding(_cite('signal:p:derivation:regional_response:10', 'signal:p:derivation:regional_response:11')
                                      + [{'sensor_id': 'depth', 'series_id': 'depth:median', 'time_s': [0.5]}]))
     assert [r['label'] for r in rows] == ['Thumb', 'Index finger']
+    doc['findings'] = [depth_only]
+    sd.attach(doc)
+    assert 'display' not in doc['findings'][0]
 
 
 def test_an_inspected_read_joins_its_array_only_by_descriptor_digest():
@@ -134,7 +140,7 @@ def test_an_inspected_read_joins_its_array_only_by_descriptor_digest():
     other = copy.deepcopy(doc)
     other['sensors'][-1]['access_descriptor_digest'] = 'another'
     rows = sd.rows_for(other, _finding([{'sensor_id': 'inspection:x', 'series_id': 'inspection:x:0', 'time_s': [0.1]}]))
-    assert rows[0]['label'] == 'p [0]'
+    assert rows == [{'series_id': 'inspection:x:0'}]
 
 
 def test_attach_adds_display_and_leaves_citations_untouched():

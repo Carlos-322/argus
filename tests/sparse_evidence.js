@@ -52,6 +52,14 @@ const dense={generic:true,sensors:[{id:'recorded',kind:'numeric'}],series:[{id:'
 const denseF={start:0,end:.06,evidence:[{sensor_id:'recorded',series_id:'recorded:0'}]};
 assert.deepEqual(api.genericSensorSampleTimes(dense,denseF),[0,.03,.06]);
 assert(api.genericSensorSeries(dense,denseF)[0].low<0,'non-depth scale remains zero-inclusive');
+const region={label:'Thumb',times:[0,.03,.06],values:[0,4,9]};
+const mixed=api.genericSensorSeries(dense,{...denseF,display:[region,{series_id:'recorded:0'},{series_id:'uncited'}]},3);
+assert.deepEqual(mixed.map(r=>r.label),['Thumb','Signal'],'a derived row keeps its place and a cited series is drawn as always');
+assert(mixed[0].displayRow&&!mixed[1].displayRow);
+assert.deepEqual(api.genericSensorSeries(dense,{...denseF,display:[{series_id:'recorded:0'}]},3),api.genericSensorSeries(dense,denseF,3),
+  'references alone change nothing');
+assert.deepEqual(api.genericSensorSeries(dense,{...denseF,display:[region]},Infinity).map(r=>r.label),['Signal'],
+  'the expanded panel keeps the raw cited series');
 const many={...dense,series:[{...dense.series[0],times:Array.from({length:12},(_,i)=>i*.03),values:Array.from({length:12},(_,i)=>i)}]};
 const manyF={...denseF,end:1};
 assert(api.genericSensorPanelHtml(many,manyF).includes('data-sensor-sample-select'),'larger sample lists stay compact');

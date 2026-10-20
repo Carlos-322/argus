@@ -4601,11 +4601,15 @@ function genericSensorSamplesHtml(G, f) {
 }
 // The card's rows: the finding's own display rows (label/sensor_display.py), named for what they measure and pointing
 // the way the recording declares a stronger response. The expanded panel (limit Infinity) keeps every cited series.
-function displaySensorSeries(f, limit) {
-  const rows = (Array.isArray(f.display) ? f.display : []).filter(r => r && typeof r.label === 'string' && r.label
-    && Array.isArray(r.times) && Array.isArray(r.values) && r.times.length === r.values.length && r.times.length > 1
-    && r.times.every((t, i) => Number.isFinite(t) && (!i || t > r.times[i - 1])) && r.values.some(Number.isFinite));
-  return rows.slice(0, limit).map(r => {
+// A card row derived from what the finding cites (a region, or an area of one), or a reference to a cited series,
+// which is drawn as the series always is.
+function displaySensorSeries(f, cited) {
+  const rows = (Array.isArray(f.display) ? f.display : []).filter(r => r && ((typeof r.series_id === 'string' && cited.has(r.series_id))
+    || (typeof r.label === 'string' && r.label && Array.isArray(r.times) && Array.isArray(r.values) && r.times.length === r.values.length
+      && r.times.length > 1 && r.times.every((t, i) => Number.isFinite(t) && (!i || t > r.times[i - 1])) && r.values.some(Number.isFinite))));
+  if (!rows.some(r => typeof r.series_id !== 'string')) return [];
+  return rows.map(r => {
+    if (typeof r.series_id === 'string') return cited.get(r.series_id);
     const valid = r.values.filter(Number.isFinite), low = Math.min(0, ...valid), high = Math.max(0, ...valid);
     const padding = Math.max(1, high - low) * .12;
     return {label: r.label + (typeof r.unit === 'string' ? ' (' + r.unit + ')' : ''), times: r.times,
@@ -4615,10 +4619,14 @@ function displaySensorSeries(f, limit) {
 }
 function genericSensorSeries(G, f, limit = 3) {
   if (!G || !G.generic || !f) return [];
+  const cited = citedSensorSeries(G, f);
   if (limit !== Infinity) {
-    const display = displaySensorSeries(f, limit);
-    if (display.length) return display;
+    const display = displaySensorSeries(f, new Map(cited.map(r => [r.id, r])));
+    if (display.length) return display.slice(0, limit);
   }
+  return cited.slice(0, limit);
+}
+function citedSensorSeries(G, f) {
   const ids = new Set((f.evidence || []).map(e => e.series_id).filter(Boolean));
   const selected = (G.series || []).filter(r => ids.has(r.id) && genericSensorAvailable(G, r.sensor_id) && r.review_status !== 'rejected'
     && !r.withheld_from_final && (f.evidence || []).some(e => e.series_id === r.id && e.sensor_id === r.sensor_id) && Array.isArray(r.values) && Array.isArray(r.times)
@@ -4629,7 +4637,7 @@ function genericSensorSeries(G, f, limit = 3) {
   const sourceName = r => String((sensors.get(r.sensor_id) || {}).name || r.sensor_id || 'Recorded field');
   const leafName = r => sourceName(r).split(/[./]/).filter(Boolean).pop() || sourceName(r);
   const readable = name => name.replace(/_/g, ' ');
-  return selected.slice(0, limit).map(r => {
+  return selected.map(r => {
       const plot = r.plot;
       const native = plot?.kind === 'native_samples' && Array.isArray(plot.times) && Array.isArray(plot.values)
         && plot.times.length === r.native_samples && plot.times.length === plot.values.length && plot.times.length <= 4096

@@ -226,12 +226,9 @@ def rows_for(doc, finding):
                             'sample_period_s': src.sample_period_s,
                             'source_ids': [f'{sensor_id}:array:{c}' for c in group]})
         else:
-            row = series[item[1]]
-            times, values = _plot(row)
-            out.append({'label': str(row.get('label') or row.get('sensor_id')), 'times': times, 'values': values,
-                        'sample_period_s': row.get('sample_period_s'), 'source_ids': [row['id']],
-                        **({'unit': row['unit']} if isinstance(row.get('unit'), str) else {})})
-    return [r for r in out if any(_finite(v) for v in r['values'])]
+            # Any other cited series is drawn by the board as it always is; the row only keeps its place in order.
+            out.append({'series_id': item[1]})
+    return [r for r in out if 'series_id' in r or any(_finite(v) for v in r['values'])]
 
 
 def attach(doc):
@@ -242,7 +239,7 @@ def attach(doc):
         if not isinstance(finding, dict):
             continue
         rows = rows_for(doc, finding)
-        if rows:
+        if any('series_id' not in r for r in rows):
             finding['display'] = {'version': VERSION, 'rows': rows}
         else:
             finding.pop('display', None)

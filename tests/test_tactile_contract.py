@@ -272,10 +272,9 @@ def test_normal_request_and_reply_use_shared_contract(tmp_path, monkeypatch):
     assert out['sensor_evidence']['findings'] == [{**finding, 'copy_contract_version': sensor_copy.VERSION}]
     assert out['labels']['sensor_findings'] == [finding]
     board = to_board.convert(out, 'unfamiliar_sensor')['sensor_evidence']['findings']
-    assert [{k: v for k, v in f.items() if k != 'display'} for f in board] == [
-        {**finding, 'copy_contract_version': sensor_copy.VERSION}]
-    # The card row is the cited channel itself, under its recorded name.
-    assert [r['label'] for r in board[0]['display']['rows']] == [row['label']]
+    # A cited channel that is not part of a declared array is drawn by the board as it always is, so the finding
+    # reaches the board unchanged.
+    assert board == [{**finding, 'copy_contract_version': sensor_copy.VERSION}]
 
 
 def test_shared_viewer_uses_cited_channels_units_and_optical_evidence():
