@@ -159,7 +159,7 @@ assert.equal(overlay.classList.active,false,'ordinary contact does not add a red
     subprocess.run(['node', '-e', CARD_DOM + script, str(SOURCE)], check=True)
 
 
-def test_concurrent_recorded_findings_and_quality_warning_are_all_rendered_without_a_carousel():
+def test_concurrent_findings_and_a_quality_warning_share_the_video_without_a_carousel():
     script = r"""
 const fs=require('fs'),assert=require('assert');
 const src=fs.readFileSync(process.argv[1],'utf8');
@@ -194,7 +194,7 @@ assert(strip.innerHTML.includes(findings[0].headline),'the long hold gets its fu
 assert(!strip.innerHTML.includes(findings[0].detail),'full reasoning stays in the evidence panel');
 assert(strip.innerHTML.includes(findings[1].headline));
 assert(strip.innerHTML.includes('Touch and video clocks disagree')&&strip.innerHTML.includes('Measured offset exceeds the review threshold.'));
-assert.equal((strip.innerHTML.match(/data-sensor-finding=/g)||[]).length,3,'nearby findings each receive their minimum presentation time');
+assert.equal((strip.innerHTML.match(/data-sensor-finding=/g)||[]).length,3,'two findings and the quality warning share the video');
 assert(!strip.innerHTML.includes('data-overlay-finding')&&!strip.innerHTML.includes('gf-pager'),'no unseen finding is behind a selector');
 assert(!strip.innerHTML.includes('Rejected warning'));
 const paused=strip.innerHTML;wire.sync(2.46244);assert.equal(strip.innerHTML,paused,'paused playback has no independent presentation clock');
@@ -232,12 +232,11 @@ const timeline=api.sensorEvidence({grip_evidence:{version:1,findings:[
 const shownAt=t=>api.displayGripFindings(timeline,t).map(f=>f.headline);
 assert.deepEqual(shownAt(2.69),['Hold continues']);
 assert.deepEqual(shownAt(2.7),['Pressure increases','Hold continues']);
-assert.deepEqual(shownAt(3.1),['Contact shifts','State changes','Pressure increases','Hold continues']);
-assert.deepEqual(shownAt(3.5),['Contact shifts','State changes','Pressure increases']);
-assert.deepEqual(shownAt(3.7),['Contact shifts','State changes','Pressure increases']);
-assert.deepEqual(shownAt(3.85),['Brief release','Contact shifts','State changes','Pressure increases']);
-assert.deepEqual(shownAt(4.05),['Brief release','Contact shifts','State changes','Pressure increases']);
-assert.deepEqual(shownAt(4.7),['Brief release','Contact shifts','State changes']);
+assert.deepEqual(shownAt(3.1),['Contact shifts','State changes'],'at most two finding cards share the video');
+assert.deepEqual(shownAt(3.5),['Contact shifts','State changes']);
+assert.deepEqual(shownAt(3.85),['Brief release','Contact shifts'],'the newest onset takes a place on the video');
+assert.deepEqual(shownAt(4.05),['Brief release','Contact shifts']);
+assert.deepEqual(shownAt(4.7),['Brief release','Contact shifts'],'a displaced card does not come back');
 assert.deepEqual(shownAt(5.1),['Brief release']);
 assert.deepEqual(shownAt(5.8),[],'the subsecond finding also receives two seconds');
 assert.deepEqual(shownAt(7),[],'superseded long intervals never return');

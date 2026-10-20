@@ -613,7 +613,7 @@ aside.left .grip-strip .state-toast.active { position: static; order: 3; transfo
 aside.left .unshown-note { margin: 0; padding: 6px 12px 8px; background: #000; font-family: var(--mono);
   font-size: 10px; line-height: 1.45; color: rgba(255,255,255,0.72); }
 /* its label wraps inside a narrow cell instead of running past it */
-aside.left .cam-unshown .cam-label { white-space: normal; max-width: calc(100% - 28px); border-radius: var(--r-sm); }
+aside.left .cam-unshown .cam-label { white-space: normal; overflow-wrap: anywhere; max-width: calc(100% - 28px); border-radius: var(--r-sm); }
 aside.left .cam-label {
   position: absolute; top: 8px; left: 8px; z-index: 2;
   padding: 1px 6px;
@@ -1385,8 +1385,10 @@ h3.section .count {
 
 /* problem rows: a check, a data issue or an operator mistake, each with its severity */
 .di-block { display: flex; flex-direction: column; gap: 0; }
-.di-row { display: grid; grid-template-columns: 54px 1fr; gap: 10px; align-items: start; padding: 9px 2px;
+.di-row { display: grid; grid-template-columns: 54px minmax(0, 1fr); gap: 10px; align-items: start; padding: 9px 2px;
   border-top: 1px solid var(--row-divider); }
+/* upload paths and recorded field names are long unbroken words; they wrap inside the row instead of running past it */
+.di-row > * { min-width: 0; overflow-wrap: anywhere; }
 .di-row:first-child { border-top: none; }
 .di-row.minor { opacity: 0.72; }
 .di-minor { font-family: var(--mono); font-size: 10px; color: var(--fg-3); border: 1px dashed var(--border-strong);
@@ -1427,10 +1429,10 @@ h3.section .count {
 .task-row .task-num {
   width: 20px; height: 20px; border-radius: 4px; display: inline-flex;
   align-items: center; justify-content: center; font-family: var(--mono);
-  font-size: 11px; font-weight: 700; color: #0b0b0c; background: var(--fg-3);
+  font-size: 11px; font-weight: 700; color: #fff; background: var(--fg-3);
 }
 .task-row .task-num.success { background: #2f7d52; }
-.task-row .task-num.partial { background: #e7b0b8; }
+.task-row .task-num.partial { background: #e7b0b8; color: #0b0b0c; }
 .task-row .task-num.failure { background: #b3263c; color: #fff; }
 .task-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 .task-head .task-name { font-size: 13px; font-weight: 600; color: var(--fg); }
@@ -2894,9 +2896,8 @@ function unshownNote(d) {
   if (!us.length) return '';
   const each = us.map(u => `${esc(u.name || u.view)}${u.why ? ` (${esc(u.why)})` : ''}`);
   const list = each.length > 1 ? `${each.slice(0, -1).join(', ')} and ${each[each.length - 1]}` : each[0];
-  return `<p class="unshown-note">The model was not shown ${us.length === 1 ? 'the camera' : 'the cameras'} ${list}. `
-    + `${us.length === 1 ? 'It plays' : 'They play'} here so every camera of the upload can be watched.`
-    + (us.some(u => u.clock_alignment === 'unverified') ? ' Independent-clock cameras have separate controls and are excluded from synchronized downloads.' : '') + '</p>';
+  return `<p class="unshown-note">Not shown to the model: ${list}.`
+    + (us.some(u => u.clock_alignment === 'unverified') ? ' Cameras on their own clock have their own controls and are left out of synchronized downloads.' : '') + '</p>';
 }
 // next to a session's success count: how many parts of a long recording have no labels (label/pieces.py stitch_run)
 function partsGapHtml(d) {
@@ -4334,8 +4335,8 @@ function snMapHtml(s, k) {
       + `${100 / cols}%;height:${100 / rows}%"></div></div>
     <span class="lane-title">${esc(s.name)}</span>
     <span class="lane-now"></span>
-    <span class="sn-note">Each cell's distance from its resting level at the playhead. Darker is farther, and black `
-      + `is ${snNum(s.swing)} ${snAway(s.direction)} rest or more, ${scope}.</span>
+    <span class="sn-note">Darker cells are farther from rest; black is ${snNum(s.swing)} ${snAway(s.direction)} rest `
+      + `or more, ${scope}.</span>
   </div>`;
 }
 function snDepthHtml(D, camName, order) {
@@ -4394,8 +4395,8 @@ function snMapDraw(m, i, ink) {
     m.peak.style.top = (100 * Math.floor(bi / cols) / rows) + '%';
   }
   m.peak.classList.toggle('on', active);
-  m.now.textContent = none ? 'No reading at the playhead' : active ? `Row ${Math.floor(bi / cols) + 1}, column `
-    + `${bi % cols + 1} has the largest reference difference, ${snNum(best)} ${snAway(s.direction)} reference` : 'Near reference';
+  m.now.textContent = none ? 'No reading at the playhead' : active ? `Largest change: row ${Math.floor(bi / cols) + 1}, column `
+    + `${bi % cols + 1}, ${snNum(best)} ${snAway(s.direction)} rest` : 'Near rest';
 }
 // the signals with no lane, by name: those whose every value is the same at every frame, those the same wherever they
 // read but with no reading at some frames (board/sensors.py signal_doc no_reading_frames), and those with no reading at
@@ -4524,7 +4525,7 @@ function setupSensors(file, duration, seek, on, vid, camName, order, hasContacts
     }
     if (vid) {
       on(vid, 'play', watch);
-      on(vid, 'seeked', () => sync(vid.currentTime));
+      on(vid, 'seeked', () => sync(snPlaybackTime(D, vid.currentTime)));
     }
     window._epCleanup.push(() => {
       if (rv && vid && vid.cancelVideoFrameCallback) vid.cancelVideoFrameCallback(rv);
@@ -4881,10 +4882,16 @@ function displayGripFindings(E, t, windows = sensorFindingWindows(E)) {
   const findings = E.overlayFindings || E.insights || [];
   // Equal onsets coexist. Every finding gets at least two seconds of media time,
   // including subsecond intervals. Superseded findings never return later.
-  return findings.filter(f => t + 1e-6 >= f.start && t < windows.get(f.findingIndex))
+  const shown = findings.filter(f => t + 1e-6 >= f.start && t < windows.get(f.findingIndex))
     .map(f => ({...f, phase: t <= f.end + 1e-6 ? 'Now' : 'Earlier'}))
     .sort((a, b) => b.priority - a.priority || b.start - a.start);
+  // At most two sensor finding cards share the video at once, whether or not the run chose its cards. The newest
+  // onsets win, so a card a newer one displaced never comes back, and every finding stays in the list and on the
+  // timeline. Quality warnings and contact anomalies are not findings and always show.
+  const kept = new Set(shown.filter(f => f.kind === 'insight').slice(0, MAX_CARDS_ON_VIDEO).map(f => f.findingIndex));
+  return shown.filter(f => f.kind !== 'insight' || kept.has(f.findingIndex));
 }
+const MAX_CARDS_ON_VIDEO = 2;
 
 function displayGripFinding(E, t) { return displayGripFindings(E, t)[0] || null; }
 function gripOverlaySeries(G, f, limit = 3) {
@@ -4923,7 +4930,7 @@ function gripOverlayPressureHtml(G, f, limit = 3) {
         const previous = i > 0 && Number.isFinite(v.values[i - 1]) && times[i] - times[i - 1] <= maxGap;
         const next = i + 1 < times.length && Number.isFinite(v.values[i + 1]) && times[i + 1] - times[i] <= maxGap;
         if (G.generic && (!v.nativePlot || !previous && !next)) {
-          points += `<circle data-sensor-recorded-point cx="${x(times[i]).toFixed(2)}" cy="${y(value).toFixed(2)}" r="1.8" fill="currentColor" opacity=".65"/>`;
+          points += `<circle data-sensor-recorded-point cx="${x(times[i]).toFixed(2)}" cy="${y(value).toFixed(2)}" r=".01" fill="none" stroke="currentColor" stroke-width="3.6" stroke-linecap="round" vector-effect="non-scaling-stroke" opacity=".65"/>`;
           pen = false;
           return;
         }
@@ -4936,7 +4943,7 @@ function gripOverlayPressureHtml(G, f, limit = 3) {
           <rect x="${x(f.start)}" y="2" width="${x(f.end) - x(f.start)}" height="28" fill="currentColor" opacity=".08"/>
           ${v.depthRegion ? '' : `<line x1="0" x2="180" y1="${y(0)}" y2="${y(0)}" stroke="currentColor" opacity=".3" stroke-dasharray="2 3"/>`}
           ${points}<path d="${path.trim()}" fill="none" stroke="currentColor" opacity=".65" stroke-width="1.2" vector-effect="non-scaling-stroke"/>
-          <circle data-grip-mini-dot="${k}" cx="0" cy="0" r="2.8" fill="currentColor" visibility="hidden"/>
+          <circle data-grip-mini-dot="${k}" cx="0" cy="0" r=".01" fill="none" stroke="currentColor" stroke-width="5.6" stroke-linecap="round" vector-effect="non-scaling-stroke" visibility="hidden"/>
         </svg>${G.generic ? '' : `<span class="gf-pressure-gap" data-grip-mini-gap="${k}" visibility="hidden">No reading</span>`}</span></span>`;
     }).join('')}
     </span>`;
@@ -4969,7 +4976,7 @@ function syncGripOverlayPressure(G, f, t, scope = document, limit = 3) {
   }
   for (const label of scope.querySelectorAll('[data-grip-mini-value]')) {
     const v = traces[+label.dataset.gripMiniValue], now = v && sample(v);
-    label.textContent = now && now.nearby && Number.isFinite(now.value) ? String(now.value) : '';
+    label.textContent = now && now.nearby && Number.isFinite(now.value) ? String(Number(now.value.toPrecision(3))) : '';
   }
   for (const label of scope.querySelectorAll('[data-grip-mini-time]')) label.textContent = 'Video ' + fmtT(t);
 }
@@ -6658,7 +6665,7 @@ function renderEp(d, opts) {
       <span class="ts-ok">${tcount.success} success</span> /
       <span class="ts-fail">${tcount.failure} failure${tPartly ? `, ${tPartly} of them partly done` : ''}</span>${
         partsGapHtml(d)}
-      <div class="tasks-note">The episode has no single goal. Each task is graded on its own, and a messy final scene is fine.</div>
+      <div class="tasks-note">Each task is graded on its own.</div>
     </div>
     ${taskGoalFrameHtml}
     <div class="info-block tasks-panel">${tasksHtml}</div>
@@ -7487,7 +7494,8 @@ function renderEp(d, opts) {
     scheduleTopPlacement();
   }, vid, () => {
     const t = presentation ? presentation.time() : null;
-    return t == null ? null : vid.paused ? vid.currentTime : snPlaybackTime(_snData.get(_activeFile), t);
+    // The shown frame's capture time decides what the sensor cards show, playing or paused.
+    return t == null ? null : snPlaybackTime(_snData.get(_activeFile), t);
   });
   window._epCleanup.push(() => evidenceWire.dispose());
   const syncEvidence = t => {
@@ -7517,7 +7525,7 @@ function renderEp(d, opts) {
     renderOverlay(t); renderHands(t); renderTaskGoal(t); syncFeed(t); syncKeyEvents(t); renderSceneGraph(t);
     placeSensors();
       syncLanes(t);
-    const sensorTime = vid && !vid.paused ? snPlaybackTime(_snData.get(_activeFile), t) : t;
+    const sensorTime = vid ? snPlaybackTime(_snData.get(_activeFile), t) : t;
     if (window._sn) window._sn.sync(sensorTime);
     if (tcWire) tcWire.sync(sensorTime);
     else syncEvidence(sensorTime);
