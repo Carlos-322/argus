@@ -237,7 +237,11 @@ def test_joint_readings_that_do_not_prove_degrees_keep_the_state_as_recorded(tmp
     degree_state(root, readings, units=units)
     path, ctx = converted(root, tmp_path / 'prepared')
     if change == 'a declared radian':
-        assert ctx['state_kind'] == 'joints' and 'unit_conversion' not in ctx['state_contract']
+        # the declared unit is kept, readings unchanged, but readings only degrees explain contradict it, so the state
+        # is left out of kinematic checks with a reader issue saying so, never trusted as 33 turns of a joint
+        assert ctx['state_kind'] == 'none' and 'state_contract' not in ctx
+        assert 'radians' in ctx['state_note'] and any(s['name'] == 'observation.state' for s in ctx['signals'])
+        assert [i['kind'] for i in ctx['reader_issues']] == ['state_unit_contradicted']
         with np.load(path / 'state.npz') as values:
             np.testing.assert_array_equal(values['state'], readings)
     else:
@@ -287,11 +291,12 @@ def mcap_joints(path, readings, names, units):
     _json_mcap(path, {'/left/joint_states': messages}, 1000)
     q = 1000 + np.arange(len(readings)) / 30
     streams = formats.mcap_joint_streams([path], q)
-    state, _, note = formats.joint_state(streams, q)
+    issues = []
+    state, _, note = formats.joint_state(streams, q, issues=issues)
     identity = {'state_kind': 'joints'}
     if state is not None:
         formats.record_joint_state_identity(identity, streams)
-    return state, note, identity, []
+    return state, note, identity, issues
 
 
 DEGREE_DECLARATIONS = {'declared by the units': (JOINTS + ['gripper'], ['degrees'] * 6 + ['fraction']),
@@ -331,6 +336,31 @@ def test_every_reader_reads_declared_joint_degrees_as_radians(tmp_path, reader, 
     assert proof['units'][:6] == ['rad'] * 6 and proof['unit_conversion']['basis'] == 'declared'
     assert proof['unit_conversion']['columns'] == list(range(6))
     assert prepared_state_problem(identity, 7) is None
+
+
+@pytest.mark.parametrize('reader', ['hdf5', 'mcap'])
+def test_every_reader_leaves_out_declared_radians_its_readings_contradict(tmp_path, reader):
+    # a declared radian was trusted whatever the readings, so a Realman arm's degrees reached kinematic checks as
+    # 33 turns of a joint; the declared unit is kept, the state is left out of kinematic checks and an issue says why
+    names, units = JOINTS + ['gripper'], ['rad'] * 6 + ['fraction']
+    if reader == 'hdf5':
+        state, note, _, signals = h5_joints(tmp_path / 'joints.h5', REALMAN, names, units)
+        issues = signals.issues
+        np.testing.assert_array_equal(signals['state'], REALMAN)
+    else:
+        state, note, _, issues = mcap_joints(tmp_path / 'joint.mcap', REALMAN, names, units)
+    assert state is None and 'radians' in str(note)
+    assert [i['kind'] for i in issues] == ['state_unit_contradicted']
+    # radians whose readings stay within a turn are read as declared, with no issue
+    small = REALMAN.copy()
+    small[:, :6] = np.deg2rad(small[:, :6])
+    if reader == 'hdf5':
+        state, note, _, signals = h5_joints(tmp_path / 'small.h5', small, names, units)
+        issues = signals.issues
+    else:
+        state, note, _, issues = mcap_joints(tmp_path / 'small.mcap', small, names, units)
+    assert state is not None and not issues, note
+    np.testing.assert_allclose(state, small, rtol=1e-6)
 
 
 @pytest.mark.parametrize('units,expected', [(None, 'none'), (['mm'] * 3 + ['rad'] * 3 + ['m'], 'none'),
