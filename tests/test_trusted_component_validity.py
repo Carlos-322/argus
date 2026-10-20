@@ -56,6 +56,56 @@ def test_trusted_mask_filters_group_members_before_averaging():
     assert se.bind(doc, [claim(row['id'])])['findings']
 
 
+def test_large_noncontiguous_valid_group_preserves_columns_and_binds():
+    valid = [column for column in range(300) if column != 150]
+    ep = source(width=300, valid=valid,
+                layout=[{'name': 'recorded pad', 'start': 0, 'count': 300}])
+    ep['signals']['pressure'][3, 150] = 99999
+    original = ep['signals']['pressure'].copy()
+    doc = se.build(ep, {'n': 5})
+    row = next(row for row in doc['series'] if not row.get('derivation_id'))
+    assert row['values'] == pytest.approx([100., 100., 100., 100. + 800. / 299, 100.])
+    assert row['columns'] == valid
+    assert len(row['id']) < 100
+    finding = claim(row['id'])
+    bound = se.bind(doc, [finding])
+    assert bound['findings'] and not bound['unbound_findings']
+    assert se.bind(bound, [finding])['findings'] == bound['findings']
+    assert np.array_equal(ep['signals']['pressure'], original)
+
+
+def test_large_contiguous_valid_group_keeps_compact_range_and_binds():
+    ep = source(width=300, valid=list(range(299)),
+                layout=[{'name': 'recorded pad', 'start': 0, 'count': 300}])
+    doc = se.build(ep, {'n': 5})
+    row = next(row for row in doc['series'] if not row.get('derivation_id'))
+    assert row['columns'] == {'start': 0, 'count': 299}
+    assert row['id'] == 'signal:pressure:columns:0+299'
+    assert row['values'] == [100.] * 5
+    assert se.bind(doc, [claim(row['id'])])['findings']
+
+
+@pytest.mark.parametrize('valid', [[0], [3]])
+def test_mismatched_declared_width_does_not_trust_mask_or_block_raw_access(tmp_path, valid):
+    from label import evidence_access as ea
+    ep = source(valid=valid)
+    ep['signals']['pressure'] = ep['signals']['pressure'][:, :3].copy()
+    ep.update(dir=tmp_path, sources={}, action=None, depth={})
+    original = ep['signals']['pressure'].copy()
+    doc = se.build(ep, {'n': 5})
+    assert 'component_validity' not in doc['sensors'][0]
+    assert [row['columns'] for row in doc['series']] == [[0], [1], [2]]
+    assert se._sensor_validity(doc, doc['sensors'][0], ep['context']) is None
+    assert se.bind(doc, [claim(doc['series'][2]['id'])], source_context=ep['context'])['findings']
+    access = ea.Access(ep, doc, plan={'n': 5})
+    field = next(field for field in access.inventory() if field['name'] == 'pressure')
+    receipt = access.inspect({'field_id': field['id'], 'mode': 'samples', 'columns': [2]})
+    assert 'component_validity' not in field
+    assert 'selected_component_validity' not in receipt
+    assert receipt['values'] == [[100.]] * 5
+    assert np.array_equal(ep['signals']['pressure'], original)
+
+
 def test_new_saved_descriptor_rejects_stale_excluded_component_row():
     ep = source()
     doc = se.build(ep, {'n': 5})

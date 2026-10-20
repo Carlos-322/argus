@@ -154,6 +154,11 @@ def _trusted_validity(semantics):
 
 
 def _sensor_validity(doc, sensor, source_context=None):
+    shape = sensor.get('shape')
+    if (type(sensor.get('columns')) is int and isinstance(shape, (list, tuple))
+            and (any(type(d) is not int or d <= 0 for d in shape)
+                 or math.prod(shape) != sensor['columns'])):
+        return None
     name = sensor.get('name')
     if isinstance(source_context, dict) and isinstance(name, str):
         meta = next((meta for meta in source_context.get('signals') or []
@@ -322,7 +327,8 @@ def build(ep, pl, *, shown=None, images=None, native_images=None, capture_select
             elif semantics.get('response_direction'):
                 sensor['response_direction'] = semantics['response_direction']
                 sensor['response_direction_authority'] = (semantics.get('provenance') or {}).get('authority')
-        validity = _trusted_validity(semantics)
+        validity = (_trusted_validity(semantics)
+                    if semantics and math.prod(sensor['shape']) == a.shape[1] else None)
         if validity is not None:
             sensor['component_validity'] = validity
         units = meta.get('units', meta.get('unit'))
@@ -359,9 +365,11 @@ def build(ep, pl, *, shown=None, images=None, native_images=None, capture_select
                 values /= len(ids)
             # Missing members invalidate a group average. Zero is a valid reading unless declared otherwise upstream.
             ts, vs = _samples(times, values, sample_limit)
-            column_id = ','.join(map(str, ids)) if len(ids) <= 256 else f'{ids[0]}+{len(ids)}'
+            compact = len(ids) > 256 and ids == list(range(ids[0], ids[0] + len(ids)))
+            column_id = (f'{ids[0]}+{len(ids)}' if compact else ','.join(map(str, ids))
+                         if len(ids) <= 256 else 'set:' + hashlib.sha256(_json(ids).encode()).hexdigest()[:16])
             doc['series'].append({'id': sensor_id + ':columns:' + column_id, 'sensor_id': sensor_id,
-                                  'label': label[:160], 'columns': ids if len(ids) <= 256 else {'start': ids[0], 'count': len(ids)}, 'unit': unit, 'times': ts, 'values': vs,
+                                  'label': label[:160], 'columns': {'start': ids[0], 'count': len(ids)} if compact else ids, 'unit': unit, 'times': ts, 'values': vs,
                                   'operation': 'stored summary' if summary else 'recorded value' if len(ids) == 1 else 'mean of declared group',
                                   'native_samples': n, 'sampled': len(ts) < n,
                                   'sample_period_s': float(np.median(np.diff(times))) if len(times) > 1 else None})
