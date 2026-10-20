@@ -1624,31 +1624,27 @@ h3.section .count {
   vector-effect: non-scaling-stroke; }
 .prog-overlay .po-past { fill: none; stroke: #f3f2ec; stroke-width: 2; vector-effect: non-scaling-stroke; }
 .prog-overlay .po-dot { fill: #f3f2ec; }
-/* the Quality section: the two scores large, then each measure on one line, then one row per subgoal */
-.qual-top { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
-.qual-big { padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-md); }
-.qual-big .qb-k { font-size: 11px; color: var(--fg-2); font-weight: 600; }
-.qual-big .qb-v { font-family: var(--mono); font-size: 26px; font-weight: 700; line-height: 1.1; margin: 2px 0 6px; }
-.qual-big .qb-v small { font-size: 12px; color: var(--fg-2); font-weight: 600; }
-.qual-big .qb-what { font-size: 11px; color: var(--fg-2); }
-.qual-bar { display: block; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
-.qual-bar i { display: block; height: 100%; background: var(--fg); }
-.qual-measures { display: grid; grid-template-columns: 96px 34px 70px 1fr; column-gap: 12px; row-gap: 8px;
-  align-items: center; font-size: 12px; }
-.qual-measures .qm-k { font-weight: 600; }
-.qual-measures .qm-v { font-family: var(--mono); font-weight: 700; text-align: right; }
-.qual-measures .qm-what { color: var(--fg-2); }
-.qual-measures .qm-none { color: var(--fg-2); font-family: var(--mono); text-align: right; }
-.qual-sub { margin-top: 16px; }
-.qual-sub .qs-head { font-size: 12px; font-weight: 600; margin-bottom: 4px; }
-.qual-sub .qs-head span { font-weight: 400; color: var(--fg-2); margin-left: 6px; }
-.qual-sub .qs-row { display: grid; grid-template-columns: 20px 52px 1fr 64px 34px 70px; column-gap: 10px;
-  align-items: center; padding: 6px 0; border-top: 1px solid var(--line); font-size: 12px; cursor: pointer; }
-.qual-sub .qs-row:first-child { border-top: 0; }
-.qual-sub .qs-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.qual-sub .qs-dur { font-family: var(--mono); color: var(--fg-2); text-align: right; }
-.qual-sub .qs-v { font-family: var(--mono); font-weight: 700; text-align: right; }
-.qual-sub .qs-miss { color: var(--danger); font-family: var(--mono); font-size: 11px; }
+/* the Quality section: one grid, so every number, bar and note sits on the same column lines; execution and outcome
+   are the main rows, execution's three measures sit indented under it, then one row per subgoal */
+.qual-grid { display: grid; grid-template-columns: 168px 44px 140px minmax(0, 1fr); column-gap: 16px;
+  align-items: center; }
+.qual-grid > .q-row { display: contents; }
+.qual-grid .q-name, .qual-grid .q-v, .qual-grid .q-bar, .qual-grid .q-what { padding: 7px 0; }
+.qual-grid .q-name { font-size: 13px; font-weight: 600; color: var(--fg); }
+.qual-grid .q-v { font-family: var(--mono); font-size: 14px; font-weight: 700; text-align: right; }
+.qual-grid .q-what { font-size: 12px; color: var(--fg-2); min-width: 0; }
+.qual-grid .q-bar { display: block; }
+.qual-grid .q-bar span { display: block; height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.qual-grid .q-bar i { display: block; height: 100%; background: var(--fg); }
+.qual-grid .q-main .q-name { font-size: 14px; }
+.qual-grid .q-main .q-v { font-size: 20px; }
+.qual-grid .q-main .q-bar span { height: 7px; }
+.qual-grid .q-part .q-name { padding-left: 16px; font-weight: 500; color: var(--fg-2); }
+.qual-grid .q-gap { grid-column: 1 / -1; height: 1px; background: var(--line); margin: 6px 0; }
+.qual-grid .q-head { grid-column: 1 / -1; font-size: 12px; font-weight: 600; color: var(--fg-2); padding: 2px 0 0; }
+.qual-grid .q-sub .q-name { font-weight: 500; font-family: var(--mono); font-size: 12px; color: var(--fg-2); }
+.qual-grid .q-miss { font-family: var(--mono); font-size: 11px; color: var(--danger); text-align: right; }
+.qual-grid .q-what b { color: var(--fg); font-weight: 600; }
 /* top-right transient toast: object state changes, below the fullscreen button (.fs-btn, 8 px + 26 px) */
 .state-toast {
   position: absolute; top: calc(var(--fx-top, 0px) + 40px); right: calc(var(--fx-right, 0px) + 8px);
@@ -6326,36 +6322,31 @@ function renderEp(d, opts) {
   const qPct = v => `${v == null ? 0 : Math.max(0, Math.min(10, v)) * 10}%`;
   const qIn = Q ? Q.inputs || {} : {};
   const subs = Q ? Q.subgoals || [] : [];
-  const qBar = v => `<span class="qual-bar"><i style="width:${qPct(v)}"></i></span>`;
   const peerText = (n, median) => n >= 5 ? `median ${qNum(median)}s across ${n} other successful demos of this task`
     : 'fewer than 5 other successful demos of this task to compare with';
-  const measure = (k, v, what) => `<span class="qm-k">${k}</span>`
-    + (v == null ? `<span class="qm-none">-</span><span></span>` : `<span class="qm-v">${qNum(v)}</span>${qBar(v)}`)
-    + `<span class="qm-what">${esc(what)}</span>`;
   const mistakesText = (qIn.penalties || []).length
     ? qIn.penalties.map(x => `${x.severity} mistake${x.recovered ? ', recovered' : ''} (-${x.points})`).join(', ')
     : 'no operator mistakes';
-  const qualityHtml = Q ? `<h3 class="section" id="quality">Quality</h3><div class="info-block">
-    <div class="qual-top">
-      <div class="qual-big"><div class="qb-k">Execution</div><div class="qb-v">${qNum(Q.execution)}<small> / 10</small></div>
-        ${qBar(Q.execution)}<div class="qb-what">How cleanly, quickly and steadily the work was done</div></div>
-      <div class="qual-big"><div class="qb-k">Outcome</div><div class="qb-v">${qNum(Q.outcome)}<small> / 10</small></div>
-        ${qBar(Q.outcome)}<div class="qb-what">How much of the labelled goal was reached${Q.relation && Q.relation !== 'aligned'
-          ? `; the work done is ${esc(Q.relation)} from the label` : ''}</div></div>
-    </div>
-    <div class="qual-measures">
-      ${measure('Cleanliness', Q.cleanliness, `${Math.round(100 * (qIn.wasteful_share || 0))}% of the work wasteful; ${mistakesText}`)}
-      ${measure('Speed', Q.efficiency, Q.efficiency == null && qIn.outcome !== 'success' ? 'the goal was not reached'
-        : `${qNum(qIn.time_to_goal_s)}s to the goal; ${peerText(Q.peers, qIn.peer_median_time_to_goal_s)}`)}
-      ${measure('Steadiness', Q.fluency, `${Math.round(100 * (qIn.hesitation_share || 0))}% of the work with every arm waiting`)}
-    </div>
-    ${subs.length ? `<div class="qual-sub"><div class="qs-head">Subgoals <span>execution of the stretch that ends in each one</span></div>${subs.map((st, i) => `<div class="qs-row" data-t="${st.start_s}">
-      <span class="ke-num">${i + 1}</span><span class="ke-time">${fmtT(st.end_s)}</span>
-      <span class="qs-label" title="${esc(st.label || '')}">${esc(st.label || '')}</span>
-      <span class="qs-dur">${qNum(st.duration_s)}s</span>
-      ${st.reached ? `<span class="qs-v">${qNum(st.execution)}</span>${qBar(st.execution)}`
-        : `<span class="qs-miss">not reached</span><span></span>`}</div>`).join('')}</div>` : ''}
-  </div>` : '';
+  // one row of the grid: name, number, bar, what it measured; a missing score shows a dash and no bar
+  const qRow = (kind, name, v, what, miss) => `<div class="q-row ${kind}"><span class="q-name">${name}</span>`
+    + (miss ? `<span class="q-miss">${miss}</span><span class="q-bar"></span>`
+      : `<span class="q-v">${qNum(v)}</span><span class="q-bar">${v == null ? '' : `<span><i style="width:${qPct(v)}"></i></span>`}</span>`)
+    + `<span class="q-what">${what}</span></div>`;
+  const qualityHtml = Q ? `<h3 class="section" id="quality">Quality <span class="count">out of 10</span></h3>
+  <div class="info-block"><div class="qual-grid">
+    ${qRow('q-main', 'Execution', Q.execution, 'How cleanly, quickly and steadily the work was done')}
+    ${qRow('q-part', 'Cleanliness', Q.cleanliness, esc(`${Math.round(100 * (qIn.wasteful_share || 0))}% of the work wasteful; ${mistakesText}`))}
+    ${qRow('q-part', 'Speed', Q.efficiency, esc(Q.efficiency == null && qIn.outcome !== 'success' ? 'the goal was not reached'
+      : `${qNum(qIn.time_to_goal_s)}s to the goal; ${peerText(Q.peers, qIn.peer_median_time_to_goal_s)}`))}
+    ${qRow('q-part', 'Steadiness', Q.fluency, esc(`${Math.round(100 * (qIn.hesitation_share || 0))}% of the work with every arm waiting`))}
+    <div class="q-gap"></div>
+    ${qRow('q-main', 'Outcome', Q.outcome, esc(`How much of the labelled goal was reached${Q.relation && Q.relation !== 'aligned'
+      ? `; the work done is ${Q.relation} from the label` : ''}`))}
+    ${subs.length ? `<div class="q-gap"></div><div class="q-head">Subgoals, scored on the stretch of work that ends in each</div>`
+      + subs.map((st, i) => qRow('q-sub', `${st.goal ? 'Goal' : `Subgoal ${i + 1}`}, ${fmtT(st.end_s)}`, st.execution,
+        `<b>${esc(st.label || '')}</b> &middot; ${qNum(st.duration_s)}s${st.peer_median_s != null ? `, median ${qNum(st.peer_median_s)}s` : ''}`,
+        st.reached ? '' : 'not reached')).join('') : ''}
+  </div></div>` : '';
 
   // lanes under the timeline, on its time scale: when the wearer's hands leave a head camera (the model's
   // per-step hands_visible), and the dataset's own timed labels as the publisher ships them
