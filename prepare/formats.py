@@ -1121,9 +1121,14 @@ def nearest(src_t: np.ndarray, q: np.ndarray) -> np.ndarray:
     return np.where(np.abs(src_t[i - 1] - q) <= np.abs(src_t[i] - q), i - 1, i).astype(np.int32)
 
 
-SCENE_WORDS = ("top", "high", "head", "overhead", "exo", "front", "scene", "main", "cam")
-FIXED_WORDS = ("top", "high", "overhead", "exterior", "front", "scene", "exo", "zed", "stereo", "low", "static", "third")
+# Camera words, each matched whole (_names_word), so laptop_cam is not a top camera and handle_cam is not on a hand.
+# A camera word glued after another (leftcam, topcam) is split off (word_tokens); ZED X and ZED Mini name themselves
+# zedx and zedm, and a top-down camera topdown.
+SCENE_WORDS = ("top", "high", "head", "overhead", "exo", "front", "scene", "main", ("cam", "camera"))
+FIXED_WORDS = ("top", "topdown", "high", "overhead", "exterior", "front", "scene", "exo", "zed", "zedm", "zedx",
+               "stereo", "low", "static", "third")
 MOUNTED_WORDS = ("wrist", "hand", "gripper", "arm", "eef", "ee")
+SIDE_WORDS = {"l": "left", "left": "left", "r": "right", "right": "right"}
 
 
 def tokens(name: str) -> list[str]:
@@ -1132,12 +1137,28 @@ def tokens(name: str) -> list[str]:
     return [t for t in re.split(r"[^a-z0-9]+", spaced.lower()) if t]
 
 
+def word_tokens(name) -> list[str]:
+    """The words every name-word match reads (_names_word, side_of): tokens (split at anything but letters and digits,
+    so at _ / . - and spaces, and at camelCase), each split again between letters and digits (fsr0, zed2i,
+    panda_joint1) and where a camera word ends a longer word (leftcam, wristcam, RGBCamera), so that a word is only
+    ever matched whole. A run of eight or more hex digits (an episode's uuid) is an id, kept whole, so its letters
+    never read as words (3a7229fe71ee is not ee)."""
+    out = []
+    for t in tokens(str(name)):
+        if re.fullmatch(r"[0-9a-f]{8,}", t) and re.search(r"[0-9]", t) and re.search(r"[a-f]", t):
+            out.append(t)
+            continue
+        for run in re.findall(r"[a-z]+|[0-9]+", t):
+            glued = re.fullmatch(r"([a-z]{2,}?)(cam|camera)", run)
+            out += [glued[1], glued[2]] if glued else [run]
+    return out
+
+
 def side_of(name: str) -> str | None:
-    """left / right when a word of the name is or starts with the side (left, leftcam, l), else None."""
-    for tk in tokens(name):
-        for side in ("left", "right"):
-            if tk == side[0] or tk.startswith(side):
-                return side
+    """left / right when a word of the name (word_tokens) is the side or its letter (left, leftCam, l), else None."""
+    for tk in word_tokens(name):
+        if tk in SIDE_WORDS:
+            return SIDE_WORDS[tk]
     return None
 
 
@@ -1148,8 +1169,7 @@ def recorded_state_identity(source=None, names=None) -> dict:
     """One native arm group's claims, distinguishing missing identity from conflicting recorded sides."""
     names = [str(n) for n in names] if names is not None else []
     def sides(name):
-        return {side for tk in tokens(name) for side in ("left", "right")
-                if tk == side[0] or tk.startswith(side)}
+        return {SIDE_WORDS[tk] for tk in word_tokens(name) if tk in SIDE_WORDS}
     said = sides(source) if isinstance(source, str) else set()
     for name in names:
         said.update(sides(name))
@@ -1216,7 +1236,7 @@ def record_state_identity(ctx: dict, source=None, names=None, dims: int = JOINT_
 
 
 def is_mount_named(name: str) -> bool:
-    return any(t.startswith(w) for t in tokens(name) for w in MOUNTED_WORDS)
+    return _names_word(name, MOUNTED_WORDS)
 
 
 def mounted_side(name: str) -> str | None:
@@ -1228,14 +1248,14 @@ def mounted_side(name: str) -> str | None:
         return None
     if is_mount_named(name):
         return side
-    return None if any(t.startswith(w) for t in tokens(name) for w in FIXED_WORDS) else side
+    return None if _names_word(name, FIXED_WORDS) else side
 
 
 def scene_rank(name: str) -> int:
-    """Prefer an overhead / head / front camera as the scene camera when several are unnamed."""
-    n = name.lower()
+    """Prefer an overhead / head / front camera as the scene camera when several are unnamed: the first of SCENE_WORDS
+    the name says as a whole word."""
     for i, w in enumerate(SCENE_WORDS):
-        if w in n:
+        if _names_word(name, w if isinstance(w, tuple) else (w,)):
             return i
     return 99
 
@@ -1255,11 +1275,11 @@ COMMAND_WORDS = ("action", "cmd", "command", "commanded", "target", "setpoint", 
 
 
 def _names_word(name: str, words) -> bool:
-    """Whether a word of a name (tokens) is one of words, alone, plural or numbered (tactile, tactiles, digit_0, fsr0),
-    never as part of a longer word: digital is not digit and reinforcement is not force."""
-    for t in tokens(name):
-        stem = t.rstrip("0123456789")
-        if stem in words or (stem.endswith("s") and stem[:-1] in words):
+    """Whether a word of a name (word_tokens) is one of words, alone, plural or numbered (tactile, tactiles, digit_0,
+    fsr0), never as part of a longer word: digital is not digit, reinforcement is not force, laptop is not top and
+    interaction is not action. Every match of a word in a camera, topic, field or file name goes through here."""
+    for t in word_tokens(name):
+        if t in words or (t.endswith("s") and t[:-1] in words):
             return True
     return False
 
@@ -1581,7 +1601,7 @@ def describe(cam: dict, view: str, name: str, rig: str) -> dict:
     if rig == "ego_head" and view == "exo":
         cam['name'] = 'head'
     elif rig == "handheld_gripper" and view in ("left", "right"):
-        if view == "right" and not re.search("right", name, re.I):
+        if view == "right" and side_of(name) != "right":
             cam['name'] = 'gripper'
     provenance = 'recorded_name' if view in ('left', 'right') and is_mount_named(name) else 'presentation'
     cam['role_provenance'] = provenance
@@ -3882,7 +3902,7 @@ def name_parts(stem: str) -> dict:
 
 
 def _says_cameras(cams: list[str]) -> bool:
-    return any(re.search(r"left|right", c, re.I) for c in cams) or all(camera_named(c) for c in cams)
+    return any(side_of(c) is not None for c in cams) or all(camera_named(c) for c in cams)
 
 
 def one_take(stems: list[str]) -> bool:

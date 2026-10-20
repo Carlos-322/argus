@@ -5084,3 +5084,20 @@ def test_trimming_prepared_signals_preserves_native_clocks_and_placement_limits(
                                                          if s['name'] == signal['name'])
                 assert not {'touch', 'rest', 'swing', 'scale_note'} & signal.keys()
         assert not lc.of_episode(me.load(ep))
+
+
+def test_camera_words_are_matched_whole_so_a_laptop_camera_is_not_the_top_camera():
+    """scene_rank matched words inside words: laptop_cam ranked as a top camera and took the scene slot from a front
+    camera, and every name containing cam ranked 8th. The mount and fixed words matched any word they began, so
+    handle_cam was a hand camera."""
+    views, _ = f.assign_views(["laptop_cam", "front_cam"], "teleop_arms")
+    assert views["exo"] == "front_cam"
+    assert f.scene_rank("laptop_cam") == f.scene_rank("camera_0") == f.SCENE_WORDS.index(("cam", "camera"))
+    assert f.scene_rank("top_cam") == f.scene_rank("topcam") == 0 and f.scene_rank("realsense_d435") == 99
+    assert not f.is_mount_named("handle_cam") and f.is_mount_named("wristcam") and f.is_mount_named("cam_left_wrist")
+    # glued and camelCase camera words still split; a stereo camera's model name is still a fixed camera
+    assert f.side_of("leftCam") == f.side_of("leftcam") == "left" and f.mounted_side("zedx_left") is None
+    assert f.word_tokens("RGBCamera2") == ["rgb", "camera", "2"]
+    # an episode's uuid is one id, never letters that read as ee
+    assert not f.is_mount_named("episode_e73c0f86-4739-42cd-81b2-3a7229fe71ee")
+
