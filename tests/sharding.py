@@ -1,4 +1,4 @@
-"""Split the suite into shards that CI runs side by side (ARGUS_TEST_SHARD=1/4 ... 4/4).
+"""Split the suite into shards that CI runs side by side (ARGUS_TEST_SHARD=1/8 ... 8/8).
 
 A shard is a set of whole test files, so every file runs complete and in its usual order, as it does in one run.
 Files are placed largest first, each on the shard with the least time so far, by the seconds recorded in

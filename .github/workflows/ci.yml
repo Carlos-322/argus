@@ -20,16 +20,16 @@ env:
   HF_DATASETS_OFFLINE: "1"
 
 jobs:
-  # The suite runs as four shards side by side, each a set of whole test files balanced by recorded time
+  # The suite runs as eight shards side by side, each a set of whole test files balanced by recorded time
   # (tests/sharding.py); "tests" passes only when every shard does.
   shard:
-    name: tests ${{ matrix.shard }}/4
+    name: tests ${{ matrix.shard }}/8
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -54,7 +54,7 @@ jobs:
         run: uv sync --locked
       - name: Test without provider or dataset access
         env:
-          ARGUS_TEST_SHARD: ${{ matrix.shard }}/4
+          ARGUS_TEST_SHARD: ${{ matrix.shard }}/8
         run: uv run --frozen --offline pytest -q -ra
 
   tests:

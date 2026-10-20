@@ -13,17 +13,32 @@ def _uploads_read_in_this_process(monkeypatch):
     monkeypatch.setenv('ARGUS_READER_ISOLATION', '0')
 
 
-def pytest_collection_modifyitems(config, items):
-    """With ARGUS_TEST_SHARD=i/n, keep only the test files of shard i of n (tests/sharding.py). Without it, run all."""
+_SHARD = {}
+
+
+def _shard_of(config) -> tuple[int, dict] | None:
+    """(this shard's index, {test file: shard index}) under ARGUS_TEST_SHARD=i/n, else None. Every test file under
+    tests/ is placed, so each shard computes the same split from the same files (tests/sharding.py)."""
     value = os.environ.get('ARGUS_TEST_SHARD')
     if not value:
-        return
-    index, count = parse(value)
-    root = config.rootpath
-    path = {item: item.path.relative_to(root).as_posix() for item in items}
-    shard = assign(path.values(), count)
-    keep = [item for item in items if shard[path[item]] == index]
-    dropped = [item for item in items if shard[path[item]] != index]
-    if dropped:
-        config.hook.pytest_deselected(items=dropped)
-    items[:] = keep
+        return None
+    if value not in _SHARD:
+        index, count = parse(value)
+        root = config.rootpath
+        files = [f.relative_to(root).as_posix() for f in sorted((root / 'tests').rglob('test_*.py'))]
+        _SHARD[value] = (index, assign(files, count))
+    return _SHARD[value]
+
+
+def pytest_ignore_collect(collection_path, config):
+    """With ARGUS_TEST_SHARD=i/n, skip the test files of the other shards before they are imported. Without it, run
+    all."""
+    shard = _shard_of(config)
+    if shard is None or not (collection_path.name.startswith('test_') and collection_path.suffix == '.py'):
+        return None
+    index, placed = shard
+    try:
+        rel = collection_path.relative_to(config.rootpath).as_posix()
+    except ValueError:
+        return None
+    return True if placed.get(rel, index) != index else None
