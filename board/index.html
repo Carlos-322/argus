@@ -1284,6 +1284,10 @@ aside.left .cam-row-grippers.cam-main-scene:has(.sensor-overlay-stack) .cam-cell
 .key-ev.untimed .ke-time, .feed .ev.untimed .t { font-size: 10.5px; white-space: nowrap; }
 .key-ev .ke-body { min-width: 0; }
 .key-ev .ke-row1 { display: flex; align-items: baseline; gap: 10px; justify-content: space-between; }
+.key-ev .ke-kind { display: inline-block; margin-right: 8px; padding: 1px 7px; border-radius: var(--r-pill);
+  font-family: var(--mono); font-size: 10px; font-weight: 600; color: var(--fg-2); border: 1px solid var(--line);
+  vertical-align: 1px; }
+.key-ev .ke-kind.sub { background: var(--fg); color: var(--bg, #fff); border-color: var(--fg); }
 .key-ev .ke-label { color: var(--fg); font-size: 13px; line-height: 1.4; }
 .key-ev .outcome {
   flex: 0 0 auto; font-size: 10px; font-family: var(--mono); font-weight: 600;
@@ -1624,6 +1628,48 @@ h3.section .count {
   vector-effect: non-scaling-stroke; }
 .prog-overlay .po-past { fill: none; stroke: #f3f2ec; stroke-width: 2; vector-effect: non-scaling-stroke; }
 .prog-overlay .po-dot { fill: #f3f2ec; }
+/* the Quality section: Execution and Outcome are two boxes side by side, each its score over a grid of cells, and
+   Subgoals is a table in a box of its own; every box has the same header, the same cell and the same bar */
+.qual { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.qual-box { border: 1px solid var(--line); border-radius: var(--r-md); background: var(--panel, #fff); overflow: hidden; }
+.qual-box.wide { grid-column: 1 / -1; }
+.qual-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  padding: 12px 14px 10px; border-bottom: 1px solid var(--line); }
+.qual-title { font-size: 14px; font-weight: 600; color: var(--fg); }
+.qual-score { font-family: var(--mono); font-size: 24px; font-weight: 700; line-height: 1; }
+.qual-score small { font-size: 12px; font-weight: 600; color: var(--fg-2); margin-left: 2px; }
+.qual-headbar { padding: 0 14px 12px; border-bottom: 1px solid var(--line); }
+/* every bar is drawn against its full track to 10, so a short fill reads as a share of the whole */
+.qual-bar { display: block; height: 8px; border-radius: 4px; background: rgba(0,0,0,0.10);
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.06); overflow: hidden; }
+.qual-bar i { display: block; height: 100%; background: var(--fg); }
+.qual-cells { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.qual-cell { padding: 10px 14px 12px; border-right: 1px solid var(--line); min-width: 0; }
+.qual-cell:last-child { border-right: 0; }
+.qual-cell .qc-k { font-size: 11px; color: var(--fg-2); font-weight: 600; }
+.qual-cell .qc-v { font-family: var(--mono); font-size: 17px; font-weight: 700; margin: 3px 0 6px; }
+.qual-cell .qual-bar { height: 6px; margin-bottom: 6px; }
+.qual-cell .qc-sub { font-family: var(--mono); font-size: 11px; color: var(--fg-2); line-height: 1.35; }
+.qual-cell .qc-bad, .qual-table .qc-bad { color: var(--danger); }
+.qual-cell .qc-word { font-family: var(--sans, inherit); font-size: 14px; font-weight: 600; }
+.qual-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.qual-table th { text-align: left; font-size: 11px; font-weight: 600; color: var(--fg-2); padding: 8px 14px;
+  border-bottom: 1px solid var(--line); white-space: nowrap; }
+.qual-table td { padding: 8px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.qual-table tr:last-child td { border-bottom: 0; }
+.qual-table .num { font-family: var(--mono); text-align: right; white-space: nowrap; }
+
+.qual-table .qt-score { display: grid; grid-template-columns: 34px 110px; gap: 10px; align-items: center; }
+.qual-table .qt-score b { font-family: var(--mono); text-align: right; }
+.qual-table { table-layout: fixed; }
+.qual-table .qt-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qual-box.folds .ck-all-in .qual-table tr:first-child td { border-top: 1px solid var(--line); }
+.qual-box.open .ck-all { grid-template-rows: 1fr; }
+.qual-box.open .ck-all-in { opacity: 1; }
+.qual-box .qual-more { margin: 0; padding: 10px 14px; border-top: 1px solid var(--line); width: 100%; text-align: left; }
+.qual-table tr[data-t] { cursor: pointer; }
+.qual-table tr[data-t]:hover td { background: var(--hover, rgba(0,0,0,0.03)); }
+@media (max-width: 900px) { .qual { grid-template-columns: 1fr; } }
 /* top-right transient toast: object state changes, below the fullscreen button (.fs-btn, 8 px + 26 px) */
 .state-toast {
   position: absolute; top: calc(var(--fx-top, 0px) + 40px); right: calc(var(--fx-right, 0px) + 8px);
@@ -1724,6 +1770,19 @@ h3.section .count {
 }
 .timeline .marker.goal:hover { width: 5px; z-index: 8; }
 
+/* the score chip (board/scores.py): bottom left of the video, beside the caption, only while the caption shows a
+   subgoal or the goal reached (the caption's own key-event window), just the scores */
+.score-chip {
+  position: absolute; left: calc(var(--fx-left, 0px) + 12px); bottom: calc(var(--fx-bottom, 0px) + 70px); z-index: 4;
+  display: grid; grid-template-columns: auto auto; column-gap: 8px; row-gap: 1px; align-items: baseline;
+  padding: 5px 9px; border-radius: var(--r-md); background: rgba(0,0,0,0.6); border: 1px solid rgba(255,255,255,0.14);
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  opacity: 0; transform: translateY(6px); transition: opacity 150ms ease, transform 150ms ease; pointer-events: none;
+}
+.score-chip.active { opacity: 1; transform: translateY(0); }
+.score-chip .sc-k { font-size: 10px; color: rgba(255,255,255,0.7); }
+.score-chip .sc-v { font-family: var(--mono); font-size: 13px; font-weight: 700; color: #f3f2ec; text-align: right; }
+.section .ke-what { font-size: 12px; font-weight: 400; color: var(--fg-2); margin-left: 6px; }
 /* key-event flag module inside the bottom segment overlay */
 .video-overlay .vo-key { display: block; margin-bottom: 6px; }
 .video-overlay .vo-key-badge {
@@ -1831,6 +1890,11 @@ h3.section { border-top: 1px solid var(--border-strong); }
 .ck-all { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 320ms cubic-bezier(.32,.72,0,1); }
 .ck-all-in { overflow: hidden; min-height: 0; opacity: 0; transition: opacity 240ms ease; }
 .ck-theirs.open .ck-all { grid-template-rows: 1fr; }
+.fold.open .ck-all { grid-template-rows: 1fr; }
+.fold.open .ck-all-in { opacity: 1; }
+.key-events .fold-in { display: flex; flex-direction: column; gap: 6px; }
+.key-events .fold.open .fold-in { padding-top: 0; }
+.tasks-panel .fold-in .task-row:first-child { border-top: 1px solid var(--row-divider); }
 .ck-theirs.open .ck-all-in { opacity: 1; }
 .ck-more { margin-top: 6px; padding: 4px 0; background: none; border: 0; font: 500 12px/1.3 var(--sans);
   color: #2f7f76; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
@@ -3162,7 +3226,27 @@ let ISSUE_FILTER = null;   // null = show all; else an issue-class string
 // mistake that changed the outcome at medium or high, or any at high), or everything the model reported, low severity
 // included. Remembered per viewer.
 let INCLUDE_MINOR = false;
-let CHECKS_OPEN = false;       // the full list of capture checks, kept open or closed across episodes
+let CHECKS_OPEN = false;
+let SUBS_OPEN = false;         // the Subgoals table past its first rows, kept open or closed across episodes
+const SUBS_FIRST = 5;          // subgoal rows shown before "Show all"
+const FOLD_FIRST = 5;          // rows of a list under the video shown before "Show all"
+const FOLD_OPEN = {};          // which of those lists are open, kept across episodes
+// a list that grows with the episode: its first rows, then the rest folded behind "Show all N <noun>"
+function foldRows(rows, noun, key) {
+  if (rows.length <= FOLD_FIRST) return rows.join('');
+  const open = !!FOLD_OPEN[key];
+  return rows.slice(0, FOLD_FIRST).join('') + `<div class="fold${open ? ' open' : ''}" data-fold="${key}">`
+    + `<div class="ck-all"><div class="ck-all-in fold-in">${rows.slice(FOLD_FIRST).join('')}</div></div>`
+    + `<button class="ck-more fold-more" type="button" data-n="${rows.length}" data-noun="${noun}" `
+    + `onclick="foldToggle(this)">${open ? `Show the first ${FOLD_FIRST}` : `Show all ${rows.length} ${noun}`}</button></div>`;
+}
+function foldToggle(btn) {
+  const f = btn.closest('.fold');
+  const open = !f.classList.contains('open');
+  FOLD_OPEN[f.dataset.fold] = open;
+  f.classList.toggle('open', open);
+  btn.textContent = open ? `Show the first ${FOLD_FIRST}` : `Show all ${btn.dataset.n} ${btn.dataset.noun}`;
+}       // the full list of capture checks, kept open or closed across episodes
 
 // Every check run on this episode, fired or not, in one section: ours (recording and label) and the capture checks
 // of public-dataset-adapter. A firing counted as a problem is also in the problem cards above; here each check
@@ -6277,6 +6361,73 @@ function renderEp(d, opts) {
     </div>`;
   }
 
+  // the episode's quality scores (board/scores.py): a chip on the video when each subgoal or the goal is reached, and
+  // a Quality section below that sets each score beside what it measured
+  const Q = d.scores && d.scores.version === 1 ? d.scores : null;
+  const qNum = v => v == null ? '-' : (Math.round(v * 10) / 10).toString();
+  const qPct = v => `${v == null ? 0 : Math.max(0, Math.min(10, v)) * 10}%`;
+  const qIn = Q ? Q.inputs || {} : {};
+  const subs = Q ? Q.subgoals || [] : [];
+  const bar = v => `<span class="qual-bar"><i style="width:${qPct(v)}"></i></span>`;
+  // one cell: a short label, the number, its bar, one short value; the longer explanation is its tooltip
+  const cell = (k, v, sub, tip, bad, shown) => `<div class="qual-cell" title="${esc(tip)}"><div class="qc-k">${k}</div>`
+    + (v == null ? `<div class="qc-v qc-word${bad ? ' qc-bad' : ''}">${esc(sub)}</div>`
+       : `<div class="qc-v">${shown ?? qNum(v)}</div>${bar(v)}${sub ? `<div class="qc-sub">${esc(sub)}</div>` : ''}`) + '</div>';
+  const box = (title, v, body, wide, folds) => `<div class="qual-box${wide ? ' wide' : ''}${folds ? ' folds' : ''}${folds
+    && SUBS_OPEN ? ' open' : ''}"><div class="qual-head">`
+    + `<span class="qual-title">${title}</span>${v === undefined ? '' : `<span class="qual-score">${qNum(v)}<small>/10</small></span>`}</div>`
+    + (v === undefined ? '' : `<div class="qual-headbar">${bar(v)}</div>`) + body + '</div>';
+  // the Subgoals table: one row per subgoal stretch, the first SUBS_FIRST shown and the rest folded; both parts are
+  // tables with the same fixed columns so the folded rows line up under the header
+  const subCols = `<colgroup>${qIn.tasks_total ? '<col style="width:64px">' : ''}<col style="width:48px"><col style="width:92px">`
+    + '<col><col style="width:64px"><col style="width:72px"><col style="width:88px"><col style="width:164px"></colgroup>';
+  let subRowN = 0;
+  const subRows = subs.map(st => `<tr data-t="${st.start_s}">${qIn.tasks_total ? `<td class="num">${st.task ?? '-'}</td>` : ''}
+        <td class="num">${st.goal ? (qIn.tasks_total ? 'End' : 'Goal') : ++subRowN}</td>
+        <td class="num${!st.reached && st.outcome !== 'unclear' ? ' qc-bad' : ''}">${st.reached ? fmtT(st.end_s)
+          : st.outcome === 'unclear' ? 'unclear' : 'not reached'}</td><td class="qt-name">${esc(st.label || '')}</td>
+        <td class="num">${qNum(st.duration_s)}s</td><td class="num">${st.peer_median_s != null ? qNum(st.peer_median_s) + 's' : '-'}</td>
+        <td class="num${(st.failed_attempts || []).length ? ' qc-bad' : ''}" title="${esc((st.failed_attempts || [])
+          .map(k => fmtT(k.t_s) + '  ' + (k.label || '')).join('\n'))}">${(st.failed_attempts || []).length}</td>
+        <td><span class="qt-score"><b>${qNum(st.execution)}</b>${bar(st.execution)}</span></td></tr>`);
+  const subsTable = `<table class="qual-table">${subCols}<thead><tr>${qIn.tasks_total ? '<th class="num">Subtask</th>' : ''}`
+    + `<th class="num">#</th><th class="num">Done at</th><th class="qt-name">Subgoal</th><th class="num">Took</th>`
+    + `<th class="num">Median</th><th class="num">Failed tries</th><th>Execution</th></tr></thead>`
+    + `<tbody>${subRows.slice(0, SUBS_FIRST).join('')}</tbody></table>`
+    + (subRows.length > SUBS_FIRST ? `<div class="ck-all"><div class="ck-all-in"><table class="qual-table">${subCols}`
+      + `<tbody>${subRows.slice(SUBS_FIRST).join('')}</tbody></table></div></div>`
+      + `<button class="ck-more qual-more" type="button" onclick="SUBS_OPEN = !SUBS_OPEN; `
+      + `this.closest('.qual-box').classList.toggle('open', SUBS_OPEN); this.textContent = SUBS_OPEN ? 'Show the first ${SUBS_FIRST}' `
+      + `: 'Show all ${subRows.length} subgoals'">${SUBS_OPEN ? `Show the first ${SUBS_FIRST}` : `Show all ${subRows.length} subgoals`}</button>`
+      : '');
+  const nMistakes = (qIn.penalties || []).length;
+  const goalT = comp.completed_at_s ?? comp.goal_reached_at_s;
+  const qualityHtml = Q ? `<h3 class="section" id="quality">Quality</h3><div class="qual">
+    ${box('Execution', Q.execution, `<div class="qual-cells">
+      ${cell('Cleanliness', Q.cleanliness, `${Math.round(100 * (qIn.wasteful_share || 0))}% wasteful, ${nMistakes} mistake${nMistakes === 1 ? '' : 's'}`,
+        (qIn.penalties || []).map(x => `${x.mistake} (${x.severity}${x.recovered ? ', recovered' : ''}, -${x.points})`).join('\n')
+        || 'Share of the work marked wasteful, and points off per operator mistake')}
+      ${cell('Speed', Q.efficiency, Q.efficiency == null ? (qIn.tasks_total ? 'several subtasks'
+          : qIn.outcome === 'success' ? 'no peers' : 'goal not reached')
+        : `${qNum(qIn.time_to_goal_s)}s, median ${qNum(qIn.peer_median_time_to_goal_s)}s`,
+        Q.peers >= 5 ? `Time from the first action to the goal, against ${Q.peers} other successful demos of this task`
+          : 'Fewer than 5 other successful demos of this task to compare with')}
+      ${cell('Steadiness', Q.fluency, `${Math.round(100 * (qIn.hesitation_share || 0))}% waiting`,
+        'Share of the work with every arm waiting')}
+    </div>`)}
+    ${box('Outcome', Q.outcome, `<div class="qual-cells">
+      ${qIn.tasks_total ? `${cell('Subtasks', null, `${qIn.tasks_done} of ${qIn.tasks_total} done`,
+          'Subtasks whose end state the footage shows reached', qIn.tasks_done < qIn.tasks_judged)}
+        ${cell('Unclear', null, `${qIn.tasks_total - qIn.tasks_judged} subtask${qIn.tasks_total - qIn.tasks_judged === 1 ? '' : 's'}`,
+          'Subtasks the footage does not settle, eg cut off by the end of the clip; they count for nothing either way')}`
+      : `${cell('Goal', null, goalT != null ? `reached ${fmtT(goalT)}` : 'not reached', 'When the labelled goal was first met', goalT == null)}
+      ${cell('Progress', 10 * (qIn.progress_reached || 0), '', 'The furthest the work got toward the labelled goal',
+        false, `${Math.round(100 * (qIn.progress_reached || 0))}%`)}`}
+      ${cell('Label', null, Q.relation || 'no label', 'How the work done relates to the labelled task', Q.relation && Q.relation !== 'aligned')}
+    </div>`)}
+    ${subs.length ? box('Subgoals', undefined, subsTable, true, SUBS_FIRST < subs.length) : ''}
+  </div>` : '';
+
   // lanes under the timeline, on its time scale: when the wearer's hands leave a head camera (the model's
   // per-step hands_visible), and the dataset's own timed labels as the publisher ships them
   const lanePct = (t) => (100 * Math.max(0, Math.min(duration, t)) / Math.max(duration, 1e-6));
@@ -6439,30 +6590,34 @@ function renderEp(d, opts) {
       + `class="tip">${esc(fmtT(k.t_s))}   ${k.kind ? esc(kindName(k.kind)) + ': ' : ''}${esc(k.label || '')}${oc
       ? '  [' + esc(oc) + ']' : ''}</div></div>`;
   }
-  let keyPanelHtml = '';
+  const keyRows = [];
   const untimed = untimedRows(d, keyEvents.length + 1);
+  // each key event names its kind, and the ones tagged subgoal_complete say which subgoal they end (Quality scores them)
+  let subN = 0;
   keyEvents.forEach((k, i) => {
     const oc = (k.outcome || '').toLowerCase();
     const goalish = k.kind === 'goal_reached' || k.kind === 'subgoal_complete';
-    keyPanelHtml += `<div class="key-ev ${esc(oc)}${goalish ? ' goal' : ''}" data-t="${esc(k.t_s)}">
+    const kindChip = k.kind === 'subgoal_complete' ? `<span class="ke-kind sub">Subgoal ${++subN}</span>`
+      : k.kind ? `<span class="ke-kind">${esc(kindName(k.kind))}</span>` : '';
+    keyRows.push(`<div class="key-ev ${esc(oc)}${goalish ? ' goal' : ''}" data-t="${esc(k.t_s)}">
       <span class="ke-num">${i + 1}</span>
       <span class="ke-time">${fmtT(k.t_s)}</span>
       <div class="ke-body">
-        <div class="ke-row1"><span class="ke-label">${esc(k.label || '')}</span>${oc
+        <div class="ke-row1"><span class="ke-label">${kindChip}${esc(k.label || '')}</span>${oc
           ? `<span class="outcome ${esc(oc)}">${esc(oc)}</span>` : ''}</div>
         ${k.note ? `<div class="ke-note">${esc(k.note)}</div>` : ''}
       </div>
-    </div>`;
+    </div>`);
   });
-  keyPanelHtml += untimed.keys.join('');
+  const keyPanelHtml = foldRows([...keyRows, ...untimed.keys], 'key events', 'key');
 
   // the review of how the task was performed, and the state changes; the scene graph is a snapshot that follows the
   // playhead (renderSceneGraph)
   const perfHtml = d.performance_review
     ? `<div class="info-block"><div class="perf">${esc(d.performance_review)}</div></div>` : '';
-  const scHtml = (d.state_changes || []).map(x =>
+  const scHtml = foldRows((d.state_changes || []).map(x =>
     `<div class="line"><span class="t">${fmtT(x.t_s)}</span> <span class="v">${esc(x.object || '')}</span>: ${esc(x.from
-      || '')} <span style="color:var(--fg-3)">-&gt;</span> ${esc(x.to || '')}</div>`).join('');
+      || '')} <span style="color:var(--fg-3)">-&gt;</span> ${esc(x.to || '')}</div>`), 'changes', 'sc');
   // recoveries: each failed subevent paired with its recovery; a reply that leaves out "recovered" but gives a
   // recovery time is read as recovered
   const recoveries = (d.recovery || []).map(r => ({
@@ -6474,7 +6629,7 @@ function renderEp(d, opts) {
     howToFix: r.how_to_fix || '',
   })).filter(r => r.failureT != null).sort((a, b) => a.failureT - b.failureT);
 
-  let rcHtml = '';
+  const rcRows = [];
   for (const r of recoveries) {
     const recTag = r.recovered === true
       ? `<span class="rec-ok"${r.recoveredAt != null ? ` data-t="${esc(r.recoveredAt)}"`
@@ -6485,12 +6640,13 @@ function renderEp(d, opts) {
     const recDetail = r.recovered === true
       ? (r.correction ? `<div class="rec-line"><span class="rec-k">did</span> ${esc(r.correction)}</div>` : '')
       : (r.howToFix ? `<div class="rec-line"><span class="rec-k">how to fix</span> ${esc(r.howToFix)}</div>` : '');
-    rcHtml += `<div class="rec">
+    rcRows.push(`<div class="rec">
       <div class="rec-head"><span class="rec-t" data-t="${esc(r.failureT)}">${fmtT(r.failureT)}</span><span `
         + `class="rec-fail">${esc(r.failure)}</span>${recTag}</div>
       ${recDetail}
-    </div>`;
+    </div>`);
   }
+  const rcHtml = foldRows(rcRows, 'recoveries', 'rec');
   const ivHtml = (d.instruction_variants || []).map(v => `<li>${esc(v)}</li>`).join('');
   const verdict = (comp.task_completed || '').toLowerCase();
   // the verdict's colour: green when the task ends done, red when it does not (undone included), ink otherwise
@@ -6503,13 +6659,13 @@ function renderEp(d, opts) {
   const tcount = {success: 0, failure: 0};
   tasks.forEach(t => { const o = (t.outcome || '').toLowerCase(); if (o in tcount) tcount[o]++; });
   const tPartly = tasks.filter(t => t.failure_kind === 'partial').length;
-  let tasksHtml = '';
+  const taskRows = [];
   tasks.forEach((t, i) => {
     const oc = (t.outcome || '').toLowerCase();
     const span = (t.start_s != null && t.end_s != null) ? `${fmtT(t.start_s)}-${fmtT(t.end_s)}` : '';
     const done = t.completed_at_s != null ? ` &middot; done ${fmtT(t.completed_at_s)}` : '';
     const jump = t.completed_at_s != null ? t.completed_at_s : t.start_s;
-    tasksHtml += `<div class="task-row ${esc(oc)}"${jump != null ? ` data-t="${esc(jump)}"` : ''}>
+    taskRows.push(`<div class="task-row ${esc(oc)}"${jump != null ? ` data-t="${esc(jump)}"` : ''}>
       <span class="task-num ${esc(oc)}">${i + 1}</span>
       <div class="task-body">
         <div class="task-head"><span class="task-name">${esc(t.task || '?')}</span>${oc
@@ -6518,8 +6674,9 @@ function renderEp(d, opts) {
         ${t.success_predicate ? `<div class="task-pred">${esc(t.success_predicate)}</div>` : ''}
         ${t.note ? `<div class="task-note">${esc(t.note)}</div>` : ''}
       </div>
-    </div>`;
+    </div>`);
   });
+  const tasksHtml = foldRows(taskRows, 'tasks', 'task');
   // the problems: deterministic checks that fired, data issues and operator mistakes
   const dataIssues = (d.data_issues || []).filter(x => x && x.issue);
   const tb = (d.dataset_checks || {}).timebase || null;
@@ -6707,6 +6864,7 @@ function renderEp(d, opts) {
           <div class="state-toast" id="state-toast"></div>
           <div class="recovery-overlay" id="recovery-overlay"></div>
           <div class="video-overlay" id="video-overlay"></div>
+          ${Q ? '<div class="score-chip" id="score-chip"></div>' : ''}
   `;
   const mainCameraLabel = isEgo && !unshownCams(d).some(u => u.view === mainCam) ? ''
     : `<span class="cam-label" title="${esc(camLabel(mainCam))}">${esc(unshownCams(d).some(u => u.view === mainCam)
@@ -6772,13 +6930,15 @@ function renderEp(d, opts) {
 
     ${pubHtml}
     ` : `
-    <h3 class="section">Key events <span class="count">${keyEvents.length + untimed.keys.length}</span></h3>
+    <h3 class="section">Key events <span class="count">${keyEvents.length + untimed.keys.length}</span>${Q && subs.some(st => !st.goal)
+      ? `<span class="ke-what">(${subs.filter(st => !st.goal).length} are subgoals, scored under Quality)</span>` : ''}</h3>
     <div class="info-block"><div class="key-events">${keyPanelHtml || '<span style="color:var(--fg-3)">none</span>'}`
       + `</div></div>
 
     ${tasksSection}
     ${requestPartAssessmentsHtml(d)}
 
+    ${qualityHtml}
     ${perfHtml ? `<h3 class="section">How well was the task executed?</h3>${perfHtml}` : ''}
     ${rcHtml ? `<h3 class="section">Recoveries</h3><div class="info-block">${rcHtml}</div>` : ''}
 
@@ -7093,6 +7253,31 @@ function renderEp(d, opts) {
     overlay.classList.remove('adv', 'waste', 'idle', 'none');
     overlay.classList.add('active', cc);
   }
+
+  // the score chip shows a subgoal's execution while the caption shows that subgoal (its key event's window), and the
+  // episode's execution and outcome while it shows the goal reached
+  // (it is first called while the page is still being wired, so it looks up what it needs itself)
+  let _scSig = null, _subByT = null;
+  function renderScoreChip(t) {
+    const scoreChip = document.getElementById('score-chip');
+    if (!scoreChip) return;
+    const subByT = _subByT || (_subByT = new Map(subs.filter(st => !st.goal).map(st => [Math.round(st.end_s * 100), st])));
+    const goalT = comp.completed_at_s;
+    const atGoal = goalT != null && t >= goalT - 0.3 && t <= goalT + 3.0;
+    const k = keyEvents.find(k => k.kind === 'subgoal_complete' && t >= k.t_s - 0.3 && t <= k.t_s + 2.5);
+    const st = k ? subByT.get(Math.round(k.t_s * 100)) : null;
+    const sig = atGoal ? 'goal' : st ? String(st.end_s) : '';
+    if (sig === _scSig) return;
+    _scSig = sig;
+    if (!sig) { scoreChip.classList.remove('active'); return; }
+    scoreChip.innerHTML = atGoal
+      ? `<span class="sc-k">Execution</span><span class="sc-v">${qNum(Q.execution)}</span>`
+        + `<span class="sc-k">Outcome</span><span class="sc-v">${qNum(Q.outcome)}</span>`
+      : `<span class="sc-k">Execution</span><span class="sc-v">${qNum(st.execution)}</span>`;
+    scoreChip.classList.add('active');
+  }
+
+  document.querySelectorAll('.qual-table tr[data-t]').forEach(r => r.addEventListener('click', () => seek(Number(r.dataset.t))));
 
   // ----- head camera: hands out of view -----
   // A head camera often points away from the hands, so a step's action is inferred rather than seen. The model marks
@@ -7522,7 +7707,7 @@ function renderEp(d, opts) {
     if (duration > 0 && ph) ph.style.left = (100 * t / duration) + '%';
     // progress + state first so the recovery banner can place itself below the
     // corner chips that are actually visible this frame.
-    renderProgress(t); renderState(t); renderRecovery(t);
+    renderProgress(t); renderState(t); renderScoreChip(t); renderRecovery(t);
     renderOverlay(t); renderHands(t); renderTaskGoal(t); syncFeed(t); syncKeyEvents(t); renderSceneGraph(t);
     placeSensors();
       syncLanes(t);

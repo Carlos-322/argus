@@ -950,3 +950,13 @@ def test_sensor_contract_follows_visual_rules_without_replacing_them(case):
     assert episode.index('BETWEEN INSTANTS') < episode.index('SENSOR EVIDENCE FOR ADDITIONAL ANNOTATION')
     assert 'VISUAL ANNOTATION CONTRACT' in fixed
     assert 'supplied sensor_findings and evidence_findings fields first' in fixed
+
+
+@pytest.mark.parametrize("rig", ["teleop_arms", "handheld_gripper", "ego_head"])
+@pytest.mark.parametrize("kw", [{}, {"recorded": False}, {"sessions": True}, {"has_instruction": False}])
+def test_every_prompt_defines_a_subgoal_once_as_a_lasting_change_and_keeps_failure_kinds(rig, kw):
+    s = " ".join(prompts.fixed_instructions(rig, **kw).split())
+    assert s.count("A subgoal is a lasting step") == 1
+    assert "kind subgoal_complete" in s and "A pick, a grasp, a contact or a motion is not a subgoal" in s
+    assert "A failed attempt keeps the kind of what failed" in s and "subgoal_failed" not in s
+    assert "completed_at_s), never before it" in s or "completed_at_s, never before it" in s
