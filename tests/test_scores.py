@@ -247,3 +247,82 @@ def test_a_goal_reached_then_undone_reads_as_reached_in_its_goal_row():
     rec["completion"].update({"task_completed": "success_then_undone", "completed_at_s": None, "goal_reached_at_s": 20.0})
     goal = scores.score_board({"undo.json": rec})["undo.json"]["subgoals"][-1]
     assert goal["goal"] and goal["reached"] and goal["end_s"] == 20.0
+
+
+def test_instructions_that_recur_word_for_word_are_separate_tasks_even_from_one_template():
+    recs = {}
+    for i in range(3):
+        recs[f"oven{i}.json"] = _given(_record("bake", 10.0, [(0, 10, "advancing", 1.0)]),
+                                       "Open the electric oven, put the bread inside and close it")
+        recs[f"micro{i}.json"] = _given(_record("heat", 10.0, [(0, 10, "advancing", 1.0)]),
+                                        "Open the microwave oven, put the bread inside and close it")
+    recs["para.json"] = _given(_record("bake", 10.0, [(0, 10, "advancing", 1.0)]),
+                               "Open the electric oven, put bread inside, close it")
+    g = scores.task_groups(recs)
+    assert g["oven0.json"] == g["oven2.json"] != g["micro0.json"] == g["micro2.json"]
+    assert g["para.json"] == g["oven0.json"]                          # a one-off paraphrase finds its task
+
+
+def test_an_empty_task_key_never_joins_anything_and_other_alphabets_keep_their_words():
+    recs = {name: _given(_record("", 10.0, [(0, 10, "advancing", 1.0)]), text) for name, text in
+            (("cup.json", "把杯子放到盘子上"), ("micro.json", "打开微波炉"), ("blank.json", ""), ("stop.json", "the a an"))}
+    for r in recs.values():
+        r["episode_prompt"] = ""
+    g = scores.task_groups(recs)
+    assert len(set(g.values())) == 4
+
+
+def test_similar_subgoals_are_compared_only_within_the_same_dataset():
+    recs = {}
+    for i in range(6):
+        other = _given(_record(f"t{i}", 10.0, [(0, 4, "advancing", 0.5), (4, 10, "advancing", 1.0)],
+                               [(4, "red block added to the row")]), f"build tower {i}")
+        other["dataset"] = "another_robot"
+        recs[f"o{i}.json"] = other
+    recs["me.json"] = _given(_record("lone", 20.0, [(0, 8, "advancing", 0.5), (8, 20, "advancing", 1.0)],
+                                     [(8, "blue block added to the row")]), "a task nobody else did")
+    st = scores.score_board(recs)["me.json"]["subgoals"][0]
+    assert st["peer_basis"] is None and st["efficiency"] is None
+
+
+def test_unreached_subgoals_never_enter_a_similar_pool_and_a_task_basis_with_enough_peers_is_kept():
+    recs = {}
+    for i in range(6):
+        recs[f"same{i}.json"] = _given(_record("t", 10.0, [(0, 5, "advancing", 0.5), (5, 10, "advancing", 1.0)],
+                                               [(5, "cup placed")]), "place the cup then the plate")
+    for i in range(6):
+        recs[f"other{i}.json"] = _given(_record("t", 30.0, [(0, 25, "advancing", 0.5), (25, 30, "advancing", 1.0)],
+                                                [(25, "cup placed")]), f"other task {i}")
+    st = scores.score_board(recs)["same0.json"]["subgoals"][0]
+    assert st["peer_basis"] == "task" and st["peers"] == 5 and st["peer_median_s"] == 5.0
+    pools = scores._similar_pools(recs, {f: scores.subgoals(d, scores.facts(d)) for f, d in recs.items()})
+    assert all(len(p) == 11 for p in pools.values())                # 12 reached "cup placed", itself left out
+
+
+def test_a_subtask_whose_steps_carry_no_progress_is_left_out_of_the_outcome_unless_it_succeeded():
+    rec = _record("two jobs", None, [(0, 10, "advancing", None), (10, 20, "advancing", None)])
+    rec["completion"] = {}
+    rec["tasks"] = [{"start_s": 0, "end_s": 10, "task": "a", "outcome": "success", "completed_at_s": 10},
+                    {"start_s": 10, "end_s": 20, "task": "b", "outcome": "failure", "completed_at_s": None}]
+    s = scores.score_board({"e.json": rec})["e.json"]
+    assert s["outcome"] == 10.0 and s["inputs"]["tasks_judged"] == 1
+
+
+def test_a_subgoal_within_half_a_second_past_its_subtask_belongs_to_it_when_the_next_has_not_begun():
+    rec = _record("two jobs", None, [(0, 10, "advancing", 1.0), (12, 20, "advancing", 1.0)], [(10.3, "bowl rinsed")])
+    rec["completion"] = {}
+    rec["tasks"] = [{"start_s": 0, "end_s": 10, "task": "wash", "outcome": "success", "completed_at_s": 10.3},
+                    {"start_s": 12, "end_s": 20, "task": "peel", "outcome": "success", "completed_at_s": 20}]
+    subs = scores.score_board({"e.json": rec})["e.json"]["subgoals"]
+    assert [(st["task"], st["label"]) for st in subs if not st["goal"]] == [(1, "bowl rinsed")]
+
+
+def test_similar_pools_stay_fast_when_every_label_shares_one_common_word():
+    import time
+    recs = {}
+    for i in range(1500):
+        recs[f"e{i}.json"] = _given(_record(f"t{i}", 10.0, [(0, 4, "advancing", 0.5), (4, 10, "advancing", 1.0)],
+                                            [(4, f"left gripper placed part{i % 400} variant{i % 37}")]), f"task {i}")
+    t = time.time()
+    scores.score_board(recs)
+    assert time.time() - t < 10

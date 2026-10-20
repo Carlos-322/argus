@@ -6425,9 +6425,9 @@ function renderEp(d, opts) {
     + (v === undefined ? '' : `<div class="qual-headbar">${v == null ? '<span class="qual-bar none"></span>' : bar(v)}</div>`)
     + body + '</div>';
   // what a time was compared with, in words: the same subgoal (or the goal) in other demos of this task, similar
-  // subgoals on the same recording setup across the board, or nothing (a missing basis is nothing)
+  // subgoals elsewhere in the same dataset, or nothing (a missing basis is nothing)
   const peerWords = (basis, n, what) => basis === 'task' ? `Median of ${n ?? 'the'} demo${n === 1 ? '' : 's'} of this task`
-    : basis === 'similar' ? `Median of ${n ?? 'the'} similar ${what}${n === 1 ? '' : 's'} on this setup`
+    : basis === 'similar' ? `Median of ${n ?? 'the'} similar ${what}${n === 1 ? '' : 's'} in this dataset`
     : 'Nothing comparable on this board';
   // the Subgoals table: one row per subgoal stretch, the first SUBS_FIRST shown and the rest folded; both parts are
   // tables with the same fixed columns so the folded rows line up under the header

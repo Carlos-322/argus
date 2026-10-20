@@ -22,6 +22,7 @@ as a bad one. A dimension with too few peers to compare against is None, never a
 from __future__ import annotations
 
 import bisect
+import math
 import re
 import statistics
 
@@ -113,33 +114,64 @@ def facts(d: dict) -> dict:
             "relation": (d.get("goal_alignment") or {}).get("relation")}
 
 
-def task_key(d: dict) -> frozenset:
-    """The content words of the task an episode demonstrates: the instruction it was given, so the same recording
-    labelled twice is always the same task, and the model's own summary when there is no instruction or the work done
-    is a different task from it (a mislabelled episode is compared with what it actually shows)."""
+def _content_words(text) -> frozenset:
+    """The content words of a text, in any alphabet (a Chinese instruction keeps its words)."""
+    return frozenset(w for w in re.findall(r"\w+", str(text or "").lower()) if w not in STOP)
+
+
+def task_source(d: dict) -> tuple[frozenset, bool]:
+    """(content words of the task an episode demonstrates, whether they are the given instruction). The task is the
+    instruction the episode was given, so the same recording labelled twice is always the same task, and the model's
+    own summary when there is no usable instruction or the work done is a different task from it (a mislabelled
+    episode is compared with what it actually shows)."""
     given = _dict(d.get("_meta")).get("given_prompt")
     mislabelled = _dict(d.get("goal_alignment")).get("relation") in ("different", "unrelated")
-    text = ("" if mislabelled or not isinstance(given, str) else given).strip() or str(d.get("episode_prompt") or "").strip()
-    return frozenset(w for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in STOP)
+    words = frozenset() if mislabelled or not isinstance(given, str) else _content_words(given)
+    return (words, True) if words else (_content_words(d.get("episode_prompt")), False)
+
+
+def task_key(d: dict) -> frozenset:
+    return task_source(d)[0]
 
 
 def task_groups(records: dict) -> dict:
-    """{file: group id}: demonstrations of one task, joined when their instructions share most of their words
-    (Jaccard of content words at least 0.6), within one dataset. A paraphrase of an instruction joins its group; a
-    different task does not. An instruction already seen joins its group directly, so only new wordings are compared."""
-    groups, members, seen = {}, {}, {}
-    for f, d in sorted(records.items()):
-        key, ds = task_key(d), d.get("dataset")
-        if (ds, key) in seen:
-            groups[f] = seen[(ds, key)]
+    """{file: group id}: demonstrations of one task, within one dataset. An instruction given word for word to two or
+    more episodes is a task of its own, so a dataset's templated instructions ("put the bread in the toaster oven",
+    "... in the microwave") never join each other. A wording seen once, or a model summary, joins the group whose words
+    it mostly shares (Jaccard of content words at least 0.6), so a paraphrase finds its task. An episode with no words
+    at all is a group of its own."""
+    keyed = {f: (d.get("dataset"), *task_source(d)) for f, d in sorted(records.items())}
+    count = {}
+    for ds, key, given in keyed.values():
+        if key and given:
+            count[(ds, key)] = count.get((ds, key), 0) + 1
+    groups, members, exact, next_id = {}, {}, {}, 0
+    # the recurring instructions first, each a group, so nothing later can merge two of them
+    for f, (ds, key, given) in keyed.items():
+        if key and given and count[(ds, key)] >= 2:
+            if (ds, key) not in exact:
+                exact[(ds, key)] = next_id
+                members.setdefault(ds, []).append((next_id, key))
+                next_id += 1
+            groups[f] = exact[(ds, key)]
+    for f, (ds, key, given) in keyed.items():
+        if f in groups:
             continue
-        for gid, gkey in members.get(ds, []):
-            if key and gkey and len(key & gkey) / len(key | gkey) >= 0.6:
-                break
+        if not key:
+            groups[f], next_id = next_id, next_id + 1
+            continue
+        if (ds, key) in exact:
+            groups[f] = exact[(ds, key)]
+            continue
+        best = max(((len(key & gkey) / len(key | gkey), gid) for gid, gkey in members.get(ds, []) if gkey),
+                   default=(0, None))
+        if best[0] >= 0.6:
+            groups[f] = best[1]
         else:
-            gid = sum(len(m) for m in members.values())
-            members.setdefault(ds, []).append((gid, key))
-        groups[f] = seen[(ds, key)] = gid
+            groups[f] = next_id
+            members.setdefault(ds, []).append((next_id, key))
+            next_id += 1
+        exact.setdefault((ds, key), groups[f])
     return groups
 
 
@@ -274,37 +306,51 @@ def subgoals(d: dict, f: dict) -> list:
 
 
 def _words(label) -> frozenset:
-    return frozenset(w for w in re.findall(r"[a-z]+", str(label or "").lower()) if w not in STOP and len(w) > 2)
+    return frozenset(w for w in _content_words(label) if len(w) > 2 and not w.isdigit())
 
 
 def _similar_pools(records: dict, subs_of: dict) -> dict:
-    """{(file, subgoal index): _Peers} of the durations of reached subgoals of the same kind on the same recording
-    setup anywhere on the board, the subgoal itself left out: labels sharing at least SIMILAR of their content words.
-    Labels are compared once per distinct word set, through the words they share, so the cost follows the distinct
-    labels, not every pair of subgoals."""
-    rows = {}                                   # (rig, words) -> durations
-    for f, subs in subs_of.items():
+    """{(file, subgoal index): _Peers} of the durations of reached subgoals of the same kind elsewhere in the same
+    dataset on the same recording setup, the subgoal itself left out: labels sharing at least SIMILAR of their content
+    words. One dataset is one kind of robot and camera, so durations from another dataset are never compared. Labels
+    are compared once per distinct word set, and only through their rarest words (two sets that share SIMILAR of their
+    words must share one of each other's rarest few), so a word common to every label costs nothing."""
+    def scope(f):
         rig = records[f].get("_rig")
-        if not isinstance(rig, str):
+        return (records[f].get("dataset"), rig) if isinstance(rig, str) else None
+
+    rows = {}                                   # (scope, words) -> durations
+    for f, subs in subs_of.items():
+        where = scope(f)
+        if where is None:
             continue
         for st in subs:
             words = _words(st["label"])
             if words and not st["goal"] and st["reached"]:
-                rows.setdefault((rig, words), []).append(st["duration_s"])
-    index = {}
-    for rig, words in rows:
+                rows.setdefault((where, words), []).append(st["duration_s"])
+    freq = {}
+    for where, words in rows:
         for w in words:
-            index.setdefault((rig, w), set()).add(words)
+            freq[(where, w)] = freq.get((where, w), 0) + 1
+
+    def prefix(where, words):
+        ordered = sorted(words, key=lambda w: (freq[(where, w)], w))
+        return ordered[:len(ordered) - math.ceil(SIMILAR * len(ordered)) + 1]
+
+    index = {}
+    for where, words in rows:
+        for w in prefix(where, words):
+            index.setdefault((where, w), set()).add(words)
     pools = {}
-    for rig, words in rows:
-        near = set().union(*(index[(rig, w)] for w in words))
-        pools[(rig, words)] = sorted(d for other in near if len(words & other) / len(words | other) >= SIMILAR
-                                     for d in rows[(rig, other)])
+    for where, words in rows:
+        near = set().union(*(index.get((where, w), set()) for w in prefix(where, words)))
+        pools[(where, words)] = sorted(d for other in near if len(words & other) / len(words | other) >= SIMILAR
+                                       for d in rows[(where, other)])
     out = {}
     for f, subs in subs_of.items():
-        rig = records[f].get("_rig")
+        where = scope(f)
         for i, st in enumerate(subs):
-            key = (rig, _words(st["label"]))
+            key = (where, _words(st["label"]))
             if key in pools and not st["goal"] and st["reached"]:
                 out[(f, i)] = _Peers(pools[key], st["duration_s"])
     return out
