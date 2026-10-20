@@ -11,6 +11,10 @@
   </tr>
 </table>
 
+### \* Episode quality scores (October 2026)
+
+Argus now scores each episode's execution and outcome out of 10, along with the execution of each subgoal it reaches. Every score is measured from the annotations rather than asked of the model, and speed is judged against other demonstrations of the same task. A subgoal is a lasting change the goal depends on, such as a block placed in the row, so a pick or a grasp is a key event but never a subgoal.
+
 ### \* DiverseUMI (October 2026)
 
 We released [DiverseUMI](https://huggingface.co/datasets/Pantheon-inc/DiverseUMI-sample100), 99.6 hours of bimanual UMI annotated by Argus. It spans 12,219 episodes across 179 skills, each with dense action, outcome and progress labels, key events, object state changes, scene graphs and operator recoveries, alongside SLAM-tracked wrist poses and gripper actions.
@@ -30,8 +34,8 @@ To my knowledge, Argus is the most advanced open-source robot learning annotatio
 It is the only harness to combine native multi-format ingestion (rather than restricting inputs eg to LeRobot, as [LeRobot's annotation pipeline](https://huggingface.co/docs/lerobot/main/annotation_pipeline) does), joint visual/sensor reasoning, and dense annotations of **actions, subgoals, outcomes, operator mistakes, recoveries and object-state changes**. It reads multi-view RGB alongside state/action trajectories, depth, tactile and other recorded fields, preserving their timing and measurement semantics. The VLM can inspect additional samples or image regions to support a finding; evidence, confidence and limitations remain available in the viewer and JSON exports.
 
 <p align="center">
-  <a href="https://raw.githubusercontent.com/Pantheon-Industries-Inc/argus/refs/heads/main/media/architecture.svg?v=109164b44af1">
-    <img src="media/architecture.svg?v=109164b44af1" width="1900" alt="Annotation pipeline: format ingestion, field interpretation, visual, state and sensor evidence, optional evidence inspection, VLM annotation of behavior, state changes and sensor findings with a separate regional pass for tactile arrays, issue detection, temporal stitching, and a viewer with chosen sensor cards and JSON exports.">
+  <a href="https://raw.githubusercontent.com/Pantheon-Industries-Inc/argus/refs/heads/main/media/architecture.svg?v=7b256d10278c">
+    <img src="media/architecture.svg?v=7b256d10278c" width="1900" alt="Annotation pipeline: format ingestion, field interpretation, visual, state and sensor evidence, optional evidence inspection, VLM annotation of behavior, state changes and sensor findings with a separate regional pass for tactile arrays, issue detection, temporal stitching, and a viewer with chosen sensor cards, quality scores and JSON exports.">
   </a>
 </p>
 
@@ -133,7 +137,7 @@ This is an excerpt from a pressure glove episode's downloadable JSON. In the lis
 }
 ```
 
-A free review job stops after prepared [`episodes/`](review/__main__.py) and base requests in [`dry/`](review/__main__.py). Paid annotation adds model inputs and receipts in [`run/`](review/__main__.py), rejoined labels in [`run_final/`](review/__main__.py), and the board; `review` exits 1 when any unit failed, and the board is still built. Action phases distinguish advancing, wasteful and idle behavior. Sensor findings include evidence, confidence and alternative explanations; inconclusive evidence need not produce a finding.
+A free review job stops after prepared [`episodes/`](review/__main__.py) and base requests in [`dry/`](review/__main__.py). Paid annotation adds model inputs and receipts in [`run/`](review/__main__.py), rejoined labels in [`run_final/`](review/__main__.py), and the board; `review` exits 1 when any unit failed, and the board is still built. Action phases distinguish advancing, wasteful and idle behavior, and [`board/scores.py`](board/scores.py) turns them, with operator mistakes and failed attempts, into execution and outcome scores for each episode and subgoal. Sensor findings include evidence, confidence and alternative explanations; inconclusive evidence need not produce a finding.
 
 Public exports, meaning the static site, downloads and [`/api/export`](board/serve.py), name the uploader's own metadata (file attributes, sidecar fields, publisher fields) but leave out its values, because no filter can recognize every secret a person writes there. A board served on 127.0.0.1 without `--allow-host` shows those values in its pages, and its downloads still leave them out. Add [`--publish-uploader-values`](board/serve.py) to `board serve` or `board static site` to publish them. Exports also redact access attributes, recognizable credential values and private access locations in every field.
 
