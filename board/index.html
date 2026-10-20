@@ -640,6 +640,8 @@ aside.left .cam-cell.cam-exo .cam-label { top: calc(var(--fx-top, 0px) + 8px); l
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
 }
 .video-overlay.active { opacity: 1; transform: translateX(-50%) translateY(0); }
+.video-wrap.media-pending :is(.sensor-overlay-stack, .sensor-evidence-band, .video-overlay,
+  .state-toast, .recovery-overlay, #prog-overlay, #es-hand, .hp-canvas, .dp-roi) { visibility: hidden !important; }
 .video-overlay.adv   { border-left: 3px solid rgba(255,255,255,0.55); box-shadow: 0 4px 18px rgba(0,0,0,0.45); }
 .video-overlay.waste { border-left: 3px solid #a3aee0; box-shadow: 0 4px 18px rgba(0,0,0,0.45),
   inset 3px 0 12px -4px rgba(163,174,224,0.3); }
@@ -5184,7 +5186,8 @@ function syncGripEvidence(G, t, finding = null) {
   if (panel && finding) syncGripOverlayPressure(G, finding, t, panel, Infinity);
   if (G?.generic) syncGenericSensorVideos(t);
 }
-function setupSensorEvidence(E, seek, on, inspectContact, d = null, file = null, relayout = () => {}, media = null) {
+function setupSensorEvidence(E, seek, on, inspectContact, d = null, file = null, relayout = () => {}, media = null,
+    presentedTime = null) {
   const overlay = document.getElementById('sensor-overlay'), strip = document.getElementById('grip-finding-overlay'),
     now = document.getElementById('sensor-evidence-now');
   const details = document.getElementById('sensor-evidence-details');
@@ -5233,7 +5236,7 @@ function setupSensorEvidence(E, seek, on, inspectContact, d = null, file = null,
   const presentationWindows = sensorFindingWindows(E);
   let previousTime = null, currentCandidates = [], disposed = false;
   const wire = {reset(t = currentTime, keepSelection = false) {
-    const selection = keepSelection && Math.abs(t - currentTime) < 1e-6 ? chosenGrip : null;
+    const selection = keepSelection ? chosenGrip : null;
     chosenGrip = null; displayedGrip = null;
     currentCandidates = []; previousTime = null; stripKey = null;
     wire.sync(t, selection);
@@ -5241,9 +5244,14 @@ function setupSensorEvidence(E, seek, on, inspectContact, d = null, file = null,
     disposed = true;
   }, sync(t, explicitFindingIndex = null) {
     if (disposed) return;
-    const delta = previousTime == null ? 0 : t - previousTime;
-    if (delta < -1e-6) chosenGrip = null;
     if (explicitFindingIndex != null) chosenGrip = explicitFindingIndex;
+    if (!media?.ended) {
+      const shown = presentedTime ? presentedTime() : media && (media.seeking || media.readyState < 2) ? null : t;
+      if (shown == null) return;
+      t = shown;
+    }
+    const delta = previousTime == null ? 0 : t - previousTime;
+    if (delta < -1e-6 && explicitFindingIndex == null) chosenGrip = null;
     const allFindings = E.overlayFindings || E.insights || [];
     const ended = media?.ended === true;
     const available = ended ? [] : displayGripFindings(E, t, presentationWindows);
@@ -5980,6 +5988,76 @@ function progressAt(pts, t) {
   return p;
 }
 
+// Annotations wait for the requested picture before following media time.
+function setupPresentedVideoClock(video, on, render, pending) {
+  let disposed = false, frame = null, target = null, unchanged = null, presented = null, generation = 0, callback = 0;
+  let awaitingSeek = false;
+  const ready = () => !disposed && video.readyState >= 2 && !video.seeking && !video.error;
+  const saved = video._annotationFrame;
+  if (ready() && saved && saved.clock === video.currentTime) frame = saved.time;
+  const cancel = () => {
+    if (callback && video.cancelVideoFrameCallback) video.cancelVideoFrameCallback(callback);
+    callback = 0;
+  };
+  const accept = t => {
+    if (!ready() || !Number.isFinite(t)) return;
+    cancel();
+    frame = t; target = null; unchanged = presented = null; awaitingSeek = false;
+    video._annotationFrame = {time: t, clock: video.currentTime};
+    pending(false); render(video.currentTime);
+  };
+  const watch = () => {
+    if (disposed || video.error || video.ended || frame != null || awaitingSeek) return;
+    if (video.requestVideoFrameCallback) {
+      if (callback) return;
+      const ticket = generation;
+      callback = video.requestVideoFrameCallback((now, metadata) => {
+        if (disposed || ticket !== generation || frame != null) return;
+        callback = 0;
+        presented = metadata.mediaTime;
+        accept(presented);
+        if (frame == null) watch();
+      });
+    }
+  };
+  const begin = t => {
+    if (disposed || (ready() && frame != null && t === video.currentTime)) return;
+    generation++; cancel(); frame = null; unchanged = presented = null; target = t;
+    // With no metadata, default start zero loads without a native seeking event.
+    awaitingSeek = t != null && !(video.readyState === 0 && t === 0);
+    video._annotationFrame = null;
+    pending(true);
+    if (!awaitingSeek) watch();
+  };
+  const refresh = () => {
+    if (disposed) return;
+    if (awaitingSeek) return;
+    if (unchanged != null && ready()) accept(unchanged);
+    else if (presented != null && ready()) accept(presented);
+    else if (!video.requestVideoFrameCallback) accept(video.currentTime);
+    else if (ready() && frame != null) {
+      video._annotationFrame.clock = video.currentTime;
+      render(video.currentTime);
+    }
+    watch();
+  };
+  on(video, 'seeking', () => {
+    if (frame != null || target !== video.currentTime) {
+      const same = frame != null && video._annotationFrame?.clock === video.currentTime ? frame : null;
+      begin(video.currentTime);
+      unchanged = same;
+    }
+    awaitingSeek = false;
+    watch();
+  });
+  for (const event of ['loadeddata', 'seeked', 'timeupdate', 'play', 'pause']) on(video, event, refresh);
+  for (const event of ['emptied', 'error']) on(video, event, () => begin(null));
+  on(video, 'ended', () => { cancel(); if (!disposed) render(video.currentTime); });
+  pending(frame == null); watch();
+  return {begin, time: () => ready() && frame != null ? video.currentTime : null,
+    dispose() { disposed = true; generation++; cancel(); frame = null; }};
+}
+
 function renderEp(d, opts) {
   opts = opts || {};
   const meta = d._meta || {};
@@ -6588,7 +6666,7 @@ function renderEp(d, opts) {
     : `<span class="cam-label" title="${esc(camLabel(mainCam))}">${esc(unshownCams(d).some(u => u.view === mainCam)
       && cameraPresentation(d, mainCam) === 'scene' ? 'scene' : camLabel(mainCam))}</span>`;
   leftCol.innerHTML = `
-    <div class="video-wrap">
+    <div class="video-wrap" id="video-wrap">
       <div class="cam-row${isEgo ? ' cam-row-single' : (!hasTop ? ' cam-row-grippers' + (sideCams.length ? ''
         : ' cam-row-single') : '')}${mainIsScene ? ' cam-main-scene' : ''}">
         <div class="cam-cell cam-exo">
@@ -6850,10 +6928,13 @@ function renderEp(d, opts) {
     if (window._epCleanup) window._epCleanup.push(() => clearInterval(_driftIv));
   }
 
+  let presentation = null;
   const seek = (t, autoplay = true) => {
     if (vid && t != null && t !== '' && !isNaN(parseFloat(t))) {
+      if (presentation) presentation.begin(parseFloat(t));
       if (evidenceWire) evidenceWire.reset(parseFloat(t));
-      vid.currentTime = parseFloat(t);
+      if (!presentation || presentation.time() == null || vid.currentTime !== parseFloat(t))
+        vid.currentTime = parseFloat(t);
       // Auto-play from the clicked point (slaves follow via the 'play' handler).
       if (autoplay) vid.play().catch(()=>{});
       else vid.pause();
@@ -7366,7 +7447,10 @@ function renderEp(d, opts) {
   evidenceWire = setupSensorEvidence(evidence, seek, on, (k, t) => { if (tcWire) tcWire.inspect(k, t); }, d, _activeFile, () => {
     placeSensors();
     scheduleTopPlacement();
-  }, vid);
+  }, vid, () => {
+    const t = presentation ? presentation.time() : null;
+    return t == null ? null : vid.paused ? vid.currentTime : snPlaybackTime(_snData.get(_activeFile), t);
+  });
   window._epCleanup.push(() => evidenceWire.dispose());
   const syncEvidence = t => {
     evidenceWire.sync(t);
@@ -7383,6 +7467,11 @@ function renderEp(d, opts) {
       || event.target === exoCell.querySelector('#video-overlay')) scheduleTopPlacement();
   });
   function syncAll(t) {
+    if (vid) {
+      t = presentation ? presentation.time() : null;
+      if (t == null && !vid.ended) return;
+      if (t == null) t = vid.currentTime;
+    }
     if (duration > 0 && ph) ph.style.left = (100 * t / duration) + '%';
     // progress + state first so the recovery banner can place itself below the
     // corner chips that are actually visible this frame.
@@ -7396,18 +7485,20 @@ function renderEp(d, opts) {
     else syncEvidence(sensorTime);
   }
   if (vid) {
-    on(vid, 'timeupdate', () => syncAll(vid.currentTime));
     on(vid, 'seeking', () => {
       evidenceWire.reset(vid.currentTime, true);
     });
-    on(vid, 'seeked', () => syncAll(vid.currentTime));
     on(vid, 'play', () => { if (vid.currentTime <= 1e-6) evidenceWire.reset(vid.currentTime); });
+    presentation = setupPresentedVideoClock(vid, on, syncAll, blocked => {
+      document.getElementById('video-wrap').classList.toggle('media-pending', blocked);
+    });
+    window._epCleanup.push(() => presentation.dispose());
   }
   setupSensors(_activeFile, duration, seek, on, vid, v => v === mainCam && isEgo ? 'head' : camLabel(v), camViews,
     touch.contacts.length > 0, d);
   if (touch.contacts.length) tcWire = setupTouch(touch, _activeFile, duration, seek, on, vid, syncEvidence);
   if (vid && !tcWire && evidence.overlayFindings.length) {
-    // Short findings follow media time between native timeupdate events.
+    // Short findings follow the native sensor clock after the requested picture is ready.
     let frame = 0;
     const cancel = () => { if (frame) cancelAnimationFrame(frame); frame = 0; };
     const update = () => {

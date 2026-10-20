@@ -185,7 +185,8 @@ const begin=source.indexOf('  const seek = (t');
 const end=source.indexOf("  document.querySelectorAll('.timeline .marker')",begin);
 let paused=false,plays=0;const resets=[];
 const vid={currentTime:0,parentElement:null,play(){plays++;paused=false;return Promise.resolve()},pause(){paused=true},scrollIntoView(){}};
-const seek=new Function('vid','document','evidenceWire',source.slice(begin,end)+'return seek;')(vid,{body:{}},{reset:t=>resets.push(t)});
+const seek=new Function('vid','document','evidenceWire','presentation',source.slice(begin,end)+'return seek;')(
+ vid,{body:{}},{reset:t=>resets.push(t)},null);
 seek(.733,false);
 assert.equal(vid.currentTime,.733);
 assert(paused,'inspection keeps the short evidence interval visible');
