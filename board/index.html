@@ -1635,14 +1635,16 @@ h3.section .count {
 .qual-score { font-family: var(--mono); font-size: 24px; font-weight: 700; line-height: 1; }
 .qual-score small { font-size: 12px; font-weight: 600; color: var(--fg-2); margin-left: 2px; }
 .qual-headbar { padding: 0 14px 12px; border-bottom: 1px solid var(--line); }
-.qual-bar { display: block; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+/* every bar is drawn against its full track to 10, so a short fill reads as a share of the whole */
+.qual-bar { display: block; height: 8px; border-radius: 4px; background: rgba(0,0,0,0.10);
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.06); overflow: hidden; }
 .qual-bar i { display: block; height: 100%; background: var(--fg); }
 .qual-cells { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .qual-cell { padding: 10px 14px 12px; border-right: 1px solid var(--line); min-width: 0; }
 .qual-cell:last-child { border-right: 0; }
 .qual-cell .qc-k { font-size: 11px; color: var(--fg-2); font-weight: 600; }
 .qual-cell .qc-v { font-family: var(--mono); font-size: 17px; font-weight: 700; margin: 3px 0 6px; }
-.qual-cell .qual-bar { height: 4px; margin-bottom: 6px; }
+.qual-cell .qual-bar { height: 6px; margin-bottom: 6px; }
 .qual-cell .qc-sub { font-family: var(--mono); font-size: 11px; color: var(--fg-2); line-height: 1.35; }
 .qual-cell .qc-bad { color: var(--danger); }
 .qual-cell .qc-word { font-family: var(--sans, inherit); font-size: 14px; font-weight: 600; }
