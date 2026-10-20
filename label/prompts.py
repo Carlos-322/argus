@@ -221,8 +221,11 @@ Rules:
   the goal's end-state (each task's, when there are tasks) is the last one, at the goal frame
   (completed_at_s, judged by its own rule below). Mark each subgoal as a key_event with kind subgoal_complete at the first moment
   its change holds with nothing holding the objects, labelled with the state reached; nudging or
-  straightening it afterwards neither moves it nor makes a new subgoal. A pick, a placement that is later
-  undone, a contact and a failed attempt are still key_events of their own kind (a grasp, a placement).
+  straightening it afterwards neither moves it nor makes a new subgoal. Only the goal's end-state waits, as
+  completed_at_s does, for the last adjustment: when the last piece is set down and then straightened, setting
+  it down is a subgoal of its own at the first moment it holds, and the goal follows once the straightening is
+  done. A pick, a placement that is later undone, a contact and a failed attempt are still key_events of
+  their own kind (a grasp, a placement).
 - completion judges the whole task on the BALANCE OF EVIDENCE, the way a fair
   human reviewer would, not as a strict verifier. Grade what the footage shows was
   ACHIEVED, not whether every detail was explicitly confirmed on camera.
@@ -467,8 +470,11 @@ Rules:
   style, and each task's end-state is its last one, at that task's completed_at_s. Mark each subgoal as a
   key_event with kind subgoal_complete at the first moment its change holds with nothing holding the
   objects, labelled with the state reached; nudging or straightening it afterwards neither moves it nor
-  makes a new subgoal. A pick, a placement that is later undone, a contact and a failed attempt are still
-  key_events of their own kind (a grasp, a placement).
+  makes a new subgoal. Only a task's end-state waits, as its completed_at_s does, for the last adjustment:
+  when the last piece is set down and then straightened, setting it down is a subgoal of its own at the
+  first moment it holds, and the task's end follows once the straightening is done. A pick, a placement that
+  is later undone, a contact and a failed attempt are still key_events of their own kind (a grasp, a
+  placement).
 - THIS USES THE HUMAN-HAND ANNOTATION PROFILE: describe the person's work with their own
   hands. Determine viewpoint and camera mounting from the supplied evidence. There is NO robot and usually NO
   single overall goal, especially in a longer clip; the person does a SEQUENCE of

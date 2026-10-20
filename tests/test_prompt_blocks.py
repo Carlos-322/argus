@@ -962,3 +962,4 @@ def test_every_prompt_defines_a_subgoal_once_as_a_lasting_change_and_keeps_failu
     assert "at the goal frame (completed_at_s, judged by its own rule below)" in s or "at that task's completed_at_s" in s
     assert "at the first moment its change holds with nothing holding the objects" in s
     assert "neither moves it nor makes a new subgoal" in s and "waits for the last such adjustment" not in s
+    assert "setting it down is a subgoal of its own at the first moment it holds" in s
