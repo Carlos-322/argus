@@ -1650,7 +1650,7 @@ h3.section .count {
 .qual-cell .qc-v { font-family: var(--mono); font-size: 17px; font-weight: 700; margin: 3px 0 6px; }
 .qual-cell .qual-bar { height: 6px; margin-bottom: 6px; }
 .qual-cell .qc-sub { font-family: var(--mono); font-size: 11px; color: var(--fg-2); line-height: 1.35; }
-.qual-cell .qc-bad { color: var(--danger); }
+.qual-cell .qc-bad, .qual-table .qc-bad { color: var(--danger); }
 .qual-cell .qc-word { font-family: var(--sans, inherit); font-size: 14px; font-weight: 600; }
 .qual-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .qual-table th { text-align: left; font-size: 11px; font-weight: 600; color: var(--fg-2); padding: 8px 14px;
@@ -6370,10 +6370,12 @@ function renderEp(d, opts) {
       ${cell('Label', null, Q.relation || 'no label', 'How the work done relates to the labelled task', Q.relation && Q.relation !== 'aligned')}
     </div>`)}
     ${subs.length ? box('Subgoals', undefined, `<table class="qual-table"><thead><tr><th>#</th><th>Done at</th>
-      <th class="qt-name">Subgoal</th><th class="num">Took</th><th class="num">Median</th><th>Execution</th></tr></thead><tbody>
+      <th class="qt-name">Subgoal</th><th class="num">Took</th><th class="num">Median</th><th class="num">Failed tries</th><th>Execution</th></tr></thead><tbody>
       ${subs.map((st, i) => `<tr data-t="${st.start_s}"><td class="num">${st.goal ? 'Goal' : i + 1}</td>
         <td class="num">${st.reached ? fmtT(st.end_s) : 'not reached'}</td><td class="qt-name">${esc(st.label || '')}</td>
         <td class="num">${qNum(st.duration_s)}s</td><td class="num">${st.peer_median_s != null ? qNum(st.peer_median_s) + 's' : '-'}</td>
+        <td class="num${(st.failed_attempts || []).length ? ' qc-bad' : ''}" title="${esc((st.failed_attempts || [])
+          .map(k => fmtT(k.t_s) + '  ' + (k.label || '')).join('\n'))}">${(st.failed_attempts || []).length}</td>
         <td><span class="qt-score"><b>${qNum(st.execution)}</b>${bar(st.execution)}</span></td></tr>`).join('')}
       </tbody></table>`, true) : ''}
   </div>` : '';

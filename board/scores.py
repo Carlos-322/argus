@@ -145,8 +145,9 @@ def subgoals(d: dict, f: dict) -> list:
     """The stretches of work that end in the episode's subgoals: from the start of the work (or the previous subgoal)
     to each key event tagged subgoal_complete, and a last stretch to the goal, or to the end of the work when the goal
     is never reached ("reached": False). The model records a subgoal only once it is achieved, so a subgoal's own
-    outcome is always success and is not scored; how cleanly, steadily and quickly its stretch went is. Each carries
-    its duration, wasteful share, hesitation and the mistakes that start inside it."""
+    outcome is always success and is not scored; how cleanly, steadily and quickly its stretch went is. A subgoal is a
+    lasting change the goal depends on, so the failed attempts between two subgoals are attempts at the later one. Each
+    carries its duration, wasteful share, hesitation, and the mistakes and failed attempts inside it."""
     events = sorted((k for k in d.get("key_events") or [] if isinstance(k, dict) and k.get("kind") == "subgoal_complete"
                      and _num(k.get("t_s")) is not None), key=lambda k: k["t_s"])
     if f["start_s"] is None or not events:
@@ -168,13 +169,18 @@ def subgoals(d: dict, f: dict) -> list:
         share = _union(waste) / active if active else 0.0
         hes = _union(_subtract([(a, b)], work)) / (b - a)
         ms = [m for m in f["mistakes"] if _num(m.get("t_s")) is not None and a <= m["t_s"] < b]
+        failed = [k for k in d.get("key_events") or [] if isinstance(k, dict) and k.get("outcome") == "failure"
+                  and _num(k.get("t_s")) is not None and a <= k["t_s"] < b]
         clean = max(0.0, 10 * (1 - share) - sum(SEVERITY_POINTS.get(m.get("severity"), 1.5)
-                                               * (0.5 if m.get("recovered") else 1.0) for m in ms))
+                                               * (0.5 if m.get("recovered") else 1.0) for m in ms)
+                    - FAILED_ATTEMPT_POINTS * max(0, len(failed) - len(ms)))
         out.append({"start_s": a, "end_s": b, "label": label, "outcome": outcome, "goal": goal,
                     "reached": outcome == "success",
                     "duration_s": round(b - a, 2),
                     "cleanliness": round(clean, 1), "steady": round(10 * max(0.0, 1 - 2 * hes), 1),
-                    "wasteful_share": round(share, 3), "mistakes": [m.get("issue") for m in ms]})
+                    "wasteful_share": round(share, 3), "mistakes": [m.get("issue") for m in ms],
+                    "failed_attempts": [{"t_s": k["t_s"], "label": k.get("label"), "kind": k.get("kind")}
+                                        for k in sorted(failed, key=lambda k: k["t_s"])]})
     return out
 
 

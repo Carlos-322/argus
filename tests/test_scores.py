@@ -68,3 +68,20 @@ def test_a_paraphrase_joins_its_task_group_and_another_task_does_not():
     recs["other.json"] = _record("stack the red cube on the blue cube", 10.0, [(0, 10, "advancing", 1.0)])
     g = scores.task_groups(recs)
     assert g["para.json"] == g["p0.json"] and g["other.json"] != g["p0.json"]
+
+
+def test_failed_attempts_belong_to_the_subgoal_they_precede_and_cost_only_when_no_mistake_explains_them():
+    recs = _board()
+    rec = _record("open the left door then the right door", None,
+                  [(0, 5, "advancing", 0.5), (5, 12, "wasteful", 0.5)], [(5, "left door open")], outcome="failure")
+    rec["key_events"] += [{"t_s": 3.0, "kind": "grasp", "outcome": "failure", "label": "handle slips"},
+                          {"t_s": 8.0, "kind": "grasp", "outcome": "failure", "label": "right handle missed"},
+                          {"t_s": 10.0, "kind": "pickup", "outcome": "success", "label": "handle held"}]
+    rec["operator_mistakes"] = [{"issue": "slipped grasp", "severity": "low", "recovered": True, "t_s": 3.0}]
+    recs["tries.json"] = rec
+    first, last = scores.score_board(recs)["tries.json"]["subgoals"]
+    assert [k["label"] for k in first["failed_attempts"]] == ["handle slips"]
+    assert first["cleanliness"] == round(10.0 - 0.5 * 0.5, 1)         # the mistake explains the failed grasp
+    assert [k["label"] for k in last["failed_attempts"]] == ["right handle missed"]
+    assert last["goal"] and not last["reached"]
+    assert last["cleanliness"] == 0.0                                 # all wasteful, then one unexplained failure
