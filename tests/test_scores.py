@@ -240,3 +240,10 @@ def test_fields_of_the_wrong_type_are_read_as_absent_never_a_crash():
     rec = _record("open the door", 10.0, [(0, 10, "advancing", 1.0)])
     rec.update({"tasks": 3, "completion": ["x"], "goal_alignment": ["y"], "_meta": "z"})
     assert scores.score_board({"odd.json": rec})["odd.json"]["version"] == scores.VERSION
+
+
+def test_a_goal_reached_then_undone_reads_as_reached_in_its_goal_row():
+    rec = _record("set the table", 20.0, [(0, 10, "advancing", 0.5), (10, 25, "advancing", 1.0)], [(10, "plate set")])
+    rec["completion"].update({"task_completed": "success_then_undone", "completed_at_s": None, "goal_reached_at_s": 20.0})
+    goal = scores.score_board({"undo.json": rec})["undo.json"]["subgoals"][-1]
+    assert goal["goal"] and goal["reached"] and goal["end_s"] == 20.0

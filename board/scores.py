@@ -264,7 +264,7 @@ def subgoals(d: dict, f: dict) -> list:
                                                * (0.5 if m.get("recovered") else 1.0) for m in ms)
                     - FAILED_ATTEMPT_POINTS * max(0, len(failed) - len(ms)))
         out.append({"start_s": a, "end_s": b, "label": label, "outcome": outcome, "goal": goal, "task": task,
-                    "reached": outcome == "success",
+                    "reached": outcome in ("success", "success_then_undone"),
                     "duration_s": round(b - a, 2),
                     "cleanliness": round(clean, 1), "steady": round(10 * max(0.0, 1 - 2 * hes), 1),
                     "wasteful_share": round(share, 3), "mistakes": [m.get("issue") for m in ms],
