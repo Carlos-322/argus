@@ -1659,7 +1659,14 @@ h3.section .count {
 .qual-table tr:last-child td { border-bottom: 0; }
 .qual-table .num { font-family: var(--mono); text-align: right; white-space: nowrap; }
 
-.qual-table .qt-score { display: grid; grid-template-columns: 34px 110px; gap: 10px; align-items: center; }
+.qual-table .qt-score { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 8px; align-items: center; }
+.qual-table col.q-task { width: 64px; }
+.qual-table col.q-no { width: 48px; }
+.qual-table col.q-at { width: 92px; }
+.qual-table col.q-took { width: 64px; }
+.qual-table col.q-med { width: 72px; }
+.qual-table col.q-fail { width: 100px; }
+.qual-table col.q-exec { width: 164px; }
 .qual-table .qt-score b { font-family: var(--mono); text-align: right; }
 .qual-table { table-layout: fixed; }
 .qual-table .qt-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1669,6 +1676,32 @@ h3.section .count {
 .qual-box .qual-more { margin: 0; padding: 10px 14px; border-top: 1px solid var(--row-divider); width: 100%; text-align: left; }
 .qual-table tr[data-t] { cursor: pointer; }
 .qual-table tr[data-t]:hover td { background: var(--hover, rgba(0,0,0,0.03)); }
+/* a box too narrow for the table's columns (a phone) stacks each row: the subgoal on its own line over its time, its
+   failed tries and its execution, on one grid shared by the header, the shown rows and the folded ones; Took and
+   Median are left to the wide table */
+.qual-box { container-type: inline-size; }
+@container (max-width: 620px) {
+  .qual-table, .qual-table thead, .qual-table tbody { display: block; }
+  .qual-table colgroup, .qual-table .q-took, .qual-table .q-med { display: none; }
+  .qual-table tr { display: grid; grid-template-columns: 26px minmax(0, 1fr) 76px 96px; column-gap: 10px; row-gap: 3px;
+    grid-template-areas: "no name name name" ". at fail exec"; align-items: center; padding: 8px 14px;
+    border-bottom: 1px solid var(--row-divider); }
+  .qual-table.has-task tr { grid-template-columns: 50px 26px minmax(0, 1fr) 76px 96px;
+    grid-template-areas: "task no name name name" ". at at fail exec"; }
+  .qual-table tr:last-child { border-bottom: 0; }
+  .qual-table th, .qual-table td { padding: 0; border: 0; }
+  .qual-table th, .qual-table th.num { white-space: normal; }
+  .qual-table .q-task { grid-area: task; text-align: left; }
+  .qual-table .q-no { grid-area: no; text-align: left; }
+  .qual-table .qt-name { grid-area: name; }
+  .qual-table .q-at { grid-area: at; text-align: left; }
+  .qual-table .q-fail { grid-area: fail; }
+  .qual-table .q-exec { grid-area: exec; }
+  .qual-table tr[data-t]:hover { background: var(--hover, rgba(0,0,0,0.03)); }
+  .qual-table tr[data-t]:hover td { background: none; }
+  .qual-box.folds .ck-all-in .qual-table tr:first-child { border-top: 1px solid var(--row-divider); }
+  .qual-box.folds .ck-all-in .qual-table tr:first-child td { border-top: 0; }
+}
 @media (max-width: 900px) { .qual { grid-template-columns: 1fr; } }
 /* top-right transient toast: object state changes, below the fullscreen button (.fs-btn, 8 px + 26 px) */
 .state-toast {
@@ -6379,22 +6412,23 @@ function renderEp(d, opts) {
     + (v === undefined ? '' : `<div class="qual-headbar">${bar(v)}</div>`) + body + '</div>';
   // the Subgoals table: one row per subgoal stretch, the first SUBS_FIRST shown and the rest folded; both parts are
   // tables with the same fixed columns so the folded rows line up under the header
-  const subCols = `<colgroup>${qIn.tasks_total ? '<col style="width:64px">' : ''}<col style="width:48px"><col style="width:92px">`
-    + '<col><col style="width:64px"><col style="width:72px"><col style="width:88px"><col style="width:164px"></colgroup>';
+  const subCols = `<colgroup>${qIn.tasks_total ? '<col class="q-task">' : ''}<col class="q-no"><col class="q-at">`
+    + '<col><col class="q-took"><col class="q-med"><col class="q-fail"><col class="q-exec"></colgroup>';
+  const subTable = `<table class="qual-table${qIn.tasks_total ? ' has-task' : ''}">${subCols}`;
   let subRowN = 0;
-  const subRows = subs.map(st => `<tr data-t="${st.start_s}">${qIn.tasks_total ? `<td class="num">${st.task ?? '-'}</td>` : ''}
-        <td class="num">${st.goal ? (qIn.tasks_total ? 'End' : 'Goal') : ++subRowN}</td>
-        <td class="num${!st.reached && st.outcome !== 'unclear' ? ' qc-bad' : ''}">${st.reached ? fmtT(st.end_s)
+  const subRows = subs.map(st => `<tr data-t="${st.start_s}">${qIn.tasks_total ? `<td class="num q-task">${st.task ?? '-'}</td>` : ''}
+        <td class="num q-no">${st.goal ? (qIn.tasks_total ? 'End' : 'Goal') : ++subRowN}</td>
+        <td class="num q-at${!st.reached && st.outcome !== 'unclear' ? ' qc-bad' : ''}">${st.reached ? fmtT(st.end_s)
           : st.outcome === 'unclear' ? 'unclear' : 'not reached'}</td><td class="qt-name">${esc(st.label || '')}</td>
-        <td class="num">${qNum(st.duration_s)}s</td><td class="num">${st.peer_median_s != null ? qNum(st.peer_median_s) + 's' : '-'}</td>
-        <td class="num${(st.failed_attempts || []).length ? ' qc-bad' : ''}" title="${esc((st.failed_attempts || [])
+        <td class="num q-took">${qNum(st.duration_s)}s</td><td class="num q-med">${st.peer_median_s != null ? qNum(st.peer_median_s) + 's' : '-'}</td>
+        <td class="num q-fail${(st.failed_attempts || []).length ? ' qc-bad' : ''}" title="${esc((st.failed_attempts || [])
           .map(k => fmtT(k.t_s) + '  ' + (k.label || '')).join('\n'))}">${(st.failed_attempts || []).length}</td>
-        <td><span class="qt-score"><b>${qNum(st.execution)}</b>${bar(st.execution)}</span></td></tr>`);
-  const subsTable = `<table class="qual-table">${subCols}<thead><tr>${qIn.tasks_total ? '<th class="num">Subtask</th>' : ''}`
-    + `<th class="num">#</th><th class="num">Done at</th><th class="qt-name">Subgoal</th><th class="num">Took</th>`
-    + `<th class="num">Median</th><th class="num">Failed tries</th><th>Execution</th></tr></thead>`
+        <td class="q-exec"><span class="qt-score"><b>${qNum(st.execution)}</b>${bar(st.execution)}</span></td></tr>`);
+  const subsTable = `${subTable}<thead><tr>${qIn.tasks_total ? '<th class="num q-task">Subtask</th>' : ''}`
+    + `<th class="num q-no">#</th><th class="num q-at">Done at</th><th class="qt-name">Subgoal</th><th class="num q-took">Took</th>`
+    + `<th class="num q-med">Median</th><th class="num q-fail">Failed tries</th><th class="q-exec">Execution</th></tr></thead>`
     + `<tbody>${subRows.slice(0, SUBS_FIRST).join('')}</tbody></table>`
-    + (subRows.length > SUBS_FIRST ? `<div class="ck-all"><div class="ck-all-in"><table class="qual-table">${subCols}`
+    + (subRows.length > SUBS_FIRST ? `<div class="ck-all"><div class="ck-all-in">${subTable}`
       + `<tbody>${subRows.slice(SUBS_FIRST).join('')}</tbody></table></div></div>`
       + `<button class="ck-more qual-more" type="button" onclick="SUBS_OPEN = !SUBS_OPEN; `
       + `this.closest('.qual-box').classList.toggle('open', SUBS_OPEN); this.textContent = SUBS_OPEN ? 'Show the first ${SUBS_FIRST}' `
