@@ -1236,8 +1236,7 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
                 doc, extra = ea.discover(evidence_access, content, select, cache, reserve_cost=reserve,
                                         reserve_dispatch=selection_dispatch, settle_dispatch=settle_selection,
                                         force_refresh=force_refresh, refresh_id=inspection_refresh_id,
-                                        ledger_managed=(require_known_pricing and reserve_selection is not None
-                                                        and settle_selection is not None),
+                                        ledger_managed=(callable(reserve_selection) and callable(settle_selection)),
                                         image_limit=MAX_IMAGES, image_bytes_limit=IMAGE_LIMIT_BYTES / IMAGE_SIZE_INFLATION)
             except Exception as error:
                 doc = evidence_access.record()
@@ -1717,9 +1716,14 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
             unverified[ep.name] = 'received retry refused: this episode already has a usable annotation'
             return True
         inspection = record.get('evidence_inspection') or {}
-        if complete and (inspection.get('pause_reason') == 'spend_cap' or
+        internally_limited = ('Inspection selection stopped at the cost or dispatch boundary.'
+                              in inspection.get('limitations', []))
+        if complete and (internally_limited or inspection.get('pause_reason') == 'spend_cap' or
                 'Inspection selection exceeds the remaining batch spend cap.' in inspection.get('limitations', [])):
             unverified[ep.name] = 'saved paid annotation omitted budget-blocked inspection; use --force to refresh explicitly'
+            if internally_limited:
+                print(f'LIMITED {ep.name}: saved paid annotation has incomplete inspection; '
+                      'use --force to refresh explicitly', file=sys.stderr, flush=True)
         if record.get('parse_ok') is True and not complete:
             try:
                 _billing_fields(p)
