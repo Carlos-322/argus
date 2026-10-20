@@ -120,3 +120,12 @@ def test_a_record_with_nothing_scoreable_or_malformed_steps_gets_empty_scores_ne
                                                            "tasks": "none"}})
     assert s["empty.json"]["subgoals"] == [] and s["empty.json"]["outcome"] is None
     assert s["odd.json"]["subgoals"] == [] and s["odd.json"]["execution"] is not None
+
+
+def test_a_time_stored_as_text_or_not_finite_is_skipped_never_compared():
+    rec = _record("open the left door then the right door", 10.0,
+                  [(0, 5, "advancing", 0.5), (5, 10, "advancing", 1.0)], [(5, "left door open")])
+    rec["key_events"] += [{"t_s": "7", "kind": "grasp", "outcome": "failure"},
+                          {"t_s": float("nan"), "kind": "grasp", "outcome": "failure"}]
+    subs = scores.score_board({"r.json": rec})["r.json"]["subgoals"]
+    assert [st["failed_attempts"] for st in subs] == [[], []]

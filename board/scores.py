@@ -21,8 +21,17 @@ as a bad one. A dimension with too few peers to compare against is None, never a
 """
 from __future__ import annotations
 
+import math
 import re
 import statistics
+
+from board.families import union_seconds as _union
+
+
+def _num(x):
+    """A stored number the scores can compare as it is: a finite int or float, never text, true or false."""
+    return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) else None
+
 
 VERSION = 1
 MIN_PEERS = 5                     # a relative dimension needs this many other demonstrations of the same task
@@ -35,20 +44,6 @@ FIELDS = ("dataset", "episode_prompt", "task_label", "event_labels", "key_events
           "goal_alignment", "tasks")
 STOP = {"the", "a", "an", "and", "then", "with", "its", "it", "of", "on", "to", "into", "in", "from", "onto", "by", "at",
         "for", "both", "each", "one", "that", "this", "is", "are", "be", "so", "as", "up", "down", "out", "back", "over"}
-
-
-def _num(x):
-    return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) else None
-
-
-def _union(spans):
-    total, end = 0.0, None
-    for a, b in sorted((a, b) for a, b in spans if b > a):
-        if end is None or a > end:
-            total, end = total + b - a, b
-        elif b > end:
-            total, end = total + b - end, b
-    return total
 
 
 def _subtract(spans, cut):
@@ -230,7 +225,6 @@ def score_board(records: dict) -> dict:
         peer_took = [p["goal_s"] - p["start_s"] for p in peers if p["goal_s"] is not None and p["start_s"] is not None]
         efficiency = _ratio_score(took, peer_took) if x["outcome"] == "success" else None
         hes = x["hesitation_s"] / x["window_s"] if x["window_s"] else None
-        peer_hes = [p["hesitation_s"] / p["window_s"] for p in peers if p["window_s"]]
         per_progress = x["actions"] / x["progress_reached"] if x["progress_reached"] else None
         peer_pp = [p["actions"] / p["progress_reached"] for p in peers if p["progress_reached"]]
         # hesitation is absolute (half the work spent with every arm waiting scores 0); busyness is against peers
