@@ -51,7 +51,8 @@ def indexed_recording(path, *, omit_pose=None, invalid_quaternion=False, actor_m
         if position_unit is not None:
             metadata['position_unit'] = position_unit
         if actor_map:
-            metadata['actor_map'] = json.dumps({'robot0': 'left', 'robot1': 'right'})
+            metadata['actor_map'] = actor_map if isinstance(actor_map, str) else json.dumps(
+                {'robot0': 'left', 'robot1': 'right'})
         writer._writer.add_metadata('source', metadata)
         for robot, side in [(0, 'left'), (1, 'right')]:
             for index, stamp in enumerate(stamps):
@@ -197,6 +198,13 @@ def test_index_numbers_alone_never_establish_camera_sides(tmp_path):
     assert aliases[topics[0]].startswith('left ')
     assert aliases[topics[1]].startswith('right ')
     assert provenance['source'] == 'MCAP actor_map metadata'
+
+
+def test_an_actor_map_nested_past_the_recursion_limit_is_named_unparsed_never_a_failed_episode(tmp_path):
+    raw = tmp_path / 'episode.mcap'
+    indexed_recording(raw, actor_map='[' * 100_000 + ']' * 100_000)
+    assert mcap_pose.camera_roles(raw, list(realomin.CAMERA_TOPICS)) == (
+        {}, {'limitation': 'Recorded actor map could not be parsed.'})
 
 
 def test_coordinate_frame_names_do_not_supply_actor_sides(tmp_path):
