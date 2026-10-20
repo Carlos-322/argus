@@ -4042,25 +4042,44 @@ def frame_time_files(video: Path, depth: bool = False) -> list[Path]:
             and any(t.startswith(('time', 'stamp')) for t in tk) and cam <= tk]
 
 
-def frame_times(video: Path, n: int, depth: bool = False, native: bool = False) -> np.ndarray | tuple | None:
+def frame_times(video: Path, n: int, depth: bool = False, native: bool = False,
+                ctx: dict | None = None) -> np.ndarray | tuple | None:
     """A video's frames' capture times in seconds on its recorder's clock, from the per-frame timestamp array a
     recorder writes beside it (exo_cam-rgb-timestamp.npy beside exo_cam-images-rgb.mp4): a .npy in its folder whose
     name says time and has the video's camera words, holding n rising numbers (seconds, or ms, us or ns, read
     by _seconds, the unit rule of every clock). Colour over depth when both fit, and depth over colour for a depth video (depth=True, whose
-    stamps exo_cam-depth-timestamp.npy are its own). None when there is none."""
-    cands = []
+    stamps exo_cam-depth-timestamp.npy are its own). None when there is none. With ctx (the episode's context), a
+    camera left with no frame times although stamp files sit beside it has each of them named on the episode as a
+    camera_timestamp_invalid issue (it does not load, holds another number of stamps or runs backwards), so a clock
+    the recorder wrote is never dropped unseen. A file passed over while another fits, or one of the other kind of
+    stream (depth stamps beside a colour video), is another stream's and is not named."""
+    cands, rejected = [], []
+
+    def unused(path, why):
+        if bool(set(tokens(path.stem)) & NON_COLOUR) == depth:   # a stamp file of this camera's own kind of stream
+            rejected.append((path, why))
+
     for p in frame_time_files(video, depth):
         tk = set(tokens(p.stem))
         try:
             a = np.load(p, allow_pickle=False)
-        except Exception:  # noqa: BLE001, S112 - numpy's loader on upload bytes; a stamp file that does not load is no clock
+        except Exception as error:  # noqa: BLE001 - numpy's loader on upload bytes; the file is named as unused below
+            unused(p, f"it does not load ({plain_error(error)})")
             continue
-        if a.ndim != 1 or len(a) != n or not np.issubdtype(a.dtype, np.number):
+        if a.ndim != 1 or not np.issubdtype(a.dtype, np.number):
+            unused(p, "it is not one list of numbers")
+            continue
+        if len(a) != n:
+            unused(p, f"it holds {len(a)} stamps for {n} frames")
             continue
         if n > 1 and not (np.isfinite(a).all() and np.all(np.diff(a) >= 0)):
-            continue                      # never backwards (a recorder can stamp two frames alike)
+            unused(p, "its stamps are not all finite and in order")   # never backwards; two frames may share one
+            continue
         cands.append((bool(tk & NON_COLOUR) != depth, -len(os.path.commonprefix([p.stem, video.stem])), p.name, a, p))
     if not cands:
+        for path, why in rejected if ctx is not None else ():
+            add_issue(ctx, "camera_timestamp_invalid", f"{path.name} beside {video.name} is not used as its frame "
+                                                       f"times: {why}.", camera=video.stem, clock_problem=why)
         return None
     chosen = min(cands, key=lambda c: c[:3])
     if native:
@@ -4731,7 +4750,7 @@ def convert_video(item: dict, rig: str, out: Path, dataset: str) -> dict:
                                                "could not be opened.", camera=Path(dp).stem)
             extra["source"].setdefault("unused_depth", []).append(
                 f"{Path(dp).name} (its colour camera could not be opened)")
-    real = {v: frame_times(Path(p), len(prs[v]["pts"])) for v, (_, p) in files.items()}
+    real = {v: frame_times(Path(p), len(prs[v]["pts"]), ctx=extra) for v, (_, p) in files.items()}
     native = {v: frame_times(Path(p), len(prs[v]["pts"]), native=True) for v, (_, p) in files.items()}
     native = {v: source for v, source in native.items() if source is not None}
     state = action = state_names = None
@@ -4839,9 +4858,9 @@ def convert_video(item: dict, rig: str, out: Path, dataset: str) -> dict:
                 descs[f"extra{k}"] = (f"the depth of {files[v][0]}, stored by the recorder as an ordinary picture, with "
                                       "its own shading of near and far")
                 prs[f"extra{k}"] = probe(Path(dp))
-                real[f"extra{k}"] = frame_times(Path(dp), len(prs[f"extra{k}"]["pts"]), depth=True)
+                real[f"extra{k}"] = frame_times(Path(dp), len(prs[f"extra{k}"]["pts"]), depth=True, ctx=extra)
                 continue
-            depth[v] = {"path": dp, "real": frame_times(Path(dp), n_d, depth=True) if n_d else None,
+            depth[v] = {"path": dp, "real": frame_times(Path(dp), n_d, depth=True, ctx=extra) if n_d else None,
                         "scale_m": depth_scale_from(Path(dp).parent), "source": Path(dp).name}
     # the cameras the model is not shown go to the board (unshown_cameras), timed on the recorder's clock when the
     # videos carry capture times, else from their own first frame as every separate video file is

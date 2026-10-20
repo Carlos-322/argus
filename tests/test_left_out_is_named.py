@@ -172,3 +172,34 @@ def test_a_signal_whose_rows_cannot_be_made_is_named_in_the_prompt(tmp_path, mon
     monkeypatch.setattr(signals, "summary_rows", broken)
     prompt = episode.build_request(ep)["prompt"]
     assert "leave out force (RuntimeError), because its rows could not be read" in prompt, prompt[-3000:]
+
+
+def test_a_camera_left_without_frame_times_names_each_stamp_file_beside_it(tmp_path):
+    """A per-frame stamp file that does not load, holds another number of stamps or runs backwards leaves the camera
+    on its decode times, and the episode says which file and why; another stream's stamps are not this camera's."""
+    import numpy as np
+    from prepare import formats as fm
+    video = tmp_path / "exo_cam-images-rgb.mp4"
+    video.write_bytes(b"")
+    stamps = tmp_path / "exo_cam-rgb-timestamp.npy"
+    named = lambda ctx: [i["what"] for i in ctx.get("reader_issues", []) if i["kind"] == "camera_timestamp_invalid"]
+
+    np.save(stamps, np.arange(5.0))
+    ctx = {}
+    assert fm.frame_times(video, 7, ctx=ctx) is None
+    assert named(ctx) == ["exo_cam-rgb-timestamp.npy beside exo_cam-images-rgb.mp4 is not used as its frame times: "
+                          "it holds 5 stamps for 7 frames."]
+    np.save(stamps, np.array([0.0, 2.0, 1.0]))
+    ctx = {}
+    assert fm.frame_times(video, 3, ctx=ctx) is None and "not all finite and in order" in named(ctx)[0]
+    stamps.write_bytes(b"not a numpy file")
+    ctx = {}
+    assert fm.frame_times(video, 3, ctx=ctx) is None and "it does not load" in named(ctx)[0]
+
+    stamps.unlink()
+    np.save(tmp_path / "exo_cam-depth-timestamp.npy", np.arange(5.0))
+    ctx = {}
+    assert fm.frame_times(video, 7, ctx=ctx) is None and named(ctx) == []      # depth stamps are not the colour clock
+    np.save(stamps, np.arange(7.0) / 30)
+    ctx = {}
+    assert fm.frame_times(video, 7, ctx=ctx) is not None and named(ctx) == []  # a fitting file is used, nothing named
