@@ -17,7 +17,7 @@ Recently, [Midcentury AI](https://www.midcentury.xyz/blog/optimizing-argus) push
 
 ### \* Depth and tactile annotations (October 2026)
 
-Argus now annotates depth, tactile and other sensor data jointly with video, state and actions. Sensor findings appear as video overlays and in the JSON export, with supporting evidence and uncertainty.
+Argus now annotates depth, tactile and other sensor data jointly with video, state and actions. The clearest sensor findings appear as cards on the video, and every finding appears in the list and the JSON export, with supporting evidence and uncertainty.
 
 ## Overview
 
@@ -26,8 +26,8 @@ To my knowledge, Argus is the most advanced open-source robot learning annotatio
 It is the only harness to combine native multi-format ingestion (rather than restricting inputs eg to LeRobot, as [LeRobot's annotation pipeline](https://huggingface.co/docs/lerobot/main/annotation_pipeline) does), joint visual/sensor reasoning, and dense annotations of **actions, subgoals, outcomes, operator mistakes, recoveries and object-state changes**. It reads multi-view RGB alongside state/action trajectories, depth, tactile and other recorded fields, preserving their timing and measurement semantics. The VLM can inspect additional samples or image regions to support a finding; evidence, confidence and limitations remain available in the viewer and JSON exports.
 
 <p align="center">
-  <a href="https://raw.githubusercontent.com/Pantheon-Industries-Inc/argus/refs/heads/main/media/architecture.svg?v=6fb8f2e48081">
-    <img src="media/architecture.svg?v=6fb8f2e48081" width="1900" alt="Annotation pipeline: format ingestion, field interpretation, visual, state and sensor evidence, VLM annotation of behavior and state changes, issue detection, temporal stitching, viewer and JSON exports.">
+  <a href="https://raw.githubusercontent.com/Pantheon-Industries-Inc/argus/refs/heads/main/media/architecture.svg?v=e01c9fcbf63c">
+    <img src="media/architecture.svg?v=e01c9fcbf63c" width="1900" alt="Annotation pipeline: format ingestion, field interpretation, visual, state and sensor evidence, optional evidence inspection, VLM annotation of behavior, state changes and sensor findings with a separate regional pass for tactile arrays, issue detection, temporal stitching, and a viewer with chosen sensor cards and JSON exports.">
   </a>
 </p>
 
@@ -36,15 +36,15 @@ It is the only harness to combine native multi-format ingestion (rather than res
 | Recording types | Teleop, UMI and human ego |
 | Native formats | LeRobot v2.0/v2.1/v3.0, MCAP, HDF5, video files and folders |
 | Archives | ZIP and TAR |
-| Sidecar metadata | JSON, CSV and Parquet |
+| Sidecar metadata | JSON, JSON Lines, CSV, TSV, YAML, TOML, INI, XML, text and Markdown notes, and LeRobot's Parquet annotation tables |
 | Public dataset adapters | Nine adapters for downloading datasets and selecting episode samples |
 
 | Available evidence | How it contributes |
 |---|---|
 | RGB | Timestamped multi-view frames provide visual context for task execution, object interactions, progress, failures and recoveries. |
-| Proprioception and actions | Joint states, end-effector poses, gripper states and action trajectories provide motion context. Training targets retain their declared semantics rather than being assumed to be executed commands. |
+| Proprioception and actions | Joint states, end-effector poses, gripper states and action trajectories provide motion context. Training targets retain their declared semantics rather than being assumed to be executed commands. Joint angles that are declared as degrees, or whose readings can only be degrees, are converted to radians, and the state contract records why. |
 | Depth | Metric depth supports camera-relative distance and separation when units, calibration and temporal alignment are known. Relative depth remains relative. |
-| Tactile | Pressure, normal/shear force, contact arrays and optical tactile images support analysis of grip, contact distribution and surface motion. Full-array patterns, individual-cell and regional responses, and hand geometry are compared with video and gripper state. Publisher layouts remain qualified candidates unless verified for the recording; array shape alone does not establish anatomy or force. Response changes alone do not establish slip. |
+| Tactile | Pressure, normal/shear force, contact arrays and optical tactile images support analysis of grip, contact distribution and surface motion. Full-array patterns, individual-cell and regional responses, and hand geometry are compared with video and gripper state. A publisher's declared layout, such as the bundled [OpenTouch contract](configs/sensor_schemas/opentouch_hdf5_v1.json) that names the glove's hand regions, remains a qualified candidate unless verified for the recording; array shape alone does not establish anatomy or force. Response changes alone do not establish slip. |
 | Other episode fields | Numeric channels, event flags, waveform packets and structured metadata are accessible through the same inspection interface. Spectral analysis of eligible waveforms requires a recorded sample rate. |
 | Task context | Instructions, annotations and calibration metadata provide context. The VLM checks publisher claims against the recording rather than assuming their correctness. |
 
@@ -87,32 +87,40 @@ uv run python -m board serve --board data/review/mine --clips data/review/mine/c
 Optical tactile cameras supply comparisons across the sampled episode plus bounded native-frame comparisons around image changes.
 For tactile arrays with regional and individual-cell evidence, a separate model pass compares regional responses with hand configuration and camera evidence. The primary pass examines local spatial patterns independently. Both passes use source-bound measurements and share the spending cap; their findings retain separate request provenance.
 
+After annotation, one text-only call to the same model reads the timed sensor findings that add something beyond the video. It chooses the few a person watching should see as cards on the video and writes each in everyday words. A card plots at most two rows: the declared regions its finding cites, or areas within one region, with parts that change in opposite directions kept apart rather than averaged. Every finding stays in the list below the video. If the card call fails or the cap blocks it, the video plays every finding, as it did before cards existed.
+
 Each recording produces one public episode. Long recordings are split to fit API request limits and rejoined on the original timeline; internal chunk boundaries are not treated as recording truncation. Session mode annotates activities within the recording. Preparation limits, missing chunks and processing failures are reported alongside any usable results.
 
-Rerunning a review job with the same [`--out`](review/__main__.py) preserves its settings and reuses outputs whose inputs and selected evidence still match. Source data, prepared inputs and annotation settings must still match; otherwise start a new job. After code changes, saved request receipts can verify the exact prompt and ordered images offline and rebind the retained reply without another call. Missing or changed proof requires an explicit refresh. The preparation receipt retains the original reader version. Resume reuses that verified preparation; use a fresh `--out` to apply newer reader fixes. [`--free`](review/__main__.py) skips paid field interpretation, image-detail routing and evidence selection, so it previews base requests rather than the full paid evidence path. Spending caps account for all applicable calls and outstanding reservations; unresolved charges stay reserved. Inspection blocked by the cap resumes when the allowance increases, before final annotation is dispatched.
+Rerunning a review job with the same [`--out`](review/__main__.py) preserves its settings and reuses outputs whose inputs and selected evidence still match. Source data, prepared inputs and annotation settings must still match; otherwise start a new job. After code changes, saved request receipts can verify the exact prompt and ordered images offline and rebind the retained reply without another call. Missing or changed proof requires an explicit refresh. The preparation receipt retains the original reader version. Resume reuses that verified preparation; use a fresh `--out` to apply newer reader fixes. [`--free`](review/__main__.py) skips paid field interpretation, image-detail routing, evidence selection, the regional sensor pass and video cards, so it previews base requests rather than the full paid evidence path. Spending caps account for all applicable calls and outstanding reservations; unresolved charges stay reserved. Inspection blocked by the cap resumes when the allowance increases, before final annotation is dispatched.
 
-For models without locally verified rates, reservations use the full published context window and can exceed the expected request cost. Capped runs reject models that search on every request, because their search fees have no enforceable ceiling. Claude and Gemini search only when a request asks, and requests here never ask. Prices for inputs that requests never carry, such as Gemini's audio prices, are accepted, because a request carries only text and images.
+Capped runs reject models that search on every request, because their search fees have no enforceable ceiling. Claude and Gemini search only when a request asks, and requests here never ask. Prices for inputs that requests never carry, such as Gemini's audio prices, are accepted, because a request carries only text and images.
 
 ## Results and further use
 
 Live and static boards use the same [viewer](board/index.html), with behavioral and sensor annotations overlaid on the footage and supporting measurements alongside it. The same findings are available as episode JSON, filtered JSON Lines and static exports. Issues with missing or invalid severity remain visible as unrated and are excluded from severity totals. Each issue's problem family is read from the grammar of its own sentences, so a problem the text denies, asks about, supposes or withdraws is not counted, and a correction in a later sentence leaves the earlier finding in its family.
 
-This is an excerpt from a tactile episode's downloadable JSON. Evidence IDs resolve to recorded streams and samples in the full export:
+This is an excerpt from a pressure glove episode's downloadable JSON. The headline and detail describe the finding in the list, and `video_card` is the card shown on the video. Evidence IDs resolve to recorded streams and samples in the full export:
 
 ```json
 {
   "sensor_evidence": {
     "findings": [
       {
-        "start_s": 54.0,
-        "end_s": 55.0,
-        "headline": "The final module's contact reshapes before the grip opens",
-        "overlay_detail": "The pad deforms while the jaw reading stays steady; this does not establish that the module slipped.",
+        "start_s": 2.63,
+        "end_s": 3.03,
+        "headline": "Thumb loading likely eases more than index finger loading",
+        "detail": "As the cup moves away, the thumb response weakens substantially while the index finger response remains elevated.",
         "confidence": "medium",
+        "video_card": {
+          "version": 1,
+          "headline": "Thumb pressure likely eases more",
+          "detail": "As the cup moves away, the thumb eases while index finger pressure stays elevated."
+        },
         "evidence": [
           {
-            "sensor_id": "camera:extra4",
-            "time_s": [53.0, 54.0, 55.0]
+            "sensor_id": "mechanics:signal:right_pressure",
+            "series_id": "mechanics:signal:right_pressure:derivation:regional_response:0",
+            "time_s": [2.63, 2.83, 2.93]
           }
         ]
       }
