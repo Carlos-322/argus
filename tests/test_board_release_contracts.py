@@ -277,7 +277,7 @@ def test_recognizable_encoded_registry_auth_and_private_prose_are_withheld():
     auth = base64.b64encode(b'fixture:unusablecredential').decode()
     encoded = base64.b64encode(json.dumps({'auths': {'ghcr.io': {'auth': auth}}}).encode()).decode()
     values = [encoded, 'ssh fixture@100.101.7.9 to pull',
-              'rsync from pluto.tailc7b2a4.ts.net:/data/episode nightly']
+              'rsync from pluto.example-tailnet.ts.net:/data/episode nightly']
     assert project({'fields': {'notes': values}}) == {'fields': {'notes': [None,None,None]}}
     safe = ['The SSH connection failed during calibration.',
             'See https://example.org/paper for the public source.',

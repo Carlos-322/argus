@@ -21,6 +21,19 @@ from test_formats import recorder_folder
 REPO = Path(__file__).resolve().parent.parent
 
 
+def test_review_refuses_a_missing_data_path_in_one_line_and_creates_no_job(tmp_path, monkeypatch, capsys):
+    """A mistyped --data path made a job folder and then stopped with a traceback ending in "the upload holds no ...
+    (it is empty)". It is now refused with one line naming the path, before anything is written."""
+    from review import __main__ as rv
+    missing, job = tmp_path / 'no_such_upload', tmp_path / 'job'
+    monkeypatch.setattr(sys, 'argv', ['review', '--data', str(missing), '--rig', 'teleop_arms', '--out', str(job),
+                                      '--free'])
+    with pytest.raises(SystemExit) as stop:
+        rv.main()
+    assert stop.value.code == f'--data {missing} does not exist'
+    assert not job.exists()
+
+
 @pytest.mark.parametrize('kind', ['video', 'mcap', 'hdf5'])
 def test_review_direct_file_retains_owned_metadata_without_reading_neighbor_recordings(tmp_path, monkeypatch, kind):
     import hashlib

@@ -14,6 +14,19 @@ checks/vendor/public_dataset_adapter_qc.py
     Written by Sambhav Gupta at Pantheon for public-dataset-adapter (commit 99d0a9e) and released here under
     Apache-2.0. The file's header lists every change made to the original.
 
+configs/compare/routes_main.json
+    Pantheon's routing answers for 39 public episodes. Each key quotes the episode's dataset name, instruction, task
+    label and timed sub-steps as its dataset publishes them. The quoted text keeps its source license:
+    Galaxea Open-World (9 episodes), published by Galaxea (https://huggingface.co/datasets/OpenGalaxea/Galaxea-Open-World-Dataset,
+    read from the re-upload RogersPyke/Galaxea-Open-World-Dataset_10K_20260123) under CC BY-NC-SA 4.0
+    (https://creativecommons.org/licenses/by-nc-sa/4.0/);
+    HABIT (15 episodes), published by Config (https://huggingface.co/datasets/configinc/HABIT) under CC BY 4.0
+    (https://creativecommons.org/licenses/by/4.0/);
+    MolmoAct2-BimanualYAM-Dataset (11 episodes), published by Ai2
+    (https://huggingface.co/datasets/allenai/MolmoAct2-BimanualYAM-Dataset) under Apache-2.0 (the text is in LICENSE);
+    ABC-130k (4 episodes), published by XDOF (https://huggingface.co/datasets/XDOF/ABC-130k) under Apache-2.0.
+    All are provided as is, without warranties. This does not imply endorsement by any publisher.
+
 configs/examples/example_ego_head.json
     Pantheon's annotation of the Open-AoE clip raw_334438_seg_1. Source attribution as the Open-AoE Dataset License
     asks, Open-AoE / OpenAoE-2000h (dataset inclusionAI/OpenAoE-2000h,

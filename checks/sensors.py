@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -46,6 +45,7 @@ from label import episode as me
 from label import signals as sg
 from label.atomic import write_atomic
 from checks import EXIT_PARTIAL
+from checks.workers import run_each
 
 NO_READING_SHARE = 0.2
 PINNED_SHARE = 0.1
@@ -297,11 +297,12 @@ def run_episode(ep_dir: Path) -> dict | None:
                      "frames")}
 
 
-def _constants(d: str) -> dict:
+def _constants(d: str) -> tuple[str, dict]:
+    """(episode, its constant values); an episode that does not read has none."""
     try:
-        return constant_values(Path(d))
+        return d, constant_values(Path(d))
     except Exception:
-        return {}
+        return d, {}
 
 
 def _safe(d: str):
@@ -310,9 +311,14 @@ def _safe(d: str):
     try:
         return d, run_episode(Path(d)), None
     except Exception as e:  # recorded on every check, never silently skipped
-        err = f"{type(e).__name__}: {e}"[:300]
-        return d, {"notes": [], "flagged": False, "error": err,
-                   "checks": [{"check": c, "name": NAMES[c], "status": "errored", "error": err} for c in NAMES]}, None
+        return _errored(d, e)
+
+
+def _errored(d: str, e: Exception):
+    """The result of an episode whose checks could not run at all: every check errored, with the error."""
+    err = f"{type(e).__name__}: {e}"[:300]
+    return d, {"notes": [], "flagged": False, "error": err,
+               "checks": [{"check": c, "name": NAMES[c], "status": "errored", "error": err} for c in NAMES]}, None
 
 
 def needs_check(ctx: dict) -> bool:
@@ -349,37 +355,42 @@ def main():
                 eps.append(str(d))
     print(f"episodes to check: {len(eps)}", flush=True)
     done = fired = failed = 0
-    # dead values are judged across every episode of each folder, never within one (module docstring)
+    # dead values are judged across every episode of each folder, never within one (module docstring). A worker that
+    # dies (out of memory, killed) costs its own episode only: no constant values here, every check errored below.
     every = {}
     for root in a.roots:
         ds = [str(d) for d in sorted(root.glob("episode_*")) if (d / "context.json").exists()]
-        with ProcessPoolExecutor(a.jobs) as ex:
-            consts = dict(zip(ds, ex.map(_constants, ds, chunksize=4)))
+        consts = {}
+        run_each(_constants, ds, a.jobs, lambda res: consts.__setitem__(*res), lambda d, e: (d, {}))
         dead = dead_across(consts)
         for d in ds:
             every[d] = [f for name, f in dead.items() if name in (consts.get(d) or {})]
-    with ProcessPoolExecutor(a.jobs) as ex:
-        for d, r, err in ex.map(_safe, eps, chunksize=2):
-            if r is not None and every.get(d):
-                r["notes"] += every[d]
-                for c in r["checks"]:
-                    if c["check"] == "dead_values":
-                        c["status"] = "fired"
-            done += 1
-            errors = [check for check in (r or {}).get('checks', []) if check.get('status') == 'errored']
-            if err or (r and r.get('error')) or errors:
-                failed += 1
-                reason = err or r.get('error') or errors[0].get('error', 'sensor checks could not finish')
-                print(f"ERRORED {Path(d).name}: {reason}", flush=True)
-            p = Path(d) / "context.json"
-            ctx = json.loads(p.read_text())
-            ctx["sensor_checks"] = r
-            versions = ctx.get('check_versions')
-            ctx['check_versions'] = {**(versions if isinstance(versions, dict) else {}), 'sensor_checks': VERSION}
-            write_atomic(p, ctx, indent=1)
-            if r and r["notes"]:
-                fired += 1
-                print(f"SENSORS {Path(d).name}: " + "; ".join(n["evidence"] for n in r["notes"][:4]), flush=True)
+
+    def record(res) -> None:
+        nonlocal done, fired, failed
+        d, r, err = res
+        if r is not None and every.get(d):
+            r["notes"] += every[d]
+            for c in r["checks"]:
+                if c["check"] == "dead_values":
+                    c["status"] = "fired"
+        done += 1
+        errors = [check for check in (r or {}).get('checks', []) if check.get('status') == 'errored']
+        if err or (r and r.get('error')) or errors:
+            failed += 1
+            reason = err or r.get('error') or errors[0].get('error', 'sensor checks could not finish')
+            print(f"ERRORED {Path(d).name}: {reason}", flush=True)
+        p = Path(d) / "context.json"
+        ctx = json.loads(p.read_text())
+        ctx["sensor_checks"] = r
+        versions = ctx.get('check_versions')
+        ctx['check_versions'] = {**(versions if isinstance(versions, dict) else {}), 'sensor_checks': VERSION}
+        write_atomic(p, ctx, indent=1)
+        if r and r["notes"]:
+            fired += 1
+            print(f"SENSORS {Path(d).name}: " + "; ".join(n["evidence"] for n in r["notes"][:4]), flush=True)
+
+    run_each(_safe, eps, a.jobs, record, _errored)
     print(f"done {done} with_notes={fired} failed={failed}", flush=True)
     return EXIT_PARTIAL if failed else 0
 
