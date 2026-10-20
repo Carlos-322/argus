@@ -89,6 +89,7 @@ uv run python -m board serve --board data/review/mine --clips data/review/mine/c
 |---|---|
 | Astra, the default | [`openai/gpt-6-astra`](label/policy.py), medium reasoning; a regular sample every 1.5s for teleop, 1s for UMI and 0.5s for human ego, plus the edges of still spans and the first and last frames. |
 | Sol 6.1 High | [`--model openai/gpt-6.1-sol --reasoning high`](label/policy.py); defaults to 1 FPS on all recording setups and requires at least 1 FPS. |
+| Gemini 4 Argon High | [`--model google/gemini-4-argon --reasoning high`](label/policy.py) with an OpenRouter key; a capped run prices it from OpenRouter's published rates, fetched when the run starts ([`label/pricing.py`](label/pricing.py)). |
 | Faster actions | [`--sample-fps 2`](label/policy.py) is recommended for subsecond fumbles and rapid recoveries. More images shorten the available request window and can increase cost. |
 | Task scope | Episode/session scope follows source metadata; [`--task-mode episode`](label/policy.py) or [`session`](label/policy.py) overrides it. A missing instruction does not automatically imply a session. Human ego uses the activities schema. |
 
