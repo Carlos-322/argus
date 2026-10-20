@@ -219,6 +219,15 @@ def index_tables(meta, columns, read_jsonl):
     return out
 
 
+def index_issue_text(column, issue):
+    """One readable reason for an index table problem, naming the row or index it concerns, never the raw record."""
+    if column is None:
+        return issue['why']
+    if 'row' in issue:
+        return f"row {issue['row']} has {column} {issue['value']!r}, which is not an index ({issue['why']})"
+    return f"{column} {issue['value']} has {issue['why']}"
+
+
 def resolved_labels(tables, column):
     """Combine all claims for one exact column so a later table cannot silently replace an earlier owner."""
     claims = defaultdict(list)

@@ -5005,7 +5005,7 @@ def read_root(rdir: Path, rel: str) -> dict:
                              'fps is not a finite positive frame rate; readable source clocks determine timing')
         else:
             fps = candidate
-    from prepare.annotations import resolved_labels
+    from prepare.annotations import index_issue_text, resolved_labels
     from prepare.lerobot_labels import scoped_index_tables
     task_tables = scoped_index_tables(rdir / "meta", ["task_index"], lambda p: read_jsonl(p, reads)
                                if p.name == "tasks.jsonl" else read_jsonl(p))
@@ -5013,7 +5013,7 @@ def read_root(rdir: Path, rel: str) -> dict:
         if column is not None:
             reads["metadata_read"].add(Path(path).resolve())
         for issue in table["issues"]:
-            metadata_failure(reads, Path(path), issue["why"] if column is None else json.dumps(issue, default=str))
+            metadata_failure(reads, Path(path), index_issue_text(column, issue))
     task_labels = resolved_labels(task_tables, "task_index")
     tasks_by_index = {k: v["label"] for k, v in task_labels.items() if v["label"]}
     for path in (rdir / "meta" / "tasks.jsonl", rdir / "meta" / "tasks.parquet"):
