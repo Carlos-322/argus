@@ -33,6 +33,11 @@ dataset_checks, where it raises a data issue (board/families.py), and which note
 upload's report notes. Only an episode none of whose cameras can be cut is listed in CLIPS/failed.json and left out
 by set_aside_failed; the rest go on.
 
+Only the video itself can make a camera not decode. A cut the machine stopped (a full or read-only disk, a quota, no
+memory, a tool that is missing, stopped making progress or was killed from outside: machine_stopped) says nothing
+about the video, so it never takes a camera out or an episode with it: the episode is left as it was, and the step
+fails, so a rerun once the machine is fixed cuts it.
+
 A depth clip is cut after its camera's colour clip and timed exactly like it: it has the colour clip's frames at the
 colour clip's timestamps, each showing the depth frame recorded nearest that colour frame (depth_times.npz
 depth_<camera> against times.npz <camera>), drawn by label/depth.py picture() (near red and far blue, metric depth
@@ -50,9 +55,11 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -181,7 +188,11 @@ def source_size(ffmpeg: str, path: str) -> tuple:
     its stored landscape size squashed it."""
     from prepare import display
     probe = Path(ffmpeg).with_name("ffprobe")
-    g = display.geometry(str(path), str(probe) if probe.exists() else None)
+    exe = str(probe) if probe.exists() else shutil.which("ffprobe")
+    if not exe:
+        # a missing tool is the machine's (machine_stopped), never a size the video does not have
+        raise FileNotFoundError(errno.ENOENT, "ffprobe not found beside ffmpeg or on PATH", "ffprobe")
+    g = display.geometry(str(path), exe)
     if not g["stored"][0]:
         raise RuntimeError(f"ffprobe could not read the size of {path}")
     w, h = display.shown_size(g)
@@ -930,6 +941,36 @@ def depth_jobs(ep_dir: Path, mp4_dir: Path, force: bool, prefix: str = "") -> li
     return jobs
 
 
+# errors of the machine a clip is cut on, never of its video: a full disk, a quota, a read-only disk, no memory, too
+# many open files. ffmpeg prints them in the same words as os.strerror.
+MACHINE_ERRNOS = frozenset({errno.ENOSPC, errno.EDQUOT, errno.EROFS, errno.ENOMEM, errno.EMFILE, errno.ENFILE})
+MACHINE_WORDS = tuple(os.strerror(code) for code in sorted(MACHINE_ERRNOS))
+# signals a tool is stopped with from outside it (the out of memory killer, a shutdown); a tool that crashes on its
+# input dies by its own (SIGSEGV, SIGABRT), which is the video's
+OUTSIDE_SIGNALS = frozenset({signal.SIGKILL, signal.SIGTERM, signal.SIGINT, signal.SIGHUP})
+
+
+def machine_stopped(error: BaseException) -> bool:
+    """Whether a clip failed because of the machine it was cut on, never its video, so a rerun on a sound machine can
+    cut it: a tool that stopped making progress (run_while_progressing) or was killed from outside, an error of the
+    machine (MACHINE_ERRNOS) from ffmpeg or from Python's own writing, or an OSError outside the video decoder (ffmpeg
+    or ffprobe missing, a folder that cannot be written). Everything else, ffmpeg failing on the video, a video that
+    gives no frame, PyAV unable to read it, is the video's."""
+    if isinstance(error, (subprocess.TimeoutExpired, MemoryError)):
+        return True
+    if isinstance(error, subprocess.CalledProcessError):
+        if error.returncode < 0 and -error.returncode in OUTSIDE_SIGNALS:
+            return True
+        said = error.stderr.decode(errors="replace") if isinstance(error.stderr, bytes) else str(error.stderr or "")
+        return any(words in said for words in MACHINE_WORDS)
+    if isinstance(error, OSError):
+        import av
+        if isinstance(error, av.error.FFmpegError):
+            return error.errno in MACHINE_ERRNOS
+        return True
+    return False
+
+
 FAILED = "failed.json"      # in the clips folder: {episode folder: {camera: why its clip could not be cut}}, for the
                             # episodes none of whose cameras could be cut
 
@@ -1523,6 +1564,13 @@ def main() -> int:
     cut: dict[str, set] = {}                    # episode folder -> the cameras cut on this run
     unshown_cut: dict[str, set] = {}            # the same for the cameras the model is not shown (unshown_views)
     unshown_broken: dict[str, dict[str, str]] = {}
+    # episode folder -> {camera: why the machine stopped its cut} (machine_stopped), and every clip this run cut for it
+    stopped: dict[str, dict[str, str]] = {}
+    made: dict[str, list[Path]] = {}
+
+    def machine(ep, cam, o, e, when=""):
+        stopped.setdefault(ep, {})[cam] = str(e)[:400]
+        sys.stderr.write(f"clip STOPPED {o}{when}, by the machine, not the video: {str(e)[:160]}\n")
     with ThreadPoolExecutor(max_workers=args.jobs) as ex:
         futs = {ex.submit(extract_one, pk, b, du, o, ffmpeg, threads, fps, is_main, off, skip, t, q, km, pts, end):
                 (o, ep, cam) for (pk, b, du, o, fps, is_main, off, skip, t, q, km, pts, end, ep, cam) in jobs}
@@ -1535,8 +1583,12 @@ def main() -> int:
                     f.result()
                     ok += 1
                     unshown_cut.setdefault(ep, set()).add(cam)
+                    made.setdefault(ep, []).append(o)
                 except Exception as e:
                     fail += 1
+                    if machine_stopped(e):
+                        machine(ep, cam, o, e)
+                        continue
                     unshown_broken.setdefault(ep, {})[cam] = str(e)[:400]
                     sys.stderr.write(f"clip FAIL {o}: {str(e)[:160]}\n")
                 continue
@@ -1544,14 +1596,25 @@ def main() -> int:
                 counts = f.result()
                 ok += 1
                 cut.setdefault(ep, set()).add(cam)
+                made.setdefault(ep, []).append(o)
                 if counts:
                     short.setdefault(ep, {})[cam] = counts
                     sys.stderr.write(f"clip SHORT {o}: {counts['clip_frames']} frames, episode has "
                                      f"{counts['episode_frames']}\n")
             except Exception as e:
                 fail += 1
+                if machine_stopped(e):
+                    machine(ep, cam, o, e)
+                    continue
                 broken.setdefault(ep, {})[cam] = str(e)[:400]
                 sys.stderr.write(f"clip FAIL {o}: {str(e)[:160]}\n")
+    # an episode a cut of which the machine stopped is left as it was before this run: what its other cameras did is
+    # not recorded and their clips are removed, so the rerun cuts and records the whole episode at once, and no
+    # camera of it is taken out or flagged for what the machine did
+    for ep in stopped:
+        for o in made.get(ep, []):
+            Path(o).unlink(missing_ok=True)
+    ep_dirs = [d for d in ep_dirs if d.name not in stopped]
     for d in ep_dirs:
         if d.name in unshown_cut or d.name in unshown_broken:
             record_unshown(d, unshown_cut.get(d.name, set()), unshown_broken.get(d.name, {}))
@@ -1586,6 +1649,12 @@ def main() -> int:
                     if counts:
                         redo[cam] = counts
                 except Exception as e:
+                    if machine_stopped(e):
+                        # the clip from before the main camera went is timed on the old clock: removed, so the rerun
+                        # cuts it on the episode as it is now
+                        Path(o).unlink(missing_ok=True)
+                        machine(ep, cam, o, e, " cut again after the main camera went")
+                        continue
                     if cam.startswith(UNSHOWN):
                         u_broken[cam] = str(e)[:400]
                     sys.stderr.write(f"clip FAIL {o} cut again after the main camera went: {str(e)[:160]}\n")
@@ -1594,7 +1663,8 @@ def main() -> int:
     # the depth clips, after the colour clips they are timed against; one that comes out imperfect is kept, and one
     # that cannot be cut is left out (the page then offers no depth for that camera), never costing the episode; either
     # is recorded on the episode as a reader issue (record_depth), which the board shows
-    djobs = [j for d in ep_dirs if d.name not in failed for j in depth_jobs(d, args.out, args.force, args.name_prefix)]
+    djobs = [j for d in ep_dirs if d.name not in failed and d.name not in stopped
+             for j in depth_jobs(d, args.out, args.force, args.name_prefix)]
     if djobs:
         print(f"clips: {len(djobs)} depth clips to cut")
         dok = 0
@@ -1619,6 +1689,11 @@ def main() -> int:
     print(f"clips: ok={ok} fail={fail}" + (f", {len(short)} episode(s) with a short clip" if short else "")
           + (f", {kept} episode(s) kept without a camera that does not decode" if kept else "")
           + (f", {len(failed)} episode(s) left out" if failed else ""))
+    if stopped:
+        # the step fails, so a rerun on a sound machine cuts these episodes; none of them is left out or loses a camera
+        sys.stderr.write(f"clips: the machine stopped the cut of {len(stopped)} episode(s), not their video, so the step "
+                         f"failed and a rerun cuts them: {', '.join(sorted(stopped))}\n")
+        return 1
     return 1 if failed and len(failed) >= len(ep_dirs) else 0
 
 
