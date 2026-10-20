@@ -734,15 +734,17 @@ def frame_lengths(mp4: Path) -> bool:
     the latest frame starts, and a player (and clip_frames) drops that frame: a 480-frame episode came out as 479.
     Each frame then lasts the step to the next frame's time and the last one the step before it, as FrameWriter
     (prepare/formats.py) gives copied frames; the packets, their times and every other stream are copied unchanged,
-    so a camera that starts late still starts where it did. A file whose frames all have a length is left as it is."""
+    so a camera that starts late still starts where it did. A muxer can also end its edit before the final frame
+    despite nonzero packet lengths. Its discarded final presentation packet needs the same remux. Other files
+    whose frames all have a length are left as they are."""
     import av
     with av.open(str(mp4)) as src:
         ist = src.streams.video[0]
         tag = src.metadata.get("comment")
-        meta = [(p.pts, p.duration) for p in src.demux(ist) if p.size and p.pts is not None]
-    if not meta or all(d for _, d in meta[:-1]) and meta[-1][1]:
+        meta = [(p.pts, p.duration, p.is_discard) for p in src.demux(ist) if p.size and p.pts is not None]
+    if not meta or all(d for _, d, _ in meta) and not max(meta, key=lambda p: p[0])[2]:
         return False
-    pts = sorted(p for p, _ in meta)
+    pts = sorted(p for p, _, _ in meta)
     step = {p: (pts[i + 1] - p if i + 1 < len(pts) else (p - pts[i - 1] if i else 0)) for i, p in enumerate(pts)}
     tmp = mp4.with_name(mp4.stem + ".len.mp4")
     try:
