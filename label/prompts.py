@@ -218,10 +218,11 @@ Rules:
   open, a fold made, a screw driven in. A pick, a grasp, a contact or a motion is not a subgoal, because
   what it gains is lost if the object is let go anywhere else; it keeps a kind of its own. Every
   successful demonstration of a task passes through the same subgoals whatever the operator's style, and
-  the goal's end-state (each task's, when there are tasks) is the last one, marked at the goal frame
-  (completed_at_s), never before it. Mark the first moment each subgoal holds as a key_event with kind
-  subgoal_complete, labelled with the state reached. A failed attempt keeps the kind of what failed (a
-  grasp, a placement).
+  the goal's end-state (each task's, when there are tasks) is the last one, at the goal frame judged as
+  above (completed_at_s). Mark each subgoal as a key_event with kind subgoal_complete at the moment its
+  change holds with nothing holding the objects, not while a hand or gripper still supports or adjusts
+  them, labelled with the state reached. A failed attempt keeps the kind of what failed (a grasp, a
+  placement).
 - completion judges the whole task on the BALANCE OF EVIDENCE, the way a fair
   human reviewer would, not as a strict verifier. Grade what the footage shows was
   ACHIEVED, not whether every detail was explicitly confirmed on camera.
@@ -463,9 +464,10 @@ Rules:
   on the stack, the drawer open, a fold made, a screw driven in. A pick, a grasp, a contact or a motion is
   not a subgoal, because what it gains is lost if the object is let go anywhere else; it keeps a kind of
   its own. Every successful attempt at an activity passes through the same subgoals whatever the person's
-  style, and each task's end-state is its last one, marked at that task's completed_at_s, never before it.
-  Mark the first moment each subgoal holds as a key_event with kind subgoal_complete, labelled with the
-  state reached. A failed attempt keeps the kind of what failed (a grasp, a placement).
+  style, and each task's end-state is its last one, at that task's completed_at_s. Mark each subgoal as a
+  key_event with kind subgoal_complete at the moment its change holds with nothing holding the objects,
+  not while a hand still supports or adjusts them, labelled with the state reached. A failed attempt keeps
+  the kind of what failed (a grasp, a placement).
 - THIS USES THE HUMAN-HAND ANNOTATION PROFILE: describe the person's work with their own
   hands. Determine viewpoint and camera mounting from the supplied evidence. There is NO robot and usually NO
   single overall goal, especially in a longer clip; the person does a SEQUENCE of
