@@ -273,6 +273,40 @@ def test_an_archive_nested_without_end_stops_at_the_budget(tmp_path, monkeypatch
         formats.open_archives(path, tmp_path / 'unpacked')
 
 
+@pytest.mark.parametrize('beside', ['a different file', 'a folder', 'an earlier run of the archive'])
+def test_a_member_whose_path_is_taken_by_another_file_is_never_lost(tmp_path, beside):
+    # a zip copy of take1/cam.mp4 beside a folder copy that differs had been skipped with no word. Only a file of the
+    # member's size is this member, unpacked by an earlier run; any other keeps its path, and the member is read as
+    # an upload of its own, which no file of the upload describes
+    up = tmp_path / 'upload'
+    (up / 'take1').mkdir(parents=True)
+    member = b'ZIP COPY, DIFFERENT BYTES'
+    if beside == 'a different file':
+        (up / 'take1' / 'cam.mp4').write_bytes(b'FOLDER COPY')
+    elif beside == 'a folder':
+        (up / 'take1' / 'cam.mp4').mkdir()
+    else:
+        (up / 'take1' / 'cam.mp4').write_bytes(member)
+    with zipfile.ZipFile(up / 'take1.zip', 'w') as z:
+        z.writestr('take1/cam.mp4', member)
+        z.writestr('take1/notes.txt', b'hello')
+    root, notes, apart = formats.open_archives(up, tmp_path / 'dest')
+    assert (up / 'take1' / 'notes.txt').read_bytes() == b'hello'
+    if beside == 'an earlier run of the archive':
+        assert apart == [] and (up / 'take1' / 'cam.mp4').read_bytes() == member, notes
+        return
+    assert (up / 'take1' / 'cam.mp4').read_bytes() == b'FOLDER COPY' if beside == 'a different file' \
+        else (up / 'take1' / 'cam.mp4').is_dir()
+    assert len(apart) == 1 and [p.name for p in apart[0].iterdir()] == ['cam.mp4'], apart
+    assert (apart[0] / 'cam.mp4').read_bytes() == member
+    said = [n for n in notes if 'take1/cam.mp4' in str(n)]
+    assert said == [f'take1.zip holds take1/cam.mp4, which differs from the take1/cam.mp4 already in the upload, so '
+                    f"the archive's copy was read as an upload of its own, {apart[0].name}, which no other file "
+                    'describes.'], notes
+    # a rerun finds the member apart from the archive's done marker, never unpacked a second time
+    assert formats.open_archives(up, tmp_path / 'dest')[2] == apart
+
+
 def write_tar(path, names, *, folders=False):
     import tarfile
     with tarfile.open(path, 'w:gz') as tf:

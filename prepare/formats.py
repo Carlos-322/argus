@@ -647,14 +647,16 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
                 notes.append(f"{a.name} could not be unpacked where it lies ({_written_why(error)}), so it was left "
                              "out.")
                 continue
-            wrote, made = 0, []
-            for label, filename, size, opener in unverified:
-                if count >= UNPACK_MAX_FILES or total + size > UNPACK_MAX_BYTES:
-                    raise UnpackLimit(f"{a.name} holds more than one upload can: at most {UNPACK_MAX_FILES:,} files "
-                                     f"and {UNPACK_MAX_BYTES / 1e9:.0f} GB unpacked")
+            wrote, made, conflicts = 0, [], []
+
+            def keep_apart(label, filename, size, opener, why_label=None) -> bool:
                 # A member kept apart is an upload of its own exactly as a direct upload is. An archive among them is
                 # held outside the folder it unpacks to, as open_archives holds a direct archive outside its tree, so
                 # the folder holds only what the archive holds and is read from its own dataset root.
+                nonlocal total, count
+                if count >= UNPACK_MAX_FILES or total + size > UNPACK_MAX_BYTES:
+                    raise UnpackLimit(f"{a.name} holds more than one upload can: at most {UNPACK_MAX_FILES:,} files "
+                                      f"and {UNPACK_MAX_BYTES / 1e9:.0f} GB unpacked")
                 is_archive = bool(ARCHIVE_RE.search(filename))
                 got = 0
                 try:
@@ -669,8 +671,8 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
                 except UnpackLimit:
                     raise
                 except Exception as error:
-                    bad.append(f"{label} ({_member_why(error)})")
-                    continue
+                    bad.append(f"{why_label or label} ({_member_why(error)})")
+                    return False
                 total += got
                 count += 1
                 apart.append(folder)
@@ -678,6 +680,9 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
                 if is_archive and target not in depth:
                     archives.append(target)
                     base_of[target], depth[target] = folder, depth[a] + 1
+                return True
+            for label, filename, size, opener in unverified:
+                keep_apart(label, filename, size, opener)
             for parts, size, opener in members:
                 if count >= UNPACK_MAX_FILES or total + size > UNPACK_MAX_BYTES:
                     raise UnpackLimit(f"{a.name} holds more than one upload can: at most {UNPACK_MAX_FILES:,} files "
@@ -689,7 +694,19 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
                     if broot not in target.resolve().parents:
                         skipped += 1
                         continue
-                    existed = target.exists()          # unpacked by an earlier run that stopped part way
+                    existed = target.exists() or target.is_symlink()
+                    if existed and not (target.is_file() and target.stat().st_size == size):
+                        # A file already at this path is this member only as an earlier run that stopped part way
+                        # unpacked it, so it has the member's size. Any other file there (the folder's own copy of
+                        # take1/cam.mp4 beside take1.zip) is a different file of the same name: neither is lost
+                        # for the other, and which one the path's folder describes is not proven, so the upload's
+                        # file keeps the path and the member is read as an upload of its own, as a member of
+                        # unproven name is.
+                        name = '/'.join(parts)
+                        label = f"{ARCHIVE_RE.sub('', a.name)}-{parts[-1]}"
+                        if keep_apart(label, parts[-1], size, opener, name):
+                            conflicts.append((name, Path(made[-1]).name))
+                        continue
                     if not existed:
                         target.parent.mkdir(parents=True, exist_ok=True)
                         with opener() as src, tempfile.NamedTemporaryFile(
@@ -748,6 +765,9 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
                         f"not be unpacked: {_and_words(members_bad[:12])}"
                         + (f" and {len(members_bad) - 12} more" if len(members_bad) > 12 else "")
                         if members_bad else "") + "." + "".join(f" {c}." for c in cut))
+        notes.extend(f"{a.name} holds {name}, which differs from the {name} already in the upload, so the archive's "
+                     f"copy was read as an upload of its own, {folder}, which no other file describes."
+                     for name, folder in conflicts)
     if root.is_file():
         return Path(dest), notes, apart
     return root, notes, apart
