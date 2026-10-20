@@ -7,9 +7,13 @@
 
 <table align="center">
   <tr>
-    <td><strong><a href="https://pantheon.inc/research/argus">Blog</a> | <a href="https://pantheon.inc/data-board">Data</a></strong></td>
+    <td><strong><a href="https://pantheon.inc/research/argus">Blog</a> | <a href="https://pantheon.inc/data-board">Dashboard</a> | <a href="https://huggingface.co/datasets/Pantheon-inc/DiverseUMI-sample100">DiverseUMI-100</a></strong></td>
   </tr>
 </table>
+
+### \* DiverseUMI (October 2026)
+
+We released [DiverseUMI](https://huggingface.co/datasets/Pantheon-inc/DiverseUMI-sample100), 99.6 hours of bimanual UMI annotated by Argus. It spans 12,219 episodes across 179 skills, each with dense action, outcome and progress labels, key events, object state changes, scene graphs and operator recoveries, alongside SLAM-tracked wrist poses and gripper actions.
 
 ### \* WGO-Bench (October 2026)
 
@@ -17,7 +21,7 @@ Recently, [Midcentury AI](https://www.midcentury.xyz/blog/optimizing-argus) push
 
 ### \* Depth and tactile annotations (October 2026)
 
-Argus now annotates depth, tactile and other sensor data jointly with video, state and actions. The clearest sensor findings appear as cards on the video, and every finding appears in the list and the JSON export, with supporting evidence and uncertainty.
+Argus now annotates depth, tactile and other sensor data jointly with video, state and actions. The most informative sensor findings are overlaid on the video as they occur, and every finding is exported with its evidence and uncertainty.
 
 ## Overview
 
@@ -36,15 +40,15 @@ It is the only harness to combine native multi-format ingestion (rather than res
 | Recording types | Teleop, UMI and human ego |
 | Native formats | LeRobot v2.0/v2.1/v3.0, MCAP, HDF5, video files and folders |
 | Archives | ZIP and TAR, plain or compressed with gzip, bzip2 or xz |
-| Sidecar metadata | JSON, JSON Lines, CSV, TSV, text and Markdown notes, and LeRobot's Parquet and JSON Lines annotation tables; YAML, TOML, INI and XML files are listed as not read |
-| Public dataset adapters | Nine adapters download and prepare public datasets, and six of them can also select an episode sample |
+| Sidecar metadata | JSON, JSON Lines, CSV, TSV, text and Markdown notes, and LeRobot's Parquet and JSON Lines annotation tables; YAML, TOML, INI and XML are reported as unread |
+| Public dataset adapters | Nine, each downloading and preparing a public dataset; six can also sample episodes |
 
 | Available evidence | How it contributes |
 |---|---|
 | RGB | Timestamped multi-view frames provide visual context for task execution, object interactions, progress, failures and recoveries. |
-| Proprioception and actions | Joint states, end-effector poses, gripper states and action trajectories provide motion context. Training targets retain their declared semantics rather than being assumed to be executed commands. In LeRobot, HDF5 and MCAP alike, joint angles declared as degrees by their metadata or names, or whose readings can only be degrees, are converted to radians, and the state contract records why. A state declared in radians whose readings can only be degrees is kept as recorded and left out of kinematic checks, with the contradiction named on the episode. |
+| Proprioception and actions | Joint states, end-effector poses, gripper states and action trajectories provide motion context. Training targets retain their declared semantics rather than being assumed to be executed commands. Every reader (LeRobot, HDF5 and MCAP) converts joint angles declared in degrees, or whose readings can only be degrees, to radians, and the state contract records why. A state declared in radians whose readings can only be degrees is kept as recorded, flagged, and left out of kinematic checks. |
 | Depth | Metric depth supports camera-relative distance and separation when units, calibration and temporal alignment are known. Relative depth remains relative. |
-| Tactile | Pressure, normal/shear force, contact arrays and optical tactile images support analysis of grip, contact distribution and surface motion. Full-array patterns, individual-cell and regional responses, and hand geometry are compared with video and gripper state. A publisher's declared layout, such as the bundled [OpenTouch contract](configs/sensor_schemas/opentouch_hdf5_v1.json) that names the glove's hand regions, is treated as the publisher's claim rather than a verified map of the hardware; array shape alone does not establish anatomy or force. Response changes alone do not establish slip. |
+| Tactile | Pressure, normal/shear force, contact arrays and optical tactile images support analysis of grip, contact distribution and surface motion. Full-array patterns, individual-cell and regional responses, and hand geometry are compared with video and gripper state. A publisher's declared layout, such as the bundled [OpenTouch contract](configs/sensor_schemas/opentouch_hdf5_v1.json) that names the glove's hand regions, is treated as the publisher's claim, not a verified map of the hardware. Array shape alone does not establish anatomy or force, and response changes alone do not establish slip. |
 | Other episode fields | Numeric channels, event flags, waveform packets and structured metadata are accessible through the same inspection interface. Spectral analysis of eligible waveforms requires a recorded sample rate. |
 | Task context | Instructions, annotations and calibration metadata provide context. The VLM checks publisher claims against the recording rather than assuming their correctness. |
 
@@ -75,7 +79,7 @@ uv run python -m review --data path/to/dataset --rig teleop_arms \
 uv run python -m board serve --board data/review/mine --clips data/review/mine/clips
 ```
 
-[`--data`](review/__main__.py) accepts a folder, file, archive or HTTP(S) URL. Set [`--rig`](review/__main__.py) to [`teleop_arms`](review/__main__.py), [`handheld_gripper`](review/__main__.py) or [`ego_head`](review/__main__.py) for teleop, UMI or human ego, respectively. Argus detects the format and available evidence; RGB-only data follows the same pipeline without requiring sensor inputs. [Data Review](https://data.pantheon.inc/review) uses the same default policy, though its deployed version and upload limits can differ.
+[`--data`](review/__main__.py) accepts a folder, file, archive or HTTP(S) URL. Set [`--rig`](review/__main__.py) to [`teleop_arms`](review/__main__.py), [`handheld_gripper`](review/__main__.py) or [`ego_head`](review/__main__.py) for teleop, UMI or human ego, respectively. Argus detects the format and the evidence available, and RGB-only data runs through the same pipeline. [Data Review](https://data.pantheon.inc/review) uses the same default policy, though its deployed version and upload limits can differ.
 
 | Default or optional setting | Behavior |
 |---|---|
@@ -84,20 +88,20 @@ uv run python -m board serve --board data/review/mine --clips data/review/mine/c
 | Faster actions | [`--sample-fps 2`](label/policy.py) is recommended for subsecond fumbles and rapid recoveries. More images shorten the available request window and can increase cost. |
 | Task scope | Episode/session scope follows source metadata; [`--task-mode episode`](label/policy.py) or [`session`](label/policy.py) overrides it. A missing instruction does not automatically imply a session. Human ego uses the activities schema. |
 
-Optical tactile cameras are compared across the sampled episode, and at their full frame rate, up to 24 extra frames, around moments when their image changes; marker tracking reads dot-marker images only.
-For tactile arrays with regional and individual-cell evidence, a separate model pass compares regional responses with hand configuration and camera evidence. The primary pass examines local spatial patterns independently. Each pass cites only measurements its own request supplied, both share the spending cap, and each finding records which request produced it.
+Optical tactile images are compared across the sampled episode, plus up to 24 extra full-rate frames, shared across sensors, at the moments their image changes most; marker tracking applies only to dot-marker sensors.
+For tactile arrays with regional and per-cell evidence, a separate regional pass compares regional responses with hand pose and the cameras, while the primary pass reads local spatial patterns. Each pass cites only the measurements its own request carried, both draw on the same spending cap, and every finding records the request that produced it.
 
-After annotation, one text-only call to the same model reads the timed sensor findings that add something beyond the video. It chooses the few a person watching should see as cards on the video, and writes each of those findings in plain English, under the same rule the annotation follows, so the cards and the list read in one voice. Plain here means ordinary words that keep the specifics, such as "two thumb spots press harder again while a third stays the same", never a vaguer claim. A card plots at most two rows: the regions its finding cites, areas within one region with parts that change in opposite directions kept apart, or another cited series. Every finding that adds to the video stays in the list below it, and the JSON keeps them all. If the card call fails or the cap blocks it, the video plays every finding, and the annotation it follows is never paid for again.
+After annotation, one text-only call to the same model picks the sensor findings worth overlaying on the video, at most two at once, and rewrites every finding in plain, specific English under the same rule the annotation follows, so the overlay and the list read in one voice. Each overlay plots at most two series: the regions its finding cites, opposing areas within one region, or another cited series. Every finding stays in the list and the JSON export. If the call fails or the cap blocks it, every finding plays on the video and the paid annotation is kept as it is.
 
-Each recording produces one public episode. Long recordings are split to fit API request limits and rejoined on the original timeline; internal chunk boundaries are not treated as recording truncation. Session mode annotates activities within the recording. Preparation limits, missing chunks and processing failures are reported alongside any usable results.
+Each recording produces one episode. Long recordings are split into chunks of at most 450s at default sampling, annotated separately and rejoined on the original timeline, and a chunk boundary is never mistaken for truncation. Session mode annotates activities within the recording. Preparation limits, missing chunks and processing failures are reported alongside any usable results.
 
 Rerunning a review job with the same [`--out`](review/__main__.py) keeps its settings, refuses changed ones, and reuses outputs whose inputs and selected evidence still match; to change source data, prepared inputs or annotation settings, start a new job. Resume reuses the job's verified preparation, so use a fresh `--out` to apply newer reader fixes. [`--free`](review/__main__.py) skips field interpretation, image-detail routing, evidence selection, the regional sensor pass and video cards, so it previews base requests rather than the full paid evidence path.
 
-After code changes, the saved receipts of a recording labelled in one request can verify its exact prompt and ordered images offline and rebind the retained reply without another call; when that proof is missing or changed, [`--force`](label/harness.py) refreshes the episode with new paid calls. Spending caps account for every call and outstanding reservation, and unresolved charges stay reserved. Inspection blocked by the cap resumes when the allowance increases, before final annotation is dispatched.
+After a code change, a recording labelled in one request is verified offline against its saved receipt, exact prompt and image order included, and its retained reply is rebound without another call; when that proof is missing or has changed, [`--force`](label/harness.py) relabels the episode with new paid calls. Spending caps account for every call and outstanding reservation, and unresolved charges stay reserved. Inspection blocked by the cap resumes when the allowance increases, before final annotation is dispatched.
 
 ## Results and further use
 
-Live and static boards use the same [viewer](board/index.html), with behavioral and sensor annotations overlaid on the footage and supporting measurements alongside it. The same findings are available as episode JSON, filtered JSON Lines and static exports. Issues with missing or invalid severity remain visible as unrated and are excluded from severity totals. An issue's problem family comes from its tag, and for a broad tag from its wording, where a problem the text denies, asks about, supposes or withdraws does not count.
+Live and static boards share one [viewer](board/index.html), which overlays behavioral and sensor annotations on the footage with the supporting measurements beside it. The same findings export as episode JSON, filtered JSON Lines and static sites. Issues with missing or invalid severity remain visible as unrated and are excluded from severity totals. An issue's problem family comes from its tag, and for a broad tag from its wording, where a problem the text denies, asks about, supposes or withdraws does not count.
 
 This is an excerpt from a pressure glove episode's downloadable JSON. In the list and on the video, a finding shows its `video_card` words when it has one, otherwise its `list_copy`, otherwise its own headline and detail. Evidence IDs resolve to recorded streams and samples in the full export:
 
@@ -113,8 +117,8 @@ This is an excerpt from a pressure glove episode's downloadable JSON. In the lis
         "confidence": "medium",
         "video_card": {
           "version": 1,
-          "headline": "Thumb pressure likely eases more",
-          "detail": "As the cup moves away, the thumb eases while index finger pressure stays elevated."
+          "headline": "The thumb likely presses less.",
+          "detail": "The index finger keeps pressing as the cup moves away."
         },
         "evidence": [
           {
@@ -179,7 +183,7 @@ Paid staged runs require a clean tracked checkout. [`--resume RUN --why "reason"
 
 Capped runs use verified model rates or a saved OpenRouter pricing quote and refuse unknown prices. Each request reserves an upper bound computed from the request itself, its text and images plus its full output limit, until the bill arrives. With the default 64,000-token output limit, the default model reserves at least $3.20 per request for the output alone, about $3.70 for a short teleop episode, so a smaller [`--max-tokens`](review/__main__.py) reserves less. Field interpretation and teleop image routing always use `openai/gpt-6-sol`, whatever `--model` says, and count against the cap; field interpretation can spend up to $3. When the cap cannot cover a single labelling request, `review` stops before that request and says so, though field interpretation may already have run. A quoted model whose price list includes web search is refused unless it is a Claude or Gemini model, which search only when a request asks, and requests here never ask; a price for an input a request never carries, such as audio, does not block a quote. Receipts preserve prior responses, charges and outstanding reservations across failures. [`board grids`](board/grids.py) reconstructs base request grids only when original input hashes can be verified; detail/sensor images are counted but not reconstructed there.
 
-[`checks.timebase scan`](checks/timebase.py) detects MolmoAct2 episodes that play faster than real time. [`apply`](checks/timebase.py) adds its measurements and report flags to prepared episodes and existing labels without changing their clocks. Capture, source and sensor check failures are distinct from clean results. Optional hand pose uses [`board/hand_pose/modal_app.py`](board/hand_pose/modal_app.py) and [`board/hands.py`](board/hands.py); it is separate from ordinary annotation and has the licenses below.
+[`checks.timebase scan`](checks/timebase.py) detects MolmoAct2 episodes that play faster than real time. [`apply`](checks/timebase.py) adds its measurements and report flags to prepared episodes and existing labels without changing their clocks. A capture, source or sensor check that stops with an error is reported as errored, never as clean. Optional hand pose uses [`board/hand_pose/modal_app.py`](board/hand_pose/modal_app.py) and [`board/hands.py`](board/hands.py); it is separate from ordinary annotation and has the licenses below.
 
 </details>
 
@@ -195,7 +199,7 @@ uv run python -m gate prepare
 uv run python -m gate label --kind full --cap 20
 ```
 
-Comparison caps apply per model run and gate caps per recording setup. Sampling may differ by model: compare saved requests before claiming identical inputs. [`--with-example`](compare/__main__.py) supplies a reference annotation; [`--routes`](compare/__main__.py) reuses resolution choices. [gate/selection.json](gate/selection.json) and [gate/cases.json](gate/cases.json) define the selected cases; [`gate score`](gate/score.py) evaluates the supplied runs. Its text checks count a word only where its own sentence asserts it, which is not a test of meaning; ambiguous object claims count as unmet and are flagged for review.
+Comparison caps apply per model run and gate caps per recording setup. Sampling may differ by model, so compare saved requests before claiming identical inputs. [`--with-example`](compare/__main__.py) supplies a reference annotation; [`--routes`](compare/__main__.py) reuses resolution choices. [gate/selection.json](gate/selection.json) and [gate/cases.json](gate/cases.json) define the selected cases; [`gate score`](gate/score.py) evaluates the supplied runs. Its text checks count a word only where its own sentence asserts it, which is not a test of meaning; ambiguous object claims count as unmet and are flagged for review.
 
 Comparisons distinguish missing responses from replies that failed to parse. Cost reports separate verified charges from unresolved reservations, and a gate cost rate is reported only when every invoice is verified. Cold-cost estimates require the default model and a single paid attempt per unit.
 
