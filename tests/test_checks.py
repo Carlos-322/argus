@@ -806,7 +806,7 @@ def test_a_single_arm_upload_with_a_third_camera_names_the_arm_after_its_wrist_c
     """The same through the reader: a one-arm LeRobot dataset (7 values, no action) with a top, a wrist and a front
     camera. The prompt must not tell the model the arm is called after the front camera."""
     from prepare import formats
-    from test_prepare import _lerobot_v21, _mp4, W, H
+    from test_prepare import _lerobot_v21, _mp4
     root = tmp_path / "one_arm"
     _lerobot_v21(root, n=45, dims=7)
     import pandas as pd
@@ -1085,7 +1085,7 @@ def test_the_recorded_state_line_says_why_there_is_no_state_as_the_reader_record
         (ep / "context.json").write_text(json.dumps(ctx))
         e = me.load(ep)
         return me._no_state_text(e, me.plan(e)).strip().splitlines()[0]
-    assert set(me.STATE_WHY) == {"layout", "not_recorded", "unreadable", "short", "assumed_clock"}
+    assert set(me.STATE_WORDING) == {"layout", "not_recorded", "unreadable", "short", "assumed_clock"}
     assert line("layout").startswith(layout + " The signal whose name says joints")
     assert line("layout", stops_short=True).startswith(layout)
     assert line("not_recorded").startswith("RECORDED STATE: no arm state in the layout our checks read.")

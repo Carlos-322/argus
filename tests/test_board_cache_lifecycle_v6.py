@@ -4,7 +4,6 @@ import errno
 import json
 import os
 from pathlib import Path
-import re
 import socket
 import subprocess
 import sys
@@ -15,7 +14,7 @@ import urllib.request
 import pytest
 
 from board import serve, static
-from test_prepared_footage import count_media_reads, media, serving, get
+from test_prepared_footage import count_media_reads, media, served, serving, get
 
 
 def test_reuse_refreshes_eviction_age_without_changing_movie_identity(tmp_path, monkeypatch):
@@ -25,14 +24,14 @@ def test_reuse_refreshes_eviction_age_without_changing_movie_identity(tmp_path, 
         def prepare(a, b):
             return json.loads(get(base + f'api/footage?id=episode_x&t0={a}&t1={b}&prepare=1'))
         first = prepare(0, .1)
-        path, _ = serve.ticket_footage(first['ticket'])
+        path, _ = served(first['ticket'])
         identity = serve._footage_version(path)
         second = prepare(.05, .2)
         refreshed = prepare(0, .1)
         prepare(.1, .3)
         assert get(base + 'api/footage?ticket=' + refreshed['ticket'])
         assert serve._footage_version(path) == identity
-        assert serve.ticket_footage(second['ticket']) is None
+        assert served(second['ticket']) is None
 
 
 def test_cli_restart_preserves_ticket_with_disabled_file_count(tmp_path, monkeypatch):
@@ -158,7 +157,7 @@ def test_receipt_orphan_sweep_skips_an_active_atomic_writer(tmp_path, monkeypatc
             assert active[0].exists()
         finally:
             release.set()
-        assert serve.ticket_footage(pending.result()) == result
+        assert served(pending.result()) == result
 
 
 def test_actual_download_client_retries_encoder_contention(tmp_path, monkeypatch):

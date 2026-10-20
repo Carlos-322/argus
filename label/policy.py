@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import math
-import re
 
 VERSION = 1
 ASTRA = 'openai/gpt-6-astra'
@@ -23,10 +22,6 @@ def output_limit(answer_tokens: int, reasoning: str) -> int:
     return answer_tokens + REASONING_TOKENS[reasoning]
 
 
-def is_astra(model: str) -> bool:
-    return re.fullmatch(r'(?:openai/)?gpt-6-astra(?:-\d{4}-\d{2}-\d{2})?', model) is not None
-
-
 def resolve(ctx: dict, *, model: str | None = None, reasoning: str | None = None,
             sample_fps: float | None = None, task_mode: str | None = None,
             dataset_note: str | None = None) -> dict:
@@ -40,8 +35,9 @@ def resolve(ctx: dict, *, model: str | None = None, reasoning: str | None = None
     model = model or saved.get('model') or ASTRA
     if not isinstance(model, str) or not model.strip():
         raise ValueError('model must be a nonempty identifier')
+    sol = model.split('/')[-1] == SOL61.split('/')[-1]
     prior_reasoning = saved.get('reasoning') if saved.get('model') == model else None
-    reasoning = reasoning or prior_reasoning or ('high' if model.split('/')[-1] == 'gpt-6.1-sol' else 'medium')
+    reasoning = reasoning or prior_reasoning or ('high' if sol else 'medium')
     if reasoning not in REASONING_TOKENS:
         raise ValueError('unsupported reasoning effort')
     if sample_fps is None:
@@ -55,8 +51,8 @@ def resolve(ctx: dict, *, model: str | None = None, reasoning: str | None = None
         if type(period) not in (float, int) or not math.isfinite(period) or period <= 0:
             raise ValueError('saved sampling cadence is invalid')
     else:
-        period = 1.0 if model.split('/')[-1] == 'gpt-6.1-sol' else PERIODS[rig]
-    if model.split('/')[-1] == 'gpt-6.1-sol' and period > 1.0:
+        period = 1.0 if sol else PERIODS[rig]
+    if sol and period > 1.0:
         raise ValueError('GPT-6.1 Sol requires at least 1 sample per second')
     declared = ctx.get('task_mode')
     if declared is None and ctx.get('sessions') is True:
@@ -68,7 +64,7 @@ def resolve(ctx: dict, *, model: str | None = None, reasoning: str | None = None
     if not isinstance(note, str):
         raise ValueError('dataset description must be text')
     # Preserve Astra's request budget. Denser sampling reduces the duration allowance proportionally.
-    baseline = 1.0 if model.split('/')[-1] == 'gpt-6.1-sol' else PERIODS[rig]
+    baseline = 1.0 if sol else PERIODS[rig]
     maximum = 450.0 if period >= baseline else 330.0 * min(1.0, period / 0.5)
     if sample_fps is None and saved.get('model') == model and saved.get('part_max_s') is not None:
         previous = saved['part_max_s']

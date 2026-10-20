@@ -13,7 +13,7 @@ from compare import metrics
 from gate.score import judge
 from label.harness import parse_response, TIMELINE_COLUMNS
 from test_output_consumers import complete_schema_reply
-from test_public_export_boundaries import public_sources, Request
+from test_public_export_boundaries import public_sources, Request  # noqa: F401 (public_sources is a fixture)
 
 
 def test_public_credentials_are_withheld_by_live_and_static_exports(public_sources, tmp_path, monkeypatch):

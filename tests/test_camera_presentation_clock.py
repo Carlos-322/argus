@@ -1,13 +1,12 @@
 """Distinct camera frames remain visible when their recorded timestamps repeat."""
 import hashlib
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 from board import clips, sensors
-from label import episode, frames
+from label import episode
 from prepare import formats
 
 

@@ -15,7 +15,7 @@ from pathlib import Path, PureWindowsPath
 
 import numpy as np
 
-from label.errors import DispatchError, KeyExhausted
+from label.errors import DispatchError
 from label.policy import output_limit
 
 SCHEMA = 1

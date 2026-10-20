@@ -2,10 +2,8 @@
 import hashlib
 import json
 import shutil
-from pathlib import Path
 
 import numpy as np
-import pytest
 
 from label import episode
 from prepare import formats, openaoe
@@ -32,15 +30,20 @@ def clip(root, *, annotation_name='ego_annotation/ego_action_annotation.json'):
     return annotation, info
 
 
-def convert(root, out, monkeypatch, *, legacy=False, rig='ego_head', ownership=None):
-    discover = formats.upload_adapters
-    with monkeypatch.context() as patch:
-        patch.setattr(formats, 'upload_adapters', lambda kind: [openaoe] if legacy and kind == 'video'
-                      else [] if kind == 'video' else discover(kind))
-        report = formats.convert(root, rig, out, 'native parity', 900, ownership_context=ownership)
+def convert(root, out, *, rig='ego_head', ownership=None):
+    """The upload folder root read as Data Review reads it, by the generic reader."""
+    report = formats.convert(root, rig, out, 'native parity', 900, ownership_context=ownership)
     assert not report['failed'] and len(report['episodes']) == 1, report
     ep = out / report['episodes'][0]['episode_id']
     return ep, json.loads((ep / 'context.json').read_text()), report
+
+
+def published(root, out):
+    """The episode the published OpenAoE preparation (python -m prepare openaoe, prepare_clip) writes for the clip
+    folder root."""
+    ep = out / formats.episode_name(root.name)
+    openaoe.prepare_clip(root, root.name, ep)
+    return ep, json.loads((ep / 'context.json').read_text())
 
 
 def hashes(root):
@@ -48,12 +51,12 @@ def hashes(root):
             for p in root.rglob('*') if p.is_file()}
 
 
-def test_native_public_upload_matches_forced_generic_frames_clocks_and_claims(tmp_path, monkeypatch):
+def test_native_public_upload_matches_forced_generic_frames_clocks_and_claims(tmp_path):
     root = tmp_path / 'original_clip'
     annotation, info = clip(root)
     before = hashes(root)
-    old_ep, old, _ = convert(root, tmp_path / 'legacy', monkeypatch, legacy=True)
-    new_ep, new, report = convert(root, tmp_path / 'generic', monkeypatch)
+    old_ep, old = published(root, tmp_path / 'legacy')
+    new_ep, new, report = convert(root, tmp_path / 'generic')
     assert old_ep.name == new_ep.name == 'episode_original_clip'
     for key in ['profile', 'state_kind', 'fps', 'n_state_frames', 'duration_s', 'cameras']:
         assert new[key] == old[key], key
@@ -94,24 +97,24 @@ def test_native_public_upload_matches_forced_generic_frames_clocks_and_claims(tm
                                       'no invented success', 'no undeclared physical collection claims']}))
 
 
-def test_selected_original_root_keeps_generic_identity_and_request(tmp_path, monkeypatch):
+def test_selected_original_root_keeps_generic_identity_and_request(tmp_path):
     root = tmp_path / 'original_clip'
     clip(root)
     ownership = {**original_context(root), 'root_name': root.name}
     selected = tmp_path / 'selected_alias'
     shutil.copytree(root, selected)
-    full, _, _ = convert(root, tmp_path / 'full', monkeypatch)
-    subset, _, _ = convert(selected, tmp_path / 'subset', monkeypatch, ownership=ownership)
+    full, _, _ = convert(root, tmp_path / 'full')
+    subset, _, _ = convert(selected, tmp_path / 'subset', ownership=ownership)
     assert full.name == subset.name == 'episode_original_clip'
     assert_same_model_inputs(full, subset)
 
 
-def test_generic_structural_notes_use_content_and_keep_caller_rig(tmp_path, monkeypatch):
+def test_generic_structural_notes_use_content_and_keep_caller_rig(tmp_path):
     root = tmp_path / 'neutral_clip'
     annotation, _ = clip(root, annotation_name='annotations/motions.json')
     (root / 'raw_video.mp4').rename(root / 'camera.mp4')
     (root / 'instruction.txt').write_text('fold the fabric')
-    ep, ctx, _ = convert(root, tmp_path / 'output', monkeypatch, rig='handheld_gripper')
+    ep, ctx, _ = convert(root, tmp_path / 'output', rig='handheld_gripper')
     assert ctx['profile'] == 'handheld_gripper'
     assert ctx['instruction'] == 'fold the fabric'
     assert ctx['annotation_subtasks'][0]['notes'] == annotation[0]
@@ -120,7 +123,7 @@ def test_generic_structural_notes_use_content_and_keep_caller_rig(tmp_path, monk
     assert ctx['source']['note_files'] == ['instruction.txt', 'annotations/motions.json', 'video_info.json']
 
 
-def test_invalid_structural_boundaries_stay_unresolved_with_complete_notes(tmp_path, monkeypatch):
+def test_invalid_structural_boundaries_stay_unresolved_with_complete_notes(tmp_path):
     root = tmp_path / 'invalid'
     clip(root)
     data = [{'start_ts': True, 'end_ts': 1, 'atomic_action': [{'verb': 'lift'}]},
@@ -128,64 +131,64 @@ def test_invalid_structural_boundaries_stay_unresolved_with_complete_notes(tmp_p
             {'start_ts': 'NaN', 'end_ts': 2, 'atomic_action': 'damaged'},
             {'scene': 'unmeasured', 'atomic_action': []}]
     (root / 'ego_annotation/ego_action_annotation.json').write_text(json.dumps(data))
-    _, ctx, _ = convert(root, tmp_path / 'output', monkeypatch)
+    _, ctx, _ = convert(root, tmp_path / 'output')
     assert not ctx.get('annotation_subtasks')
     assert len(ctx['annotation_unresolved']) == 4
     assert ctx['uploader_notes']['ego_annotation/ego_action_annotation.json'] == data
     assert all(row['timing_reason'] for row in ctx['annotation_unresolved'])
 
 
-def test_structural_note_scope_never_consumes_an_unrelated_nested_task(tmp_path, monkeypatch):
+def test_structural_note_scope_never_consumes_an_unrelated_nested_task(tmp_path):
     root = tmp_path / 'scope'
     clip(root)
     note = root / 'other_episode/task.json'
     note.parent.mkdir()
     note.write_text('{"task":"a different task"}')
-    _, ctx, _ = convert(root, tmp_path / 'output', monkeypatch)
+    _, ctx, _ = convert(root, tmp_path / 'output')
     assert not ctx.get('instruction')
     assert 'other_episode/task.json' not in ctx['source']['note_files']
     assert note not in formats.opened_notes(formats.plan(root)[1])
 
 
-def test_unreadable_annotation_stays_attributed_without_losing_the_clip(tmp_path, monkeypatch):
+def test_unreadable_annotation_stays_attributed_without_losing_the_clip(tmp_path):
     root = tmp_path / 'broken'
     clip(root)
     (root / 'ego_annotation/ego_action_annotation.json').write_text('[{"start_ts":0')
-    _, ctx, _ = convert(root, tmp_path / 'output', monkeypatch)
+    _, ctx, _ = convert(root, tmp_path / 'output')
     assert not ctx.get('annotation_subtasks')
     assert ctx['uploader_notes']['ego_annotation/ego_action_annotation.json'] == '[{"start_ts":0'
     assert any(issue['kind'] == 'metadata_unreadable' for issue in ctx['reader_issues'])
 
 
-def test_nested_annotations_of_another_recording_do_not_bind_to_the_parent_video(tmp_path, monkeypatch):
+def test_nested_annotations_of_another_recording_do_not_bind_to_the_parent_video(tmp_path):
     root = tmp_path / 'scope'
     annotation, _ = clip(root)
     other = root / 'other_episode/annotations/task.json'
     other.parent.mkdir(parents=True)
     other.write_text(json.dumps([{'start_ts': 0, 'end_ts': 1,
                                   'atomic_action': [{'verb': 'unrelated'}]}]))
-    _, ctx, _ = convert(root, tmp_path / 'output', monkeypatch)
+    _, ctx, _ = convert(root, tmp_path / 'output')
     assert len(ctx['annotation_subtasks']) == 2
     assert 'other_episode/annotations/task.json' not in ctx['source']['note_files']
 
 
-def test_conflicting_device_claims_keep_both_sources_without_choosing_a_device(tmp_path, monkeypatch):
+def test_conflicting_device_claims_keep_both_sources_without_choosing_a_device(tmp_path):
     root = tmp_path / 'conflict'
     _, info = clip(root)
     (root / 'other_device.json').write_text(json.dumps({'deviceInfo': {'brand': 'other', 'model': 'camera'},
                                                       'cameraParams': {'resolution': [640, 480]}}))
-    _, ctx, _ = convert(root, tmp_path / 'output', monkeypatch)
+    _, ctx, _ = convert(root, tmp_path / 'output')
     assert not ctx['source'].get('device') and not ctx['source'].get('resolution')
     assert {row['source'] for row in ctx['source']['device_claims']} == {'video_info.json', 'other_device.json'}
     assert ctx['uploader_notes']['video_info.json'] == info
     assert any(issue['kind'] == 'device_metadata_disagree' for issue in ctx['reader_issues'])
 
 
-def test_an_atomic_action_file_named_for_an_absent_take_keeps_its_owner(tmp_path, monkeypatch):
+def test_an_atomic_action_file_named_for_an_absent_take_keeps_its_owner(tmp_path):
     root = tmp_path / 'ownership'
     clip(root)
     (root / 'ep2_annotations.json').write_text(json.dumps([
         {'start_ts': 0, 'end_ts': 1, 'atomic_action': [{'verb': 'unrelated'}]}]))
-    _, ctx, _ = convert(root, tmp_path / 'output', monkeypatch)
+    _, ctx, _ = convert(root, tmp_path / 'output')
     assert len(ctx['annotation_subtasks']) == 2
     assert 'ep2_annotations.json' not in ctx['source']['note_files']

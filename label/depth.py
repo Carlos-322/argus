@@ -207,11 +207,6 @@ def picture(a: np.ndarray, entry: dict, rng: tuple[float, float] | None = None):
     return Image.fromarray((rgb * 255).astype(np.uint8), "RGB")
 
 
-def colorize(a: np.ndarray, rng: tuple[float, float], scale_m: float | None = None):
-    """picture() for a bare range and scale (an older call site)."""
-    return picture(a, {"scale_m": scale_m, "range": rng})
-
-
 def mark_regions(image, regions: list, source_shape):
     """Number measured source-pixel regions on a preview, without changing depth values."""
     from PIL import ImageDraw

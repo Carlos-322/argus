@@ -13,7 +13,7 @@ from PIL import Image
 from label import episode
 from prepare import formats
 from test_formats import _lerobot_v3
-from test_ingestion_timing_regressions import reordered_h264
+from test_ingestion_timing_regressions import reordered_h264  # noqa: F401 (a fixture)
 from test_prepare import _mp4, joint_names
 
 

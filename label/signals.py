@@ -420,20 +420,9 @@ def distance_at(a: np.ndarray, k: int, rest=None, swing=None) -> tuple[np.ndarra
 
 
 def active_at(a: np.ndarray, k: int, rest=None, swing=None) -> np.ndarray:
-    """_active's row k: which values are away from rest at frame k."""
+    """Which values are away from rest at frame k."""
     d, sw = distance_at(a, k, rest, swing)
     return _away(d, sw) if sw > 0 else np.zeros(len(d), dtype=bool)
-
-
-def _active(a: np.ndarray, rest=None, swing=None) -> np.ndarray:
-    a = _float(a)
-    level = resting_level(a, rest)
-    sw = _swing(a, level, swing)
-    out = np.zeros(a.shape, dtype=bool)
-    if sw > 0:
-        for i, c in _rows64(a):
-            out[i:i + len(c)] = _away(np.abs(c - level), sw)
-    return out
 
 
 def activity(a: np.ndarray, rest=None, swing=None) -> np.ndarray:

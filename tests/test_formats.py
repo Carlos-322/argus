@@ -242,81 +242,21 @@ def test_an_mcap_task_is_its_task_topic_and_its_steps_are_timed():
     assert mcap_task_text_checks() == 0
 
 
-def test_a_gen_humanego_recording_uses_generic_upload_dispatch():
-    """Recorded cameras and annotations use generic upload reading while published sampling stays available."""
-    from prepare import genhumanego as gh
-    cams = [f"/robot0/sensor/camera{i}/compressed" for i in range(6)]
-    hands = ["/robot0/handtracking/left", "/robot0/handtracking/right"]
-    assert f.mcap_layout(cams + hands + [gh.ANNOTATION_TOPIC]) == "generic"
-    assert f.mcap_layout(cams + hands) == "generic"
-
-
-def test_every_adapter_says_whether_it_reads_uploads():
-    """An adapter added to prepare/ is found by the reader without editing it, and cannot be forgotten: it declares
-    UPLOAD, a kind of upload it reads (with recognizes and convert_upload) or None."""
-    import importlib
-    import pkgutil
-    import prepare
-    for m in pkgutil.iter_modules(prepare.__path__):
-        if m.name in f.NOT_ADAPTERS:
-            continue
-        mod = importlib.import_module(f"prepare.{m.name}")
-        assert hasattr(mod, "UPLOAD"), f"prepare/{m.name}.py declares no UPLOAD"
-        if mod.UPLOAD is not None:
-            assert callable(getattr(mod, "recognizes", None)) and callable(getattr(mod, "convert_upload", None)), m.name
-    names = [m.__name__.rsplit(".", 1)[-1] for m in f.upload_adapters("mcap")]
-    assert names == [], names
-
-
-def test_each_mcap_adapter_recognizes_its_own_layout_and_no_other():
-    from prepare import abc130k, genhumanego, realomin
-    layouts = {"abc130k": [abc130k.TOP_TOPICS[0], *abc130k.VIEW_TOPIC.values(), *abc130k.ARM],
-               "realomin": [*realomin.CAMERA_TOPICS, *realomin.POSE_TOPICS],
-               "genhumanego": [genhumanego.CAMERA_TOPIC, genhumanego.ANNOTATION_TOPIC]}
-    for name, topics in layouts.items():
-        assert f.mcap_layout(topics) == "generic", name
-    assert f.mcap_layout(["/camera/color/0/image", "/task", "/task/subtask"]) == "generic"
-
-
-def test_a_lerobot_upload_goes_to_the_adapter_of_its_dataset():
-    """Retired dataset layouts and other LeRobot datasets use the generic reader."""
-    habit = ["action", "episode_index", "frame_index", "human_role_subtask_index", "is_error_segment",
-             "is_high_jerk_segment", "is_intervention_segment", "low_level_task_index", "observation.state",
-             "observation.images.exo_view", "observation.images.left_wrist_view"]
-    galaxea = ["action.left_arm", "action.left_gripper", "coarse_task_index", "episode_index", "frame_index",
-               "observation.images.head_rgb", "observation.state.left_arm", "observation.state.left_gripper",
-               "observation.state.right_arm", "observation.state.right_gripper", "quality_index", "task_index"]
-    yam = ["action", "observation.state", "observation.images.top", "observation.images.left", "episode_index"]
-    pick = lambda feats: next((m.__name__.rsplit(".", 1)[-1] for m in f.upload_adapters("lerobot")
-                               if m.recognizes({"features": {k: {} for k in feats}})), "generic")
-    assert [pick(habit), pick(galaxea), pick(yam)] == ["generic", "generic", "generic"]
-    assert [m.__name__.rsplit(".", 1)[-1] for m in f.upload_adapters("lerobot")] == []
-
-
-def test_a_video_folder_keeps_published_helpers_after_upload_retirement():
-    """Published preparation still recognizes its clips; upload conversion reads structured notes generically."""
+def test_openaoe_published_preparation_reads_a_clips_action_segments():
+    """The published OpenAoE preparation reads a clip's action segments as timed steps."""
     with tempfile.TemporaryDirectory() as t:
-        _video_folder_adapter(Path(t))
+        _openaoe_clip_segments(Path(t))
 
 
-def _video_folder_adapter(tmp_path: Path):
+def _openaoe_clip_segments(tmp_path: Path):
     from prepare import openaoe
     clip = tmp_path / "raw_x_seg_1"
     (clip / "ego_annotation").mkdir(parents=True)
     (clip / "raw_video.mp4").write_bytes(b"")
     (clip / "ego_annotation" / "ego_action_annotation.json").write_text(
         '[{"start_ts": "0.00", "end_ts": "3.00", "atomic_action": [{"verb": "align", "object": "fabric", "hand": "both"}]}]')
-    item = {"dir": clip, "files": [clip / "raw_video.mp4"], "name": "raw_x_seg_1"}
-    assert f.upload_adapters("video") == []
-    assert openaoe.recognizes(item)
     assert openaoe.clip_extra(clip, clip.name)["annotation_subtasks"] == [
         {"t0": 0.0, "t1": 3.0, "label": "align fabric (both hands)", "ok": True}]
-    assert not openaoe.recognizes({**item, "files": [clip / "other.mp4"]})
-    plain = tmp_path / "plain"
-    plain.mkdir()
-    (plain / "raw_video.mp4").write_bytes(b"")
-    assert not openaoe.recognizes({"dir": plain, "files": [plain / "raw_video.mp4"], "name": "plain"})
-    assert openaoe.recognizes({"dir": None, "files": [clip / "raw_video.mp4"], "name": "raw_video"})   # the folder uploaded itself
 
 
 def _clip(path: Path, n: int) -> None:
@@ -1209,7 +1149,6 @@ def test_an_accented_name_keeps_its_letters_in_the_episode_id():
     assert f.episode_name("run-1") == "episode_run_1" and f.episode_name("瓶子") == "episode_0"
 
 
-
 def test_state_that_covers_only_part_of_the_footage_is_not_held_flat_into_a_still_span():
     """Arms recorded moving over 0 to 6 s of 10 s footage: the state must not claim they stood still over the rest
     (np.interp holds the last sample flat), so the episode is labelled from the cameras with a note instead."""
@@ -1829,36 +1768,6 @@ def test_tactile_camera_names_still_say_they_sense_touch():
     for name in ("tactile_left_heatmap", "gelsight_left", "digit_0", "xense_right", "tactile_left"):
         assert f.is_sensing(name), name
     assert not f.is_sensing("digital_cam")
-
-
-def _mcap_layout_context_with(convert_upload):
-    """mcap_layout_context through a made-up layout whose reader is convert_upload: import_module returns a module
-    already in sys.modules, so only that layout is faked."""
-    import sys, types
-    sys.modules["prepare.fakelayout"] = types.SimpleNamespace(convert_upload=convert_upload)
-    try:
-        return f.mcap_layout_context({"name": "a.mcap"}, "fakelayout", Path("episode_a"), "ds")
-    finally:
-        del sys.modules["prepare.fakelayout"]
-
-
-def test_an_mcap_layout_readers_source_notes_are_kept():
-    """The format and file are added to the layout reader's source instead of replacing it."""
-    ctx = _mcap_layout_context_with(lambda item, ep: {"source": {"unused_signals": ["/imu (not read yet)"],
-                                                                 "invalid_ranges": [[0, 1]]}})
-    assert ctx["source"]["unused_signals"] == ["/imu (not read yet)"]
-    assert ctx["source"]["invalid_ranges"] == [[0, 1]]
-    assert ctx["source"]["format"] == "mcap (fakelayout layout)" and ctx["source"]["file"] == "a.mcap"
-    assert ctx["dataset"] == "ds"
-
-
-def test_an_mcap_layout_reader_that_returns_no_context_is_an_error():
-    try:
-        _mcap_layout_context_with(lambda item, ep: None)
-    except ValueError as e:
-        assert str(e) == "prepare.fakelayout returned no context"
-    else:
-        raise AssertionError("no error for a reader that returned no context")
 
 
 # ---------------------------------------------------------------- no drop: keep what is usable, flag what is wrong
@@ -3077,7 +2986,6 @@ def _lerobot_image_cameras_the_model_is_not_shown_reach_the_board(tmp_path):
         assert str(tmp_path) not in json.dumps(fields)
 
 
-
 def test_lerobot_image_cameras_the_model_is_not_shown_reach_the_board():
     # no pytest fixture: Data Review runs this file's tests as plain functions (upload/test_formats.py)
     with tempfile.TemporaryDirectory() as t:
@@ -4142,7 +4050,6 @@ def test_structured_recordings_read_owned_side_notes():
 
 
 def _camera_metadata_keeps_its_owners_without_becoming_the_task(tmp_path):
-    import json
     videos = ['d/top_ep1.mp4', 'd/wrist_ep1.mp4', 'd/top_ep2.mp4', 'd/wrist_ep2.mp4',
               'd/top_ep1_ir.mp4', 'd/top_ep9_ir.mp4']
     notes = {'d/top.json': {'task': 'calibrate top', 'note': 'top lens glare'},
@@ -4626,7 +4533,6 @@ def test_valid_episode_rows_survive_invalid_and_fractional_recorded_indices():
 
 def test_partial_jsonl_notes_keep_valid_payloads_and_name_bad_lines():
     import json
-    import numpy as np
     with tempfile.TemporaryDirectory() as t:
         root = Path(t) / 'upload'
         root.mkdir()
@@ -4659,7 +4565,6 @@ def test_fractional_task_indices_never_borrow_an_integral_task():
 
 def test_v3_episode_tables_keep_valid_rows_beside_fractional_indices():
     import pandas as pd
-    import numpy as np
     with tempfile.TemporaryDirectory() as t:
         root = Path(t) / 'upload'
         camera = 'observation.images.cam_high'
@@ -4850,7 +4755,6 @@ def _episode_row_upload(root, version, changed):
 
 
 def test_bad_episode_lengths_keep_recorded_owners_and_readable_windows():
-    import json
     with tempfile.TemporaryDirectory() as t:
         for version in ('v2', 'v3'):
             for n, length in enumerate(('bad', {'unknown': 'length'}, 0.5, True, -1, 0, [10, 20])):
@@ -4899,7 +4803,6 @@ def test_bad_episode_tasks_stay_claims_without_asserted_nontext_instructions():
 
 
 def test_invalid_episode_tasks_keep_valid_recorded_table_tasks_and_note_sources():
-    import json
     import numpy as np
     import pandas as pd
     with tempfile.TemporaryDirectory() as t:

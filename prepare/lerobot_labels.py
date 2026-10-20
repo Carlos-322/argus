@@ -5,7 +5,6 @@ from pathlib import Path
 from prepare.annotations import index_tables, original
 
 
-UPLOAD = None
 TABLE_COLUMNS = {'tasks': 'task_index', 'subtasks': 'low_level_task_index',
                  'human_subtasks': 'human_role_subtask_index'}
 PUBLISHER_COLUMNS = frozenset({'is_error_segment', 'is_intervention_segment', 'is_high_jerk_segment'})

@@ -1,7 +1,6 @@
 """Auxiliary mechanics dispatch reuses the cumulative inspection invoice."""
 import copy
 import json
-from pathlib import Path
 
 import pytest
 

@@ -18,10 +18,8 @@ Accepted uploads, in the order they are recognised:
    Cameras stored as images inside the parquet are written to H.264 at their frame times.
    LeRobot episodes use the generic reader with recorded task tables and publisher claims kept under their sources.
    Complete named arm and scalar gripper columns are joined structurally by the generic reader.
-2. MCAP, one file per episode. A layout a dataset adapter recognizes goes through that adapter (the
-   prepare/*.py that declare UPLOAD = "mcap", found by upload_adapters: RealOmin with its
-   robot state, Gen-HumanEgo with its forward camera, goal and timed steps). Any other layout is read for
-   its cameras (every compressed-image or compressed-video channel), its depth image channels (each with the camera
+2. MCAP, one file per episode, whatever its layout (RealOmin, Gen-HumanEgo and ABC-130k recordings included), read
+   by the generic reader for its cameras (every compressed-image or compressed-video channel), its depth image channels (each with the camera
    whose topic it shares), its arm joints on a teleoperated rig (joint_state: any channel whose messages carry a joint
    vector and a gripper reading, its side from the topic, a leader or command channel as the action), every other
    number it records as a signal (mcap_signals), and its text channels (the task topic, and on a head camera a step
@@ -133,7 +131,6 @@ from __future__ import annotations
 
 import collections
 import dataclasses
-import functools
 import json
 import os
 import re
@@ -155,7 +152,6 @@ from prepare.signal_alignment import ALIGNED_ROWS, ALIGNED_ASSUMED, ALIGNED_CAME
 
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 RIGS = ("teleop_arms", "handheld_gripper", "ego_head")
-STATE_KIND = {"teleop_arms": "joints", "handheld_gripper": "ee_pose"}
 TIME_BASE_DEN = 1_000_000
 ANNOTATION_MAX_CHARS = 4000
 EGO_DESC = ("the camera worn on the person's head, looking forward and down at their hands and the work "
@@ -781,7 +777,7 @@ def detect(root: Path) -> dict:
     an upload of plain videos beside an HDF5 file with a camera had been read as HDF5 alone, its videos never
     mentioned. Files inside a LeRobot dataset belong to it. MCAP and HDF5 files with no camera (arm joints, grippers, a
     glove's pressure and hand pose) are sensor files ("state"), read with the episodes of their folder (assign_sensors),
-    never episodes of their own; an MCAP a dataset adapter recognizes is an episode whatever its channels."""
+    never episodes of their own."""
     root = Path(root)
     files = files_under(root)
     roots = lerobot_roots(root, files)
@@ -791,7 +787,7 @@ def detect(root: Path) -> dict:
     mcaps = [p for p in rest if p.suffix.lower() == ".mcap"]
     h5s = [p for p in rest if p.suffix.lower() in H5_EXT]
     vids = [p for p in rest if p.suffix.lower() in VIDEO_EXT]
-    mcap_eps = [p for p in mcaps if mcap_has_camera(p) or mcap_layout([t for t, _ in mcap_channels(p)]) != "generic"]
+    mcap_eps = [p for p in mcaps if mcap_has_camera(p)]
     h5_cams = [p for p in h5s if h5_has_camera(p)]
     sensors = [str(p) for p in mcaps + h5s if p not in mcap_eps and p not in h5_cams]
     if mcap_eps:
@@ -870,7 +866,7 @@ def lerobot_roots(root: Path, files: list[Path]) -> list[str]:
     return [str(r) for r in sorted(out)]
 
 
-# ---------------------------------------------------------------- shared helpers
+# ---------------------------------------------------------------- shared helpers: opening videos and placing cameras
 
 DEMUXER = {".mp4": "mov", ".mov": "mov", ".m4v": "mov", ".mkv": "matroska", ".webm": "matroska", ".avi": "avi"}
 
@@ -1636,6 +1632,8 @@ def _short(name: str, view: str) -> str:
     return "_".join(kept or words)[:32] or view
 
 
+# ---------------------------------------------------------------- shared helpers: notes and the task
+
 def set_uploader_notes(ctx: dict, obj, files: bool = False) -> None:
     """The uploader's notes for an episode, as text for the prompt (uploader_annotation) and as sent (uploader_notes,
     which the board shows beside the labels). files: obj holds several note files, {file name: notes}."""
@@ -1715,11 +1713,6 @@ def read_note(p: Path) -> tuple[object, str | None]:
     except ValueError as error:
         return text, plain_error(error)
     return text, None
-
-
-def read_annotation(p: Path):
-    """One note as sent, with valid JSON Lines rows and any unparsed lines retained separately."""
-    return read_note(p)[0]
 
 
 NOTE_OWN_EXT = (".json", ".txt", ".jsonl", ".md")
@@ -2138,6 +2131,8 @@ def task_rank(p: Path, named: bool = False, own: bool = False) -> int | None:
     return 1 if p.name.lower() in TASK_NOTE_NAMES else None
 
 
+# ---------------------------------------------------------------- shared helpers: recorded state layout
+
 # Generic physical state requires named joints and a gripper, or ordered Cartesian pose axes and an opening.
 # Layout classification is separate from unit qualification. Unsupported readings remain signals.
 # a state value's name says a gripper or a joint by one of these words, whole (_names_word), or a joint by j and its
@@ -2157,6 +2152,7 @@ def names_joint(name: str) -> bool:
 STATE_QUAT_NAME = re.compile(r"(^|[._/ -])q[._/ -]?[wxyz]$|(^|[^a-z])quat", re.I)
 STATE_WORD_SPLIT = re.compile(r"[._/ -]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Za-z])(?=[0-9])")
 STATE_UNIT_WORDS = {"m", "mm", "cm", "rad", "deg", "degree", "degrees"}
+# STATE_AXIS_WORDS is not read here; Data Review's upload tests (upload/test_formats.py) build state-name cases from it
 STATE_AXIS_WORDS = {"x", "y", "z", "roll", "pitch", "yaw", "rx", "ry", "rz"}
 STATE_POSITION_AXES = {"x", "y", "z"}
 STATE_POSITION_WORDS = {"pos", "position", "positions"}
@@ -2572,6 +2568,8 @@ def recorded_value_roles(features, names, columns):
             roles[index], sources[index] = "gripper", column
     return roles, sources
 
+
+# ---------------------------------------------------------------- shared helpers: signals
 
 # Per-frame columns that are the table's bookkeeping, not a recording: never kept as a signal
 SIGNAL_SKIP = re.compile(r"(^|\.)(index|timestamp)$|_index$")
@@ -3500,6 +3498,8 @@ class DepthWriter:
             self.dst.close()
         return len(self.pts)
 
+
+# ---------------------------------------------------------------- finishing an episode
 
 # Stored context times and capture arrays share one raw clock. Consumers subtract clock_zero_s (default zero).
 # The fields of context.json that hold times on that clock, {field: the time keys of each entry}. A step that
@@ -4697,22 +4697,7 @@ def packaging_note(window: float) -> str:
 
 
 def convert_video(item: dict, rig: str, out: Path, dataset: str) -> dict:
-    mod = None if item.get("_generic") else next((m for m in upload_adapters("video") if m.recognizes(item)), None)
-    if mod is not None:
-        # a folder in a dataset's own layout (OpenAoE's clip with its action segments) goes through its adapter
-        before = {p.name for p in Path(out).iterdir()} if Path(out).exists() else set()
-        try:
-            ctx = mod.convert_upload(item, rig, out, dataset)
-        except Exception as error:
-            # A dataset's own reader refines the generic one; its failure never costs what the generic reader can read.
-            import shutil
-            for name in ({p.name for p in Path(out).iterdir()} - before) if Path(out).exists() else ():
-                shutil.rmtree(Path(out) / name, ignore_errors=True)
-            return generic_after_adapter(error, f"the {mod.__name__.rsplit('.', 1)[-1]} reader", out, None,
-                                         lambda: convert_video({**item, "_generic": True}, rig, out, dataset))
-        ctx.setdefault("source", {})["adapter"] = mod.__name__.rsplit(".", 1)[-1]
-        return ctx
-    parts: list = []              # damage to the episode's optional parts (part), recorded on it
+    parts: list = []             # damage to the episode's optional parts (part), recorded on it
     fs = item["files"]
     if item["dir"] is None:
         f = fs[0]
@@ -5876,75 +5861,15 @@ def _cells(col) -> np.ndarray | None:
 
 
 def convert_lerobot_item(item: dict, rig: str, out: Path, dataset: str) -> dict:
-    """A LeRobot episode through the adapter that recognizes its dataset (prepare/*.py with UPLOAD = "lerobot", found
-    by upload_adapters), else the generic reading below. Returns its context."""
-    mod = next((m for m in upload_adapters("lerobot") if m.recognizes(item["root"])), None)
-    if mod is None:
-        ctx = convert_lerobot(item, rig, out, dataset)
-    else:
-        before = {p.name for p in Path(out).iterdir()} if Path(out).exists() else set()
-        try:
-            ctx = mod.convert_upload(item, rig, out, dataset)
-        except Exception as error:
-            # A dataset's own reader refines the generic one; its failure never costs what the generic reader can read.
-            import shutil
-            for name in ({p.name for p in Path(out).iterdir()} - before) if Path(out).exists() else ():
-                shutil.rmtree(Path(out) / name, ignore_errors=True)
-            name = mod.__name__.rsplit(".", 1)[-1]
-            return generic_after_adapter(error, f"the {name} reader", out, None,
-                                         lambda: convert_lerobot(item, rig, out, dataset))
-        ctx["dataset"] = dataset
-        ctx.setdefault("source", {})["adapter"] = mod.__name__.rsplit(".", 1)[-1]
-        from prepare.state_contract import native_contract
-        proof = native_contract(ctx["source"]["adapter"], ctx.get("state_kind"))
-        if proof:
-            publisher = (ctx.get('state_contract') or {}).get('publisher_action_semantics')
-            if publisher is not None:
-                proof['publisher_action_semantics'] = publisher
-            ctx["state_contract"] = proof
-        if ctx.get("profile") != rig:
-            ctx["source"]["rig_note"] = f"the upload was marked {rig}; this dataset's layout is {ctx.get('profile')}"
-        # Galaxea writes its own episode; HABIT already passed through the generic reader above.
-        if "annotation_unresolved" not in ctx and item["row"].get("data") is not None:
-            df = _read_episode_table(item["row"]["data"], item["row"]["eidx"], None,
-                                     exclude=item["root"]["image_cams"])
-            if mod.__name__.rsplit(".", 1)[-1] == "galaxea":
-                # These are the adapter's rounded computations from task_index, not native timed annotations.
-                computed = {"adapter": "galaxea", "data_source": str(item["row"]["data"]),
-                            "provenance": "adapter computed approximations from recorded indices and its FPS; "
-                                          "not original recorded timestamps",
-                            "spans": ctx.pop("annotation_subtasks", []),
-                            "annotation_text": ctx.get("instruction_note"), "quality_tags": ctx.get("quality_tag")}
-                set_uploader_notes(ctx, {"adapter computed annotations": computed})
-                ctx["instruction_note"] = ("The adapter's earlier annotation text is retained as computed "
-                                           "approximations in the uploader notes. Admitted recorded spans are "
-                                           "attributed there separately.")
-                declared = item["root"]["annotated"].get(item["row"]["eidx"])
-                tasks = item["row"].get("tasks") or []
-                if declared or tasks:
-                    ctx["instruction"] = declared or "; ".join(tasks)
-                    ctx["task_label"] = tasks or ctx["task_label"]
-                else:
-                    try:
-                        valid = constant_index_task(df["coarse_task_index"], item["root"]["tasks_by_index"])
-                    except (TypeError, ValueError):
-                        valid = []
-                    if not valid:
-                        ctx.pop("instruction", None)
-                        ctx["task_label"] = [item["name"]]
-                instruction_file = out / ctx["episode_id"] / "instruction.txt"
-                if ctx.get("instruction"):
-                    instruction_file.write_text(ctx["instruction"] + "\n")
-                else:
-                    instruction_file.unlink(missing_ok=True)
-            lerobot_annotations(ctx, item["root"], df, item["row"]["data"])
+    """A LeRobot episode read by the generic reading below, with the notes its dataset's metadata holds on it.
+    Returns its context."""
+    ctx = convert_lerobot(item, rig, out, dataset)
     notes = item["row"].get("metadata_notes")
     if notes:
         previous = ctx.get("uploader_notes", ctx.get("uploader_annotation"))
         retained = previous if isinstance(previous, dict) else ({"recorded notes": previous} if previous else {})
         set_uploader_notes(ctx, {**retained, **notes}, files=True)
         ctx.setdefault("source", {}).setdefault("note_files", []).extend(notes)
-    if mod is not None or notes:
         write_atomic(out / ctx["episode_id"] / "context.json", ctx, indent=1, default=str)
     return ctx
 
@@ -6650,7 +6575,7 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
 
 def lerobot_rows_on_frames(parts, df, state, action, n, fps, kind, note):
     """state_on_frames, with the recorded state an optional part: if placing it fails the episode has no state."""
-    with part(parts, "the recorded state's rows") as placing:
+    with part(parts, "the recorded state's rows"):
         skip_when_cameras_only()
         return state_on_frames(df, state, action, n, fps, kind, note)
     return None, None, "none", StateNote("The recorded state could not be placed on the frames; the episode is "
@@ -7085,20 +7010,6 @@ def packed_window_indices(facts: dict, base: float, stop: float, *, fps: float |
     return tuple(indices)
 
 
-def _stream_facts(p: Path) -> dict:
-    with open_video(p) as c:
-        st = c.streams.video[0]
-        return {"width": st.codec_context.width, "height": st.codec_context.height, "codec": st.codec_context.name}
-
-
-def _shown_size(p: Path) -> tuple[int, int]:
-    """(width, height) of a video as it is shown (prepare/display.py; read once per file, so a packed file shared by
-    many episodes is probed once); (0, 0) when ffprobe cannot read it."""
-    from prepare import display
-    g = display.geometry(str(p))
-    return display.shown_size(g) if g["stored"][0] else (0, 0)
-
-
 def lerobot_image_clock(df, root, fps):
     """Original table clock plus normalized row-relative seconds, without changing source values."""
     fi = df["frame_index"].to_numpy() if "frame_index" in df.columns else np.arange(len(df))
@@ -7372,7 +7283,7 @@ def convert_recording(item: dict, rig: str, out: Path, dataset: str) -> dict:
     return ctx
 
 
-# ---------------------------------------------------------------- MCAP
+# ---------------------------------------------------------------- MCAP: planning an upload
 
 def plan_mcap(det: dict, root: Path) -> list[dict]:
     from mcap.reader import make_reader
@@ -8481,8 +8392,6 @@ def convert_hdf5(item: dict, rig: str, out: Path, dataset: str, *, source_scope:
     frames as they are), its depth stored losslessly in FFV1, every signal on the anchor camera's frames, and its text as the
     instruction and the uploader's notes (h5_streams says what each array is). An array named as the state is read as
     the state by the same rule as LeRobot's (h5_state)."""
-    import h5py
-    from PIL import Image
     if item.get("error"):
         raise ValueError(item["error"])
     ep = unique_dir(out, item.get("output_name") or episode_name(item["name"]))
@@ -8827,6 +8736,8 @@ def convert_hdf5(item: dict, rig: str, out: Path, dataset: str, *, source_scope:
                         placeholders={v: written[nm].placeholders() for v, (nm, _) in files.items()})
 
 
+# ---------------------------------------------------------------- converting one item, here or in a child process
+
 def with_hdf5_sources(sources, fn, *args, **kwargs):
     """fn(*args, **kwargs) with the upload's files as the only HDF5 sources (authorized_sources): a child process
     starts without the context its parent set."""
@@ -8886,6 +8797,8 @@ def read_episode(it: dict, rig: str, out: Path, dataset: str, scope: dict) -> di
     return ctx
 
 
+# ---------------------------------------------------------------- HDF5: camera names, depth scale, files with no camera
+
 def names_shown(files: dict) -> list[str]:
     return [nm for nm, _ in files.values()]
 
@@ -8937,7 +8850,6 @@ def depth_scale_attr(ds) -> float | None:
 
 
 def h5_has_camera(path: Path) -> bool:
-    import h5py
     try:
         with open_hdf5(path) as f:
             return any(h5_kind(p, ds) == "camera" for p, ds in _h5_datasets(f))
@@ -8949,7 +8861,6 @@ def h5_file_signals(paths: list[Path], q_abs: np.ndarray, n_anchor: int, fps: fl
                     presentation_q: np.ndarray | None = None) -> Signals:
     """Every signal of HDF5 files that hold no camera, placed on videos' frame times (q_abs, the recorder's clock):
     a glove's pressure and hand pose recorded beside a head camera. Only arrays with their own clock can be placed."""
-    import h5py
     out = Signals()
     for p in paths:
         try:
@@ -8974,63 +8885,16 @@ def h5_file_signals(paths: list[Path], q_abs: np.ndarray, n_anchor: int, fps: fl
     return out
 
 
-# modules of prepare/ that are the reader and its tools, not dataset adapters
-NOT_ADAPTERS = {"__main__", "archive_recovery", "ros2_recovery", "cli", "display", "folder", "formats", "hub", "lerobot", "lerobot_labels", "mcap_claims",
-                "mcap_fields", "mcap_pose", "mcap_registration", "mcap_source", "hdf_metadata", "remux",
-                "signal_alignment", "sensor_semantics", "publisher_schemas", "state_notes", "state_contract", "videos", "camera_clock", "jaws"}
-
-
-def upload_adapters(kind: str) -> list:
-    """The dataset adapters in prepare/ that read an upload of this kind ("mcap", "lerobot" or "video"), found rather
-    than listed: an adapter
-    declares UPLOAD = kind with recognizes() and convert_upload(), or UPLOAD = None when it reads only its published
-    dataset (tests/test_formats.py holds every adapter to one or the other). Videos use structural generic notes
-    without importing dataset adapters."""
-    if kind == "video":
-        return []
-    import importlib
-    import ast
-    import pkgutil
-    import prepare
-    out = []
-    for m in sorted(pkgutil.iter_modules(prepare.__path__), key=lambda m: m.name):
-        if m.name in NOT_ADAPTERS:
-            continue
-        path = Path(m.module_finder.path) / m.name
-        path = path / "__init__.py" if m.ispkg else path.with_suffix(".py")
-        declarations = [node.value for node in ast.parse(path.read_text()).body if isinstance(node, ast.Assign)
-                        and any(isinstance(target, ast.Name) and target.id == "UPLOAD" for target in node.targets)]
-        if not declarations or ast.literal_eval(declarations[-1]) != kind:
-            continue
-        mod = importlib.import_module(f"prepare.{m.name}")
-        if getattr(mod, "UPLOAD", None) == kind:
-            out.append(mod)
-    return out
-
+# ---------------------------------------------------------------- MCAP: reading a file
 
 def mcap_layout(topics: list[str]) -> str:
-    """The adapter whose layout these topics are (its module name), or "generic"."""
-    return next((m.__name__.rsplit(".", 1)[-1] for m in upload_adapters("mcap") if m.recognizes(topics)), "generic")
+    """Always "generic", since every MCAP is read by the generic reader. Kept because Data Review's upload server
+    (teleop-labeler/scripts/upload/server.py in the Data repo) still calls it to decide whether an MCAP is an
+    episode; it can go once that server stops calling it."""
+    return "generic"
 
 
 MCAP_MAGIC = b"\x89MCAP0\r\n"
-
-
-def mcap_layout_context(item: dict, layout: str, ep: Path, dataset: str) -> dict:
-    """The context a recognised MCAP layout's reader writes (prepare/<layout>.py), with the format and file added to
-    its source and the dataset to the context, so the reader's notes on what it left out stay."""
-    import importlib
-    ctx = importlib.import_module(f"prepare.{layout}").convert_upload(item, ep)
-    if not ctx:
-        raise ValueError(f"prepare.{layout} returned no context")
-    src = ctx.get("source") if isinstance(ctx.get("source"), dict) else {}
-    ctx.update({"dataset": dataset, "source": {**src, "format": f"mcap ({layout} layout)", "adapter": layout,
-                                                "file": item["name"]}})
-    from prepare.state_contract import native_contract
-    proof = native_contract(layout, ctx.get("state_kind"))
-    if proof:
-        ctx["state_contract"] = proof
-    return ctx
 
 
 def convert_mcap(item: dict, rig: str, out: Path, dataset: str) -> dict:
@@ -9040,58 +8904,7 @@ def convert_mcap(item: dict, rig: str, out: Path, dataset: str) -> dict:
     if not item["topics"]:
         # no summary section (a recording cut off before its footer): read it as a stream of messages
         item["topics"] = _mcap_topics_by_scan(item["file"])
-    layout = mcap_layout(item["topics"])
-    ep = out / (item.get("output_name") or episode_name(item["name"]))
-    if layout != "generic" and item["seconds"] is None:
-        layout = "generic"          # a cut-off file: the full adapters need its summary; its cameras are still read
-        item.setdefault("notes", []).append("The file ends early, before its index, so it was read from its cameras.")
-    if layout == "generic":
-        return convert_mcap_generic(item, rig, ep, dataset)
-    try:
-        return _convert_mcap_layout(item, rig, ep, dataset, layout)
-    except Exception as error:
-        # A layout reader refines the generic one; its failure never costs what the generic reader can read.
-        return generic_after_adapter(error, f"the {layout} reader", out, ep,
-                                     lambda: convert_mcap_generic(item, rig, ep, dataset))
-
-
-def generic_after_adapter(error: Exception, reader: str, out: Path, ep: Path | None, generic) -> dict:
-    """The episode read by the generic reader after a dataset's own reader failed, that failure recorded on it."""
-    import shutil
-    if ep is not None:
-        shutil.rmtree(ep, ignore_errors=True)       # what the failed reader half wrote
-    ctx = generic()
-    detail = str(error).strip().splitlines()[0][:200] if str(error).strip() else ""
-    add_issue(ctx, "adapter_failed", f"{reader[0].upper()}{reader[1:]} of this dataset could not read the episode "
-              f"({type(error).__name__}{': ' + detail if detail else ''}), so it was read by the generic reader.")
-    write_atomic(Path(out) / ctx["episode_id"] / "context.json", ctx, indent=1, default=str)
-    return ctx
-
-
-def _convert_mcap_layout(item: dict, rig: str, ep: Path, dataset: str, layout: str) -> dict:
-    ctx = mcap_layout_context(item, layout, ep, dataset)
-    # the rate and the length come from the anchor camera's real capture times (stations record at 30 or 60 Hz,
-    # and no camera runs at exactly its nominal rate), so sampling is one instant per second of real time and the
-    # footage cap counts real minutes
-    from label import episode as me
-    if ctx.get("real_times"):
-        t = np.load(ep / ctx["real_times"])[me.order_views(ctx["cameras"])[0]]
-        step = float(np.median(np.diff(t))) if len(t) > 1 else 1 / 30
-        ctx["fps"] = round(1.0 / step, 3)
-        ctx["duration_s"] = round(float(t[-1] - t[0]) + step, 3)
-    else:                                   # frames exactly on the adapter's grid: its rate is the real one
-        ctx["duration_s"] = round(ctx["n_state_frames"] / float(ctx["fps"]), 3)
-    if ctx.get("profile") != rig:
-        ctx["source"]["rig_note"] = f"the upload was marked {rig}; the {layout} layout is {ctx.get('profile')}"
-    # the layout's reader places only the recording's own channels: its folder's sensor files are listed on it
-    extra_files = [Path(x) for x in (item.get("state") or []) + (item.get("state_shared") or [])]
-    if extra_files:
-        why = f"the {layout} reader of this recording places only its own channels"
-        ctx["source"].setdefault("unused_signals", []).extend(f"{p.name} ({why})" for p in extra_files)
-        ctx["source"]["sensors"] = [p.name for p in extra_files]
-        ctx["source"]["sensor_files"] = {p.name: f"not placed: {why}" for p in extra_files}
-    write_atomic(ep / "context.json", ctx, indent=1, default=str)
-    return ctx
+    return convert_mcap_generic(item, rig, out / (item.get("output_name") or episode_name(item["name"])), dataset)
 
 
 def _mcap_stream(path: Path, topics: set | None = None, damaged: list | None = None, summary=None):
@@ -9639,11 +9452,10 @@ def mcap_joint_streams(paths: list[Path], q: np.ndarray | None = None, unread: l
 
 # Every other number an MCAP records (a gripper's IMU, an arm's joint velocities and torques, a base's odometry), read
 # as recorded_signals reads a LeRobot table's other columns: per channel, each numeric field under the dataset's own
-# name, placed on the anchor camera's frames. A channel slower than SIGNAL_MIN_HZ (a battery report) is kept with its
-# rate (rate_hz), each frame its nearest message; one with a single message is a setting, listed with its values,
-# not a reading over time. One that starts or ends inside the footage is NaN
-# outside its messages, never held flat where nothing was recorded, and the span it misses is a data issue.
-SIGNAL_MIN_HZ = 1.0
+# name, placed on the anchor camera's frames. Every channel, however slow (a battery report), is kept with its rate
+# (rate_hz); one with a single message is a setting, listed with its values, not a reading over time. One that starts
+# or ends inside the footage is NaN outside its messages, never held flat where nothing was recorded, and the span it
+# misses is a data issue.
 SIGNAL_SKIP_PARTS = {"header", "timestamp", "stamp"}      # a message's own time and sequence bookkeeping
 # A gap between two readings inside the footage longer than STATE_GAP_S is a stop the state is never filled across,
 # when it is also longer than STATE_STOP_STEPS of the stream's own median steps: a 30 Hz recorder that stops for 2 s
@@ -10333,6 +10145,8 @@ def third_arm_camera_desc(topics: list[str]) -> str:
             "out from each frame where it looks")
 
 
+# ---------------------------------------------------------------- MCAP: decoding messages, and the generic MCAP reader
+
 class McapSchemaError(ValueError):
     """A channel's recorded schema cannot be parsed by its supported decoder."""
 
@@ -10867,7 +10681,7 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
                         lose(ch.topic, msg)
                         continue
                     recovered_schemas[ch.topic] = schema
-                except (json.JSONDecodeError, UnicodeDecodeError, DecodeError) as error:
+                except (json.JSONDecodeError, UnicodeDecodeError, DecodeError):
                     message_failures[ch.topic] = message_failures.get(ch.topic, 0) + 1
                     lose(ch.topic, msg)
                     continue
@@ -11419,10 +11233,6 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
             record_joint_state_identity(extra, streams)
     elif note:
         no_state(extra, note)
-    elif item["seconds"] is None and mcap_layout(item["topics"]) != "generic":
-        # cut short (no summary), and its messages before the cut hold no arm (mcap_joint_streams reads up to the cut)
-        no_state(extra, StateNote("Labelled from the cameras, because the file is cut short before any of its robot "
-                                  "state.", "unreadable"))
     elif motion and rig == "ego_head":
         shown = ", ".join(motion[:4]) + (f" and {len(motion) - 4} more" if len(motion) > 4 else "")
         no_state(extra, StateNote(f"Labelled from the camera. The hand, body and camera tracks the file records "
@@ -11484,6 +11294,8 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
                                for v, (topic, _) in files.items()} if rig == "ego_head" else None,
                         signals=signals, depth=depth)
 
+
+# ---------------------------------------------------------------- encoded video frames, and trimming an episode
 
 def nal_units(b: bytes):
     """Header bytes of each NAL unit in an Annex-B buffer."""
@@ -12576,7 +12388,6 @@ def _read_file_times(p: Path) -> np.ndarray | None:
                 return np.linspace(st.message_start_time, st.message_end_time, max(int(st.message_count), 1)) / 1e9
             t = np.sort(np.array([m.log_time for _, _, m in _mcap_stream(Path(p))], dtype=np.float64)) / 1e9
             return t if len(t) else None
-        import h5py
         with open_hdf5(p) as f:
             clocks = [np.sort(t[np.isfinite(t)]) for t in h5_streams(f, "")["clock"].values() if len(t)]
         clocks = [t for t in clocks if len(t)]
@@ -12596,7 +12407,6 @@ def no_time_why(p: Path) -> str:
             if sensor_cut(p):
                 return "it is cut short before its first message, so nothing in it could be read"
         else:
-            import h5py
             with open_hdf5(p):
                 pass
     except Exception:
@@ -12641,7 +12451,6 @@ def unread_sensors_note(bad: list[tuple[str, str]], others: str | None) -> State
 
 def h5_state_arrays(p: Path) -> list[str]:
     """The arrays of an HDF5 file that are named as the state (H5_STATE_NAME, outside an action group)."""
-    import h5py
     try:
         with open_hdf5(p) as f:
             return sorted(s["name"] for s in h5_streams(f, "")["signal"]
@@ -12787,7 +12596,6 @@ def sensor_clock_namespace(path: Path, basis: str, reference_records=()) -> tupl
         if not count:
             return None, 'sidecar contains no readable timed numeric stream', None
     else:
-        import h5py
         keys = ('log_clock_id',) if basis == 'arrival' else ('capture_clock_id', 'clock_id')
         try:
             with open_hdf5(path) as source:
@@ -12883,7 +12691,6 @@ def note_sensors(extra: dict, signals: Signals, by_clock: list, assumed: list, u
                for a in extra.get('recorded_sensor_fields') or []):
             continue
         try:
-            import h5py
             with open_hdf5(path) as f:
                 metadata = h5_original_metadata(f, '', [])
             extra.setdefault('recorded_sensor_fields', []).append(

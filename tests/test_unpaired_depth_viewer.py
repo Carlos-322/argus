@@ -72,7 +72,7 @@ def test_table_depth_has_independent_source_clip_and_sensor_metadata(tmp_path):
 
 
 def test_depth_legend_cannot_label_disparity_as_metric_distance():
-    doc = sensors.depth_doc({'kind': 'disparity', 'scale_m': .001}, {'units': 'metres'})
+    doc = sensors.depth_doc({'kind': 'disparity', 'scale_m': .001})
     assert doc['units'] == 'relative'
 
 
