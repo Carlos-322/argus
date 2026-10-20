@@ -6408,7 +6408,8 @@ function renderEp(d, opts) {
         (qIn.penalties || []).map(x => `${x.mistake} (${x.severity}${x.recovered ? ', recovered' : ''}, -${x.points})`).join('\n')
         || 'Share of the work marked wasteful, and points off per operator mistake')}
       ${cell('Speed', Q.efficiency, Q.efficiency == null ? (qIn.tasks_total ? 'several subtasks'
-          : qIn.outcome === 'success' ? 'no peers' : 'goal not reached')
+          : qIn.outcome === 'success' ? (qIn.time_to_goal_s == null ? 'no goal time' : 'no peers')
+          : qIn.outcome === 'success_then_undone' ? 'goal undone' : 'goal not reached')
         : `${qNum(qIn.time_to_goal_s)}s, median ${qNum(qIn.peer_median_time_to_goal_s)}s`,
         Q.peers >= 5 ? `Time from the first action to the goal, against ${Q.peers} other successful demos of this task`
           : 'Fewer than 5 other successful demos of this task to compare with')}
@@ -6419,10 +6420,12 @@ function renderEp(d, opts) {
       ${qIn.tasks_total ? `${cell('Subtasks', null, `${qIn.tasks_done} of ${qIn.tasks_total} done`,
           'Subtasks whose end state the footage shows reached', qIn.tasks_done < qIn.tasks_judged)}
         ${cell('Unclear', null, `${qIn.tasks_total - qIn.tasks_judged} subtask${qIn.tasks_total - qIn.tasks_judged === 1 ? '' : 's'}`,
-          'Subtasks the footage does not settle, eg cut off by the end of the clip; they count for nothing either way')}`
+          'Subtasks the footage does not settle (eg cut off by the end of the clip) or whose progress is not measured; they count for nothing either way')}`
       : `${cell('Goal', null, goalT != null ? `reached ${fmtT(goalT)}` : 'not reached', 'When the labelled goal was first met', goalT == null)}
-      ${cell('Progress', 10 * (qIn.progress_reached || 0), '', 'The furthest the work got toward the labelled goal',
-        false, `${Math.round(100 * (qIn.progress_reached || 0))}%`)}`}
+      ${qIn.progress_reached == null ? cell('Progress', null, 'not measured',
+          'Labelled in parts, each part measuring progress toward its own local goal only, so the whole goal has none')
+        : cell('Progress', 10 * qIn.progress_reached, '', 'The furthest the work got toward the labelled goal',
+          false, `${Math.round(100 * qIn.progress_reached)}%`)}`}
       ${cell('Label', null, Q.relation || 'no label', 'How the work done relates to the labelled task', Q.relation && Q.relation !== 'aligned')}
     </div>`)}
     ${subs.length ? box('Subgoals', undefined, subsTable, true, SUBS_FIRST < subs.length) : ''}
@@ -6594,10 +6597,13 @@ function renderEp(d, opts) {
   const untimed = untimedRows(d, keyEvents.length + 1);
   // each key event names its kind, and the ones tagged subgoal_complete say which subgoal they end (Quality scores them)
   let subN = 0;
+  const subNo = new Map();
+  subs.filter(st => !st.goal).forEach((st, i) => subNo.set(st.end_s, i + 1));
   keyEvents.forEach((k, i) => {
     const oc = (k.outcome || '').toLowerCase();
     const goalish = k.kind === 'goal_reached' || k.kind === 'subgoal_complete';
-    const kindChip = k.kind === 'subgoal_complete' ? `<span class="ke-kind sub">Subgoal ${++subN}</span>`
+    const no = Q ? subNo.get(k.t_s) : ++subN;
+    const kindChip = k.kind === 'subgoal_complete' ? `<span class="ke-kind sub">Subgoal${no ? ' ' + no : ''}</span>`
       : k.kind ? `<span class="ke-kind">${esc(kindName(k.kind))}</span>` : '';
     keyRows.push(`<div class="key-ev ${esc(oc)}${goalish ? ' goal' : ''}" data-t="${esc(k.t_s)}">
       <span class="ke-num">${i + 1}</span>
@@ -6931,7 +6937,7 @@ function renderEp(d, opts) {
     ${pubHtml}
     ` : `
     <h3 class="section">Key events <span class="count">${keyEvents.length + untimed.keys.length}</span>${Q && subs.some(st => !st.goal)
-      ? `<span class="ke-what">(${subs.filter(st => !st.goal).length} are subgoals, scored under Quality)</span>` : ''}</h3>
+      ? `<span class="ke-what">(${subNo.size} ${subNo.size === 1 ? 'is a subgoal' : 'are subgoals'}, scored under Quality)</span>` : ''}</h3>
     <div class="info-block"><div class="key-events">${keyPanelHtml || '<span style="color:var(--fg-3)">none</span>'}`
       + `</div></div>
 

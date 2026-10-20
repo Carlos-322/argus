@@ -42,3 +42,19 @@ def pytest_ignore_collect(collection_path, config):
     except ValueError:
         return None
     return True if placed.get(rel, index) != index else None
+
+
+def pytest_collection_modifyitems(config, items):
+    """Files named on the command line are collected whatever the shard (pytest does not ask pytest_ignore_collect
+    about them), so their tests are deselected here when they belong to another shard."""
+    shard = _shard_of(config)
+    if shard is None:
+        return
+    index, placed = shard
+    root = config.rootpath
+    keep, dropped = [], []
+    for item in items:
+        (keep if placed.get(item.path.relative_to(root).as_posix(), index) == index else dropped).append(item)
+    if dropped:
+        config.hook.pytest_deselected(items=dropped)
+        items[:] = keep

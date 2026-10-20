@@ -218,8 +218,8 @@ Rules:
   open, a fold made, a screw driven in. A pick, a grasp, a contact or a motion is not a subgoal, because
   what it gains is lost if the object is let go anywhere else; it keeps a kind of its own. Every
   successful demonstration of a task passes through the same subgoals whatever the operator's style, and
-  the goal's end-state (each task's, when there are tasks) is the last one, at the goal frame judged as
-  above (completed_at_s). Mark each subgoal as a key_event with kind subgoal_complete at the first moment
+  the goal's end-state (each task's, when there are tasks) is the last one, at the goal frame
+  (completed_at_s, judged by its own rule below). Mark each subgoal as a key_event with kind subgoal_complete at the first moment
   its change holds with nothing holding the objects, labelled with the state reached; nudging or
   straightening it afterwards neither moves it nor makes a new subgoal. A pick, a placement that is later
   undone, a contact and a failed attempt are still key_events of their own kind (a grasp, a placement).

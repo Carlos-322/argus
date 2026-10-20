@@ -129,3 +129,51 @@ def test_a_time_stored_as_text_or_not_finite_is_skipped_never_compared():
                           {"t_s": float("nan"), "kind": "grasp", "outcome": "failure"}]
     subs = scores.score_board({"r.json": rec})["r.json"]["subgoals"]
     assert [st["failed_attempts"] for st in subs] == [[], []]
+
+
+def test_a_partial_result_as_a_board_record_stores_it_is_scored_as_partial_not_failure():
+    rec = _record("open the left door then the right door", None,
+                  [(0, 5, "advancing", 0.5), (5, 9, "advancing", 0.85)], [(5, "left door open")], outcome="failure")
+    rec["completion"]["failure_kind"] = "partial"
+    s = scores.score_board({"p.json": rec})["p.json"]
+    assert s["outcome"] == 8.5 and s["inputs"]["outcome"] == "partial"
+
+
+def test_progress_no_step_carries_is_unknown_so_a_failure_has_no_outcome_score_never_zero():
+    rec = _record("open the left door then the right door", None,
+                  [(0, 5, "advancing", None), (5, 9, "advancing", None)], outcome="failure")
+    s = scores.score_board({"parts.json": rec})["parts.json"]
+    assert s["outcome"] is None and s["inputs"]["progress_reached"] is None
+
+
+def test_a_subgoal_just_past_one_subtask_belongs_to_the_next_one_only():
+    rec = _record("wash the bowl, then peel the carrot", None,
+                  [(0, 10, "advancing", 1.0), (10, 20, "advancing", 1.0)], [(10.3, "carrot rinsed"), (20, "carrot peeled")])
+    rec["completion"] = {}
+    rec["tasks"] = [{"start_s": 0, "end_s": 10, "task": "wash the bowl", "outcome": "success", "completed_at_s": 10},
+                    {"start_s": 10, "end_s": 20, "task": "peel the carrot", "outcome": "success", "completed_at_s": 20}]
+    subs = scores.score_board({"ego.json": rec})["ego.json"]["subgoals"]
+    assert [(st["task"], st["label"]) for st in subs] == [(1, "wash the bowl"), (2, "carrot rinsed"), (2, "carrot peeled")]
+
+
+def test_the_peer_median_left_one_out_equals_the_median_of_the_other_demonstrations():
+    import random
+    import statistics
+    rng = random.Random(7)
+    recs = {}
+    for i in range(40):
+        goal = round(rng.uniform(5, 30), 1)
+        recs[f"e{i}.json"] = _record("stack the cups", goal, [(0, goal / 2, "advancing", 0.5), (goal / 2, goal, "advancing", 1.0)])
+    s = scores.score_board(recs)
+    for f, d in recs.items():
+        others = [r["completion"]["completed_at_s"] for g, r in recs.items() if g != f]
+        assert s[f]["inputs"]["peer_median_time_to_goal_s"] == statistics.median(others)
+
+
+def test_a_board_of_two_thousand_demonstrations_of_one_task_scores_in_seconds():
+    import time
+    recs = {f"e{i}.json": _record("stack the cups", 10.0 + i % 7, [(0, 5, "advancing", 0.5), (5, 10 + i % 7, "advancing", 1.0)],
+                                  [(5, "first cup stacked")]) for i in range(2000)}
+    t = time.time()
+    scores.score_board(recs)
+    assert time.time() - t < 5

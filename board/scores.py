@@ -21,6 +21,7 @@ as a bad one. A dimension with too few peers to compare against is None, never a
 """
 from __future__ import annotations
 
+import bisect
 import re
 import statistics
 
@@ -57,6 +58,13 @@ def _subtract(spans, cut):
     return out
 
 
+def _verdict(x: dict) -> str | None:
+    """A completion's or a task's outcome word, with a partial result read back from the record's failure_kind (a
+    board record stores partial as failure with failure_kind "partial", board/to_board.py convert)."""
+    word = x.get("task_completed", x.get("outcome"))
+    return "partial" if word == "failure" and x.get("failure_kind") == "partial" else word
+
+
 def facts(d: dict) -> dict:
     """What one episode's labels measure, before any comparison: its work window, its time split, its attempts."""
     steps = [e for e in d.get("event_labels") or [] if isinstance(e, dict) and _num(e.get("t_s")) is not None
@@ -75,20 +83,22 @@ def facts(d: dict) -> dict:
     # hesitation: stretches inside the work window where no arm advances or wastes, ie every arm waits
     window = [(start, end)] if start is not None and end is not None and end > start else []
     hesitation = _union(_subtract(window, work)) if window else 0.0
+    # progress toward this goal, from the steps that carry it; a recording labelled in parts keeps only each part's
+    # local progress (label/pieces.py), which says nothing about the whole goal, so there it is unknown, never 0
     progress = [p for p in (_num(e.get("progress")) for e in steps) if p is not None]
-    reached = max(progress, default=0.0)
+    reached = max(progress) if progress else None
     mistakes = [m for m in d.get("operator_mistakes") or [] if isinstance(m, dict) and m.get("deliberate") != "yes"]
     failed = [k for k in d.get("key_events") or [] if isinstance(k, dict) and k.get("outcome") == "failure"]
     # progress restarts at each subtask, so a subtask's progress is the furthest its own steps got
-    tasks = [{"outcome": t.get("outcome"),
+    tasks = [{"outcome": _verdict(t),
               "progress": max((p for e in steps if t["start_s"] <= e["t_s"] <= t["end_s"]
-                               for p in [_num(e.get("progress"))] if p is not None), default=0.0)}
+                               for p in [_num(e.get("progress"))] if p is not None), default=None)}
              for t in d.get("tasks") or [] if isinstance(t, dict) and _num(t.get("start_s")) is not None
              and _num(t.get("end_s")) is not None]
     return {"tasks": tasks, "start_s": start, "goal_s": goal, "end_s": end, "active_s": active, "wasteful_s": wasteful,
             "hesitation_s": hesitation, "window_s": (end - start) if window else None,
             "actions": sum(1 for e in steps if e.get("contribution") == "advancing"), "progress_reached": reached,
-            "outcome": comp.get("task_completed"), "mistakes": mistakes, "failed_attempts": len(failed),
+            "outcome": _verdict(comp) if comp else None, "mistakes": mistakes, "failed_attempts": len(failed),
             "relation": (d.get("goal_alignment") or {}).get("relation")}
 
 
@@ -100,17 +110,20 @@ def task_key(d: dict) -> frozenset:
 def task_groups(records: dict) -> dict:
     """{file: group id}: demonstrations of one task, joined when their instructions share most of their words
     (Jaccard of content words at least 0.6), within one dataset. A paraphrase of an instruction joins its group; a
-    different task does not."""
-    groups, members = {}, []
+    different task does not. An instruction already seen joins its group directly, so only new wordings are compared."""
+    groups, members, seen = {}, {}, {}
     for f, d in sorted(records.items()):
         key, ds = task_key(d), d.get("dataset")
-        for gid, (gds, gkey) in enumerate(members):
-            if gds == ds and key and gkey and len(key & gkey) / len(key | gkey) >= 0.6:
-                groups[f] = gid
+        if (ds, key) in seen:
+            groups[f] = seen[(ds, key)]
+            continue
+        for gid, gkey in members.get(ds, []):
+            if key and gkey and len(key & gkey) / len(key | gkey) >= 0.6:
                 break
         else:
-            groups[f] = len(members)
-            members.append((ds, key))
+            gid = sum(len(m) for m in members.values())
+            members.setdefault(ds, []).append((gid, key))
+        groups[f] = seen[(ds, key)] = gid
     return groups
 
 
@@ -118,27 +131,51 @@ def _ratio_score(value, peers):
     """0 to 10 for a lower-is-better measure against its peers' median: the median or better is 10, twice the median
     is 5, and so on (10 x median / value). A rank would put half of any group below 5 even when every demonstration
     is fine; against the median, typical work scores full and only work slower or busier than typical loses points.
-    None with too few peers."""
+    None with too few peers. peers is a _Peers or a plain list."""
+    peers = peers if isinstance(peers, _Peers) else _Peers(sorted(peers))
     if value is None or len(peers) < MIN_PEERS:
         return None
-    median = statistics.median(peers)
+    median = peers.median()
     if value <= median or value <= 0:
         return 10.0
     return round(10 * median / value, 1)
+
+
+class _Peers:
+    """The sorted values of a group's demonstrations, with one value (the episode's own) left out, so the median of its
+    peers costs one index rather than a pass over the group."""
+
+    def __init__(self, ordered, without=None):
+        self.ordered, self.skip = ordered, None
+        if without is not None:
+            i = bisect.bisect_left(ordered, without)
+            if i < len(ordered) and ordered[i] == without:
+                self.skip = i
+
+    def __len__(self):
+        return len(self.ordered) - (self.skip is not None)
+
+    def _at(self, i):
+        return self.ordered[i + 1 if self.skip is not None and i >= self.skip else i]
+
+    def median(self):
+        n = len(self)
+        return self._at(n // 2) if n % 2 else (self._at(n // 2 - 1) + self._at(n // 2)) / 2
 
 
 def _outcome(f: dict):
     if f["tasks"]:
         # several subtasks: the mean of the subtasks the footage settles; an unclear one (eg cut off by the end of the
         # clip) counts for nothing either way
-        judged = [t for t in f["tasks"] if t["outcome"] in OUTCOME_CAPS]
+        judged = [t for t in f["tasks"] if t["outcome"] in OUTCOME_CAPS
+                  and (t["outcome"] == "success" or t["progress"] is not None)]
         values = [1.0 if t["outcome"] == "success" else min(OUTCOME_CAPS[t["outcome"]], t["progress"]) for t in judged]
         return (round(10 * statistics.mean(values), 1) if values else None,
                 {"outcome": None, "tasks_total": len(f["tasks"]), "tasks_judged": len(judged),
                  "tasks_done": sum(1 for t in judged if t["outcome"] == "success")})
     cap = OUTCOME_CAPS.get(f["outcome"])
-    if cap is None:
-        return None, {"outcome": f["outcome"]}
+    if cap is None or (f["outcome"] != "success" and f["progress_reached"] is None):
+        return None, {"outcome": f["outcome"], "progress_reached": f["progress_reached"]}
     value = 1.0 if f["outcome"] == "success" else min(cap, f["progress_reached"])
     return round(10 * value, 1), {"outcome": f["outcome"], "progress_reached": f["progress_reached"]}
 
@@ -175,10 +212,20 @@ def subgoals(d: dict, f: dict) -> list:
                t.get("task"), t.get("outcome"), t["end_s"], i + 1) for i, t in enumerate(tasks)] if tasks
              else [(f["start_s"], f["end_s"], (d.get("completion") or {}).get("success_predicate"), f["outcome"], None,
                     None)])
+    def owner(t):
+        for i, task in enumerate(tasks):
+            if task["start_s"] < t <= task["end_s"]:
+                return i + 1
+        for i, task in enumerate(tasks):
+            nxt = tasks[i + 1]["start_s"] if i + 1 < len(tasks) else None
+            if task["end_s"] < t <= task["end_s"] + 0.5 and (nxt is None or t < nxt):
+                return i + 1
+        return None
+    owned = {id(k): owner(k["t_s"]) for k in events} if tasks else {}
     bounds = []
     for a, end, goal_label, goal_outcome, last, task in spans:
         for k in events:
-            if k["t_s"] > a and (last is None or k["t_s"] <= last + 0.5):
+            if k["t_s"] > a and (last is None or owned[id(k)] == task):
                 bounds.append((a, k["t_s"], k.get("label"), k.get("outcome"), False, task))
                 a = k["t_s"]
         if end is not None and end > a + 0.5:
@@ -212,21 +259,45 @@ def score_board(records: dict) -> dict:
     within its task group among the episodes that reached the goal."""
     fs = {f: facts(d) for f, d in records.items()}
     groups = task_groups(records)
-    by_group = {}
-    for f, g in groups.items():
-        by_group.setdefault(g, []).append(f)
+    took_of = {f: x["goal_s"] - x["start_s"] if x["goal_s"] is not None and x["start_s"] is not None else None
+               for f, x in fs.items()}
+    pp_of = {f: x["actions"] / x["progress_reached"] if x["progress_reached"] else None for f, x in fs.items()}
+    subs_of = {f: subgoals(d, fs[f]) for f, d in records.items()}
+    # the successful demonstrations of each group, as sorted values, built once: time to goal, actions per progress,
+    # and each subgoal's duration among those that split the task into the same number of subgoals
+    count, took_in, pp_in, sub_in = {}, {}, {}, {}
+    for f, x in fs.items():
+        if x["outcome"] != "success":
+            continue
+        g = groups[f]
+        count[g] = count.get(g, 0) + 1
+        if took_of[f] is not None:
+            took_in.setdefault(g, []).append(took_of[f])
+        if pp_of[f] is not None:
+            pp_in.setdefault(g, []).append(pp_of[f])
+        for i, st in enumerate(subs_of[f]):
+            sub_in.setdefault((g, len(subs_of[f]), i), []).append(st["duration_s"])
+    for table in (took_in, pp_in, sub_in):
+        for values in table.values():
+            values.sort()
+
+    def peers_of(table, key, f, own):
+        """The group's values with this episode's own left out when it is one of them (a successful episode)."""
+        return _Peers(table.get(key, []), own if fs[f]["outcome"] == "success" else None)
+
     out = {}
     for f, d in records.items():
         x = fs[f]
-        peers = [fs[p] for p in by_group[groups[f]] if p != f and fs[p]["outcome"] == "success"]
+        g = groups[f]
+        peers = count.get(g, 0) - (x["outcome"] == "success")
         outcome, o_in = _outcome(x)
         clean, c_in = _cleanliness(x)
-        took = x["goal_s"] - x["start_s"] if x["goal_s"] is not None and x["start_s"] is not None else None
-        peer_took = [p["goal_s"] - p["start_s"] for p in peers if p["goal_s"] is not None and p["start_s"] is not None]
+        took = took_of[f]
+        peer_took = peers_of(took_in, g, f, took)
         efficiency = _ratio_score(took, peer_took) if x["outcome"] == "success" else None
         hes = x["hesitation_s"] / x["window_s"] if x["window_s"] else None
-        per_progress = x["actions"] / x["progress_reached"] if x["progress_reached"] else None
-        peer_pp = [p["actions"] / p["progress_reached"] for p in peers if p["progress_reached"]]
+        per_progress = pp_of[f]
+        peer_pp = peers_of(pp_in, g, f, per_progress)
         # hesitation is absolute (half the work spent with every arm waiting scores 0); busyness is against peers
         steady = round(10 * max(0.0, 1 - 2 * hes), 1) if hes is not None else None
         parts = [s for s in (steady, _ratio_score(per_progress, peer_pp)) if s is not None]
@@ -235,21 +306,20 @@ def score_board(records: dict) -> dict:
         have = {k: v for k, v in dims.items() if v is not None}
         weight = sum(EXECUTION_WEIGHTS[k] for k in have)
         execution = round(sum(EXECUTION_WEIGHTS[k] * v for k, v in have.items()) / weight, 1) if weight else None
-        subs = subgoals(d, x)
+        subs = subs_of[f]
         # a subgoal's speed is judged against the same subgoal of peers that split the task the same way
-        peer_subs = [subgoals(records[p], fs[p]) for p in by_group[groups[f]] if p != f and fs[p]["outcome"] == "success"]
         for i, st in enumerate(subs):
-            same = [ps[i]["duration_s"] for ps in peer_subs if len(ps) == len(subs)]
+            same = peers_of(sub_in, (g, len(subs), i), f, st["duration_s"])
             st["efficiency"] = _ratio_score(st["duration_s"], same)
             st["peers"] = len(same)
-            st["peer_median_s"] = statistics.median(same) if len(same) >= MIN_PEERS else None
+            st["peer_median_s"] = same.median() if len(same) >= MIN_PEERS else None
             parts = [v for v in (st["cleanliness"], st["steady"], st["efficiency"]) if v is not None]
             st["execution"] = round(statistics.mean(parts), 1)
         out[f] = {"version": VERSION, "execution": execution, "outcome": outcome, **dims, "relation": x["relation"],
                   "subgoals": subs,
-                  "peers": len(peers), "group": groups[f],
+                  "peers": peers, "group": g,
                   "inputs": {**o_in, **c_in, "time_to_goal_s": took, "peer_median_time_to_goal_s":
-                             statistics.median(peer_took) if peer_took else None,
+                             peer_took.median() if len(peer_took) else None,
                              "hesitation_share": round(hes, 3) if hes is not None else None,
                              "actions_per_progress": round(per_progress, 2) if per_progress else None}}
     return out

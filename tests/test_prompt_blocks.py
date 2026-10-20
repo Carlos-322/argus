@@ -959,6 +959,6 @@ def test_every_prompt_defines_a_subgoal_once_as_a_lasting_change_and_keeps_failu
     assert s.count("A subgoal is a lasting step") == 1
     assert "kind subgoal_complete" in s and "A pick, a grasp, a contact or a motion is not a subgoal" in s
     assert "a failed attempt are still key_events of their own kind" in s and "subgoal_failed" not in s
-    assert "at the goal frame judged as above (completed_at_s)" in s or "at that task's completed_at_s" in s
+    assert "at the goal frame (completed_at_s, judged by its own rule below)" in s or "at that task's completed_at_s" in s
     assert "at the first moment its change holds with nothing holding the objects" in s
     assert "neither moves it nor makes a new subgoal" in s and "waits for the last such adjustment" not in s
