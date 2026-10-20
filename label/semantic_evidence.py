@@ -62,6 +62,14 @@ def _semantics(ctx, meta, entry, shape):
     for key in ('unit', 'units', 'response_direction'):
         if meta.get(key) is not None and (key not in semantics or provenance.get('authority') == 'publisher_candidate'):
             semantics[key] = copy.deepcopy(meta[key])
+    if (provenance.get('authority') != 'publisher_candidate'
+            and semantics.get('response_direction') in ('up', 'down')
+            and meta.get('response_direction') in ('up', 'down')
+            and semantics['response_direction'] != meta['response_direction']):
+        semantics['response_direction_conflict'] = {
+            'sensor_semantics': semantics.pop('response_direction'), 'metadata': meta['response_direction']}
+        semantics.setdefault('limitations', []).append(
+            'Conflicting declared response directions; stronger-response direction is unresolved.')
     if entry.get('role') in POINT_ROLES and len(shape) == 2:
         units = semantics.get('units')
         if isinstance(units, list) and len(units) == shape[-1]:
@@ -111,12 +119,16 @@ def _regional(a, times, semantics):
         primary.append(_feature(trace['name'] + ' relative response', trace['values'], trace['indices'],
                                 trace['operation'], trace['unit'], trace['valid_counts'], **common))
         sensitivity = trace.get('sensitivity')
-        if sensitivity:
+        if sensitivity and sensitivity['indices'] != trace['indices']:
             extra.append(_feature(trace['name'] + ' zero-exclusion sensitivity', sensitivity['values'],
                                   sensitivity['indices'], sensitivity['operation'], trace['unit'],
                                   sensitivity['valid_counts'], raw_means=sensitivity['raw_means'],
                                   zero_counts=sensitivity['zero_counts']))
-        if result['response_direction'] is None:
+        if result['response_direction'] is not None:
+            extra.append(_feature(trace['name'] + ' signed raw minus initial reference',
+                                  trace['signed_values'], trace['indices'],
+                                  'mean signed raw minus initial reference', trace['unit'], trace['valid_counts']))
+        else:
             for direction in ('positive', 'negative'):
                 extra.append(_feature(trace['name'] + ' ' + direction + ' change', trace[direction + '_values'],
                                       trace['indices'], 'mean ' + direction + ' per-cell change from initial reference',

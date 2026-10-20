@@ -271,12 +271,20 @@ def build(ep, pl, *, shown=None, images=None, native_images=None, capture_select
                   'columns': a.shape[1], 'supplied_columns': 0,
                   **({'summary_of': summary} if summary else {})}
         doc['sensors'].append(sensor)
+        from label import semantic_evidence
+        semantics = (semantic_evidence._semantics(ctx, meta, entry, meta.get('shape') or list(a.shape[1:]))
+                     if not summary else None)
+        if semantics:
+            if semantics.get('response_direction_conflict'):
+                sensor['response_direction'] = None
+                sensor['response_direction_conflict'] = copy.deepcopy(semantics['response_direction_conflict'])
+            elif semantics.get('response_direction'):
+                sensor['response_direction'] = semantics['response_direction']
+                sensor['response_direction_authority'] = (semantics.get('provenance') or {}).get('authority')
         units = meta.get('units', meta.get('unit'))
         same_unit = not isinstance(units, list) or len(units) == a.shape[1] and len(set(map(str, units))) == 1
         if (not summary and same_unit and quantity != 'contact_state' and a.shape[1] > MAX_SERIES
                 and array_count < tactile_arrays.MAX_ARRAYS):
-            from label import semantic_evidence
-            semantics = semantic_evidence._semantics(ctx, meta, entry, meta.get('shape') or list(a.shape[1:]))
             remaining_arrays = max(1, sum(index >= position for index in array_positions))
             comparison = tactile_arrays.comparison(a, meta.get('shape') or [], times, pl.get('ks') or [],
                 (tactile_arrays.MAX_VALUES - array_values) // remaining_arrays, semantics=semantics,
@@ -419,6 +427,33 @@ def image_parts(doc):
             for part in tactile_arrays.render(sensor)]
 
 
+def _restore_trace_view(row):
+    views = row.pop('source_views', {})
+    row.pop('component_binding', None)
+    if views.get('trace'):
+        row['times'] = views['trace']['times']
+        row['values'] = views['trace']['values']
+        row['sampled'] = len(row['times']) < row['native_samples']
+
+
+def _component_traces(rows, sensor):
+    """Match only explicitly recorded single components of this same sensor."""
+    if sensor.get('access_kind') or sensor.get('summary_of'):
+        return {}
+    found, repeated = {}, set()
+    for row in rows:
+        columns = row.get('columns')
+        if (row.get('sensor_id') != sensor['id'] or row.get('operation') != 'recorded value'
+                or row.get('derivation_id') or row.get('array_constituent')
+                or not isinstance(columns, list) or len(columns) != 1 or type(columns[0]) is not int):
+            continue
+        column = columns[0]
+        if column in found:
+            repeated.add(column)
+        found[column] = row
+    return {column: row for column, row in found.items() if column not in repeated}
+
+
 def _array_projection(payload):
     # A compact shared-clock matrix preserves constituent comparisons that
     # regional means and map colors alone cannot express numerically.
@@ -441,6 +476,11 @@ def _array_projection(payload):
                 'values': [compact(row) for row in native['values']] if native is not None else
                           [compact([frame['values'][column] for column in columns]) for frame in array['frames']],
                 'operation': 'Prepared component values on a shared clock, without spatial averaging; source_columns and series_ids name the corresponding matrix columns. Cite the declared per-cell series_id with exact retained times for a constituent comparison. Layout and authority are shared with this array descriptor.'}
+            traces = _component_traces(payload.get('series') or [], sensor)
+            aliases = {ident: traces[column]['id'] for column, ident in
+                       zip(columns, array['constituents']['series_ids']) if column in traces}
+            if aliases:
+                array['constituents']['same_source_series_ids'] = aliases
             array['reference'].pop('values')
             array['reference']['used_for_signed_change_images'] = True
             for frame in array['frames']:
@@ -491,6 +531,16 @@ def _prompt_projection(payload):
                 table['constant_column_values'] = constants
                 table['varying_column_positions'] = varying
                 table['values'] = [[row[i] for i in varying] for row in rows]
+                positions = {row['index']: row for row in
+                    ((sensor.get('array_evidence') or {}).get('physical_layout') or {}).get('positions', [])}
+                cells = [table['source_columns'][i] for i in varying]
+                # Keep the matrix's changing columns readable without following
+                # a second index vector into an unrelated geometry descriptor.
+                located = bool(positions) and all(cell in positions for cell in cells)
+                table['value_column_layout'] = {
+                    'columns': ['source_column', 'region', 'x', 'y'] if located else ['source_column'],
+                    'rows': [[cell, positions[cell].get('region'), positions[cell]['x'], positions[cell]['y']]
+                             if located else [cell] for cell in cells]}
     for row, key in targets:
         clocks.setdefault(_json(row[key]), []).append((row, key))
     shared = payload.get('sample_clocks', {})
@@ -518,8 +568,8 @@ def _prompt(doc):
     if not doc.get('sensors'):
         return ''
     text = '''\nSENSOR EVIDENCE FOR ADDITIONAL ANNOTATION
-Prompt encoding is lossless: time_clock names an exact timestamp vector in sample_clocks, replacing series times or constituent times_s. A singular valid_count applies at every timestamp; nonuniform valid_counts remain explicit. In constituent tables, constant_column_values maps zero-based source_columns positions to values repeated at every timestamp, including null. varying_column_positions names the matrix columns in values; combine them with those constants to recover every declared cell at every supplied time. Every series_id and its exact citation times remain available.
-When array_evidence is supplied, compare the complete raw grids and their signed changes from the initial per-cell reference. Look for responses that diverge, recover at different times, move between array locations, or change while the visible hold remains similar. A whole-array average can cancel opposing cell changes. Use array coordinates unless supplied source semantics names physical regions; preserve any qualification on that mapping. Unknown polarity or anatomy limits physical interpretation but does not invalidate an observed contrast between cell responses. The initial reference is not a verified unloaded baseline. Cite sensor_id and the exact snapshot times without series_id for whole-array evidence; cite series_id for the separate numeric traces. Grids are discrete snapshots, not continuous coverage.
+Prompt encoding is lossless: time_clock names an exact timestamp vector in sample_clocks, replacing series times or constituent times_s. A singular valid_count applies at every timestamp; nonuniform valid_counts remain explicit. In constituent tables, constant_column_values maps zero-based source_columns positions to values repeated at every timestamp, including null. varying_column_positions names the matrix columns in values; combine them with those constants to recover every declared cell at every supplied time. value_column_layout describes those values columns directly, in order, using original source cell IDs and any declared physical positions/regions. Its layout authority is unchanged. Every series_id and its exact citation times remain available.
+When array_evidence is supplied, compare the complete raw grids and their signed changes from the initial per-cell reference. Look for responses that diverge, recover at different times, move between array locations, or change while the visible hold remains similar. A whole-array average can cancel opposing cell changes. Use array coordinates unless supplied source semantics names physical regions; preserve any qualification on that mapping. Unknown polarity or anatomy limits physical interpretation but does not invalidate an observed contrast between cell responses. The initial reference is not a verified unloaded baseline. Cite sensor_id and the exact snapshot times without series_id for whole-array evidence; cite series_id for the separate numeric traces. In constituents, same_source_series_ids links a per-cell ID to its canonical recorded single-column trace ID. They identify the same source measurement: either ID can cite the union of their actually supplied finite samples, including retained matrix rows and sparse trace extrema. Native viewer plots and omitted source rows never extend this coverage. Conflicting readings cannot be combined. Grids are discrete snapshots, not continuous coverage.
 When marker_motion is supplied, compare its paired image-space displacement with the cited tactile images and scene video. In its pairs and samples tables, each row follows the named columns; dotted columns name correspondence diagnostics. Null is unavailable, never zero. A dot pattern shifting during a closed grip can support contact movement or surface deformation. Assess whether this reveals a grip adjustment, an object shifting against the grip, or another useful manipulation detail. Marker movement alone cannot distinguish object slip from elastic shear of the pad. Null displacement means tracking was unreliable, not zero movement. A high whole-pad displacement with a small local residual is coherent movement, not an absence of movement. Write headlines about the manipulation in plain English; keep dot counts, pixels and tracker terminology in observation. Use marker_motion only for pairs with valid displacement, citing both supplied image times.
 When derived regional responses or point-set shape measurements are supplied, compare them jointly with the scene and other recorded state. The operations, source columns, reference, coverage and semantic authority are part of the evidence. Compare localized responses across regions and repeated phases; compare response changes with direct pose-shape distances, declared finger-chain curl or recorded jaw state. A distance from the first pose is not the distance between two later poses. A selected-pose measurement is cited at its end time; comparison_from_s identifies the other endpoint. Exactly repeated estimates can be stale; small estimated motion alone does not prove a physically unchanged hand. Check that coverage and the visual reference support the comparison. Describe the supported manipulation implication, with alternatives, instead of stopping at a list of cell values. Preserve distinct supported events within an episode, without inventing a required number of findings.
 Use recorded evidence to find information beyond visible subgoals: changes in response while an object remains held, repeated tool actuation, contact movement, deformation, or supported slip candidates. These are possibilities, not required findings. Empty findings are valid. Separate numeric observation from physical interpretation and alternative explanations. Each headline must say what specifically happened or what the evidence supports, not merely that a signal changed. Omit a finding if neither a concrete added observation nor a useful supported implication can be stated. If physical meaning is unresolved, state the concrete observed pattern in ordinary words. Also provide overlay_detail: one short sentence explaining the added information and any uncertainty needed to read the headline correctly. Headline and overlay_detail appear together on video, so avoid redundant wording and keep them readable at a glance. Put measurements and technical limitations in observation and alternative; retain essential uncertainty on video. Preserve the concrete added information across headline and overlay_detail, including any supported comparison, temporal pattern or contrast with recorded state. State what the sensor adds to the visible action. Its timing may coincide with that action; the added information can be localized loading, its redistribution, measured state, or a supported contrast that ordinary scene RGB alone cannot establish. Do not invent a comparison or physical explanation to make a finding sound informative. Before comparing repetitions, align corresponding manipulation phases using the scene and relevant recorded state, then review active and quieter portions with usable measurements. Comparing whole-attempt peaks or a different phase does not replace that comparison. Preserve a quieter sampled response when it provides a useful contrast, without inferring continuous stability or requiring a finding for each repetition.
@@ -529,6 +579,8 @@ Return an additional JSON field "sensor_findings": [{"start_s": number, "end_s":
 '''
     payload = copy.deepcopy({k: doc[k] for k in ('sensors', 'series', 'limitations')})
     payload['series'] = [row for row in payload['series'] if not row.get('array_constituent')]
+    for row in payload['series']:
+        _restore_trace_view(row)
     if doc.get('coverage'):
         payload['coverage'] = copy.deepcopy(doc['coverage'])
     # Keep every constituent column, thinning the largest native table only
@@ -710,21 +762,53 @@ def _constituent_series(sensor, table, position, existing, ep):
     return row
 
 
+def _component_union(sensor, table, position, row, trace):
+    """Union two actually supplied views; native plot samples never enter this set."""
+    points = {}
+    component = [values[position] for values in table['values']]
+    for times, values in ((trace['times'], trace['values']), (table['times_s'], component)):
+        if len(times) != len(values):
+            raise ValueError('supplied component clock and values disagree')
+        for time, value in zip(times, values):
+            if time in points and points[time] != value:
+                raise ValueError('conflicting supplied readings for the same source component')
+            points[time] = value
+    result = copy.deepcopy(row)
+    result['times'] = sorted(points)
+    result['values'] = [points[time] for time in result['times']]
+    result['sampled'] = len(points) < result['native_samples']
+    result['component_binding'] = {'canonical_series_id': trace['id'],
+        'source_column': table['source_columns'][position],
+        'source_views': [trace['id'], table['series_ids'][position]]}
+    # Reparse must recover the original sparse view before applying the prompt
+    # budget again, even if the matrix is subsequently thinned or withheld.
+    result['source_views'] = {'trace': {'series_id': trace['id'], 'times': list(trace['times']),
+                                      'values': list(trace['values'])},
+                              'constituent_series_id': table['series_ids'][position]}
+    return result
+
+
 def bind(doc, findings, *, ep=None):
     """Keep unbound replies for inspection; only evidence-backed findings reach overlays."""
     result = copy.deepcopy(doc)
     previous = {r['id']: r for r in result.get('series') or [] if r.get('array_constituent')}
     result['series'] = [r for r in result.get('series') or [] if not r.get('array_constituent')]
+    for row in result['series']:
+        _restore_trace_view(row)
     result['findings'], result['unbound_findings'] = [], []
     sensors = {s['id']: s for s in doc.get('sensors') or []}
     # Validate against the exact prompt projection, including its byte budget.
     sent = _prompt(doc)[1] if sensors else {'series': []}
     sensors = {s['id']: s for s in sent.get('sensors') or []}
     series = {r['id']: r for r in sent['series']}
+    projected = _array_projection(sent)
     constituents = {ident: (sensor, table, i)
-                    for sensor in _array_projection(sent).get('sensors') or []
+                    for sensor in projected.get('sensors') or []
                     for table in [(sensor.get('array_evidence') or {}).get('constituents') or {}]
                     for i, ident in enumerate(table.get('series_ids') or [])}
+    components = {sensor['id']: (sensor, table, _component_traces(sent['series'], sensor))
+                  for sensor in projected.get('sensors') or []
+                  for table in [(sensor.get('array_evidence') or {}).get('constituents') or {}] if table}
     materialized = set()
     for f in findings if isinstance(findings, list) else []:
         reason = None
@@ -753,12 +837,26 @@ def bind(doc, findings, *, ep=None):
                 if r is None and ref.get('series_id') in constituents:
                     sensor, table, position = constituents[ref['series_id']]
                     r = _constituent_series(sensor, table, position, sent['series'], ep)
-                    old = previous.get(r['id'])
-                    if ep is None and old and all(old.get(key) == r.get(key) for key in ('times', 'values', 'columns')):
-                        for key in ('plot', 'sample_period_s'):
-                            if key in old:
-                                r[key] = copy.deepcopy(old[key])
                     selected[r['id']] = r
+                component = components.get(ref.get('sensor_id'))
+                if r is not None and component:
+                    sensor, table, traces = component
+                    columns = r.get('columns')
+                    if isinstance(columns, list) and len(columns) == 1 and columns[0] in traces:
+                        column = columns[0]
+                        trace = traces[column]
+                        if ((r['id'] == trace['id'] or r.get('array_constituent'))
+                                and column in table['source_columns']):
+                            try:
+                                r = _component_union(sensor, table, table['source_columns'].index(column), r, trace)
+                            except ValueError as error:
+                                reason = str(error); break
+                            selected[r['id']] = r
+                old = previous.get(r['id']) if r is not None else None
+                if ep is None and old and all(old.get(key) == r.get(key) for key in ('times', 'values', 'columns')):
+                    for key in ('plot', 'sample_period_s'):
+                        if key in old:
+                            r[key] = copy.deepcopy(old[key])
                 ts = ref.get('time_s') if isinstance(ref, dict) else None
                 array = (s or {}).get('array_evidence') if 'series_id' not in ref else None
                 if not s or (s['kind'] == 'numeric' and not array and (not r or r['sensor_id'] != s['id'])):
@@ -801,7 +899,11 @@ def bind(doc, findings, *, ep=None):
             result['findings'].append(finding_fields(f))
             for ident, row in selected.items():
                 if ident not in materialized:
-                    result['series'].append(row)
+                    existing = next((i for i, item in enumerate(result['series']) if item['id'] == ident), None)
+                    if existing is None:
+                        result['series'].append(row)
+                    else:
+                        result['series'][existing] = row
                     materialized.add(ident)
     return result
 
@@ -924,6 +1026,15 @@ def merge(parts, ctx, ep_dir=None):
             row = copy.deepcopy(row)
             row['id'], row['sensor_id'] = prefix + row['id'], prefix + row['sensor_id']
             row['times'] = [t + offset for t in row['times']]
+            if row.get('source_views'):
+                views = row['source_views']
+                views['trace']['series_id'] = prefix + views['trace']['series_id']
+                views['trace']['times'] = [t + offset for t in views['trace']['times']]
+                views['constituent_series_id'] = prefix + views['constituent_series_id']
+            if row.get('component_binding'):
+                binding = row['component_binding']
+                binding['canonical_series_id'] = prefix + binding['canonical_series_id']
+                binding['source_views'] = [prefix + ident for ident in binding['source_views']]
             if row.get('plot'):
                 row['plot']['times'] = [t + offset for t in row['plot']['times']]
             if 'comparison_from_s' in row:

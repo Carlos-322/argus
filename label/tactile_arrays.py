@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import io
 import math
 
@@ -92,6 +93,12 @@ def comparison(a, shape, times, ks, value_budget, semantics=None, native_value_b
                        for k in sorted(selected)]}
     if declared is not None and 'valid_indices' in declared:
         result['valid_indices'] = declared['valid_indices']
+    if declared and declared.get('response_direction'):
+        result['response_convention'] = {
+            'direction': declared['response_direction'],
+            'authority': (declared.get('provenance') or {}).get('authority')}
+    if declared and declared.get('response_direction_conflict'):
+        result['response_direction_conflict'] = copy.deepcopy(declared['response_direction_conflict'])
     native_budget = MAX_NATIVE_VALUES if native_value_budget is None else native_value_budget
     count = min(len(a), MAX_NATIVE_ROWS, native_budget // len(shown_columns)) if shown_columns else 0
     required_rows = [0, len(a) - 1, *[row for row in sorted(selected) if priority[row] == 1]]
@@ -227,7 +234,7 @@ def _render_sheet(sensor, snapshots):
                f"signed change scale {-delta_max:g} to {delta_max:g}. "
                'All frames use the same scales. Raw is dark to yellow; signed change is blue (negative), pale (zero), red (positive). '
                'Grey means missing. Axes are source array indices, not hand anatomy. '
-               'Raw minus the initial per-cell reference is not calibrated force or a known load direction. '
+               + _response_caption(sensor) + ' '
                'The numeric summary gives 10th, 50th and 90th percentiles across finite cells. Read individual spatial patterns from these images; cite sensor_id without series_id for these full-array snapshots.')
     return [{'type': 'text', 'text': caption}, {'type': 'image_url', 'image_url': {
         'url': 'data:image/jpeg;base64,' + base64.b64encode(raw).decode('ascii'), 'detail': 'high'}}]
@@ -242,6 +249,22 @@ def render(sensor):
         parts.extend(_render_physical(sensor, frames) if array.get('physical_layout')
                      else _render_sheet(sensor, frames))
     return parts
+
+
+def _response_caption(sensor):
+    convention = sensor['array_evidence'].get('response_convention') or {}
+    if sensor['array_evidence'].get('response_direction_conflict') or sensor.get('response_direction_conflict'):
+        return ('Response polarity declarations conflict; code changes do not establish stronger or weaker sensor response. '
+                'Raw change is not a physical force calibration.')
+    direction = convention.get('direction', sensor.get('response_direction'))
+    if direction not in ('up', 'down'):
+        return ('Response polarity is undeclared; code changes do not establish stronger or weaker sensor response. '
+                'Raw change is not a physical force calibration.')
+    word = 'Lower' if direction == 'down' else 'Higher'
+    candidate = convention.get('authority') == 'publisher_candidate'
+    return (("Publisher candidate response convention; the recording hardware match is unverified. " if candidate else
+             "Declared response convention. ") + word + ' raw values indicate stronger sensor response under that convention. '
+            'This is not a physical force calibration.')
 
 
 def _render_physical(sensor, snapshots):
@@ -308,7 +331,7 @@ def _render_physical(sensor, snapshots):
                'Region outlines group declared cells, not measured contact areas. '
                'Regions: ' + ', '.join(regions) + '. ' + ' '.join(layout['limitations']) + ' '
                'A publisher_candidate layout is conditional, not a verified recording hardware match. '
-               'Code changes are not calibrated force or a known physical loading direction. '
+               + _response_caption(sensor) + ' '
                'Cite sensor_id and exact supplied snapshot times without series_id.')
     return [{'type': 'text', 'text': caption}, {'type': 'image_url', 'image_url': {
         'url': 'data:image/jpeg;base64,' + base64.b64encode(stream.getvalue()).decode('ascii'), 'detail': 'high'}}]

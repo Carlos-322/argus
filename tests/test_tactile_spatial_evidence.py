@@ -3,6 +3,7 @@ import base64
 import io
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from label import tactile_arrays as ta
@@ -78,6 +79,19 @@ def test_unattributed_or_incomplete_positions_do_not_replace_source_grid():
         array = ta.comparison(raw, [16, 16], times, [0, 103, 185], 8192, semantics=descriptor)
         assert 'physical_layout' not in array
         assert 'Source array row and column' in array['coordinates']
+
+
+@pytest.mark.parametrize(('direction', 'word'), [('down', 'Lower'), ('up', 'Higher')])
+def test_map_caption_preserves_candidate_response_direction_and_its_limits(direction, word):
+    raw, times, semantics = spatial_case()
+    semantics['response_direction'] = direction
+    array = ta.comparison(raw, [16, 16], times, [], 8192, semantics=semantics)
+    array['frames'] = array['frames'][:1]
+    caption = ta.render({'id': 'signal:pad', 'array_evidence': array})[0]['text']
+    assert word + ' raw values indicate stronger sensor response' in caption
+    assert 'publisher_candidate' in caption and 'unverified' in caption
+    assert 'not a physical force calibration' in caption
+    assert 'not calibrated force or a known physical loading direction' not in caption
 
 
 def test_fixed_physical_scale_uses_complete_valid_source_period_and_declares_clipping():

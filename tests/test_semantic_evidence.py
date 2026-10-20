@@ -382,3 +382,94 @@ def test_many_short_derived_trajectories_share_the_native_value_cap(monkeypatch)
     assert sum(len(row['values']) for row in rows) <= 1024
     assert all(row['sampled'] and row['coverage']['omitted_samples'] > 0 for row in rows)
     assert all(len(row['times']) <= 48 for row in rows)
+
+
+def test_signed_regional_prompt_preserves_opposing_changes_hidden_by_rectified_response():
+    raw = np.full((6, 4), 1000.)
+    raw[3, [0, 2]] = [600, 1400]
+    raw[4, [0, 2]] = [600, 1600]
+    raw[5, [0, 2]] = [400, 1400]
+    ep = episode({'pad': raw}, [{'name': 'pad', 'shape': [4], 'unit': 'ADC',
+                                'sensor_semantics': descriptor()}], {'pad': {'role': 'touch'}})
+    doc = se.build(ep, {'n': 6})
+    sent = expand_prompt(json.loads(se.prompt(doc).splitlines()[-1]))
+    positive = next(row for row in sent['series'] if row['label'] == 'branch A relative response')
+    signed = next(row for row in sent['series'] if row['label'] == 'branch A signed raw minus initial reference')
+    assert positive['values'] == [0, 0, 0, 200, 200, 300]
+    assert signed['values'] == [0, 0, 0, 0, 100, -100]
+    assert signed['operation'] == 'mean signed raw minus initial reference'
+    assert signed['source_columns'] == positive['source_columns'] == [0, 2]
+    assert signed['times'] == positive['times']
+    assert signed['unit'] == 'ADC'
+    audit = next(trace for derivation in doc['derivations'] for trace in derivation['traces']
+                 if trace['series_id'] == positive['id'])
+    assert signed['values'] == audit['signed_values']
+    # A citable signed aggregate distinguishes stronger and weaker net changes,
+    # while the original positive-only response remains separately available.
+    finding = {'start_s': .3, 'end_s': .5, 'headline': 'Neighboring responses change in opposite directions',
+        'claim_type': 'response_change', 'adds_beyond_video': True,
+        'evidence': [{'sensor_id': signed['sensor_id'], 'series_id': signed['id'], 'time_s': [.3, .4, .5]}]}
+    bound = se.bind(doc, [finding])
+    assert len(bound['findings']) == 1 and not bound['unbound_findings']
+    retained = next(row for row in bound['series'] if row['id'] == signed['id'])
+    assert retained['values'] == signed['values']
+
+
+def test_zero_sensitivity_dedup_requires_identical_source_indices_even_when_values_match():
+    raw = np.full((5, 4), 100.)
+    raw[:, 0] = 0
+    ep = episode({'pad': raw}, [{'name': 'pad', 'shape': [4], 'sensor_semantics': descriptor()}],
+                 {'pad': {'role': 'touch'}})
+    doc = se.build(ep, {'n': 5})
+    rows = derived(doc)
+    primary = next(row for row in rows if row['label'] == 'branch A relative response')
+    sensitivity = next(row for row in rows if row['label'] == 'branch A zero-exclusion sensitivity')
+    assert primary['values'] == sensitivity['values'] == [0] * 5
+    assert primary['source_columns'] == [0, 2] and sensitivity['source_columns'] == [2]
+    assert primary['valid_counts'] == [2] * 5 and sensitivity['valid_counts'] == [1] * 5
+    assert not any(row['label'] == 'branch B zero-exclusion sensitivity' for row in rows)
+    assert any(row['label'] == 'branch B signed raw minus initial reference' for row in rows)
+
+
+def test_unknown_direction_keeps_existing_signed_primary_without_a_duplicate_signed_trace():
+    semantics = descriptor()
+    semantics.pop('response_direction')
+    ep = region_episode(semantics=semantics)
+    doc = se.build(ep, {'n': 5})
+    rows = derived(doc)
+    primary = next(row for row in rows if row['label'] == 'branch A relative response')
+    assert primary['operation'] == 'mean signed raw minus initial reference'
+    assert primary['values'] == [0, 0, 0, -60, 0]
+    assert not any('signed raw minus initial reference' in row['label'] for row in rows)
+    assert {'branch A positive change', 'branch A negative change'} <= {row['label'] for row in rows}
+    assert len(rows) <= 24
+
+
+@pytest.mark.parametrize('authority', [None, 'recorded', 'recording_verified'])
+def test_conflicting_non_candidate_response_directions_remain_unresolved(authority):
+    from label.semantic_evidence import _semantics
+    semantics = descriptor()
+    if authority is None:
+        semantics.pop('provenance')
+    else:
+        semantics['provenance'] = {'authority': authority}
+    meta = {'name': 'pad', 'shape': [4], 'sensor_semantics': semantics, 'response_direction': 'down'}
+    original = copy.deepcopy(meta)
+    consistent = _semantics({}, meta, {}, [4])
+    assert consistent['response_direction'] == 'down'
+    assert 'response_direction_conflict' not in consistent
+    meta['response_direction'] = 'up'
+    resolved = _semantics({}, meta, {}, [4])
+    assert 'response_direction' not in resolved
+    assert resolved['response_direction_conflict'] == {'sensor_semantics': 'down', 'metadata': 'up'}
+    assert any('Conflicting declared response directions' in note for note in resolved['limitations'])
+    assert meta['sensor_semantics'] == original['sensor_semantics']
+    assert meta['response_direction'] == 'up'
+
+
+def test_explicit_metadata_still_overrides_a_publisher_candidate_response_direction():
+    from label.semantic_evidence import _semantics
+    meta = {'name': 'pad', 'shape': [4], 'sensor_semantics': descriptor(), 'response_direction': 'up'}
+    resolved = _semantics({}, meta, {}, [4])
+    assert resolved['response_direction'] == 'up'
+    assert 'response_direction_conflict' not in resolved

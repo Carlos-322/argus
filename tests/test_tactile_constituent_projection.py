@@ -3,6 +3,7 @@ import copy
 import json
 
 import numpy as np
+import pytest
 
 from label import sensor_evidence as se
 from tests.test_tactile_contract import episode
@@ -58,6 +59,193 @@ def test_constituent_projection_keeps_unknown_layout_and_fractional_values():
     assert table['reference_values'] == [10.25] * 16
     assert 'physical_layout' not in array
     assert 'Source array row and column' in array['coordinates']
+
+
+def component_views():
+    raw, times, semantics = spatial_case()
+    ep = episode({'right_pressure': raw}, [{'name': 'right_pressure', 'shape': [16, 16],
+                                          'sensor_semantics': semantics}])
+    ep['times']['exo'] = times
+    doc = se.build(ep, {'n': len(raw)})
+    row = next(row for row in doc['series'] if row.get('columns') == [10])
+    table = doc['sensors'][0]['array_evidence']['native_constituents']
+    time = next(time for time in table['times_s'] if 1.8 < time < 3.2 and time not in row['times'])
+    finding = {'start_s': time, 'end_s': time, 'headline': 'Opposing local readings',
+               'claim_type': 'response_change', 'adds_beyond_video': True,
+               'evidence': [{'sensor_id': row['sensor_id'], 'series_id': row['id'], 'time_s': [time]}]}
+    return doc, row, table, finding
+
+
+def retain_component_rows(table, indices):
+    for key in ('times_s', 'source_rows', 'values'):
+        table[key] = [table[key][i] for i in indices]
+    table['omitted_rows'] = table['native_samples'] - len(indices)
+    table['sampled'] = bool(table['omitted_rows'])
+    table['preserved_rows'] = [row for row in table['preserved_rows'] if row in table['source_rows']]
+
+
+def test_exact_component_identity_unites_supplied_trace_and_matrix_without_changing_raw_citation():
+    doc, row, table, finding = component_views()
+    sparse_time = next(time for time in row['times'] if 1.8 < time < 3.2)
+    retain_component_rows(table, [0, table['times_s'].index(finding['start_s']), len(table['times_s']) - 1])
+    finding['evidence'][0]['time_s'].append(sparse_time)
+    finding.update(start_s=min(finding['evidence'][0]['time_s']), end_s=max(finding['evidence'][0]['time_s']))
+    before, raw_finding = copy.deepcopy(doc), copy.deepcopy(finding)
+    result = se.bind(doc, [finding])
+    assert len(result['findings']) == 1 and not result['unbound_findings']
+    bound = next(item for item in result['series'] if item['id'] == row['id'])
+    assert bound['times'] == sorted(set(row['times']) | set(table['times_s']))
+    assert bound['component_binding']['source_column'] == 10
+    assert bound['component_binding']['canonical_series_id'] == row['id']
+    assert bound['source_views']['trace']['times'] == row['times']
+    assert bound['source_views']['trace']['values'] == row['values']
+    wire = json.loads(se.prompt(result).splitlines()[-1])
+    sent = expand_prompt(wire)
+    sent_row = next(item for item in sent['series'] if item['id'] == row['id'])
+    assert sent_row['times'] == row['times'] and sent_row['values'] == row['values']
+    assert 'source_views' not in sent_row and 'component_binding' not in sent_row
+    aliases = wire['sensors'][0]['array_evidence']['constituents']['same_source_series_ids']
+    assert aliases['signal:right_pressure:array:10'] == row['id']
+    assert se.bind(result, [finding])['findings'] == result['findings']
+    assert finding == raw_finding and doc == before
+
+
+def test_legacy_array_alias_keeps_sparse_extrema_omitted_by_the_retained_matrix():
+    doc, row, table, finding = component_views()
+    retain_component_rows(table, [0, len(table['times_s']) - 1])
+    time = next(time for time in row['times'] if 1.8 < time < 3.2)
+    finding.update(start_s=time, end_s=time)
+    finding['evidence'][0].update(series_id='signal:right_pressure:array:10', time_s=[time])
+    result = se.bind(doc, [finding])
+    assert len(result['findings']) == 1 and not result['unbound_findings']
+    bound = next(item for item in result['series'] if item['id'] == 'signal:right_pressure:array:10')
+    assert time in bound['times'] and bound['values'][bound['times'].index(time)] == 600
+    assert bound['component_binding']['canonical_series_id'] == row['id']
+    bound['plot'] = copy.deepcopy(row['plot'])
+    rebound = se.bind(result, [finding])
+    restored = next(item for item in rebound['series'] if item['id'] == bound['id'])
+    assert restored['plot'] == bound['plot']
+
+
+@pytest.mark.parametrize('invalid', ['wrong_column', 'derived', 'null', 'conflict'])
+def test_component_union_rejects_unproven_or_conflicting_samples(invalid):
+    doc, row, table, finding = component_views()
+    if invalid == 'wrong_column':
+        row['columns'] = [99]
+    elif invalid == 'derived':
+        row['derivation_id'] = 'not-a-source-component'
+    elif invalid == 'null':
+        index = table['times_s'].index(finding['start_s'])
+        table['values'][index][table['source_columns'].index(10)] = None
+    else:
+        row['values'][0] += 1
+    result = se.bind(doc, [finding])
+    assert not result['findings'] and len(result['unbound_findings']) == 1
+
+
+def test_rebinding_does_not_promote_prior_union_or_native_plot_points_after_matrix_withholding():
+    doc, row, table, finding = component_views()
+    bound = se.bind(doc, [finding])
+    assert bound['findings']
+    array = bound['sensors'][0]['array_evidence']
+    retain_component_rows(array['native_constituents'], [0, len(array['native_constituents']['times_s']) - 1])
+    result = se.bind(bound, [finding])
+    assert not result['findings'] and result['unbound_findings']
+    restored = next(item for item in result['series'] if item['id'] == row['id'])
+    assert restored['times'] == row['times'] and restored['values'] == row['values']
+    assert 'component_binding' not in restored and 'source_views' not in restored
+
+
+@pytest.mark.parametrize('offset', [0, 100])
+def test_piece_merge_shifts_component_source_views_before_prompt_and_reparse(offset):
+    from label import reparse
+    doc, row, table, finding = component_views()
+    bound = se.bind(doc, [finding])
+    before = copy.deepcopy(bound)
+    raw, _, semantics = spatial_case()
+    ctx = episode({'right_pressure': raw}, [{'name': 'right_pressure', 'shape': [16, 16],
+                                           'sensor_semantics': semantics}])['context']
+    merged = se.merge([({'piece': {'index': 2, 't0_s': offset}}, {'sensor_evidence': bound})], ctx)
+    assert merged['findings'] and not merged['unbound_findings']
+    ident = 'part2:' + row['id']
+    saved = next(item for item in merged['series'] if item['id'] == ident)
+    assert saved['source_views']['trace']['times'] == [time + offset for time in row['times']]
+    assert saved['source_views']['trace']['values'] == row['values']
+    assert saved['source_views']['trace']['series_id'] == ident
+    array_id = 'part2:signal:right_pressure:array:10'
+    assert saved['source_views']['constituent_series_id'] == array_id
+    assert saved['component_binding'] == {'canonical_series_id': ident, 'source_column': 10,
+                                          'source_views': [ident, array_id]}
+    sent = se._prompt(merged)[1]
+    trace = next(item for item in sent['series'] if item['id'] == ident)
+    assert trace['times'] == [time + offset for time in row['times']]
+    assert trace['values'] == row['values']
+    record = {'labels': {'sensor_findings': merged['findings']}, 'sensor_evidence': merged}
+    reparse.rebind(record)
+    assert record['sensor_evidence']['findings'] and not record['sensor_evidence']['unbound_findings']
+    rebound = next(item for item in record['sensor_evidence']['series'] if item['id'] == ident)
+    assert rebound['times'] == saved['times'] and rebound['values'] == saved['values']
+    assert rebound['component_binding'] == saved['component_binding']
+    assert bound == before
+
+
+def test_factored_matrix_columns_directly_name_cells_and_their_declared_positions():
+    raw, times, semantics = spatial_case()
+    semantics['valid_indices'] = [11, 90, 10, 106, 26]
+    ep = episode({'right_pressure': raw}, [{'name': 'right_pressure', 'shape': [16, 16],
+                                          'sensor_semantics': semantics}])
+    ep['times']['exo'] = times
+    doc = se.build(ep, {'n': len(raw)})
+    before = copy.deepcopy(doc)
+    wire = json.loads(se.prompt(doc).splitlines()[-1])
+    table = wire['sensors'][0]['array_evidence']['constituents']
+    header = table['value_column_layout']
+    assert header['columns'] == ['source_column', 'region', 'x', 'y']
+    assert header['rows'] == [[cell, 'branch A', *semantics['positions'][cell]]
+                              for cell in [90, 10, 106, 26]]
+    assert table['constant_column_values'] == {'0': 1000}
+    clock = wire['sample_clocks'][table['time_clock']]
+    row = clock.index(times[60])
+    assert table['values'][row] == [1400, 600, 1400, 600]
+    assert doc == before
+
+
+def test_candidate_response_convention_survives_without_becoming_a_calibration():
+    raw, times, semantics = spatial_case()
+    semantics['response_direction'] = 'down'
+    ep = episode({'right_pressure': raw}, [{'name': 'right_pressure', 'shape': [16, 16],
+                                          'sensor_semantics': semantics}], {'right_pressure': {'role': 'touch'}})
+    ep['times']['exo'] = times
+    sensor = se.build(ep, {'n': len(raw)})['sensors'][0]
+    assert sensor['response_direction'] == 'down'
+    assert sensor['response_direction_authority'] == 'publisher_candidate'
+    assert sensor['calibration'] is None
+    assert sensor['array_evidence']['response_convention']['direction'] == 'down'
+    ep['context']['data_dictionary']['entries']['field_0'].update(
+        provenance='human', meaning='Different recorded field, no candidate response convention')
+    changed = se.build(ep, {'n': len(raw)})['sensors'][0]
+    assert changed['response_direction'] is None
+    assert 'response_convention' not in changed['array_evidence']
+
+
+def test_conflicting_recorded_polarity_is_withheld_in_descriptors_maps_and_regional_traces():
+    from label import tactile_arrays
+    raw, times, semantics = spatial_case()
+    semantics.update(response_direction='down', provenance={'authority': 'recorded'})
+    ep = episode({'right_pressure': raw}, [{'name': 'right_pressure', 'shape': [16, 16],
+        'response_direction': 'up', 'sensor_semantics': semantics}], {'right_pressure': {'role': 'touch'}})
+    ep['times']['exo'] = times
+    doc = se.build(ep, {'n': len(raw)})
+    sensor = doc['sensors'][0]
+    assert sensor['response_direction'] is None
+    assert sensor['response_direction_conflict']
+    array = sensor['array_evidence']
+    assert 'response_convention' not in array
+    assert array['response_direction_conflict'] == sensor['response_direction_conflict']
+    assert sensor['derivations'][0]['response_direction'] is None
+    caption = tactile_arrays.render({**sensor, 'array_evidence': {**array, 'frames': array['frames'][:1]}})[0]['text']
+    assert 'polarity declarations conflict' in caption
+    assert 'raw values indicate stronger sensor response' not in caption
 
 
 def test_prompt_pressure_reduces_array_rows_before_removing_local_evidence(monkeypatch):
@@ -264,6 +452,7 @@ def expand_prompt(payload):
         if 'time_clock' in table:
             table['times_s'] = clocks[table.pop('time_clock')]
         if 'constant_column_values' in table:
+            table.pop('value_column_layout', None)  # Redundant direct header; full source geometry is retained.
             constants = table.pop('constant_column_values')
             varying = table.pop('varying_column_positions')
             rows = []
