@@ -773,7 +773,8 @@ def test_inspection_cache_is_carried_through_new_route_claim(tmp_path, monkeypat
     build_request = harness.me.build_request
     def build_with_access(*a, **kw):
         result = build_request(*a, **kw)
-        result['evidence_access'] = ea.Access(harness.me.load(ep))
+        result['evidence_access'] = ea.Access(harness.me.load(ep),
+            copy_contract_version=result['sensor_copy_contract_version'])
         return result
     monkeypatch.setattr(harness.me, 'build_request', build_with_access)
     def discover(*a, **kw):
@@ -822,7 +823,8 @@ def test_cache_only_inspection_does_not_consume_remaining_cap_again(tmp_path, mo
     build_request = harness.me.build_request
     def build_with_access(*a, **kw):
         result = build_request(*a, **kw)
-        result['evidence_access'] = ea.Access(harness.me.load(ep))
+        result['evidence_access'] = ea.Access(harness.me.load(ep),
+            copy_contract_version=result['sensor_copy_contract_version'])
         return result
     monkeypatch.setattr(harness.me, 'build_request', build_with_access)
     monkeypatch.setattr(harness, 'call_model', provider)
