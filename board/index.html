@@ -6408,7 +6408,7 @@ function renderEp(d, opts) {
   const episodeGoalT = comp.completed_at_s ?? comp.goal_reached_at_s ?? null;
   // the episode's quality scores (board/scores.py): a chip on the video when each subgoal or the goal is reached, and
   // a Quality section below that sets each score beside what it measured
-  const Q = d.scores && d.scores.version === 1 ? d.scores : null;
+  const Q = d.scores && d.scores.version === 2 ? d.scores : null;
   const qNum = v => v == null ? '-' : (Math.round(v * 10) / 10).toString();
   const qPct = v => `${v == null ? 0 : Math.max(0, Math.min(10, v)) * 10}%`;
   const qIn = Q ? Q.inputs || {} : {};
@@ -6474,9 +6474,9 @@ function renderEp(d, opts) {
           : Q.efficiency == null && qIn.time_to_goal_s == null ? 'No timed work before the goal to measure'
           : peerWords(null))}
       ${cell('Steadiness', Q.fluency, Q.fluency == null ? 'not measured' : `${Math.round(100 * (qIn.hesitation_share || 0))}% waiting`,
-        `The mean of waiting (share of the work with every arm waiting${qIn.steadiness != null ? `, ${qNum(qIn.steadiness)}` : ''})`
-        + ` and busyness (actions per unit of progress against other demos of this task${qIn.busyness != null
-          ? `, ${qNum(qIn.busyness)}` : ', too few to compare'})`)}
+        `The mean of waiting (share of the work with every arm waiting${qIn.steadiness != null ? `, scores ${qNum(qIn.steadiness)}` : ''})`
+        + ` and busyness (actions per unit of progress against other demos of this task${qIn.actions_per_progress == null
+          ? ', not measured' : qIn.busyness != null ? `, scores ${qNum(qIn.busyness)}` : ', too few to compare'})`)}
     </div>`, false, false, 'Execution weighs cleanliness 50%, speed 25% and steadiness 25%, over the ones that exist')}
     ${box('Outcome', Q.outcome, `<div class="qual-cells">
       ${qIn.tasks_total ? `${cell('Subtasks', null, `${qIn.tasks_done} of ${qIn.tasks_total} done`,

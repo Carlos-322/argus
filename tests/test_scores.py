@@ -293,6 +293,9 @@ def test_unreached_subgoals_never_enter_a_similar_pool_and_a_task_basis_with_eno
     for i in range(6):
         recs[f"other{i}.json"] = _given(_record("t", 30.0, [(0, 25, "advancing", 0.5), (25, 30, "advancing", 1.0)],
                                                 [(25, "cup placed")]), f"other task {i}")
+    miss = _record("t", 30.0, [(0, 25, "advancing", 0.5), (25, 30, "advancing", 1.0)], [(25, "cup placed")])
+    miss["key_events"][0]["outcome"] = "failure"                     # a "cup placed" that was never reached
+    recs["miss.json"] = _given(miss, "a third task")
     st = scores.score_board(recs)["same0.json"]["subgoals"][0]
     assert st["peer_basis"] == "task" and st["peers"] == 5 and st["peer_median_s"] == 5.0
     pools = scores._similar_pools(recs, {f: scores.subgoals(d, scores.facts(d)) for f, d in recs.items()})
@@ -340,6 +343,46 @@ def test_only_mistakes_the_board_counts_cost_points_a_recovery_halves_one_and_a_
     s = scores.score_board({"m.json": rec})["m.json"]
     assert [(p["severity"], p["recovered"], p["points"]) for p in s["inputs"]["penalties"]] == [("high", True, 1.5)]
     assert s["cleanliness"] == 8.5
+
+
+def test_two_different_mistakes_at_one_time_or_without_a_time_are_each_charged():
+    for t in (5.0, None):
+        rec = _record("set the table", 10.0, [(0, 10, "advancing", 1.0)])
+        rec["operator_mistakes"] = [
+            {"issue": "dropped the cup", "severity": "high", "category": "dropped_object", "t_s": t},
+            {"issue": "dropped the plate", "severity": "high", "category": "dropped_object", "t_s": t}]
+        assert scores.score_board({"m.json": rec})["m.json"]["cleanliness"] == 4.0
+
+
+def test_a_mistake_listed_twice_explains_one_failed_attempt_not_two():
+    rec = _record("open the door", 10.0, [(0, 10, "advancing", 1.0)])
+    rec["operator_mistakes"] = [{"issue": "missed the handle", "severity": "high", "category": "missed_grasp",
+                                 "t_s": 5.0}] * 2
+    rec["key_events"] = [{"t_s": 4.0, "kind": "grasp", "outcome": "failure", "label": "grasp handle"},
+                         {"t_s": 8.0, "kind": "grasp", "outcome": "failure", "label": "grasp handle"}]
+    s = scores.score_board({"m.json": rec})["m.json"]
+    assert s["inputs"]["unexplained_failed_attempts"] == scores.FAILED_ATTEMPT_POINTS and s["cleanliness"] == 6.0
+
+
+def test_a_staged_mistake_is_charged_like_the_board_counts_it_and_one_without_text_is_not_read():
+    rec = _record("open the door", 10.0, [(0, 10, "advancing", 1.0)])
+    rec["operator_mistakes"] = [
+        {"issue": "dropped the handle", "severity": "high", "category": "dropped_object", "t_s": 5.0,
+         "deliberate": "yes"},
+        {"issue": "", "severity": "high", "category": "dropped_object", "t_s": 7.0},
+        {"severity": "high", "category": "dropped_object", "t_s": 8.0}]
+    s = scores.score_board({"m.json": rec})["m.json"]
+    assert [p["mistake"] for p in s["inputs"]["penalties"]] == ["dropped the handle"] and s["cleanliness"] == 7.0
+
+
+def test_a_goal_stretch_that_was_not_reached_has_no_speed_even_with_peers_of_its_task():
+    recs = _board()
+    part = _record("open the left door then the right door", None,
+                   [(0, 5, "advancing", 0.5), (5, 8, "advancing", 0.7)], [(5, "left door open")], outcome="partial")
+    recs["part.json"] = part
+    last = scores.score_board(recs)["part.json"]["subgoals"][-1]
+    assert last["goal"] and not last["reached"]
+    assert last["efficiency"] is None and last["peer_basis"] is None and last["peer_median_s"] is None
 
 
 def test_values_of_the_wrong_type_inside_fields_never_stop_the_board_and_scores_stay_between_0_and_10():

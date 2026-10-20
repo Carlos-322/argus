@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from board import scores
+
 PAGE = Path(__file__).resolve().parents[1] / 'board' / 'index.html'
 
 SCRIPT = r'''
@@ -23,7 +25,7 @@ const quality = new Function('d', 'comp', 'esc', 'fmtT', 'SUBS_OPEN', 'SUBS_FIRS
   qualitySrc + 'return {qualityHtml, episodeGoalT, subs, Q, qNum};');
 const sub = (o) => ({start_s: 0, end_s: 5, label: 'cup lifted', goal: false, task: null, reached: true, duration_s: 5,
   failed_attempts: [], execution: 9, peers: 12, peer_median_s: 6, peer_basis: 'task', ...o});
-const scores = (o) => ({version: 1, execution: 8, outcome: 10, cleanliness: 9, efficiency: 7, fluency: 8, peers: 12,
+const scores = (o) => ({version: Number(process.argv[2]), execution: 8, outcome: 10, cleanliness: 9, efficiency: 7, fluency: 8, peers: 12,
   peer_basis: 'task', relation: 'aligned', subgoals: [sub({}), sub({start_s: 5, end_s: 9, peer_basis: 'similar', peers: 200}),
   sub({start_s: 9, end_s: 12, peer_basis: null, peers: 0, peer_median_s: null}), sub({start_s: 12, end_s: 14})],
   inputs: {outcome: 'success', wasteful_share: 0.1, penalties: [], time_to_goal_s: 14, peer_median_time_to_goal_s: 16,
@@ -52,7 +54,9 @@ q = quality({scores: scores({execution: null, cleanliness: null, efficiency: nul
 const exBox = q.qualityHtml.slice(q.qualityHtml.indexOf('Execution</span>'), q.qualityHtml.indexOf('Outcome</span>'));
 assert(exBox.includes('<span class="qual-score">-</span>') && !exBox.includes('/10'), exBox.slice(0, 200));
 assert(exBox.includes('qual-bar none') && !exBox.includes('% wasteful') && !exBox.includes('% waiting'));
-assert.strictEqual((exBox.match(/not measured/g) || []).length, 2);
+// shown on two cells; the Steadiness tooltip also names busyness as not measured
+assert.strictEqual((exBox.replace(/title="[^"]*"/g, '').match(/not measured/g) || []).length, 2);
+assert(exBox.includes('busyness (actions per unit of progress against other demos of this task, not measured)'));
 const row = q.qualityHtml.slice(q.qualityHtml.indexOf('<tr data-t'));
 assert(row.includes('<b>-</b></span>') && !row.includes('-s<') && !row.includes('qual-bar'));
 
@@ -131,7 +135,8 @@ assert.strictEqual(foldLabel(FOLD(true, '14')), 'Show the first 5');
 
 @pytest.mark.skipif(not shutil.which('node'), reason='no node')
 def test_quality_section_chip_and_key_event_names_run_from_the_page():
-    p = subprocess.run(['node', '-e', SCRIPT, str(PAGE)], text=True, capture_output=True)
+    # the version the scorer writes, so a bump the page does not follow fails here
+    p = subprocess.run(['node', '-e', SCRIPT, str(PAGE), str(scores.VERSION)], text=True, capture_output=True)
     assert p.returncode == 0, p.stderr
 
 

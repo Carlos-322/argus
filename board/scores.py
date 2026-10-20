@@ -114,30 +114,38 @@ def _steps(d: dict) -> list:
                    and _num(e.get("end_s")) is not None), key=lambda e: e["t_s"])
 
 
-def _mistakes(d: dict) -> tuple[list, int]:
+def _mistakes(d: dict) -> tuple[list, list]:
     """(the operator mistakes the board counts, each with recovered read from the mistake or from the recovery list,
-    the number of mistakes of any rating, which explain failed attempts). A mistake the board shows as minor or unrated
-    costs nothing; its wasted motion is already in the wasteful share. A mistake listed twice at one time costs once."""
-    rows = [m for m in _list(d.get("operator_mistakes")) if isinstance(m, dict) and m.get("deliberate") != "yes"]
+    the times of the mistakes of any rating, which explain failed attempts). Like the board, only a mistake with issue
+    text is read, and a staged one (deliberate) is charged like any other. A mistake the board shows as minor or unrated
+    costs nothing; its wasted motion is already in the wasteful share. The same mistake listed twice (same text,
+    category, rating and time) is read once, both to charge it and to explain a failed attempt; mistakes without a time
+    are never taken for one another."""
+    rows, seen = [], set()
+    for m in _list(d.get("operator_mistakes")):
+        if not isinstance(m, dict) or not m.get("issue"):
+            continue
+        sev, t = _severity(m), _num(m.get("t_s"))
+        key = (str(m.get("issue")), _str(m.get("category")), sev, t)
+        if t is not None and key in seen:
+            continue
+        seen.add(key)
+        rows.append((m, sev, t))
     recovered_at = [_num(r.get("failure_t_s")) for r in _list(d.get("recovery")) if isinstance(r, dict)
                     and (r.get("recovered") is True or _num(r.get("recovered_at_s")) is not None)]
     recovered_at = [t for t in recovered_at if t is not None]
-    counted, seen = [], set()
-    for m in rows:
-        sev = _severity(m)
+    counted = []
+    for m, sev, t in rows:
         try:
             counts = sev is not None and _families().counts("operator_mistakes", {**m, "severity": sev})
         except (TypeError, ValueError, AttributeError):
             counts = False
-        t = _num(m.get("t_s"))
-        key = (_str(m.get("category")), sev, t)
-        if not counts or key in seen:
+        if not counts:
             continue
-        seen.add(key)
         recovered = m.get("recovered") is True or (t is not None and any(abs(r - t) <= RECOVERY_WINDOW_S
                                                                         for r in recovered_at))
         counted.append({"issue": _str(m.get("issue")), "severity": sev, "t_s": t, "recovered": recovered})
-    return counted, len(rows)
+    return counted, [t for _, _, t in rows]
 
 
 def _points(m: dict) -> float:
@@ -167,7 +175,8 @@ def facts(d: dict) -> dict:
     # unknown, never 0
     progress = [min(1.0, max(0.0, p)) for p in (_num(e.get("progress")) for e in steps) if p is not None]
     reached = max(progress) if progress else None
-    mistakes, any_mistakes = _mistakes(d)
+    mistakes, explaining = _mistakes(d)
+    any_mistakes = len(explaining)
     failed = [k for k in _list(d.get("key_events")) if isinstance(k, dict) and k.get("outcome") == "failure"]
     # progress restarts at each subtask, so a subtask's progress is the furthest its own steps got
     tasks = []
@@ -396,8 +405,7 @@ def subgoals(d: dict, f: dict) -> list:
     failed_t = [k["t_s"] for k in failed_all]
     mistakes = sorted((m for m in f["mistakes"] if m["t_s"] is not None), key=lambda m: m["t_s"])
     mistake_t = [m["t_s"] for m in mistakes]
-    any_mistake_t = sorted(t for t in (_num(m.get("t_s")) for m in _list(d.get("operator_mistakes"))
-                                       if isinstance(m, dict) and m.get("deliberate") != "yes") if t is not None)
+    any_mistake_t = sorted(t for t in _mistakes(d)[1] if t is not None)
     # an episode of several subtasks (human ego, sessions) has no single goal: each subtask is scored on its own, from
     # its start through its subgoals to its own end-state, and the time between subtasks belongs to none of them
     tasks = sorted((t for t in _list(d.get("tasks")) if isinstance(t, dict) and _num(t.get("start_s")) is not None
@@ -572,7 +580,7 @@ def score_board(records: dict) -> dict:
             basis = "task"
             if len(same) < MIN_PEERS and (f, i) in similar:
                 same, basis = similar[(f, i)], "similar"
-            enough = len(same) >= MIN_PEERS
+            enough = st["reached"] and len(same) >= MIN_PEERS
             st["efficiency"] = _ratio_score(st["duration_s"], same) if enough else None
             st["peers"] = len(same)
             st["peer_basis"] = basis if enough else None
