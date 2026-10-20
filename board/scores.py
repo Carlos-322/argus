@@ -1,4 +1,4 @@
-"""Episode and subtask quality scores, computed from the labels a board already holds, never asked of the model.
+"""Episode and subgoal quality scores, computed from the labels a board already holds, never asked of the model.
 
 A model reads one episode at a time, so a number it writes for one episode is not comparable with the number it writes
 for another. These scores are measured instead: each one is built from fields the annotation already records (the
@@ -141,10 +141,12 @@ def _cleanliness(f: dict):
                              "unexplained_failed_attempts": attempts}
 
 
-def subtasks(d: dict, f: dict) -> list:
-    """The episode's subtasks: from the start of the work (or the previous subgoal) to each subgoal_complete key
-    event, the last one running to the goal. Each carries its own outcome (the key event's), duration, wasteful share,
-    hesitation and the mistakes that start inside it."""
+def subgoals(d: dict, f: dict) -> list:
+    """The stretches of work that end in the episode's subgoals: from the start of the work (or the previous subgoal)
+    to each key event tagged subgoal_complete, and a last stretch to the goal, or to the end of the work when the goal
+    is never reached ("reached": False). The model records a subgoal only once it is achieved, so a subgoal's own
+    outcome is always success and is not scored; how cleanly, steadily and quickly its stretch went is. Each carries
+    its duration, wasteful share, hesitation and the mistakes that start inside it."""
     events = sorted((k for k in d.get("key_events") or [] if isinstance(k, dict) and k.get("kind") == "subgoal_complete"
                      and _num(k.get("t_s")) is not None), key=lambda k: k["t_s"])
     if f["start_s"] is None or not events:
@@ -153,12 +155,12 @@ def subtasks(d: dict, f: dict) -> list:
     bounds, a = [], f["start_s"]
     for k in events:
         if k["t_s"] > a:
-            bounds.append((a, k["t_s"], k.get("label"), k.get("outcome")))
+            bounds.append((a, k["t_s"], k.get("label"), k.get("outcome"), False))
             a = k["t_s"]
     if f["end_s"] is not None and f["end_s"] > a + 0.5:
-        bounds.append((a, f["end_s"], (d.get("completion") or {}).get("success_predicate"), f["outcome"]))
+        bounds.append((a, f["end_s"], (d.get("completion") or {}).get("success_predicate"), f["outcome"], True))
     out = []
-    for a, b, label, outcome in bounds:
+    for a, b, label, outcome, goal in bounds:
         clip = lambda spans: [(max(a, x), min(b, y)) for x, y in spans if min(b, y) > max(a, x)]
         work = clip([(e["t_s"], e["end_s"]) for e in steps if e.get("contribution") in ("advancing", "wasteful")])
         waste = clip([(e["t_s"], e["end_s"]) for e in steps if e.get("contribution") == "wasteful"])
@@ -168,7 +170,9 @@ def subtasks(d: dict, f: dict) -> list:
         ms = [m for m in f["mistakes"] if _num(m.get("t_s")) is not None and a <= m["t_s"] < b]
         clean = max(0.0, 10 * (1 - share) - sum(SEVERITY_POINTS.get(m.get("severity"), 1.5)
                                                * (0.5 if m.get("recovered") else 1.0) for m in ms))
-        out.append({"start_s": a, "end_s": b, "label": label, "outcome": outcome, "duration_s": round(b - a, 2),
+        out.append({"start_s": a, "end_s": b, "label": label, "outcome": outcome, "goal": goal,
+                    "reached": outcome == "success",
+                    "duration_s": round(b - a, 2),
                     "cleanliness": round(clean, 1), "steady": round(10 * max(0.0, 1 - 2 * hes), 1),
                     "wasteful_share": round(share, 3), "mistakes": [m.get("issue") for m in ms]})
     return out
@@ -203,15 +207,18 @@ def score_board(records: dict) -> dict:
         have = {k: v for k, v in dims.items() if v is not None}
         weight = sum(EXECUTION_WEIGHTS[k] for k in have)
         execution = round(sum(EXECUTION_WEIGHTS[k] * v for k, v in have.items()) / weight, 1) if weight else None
-        subs = subtasks(d, x)
-        # a subtask's speed is judged against the same subtask of peers that split the task the same way
-        peer_subs = [subtasks(records[p], fs[p]) for p in by_group[groups[f]] if p != f and fs[p]["outcome"] == "success"]
+        subs = subgoals(d, x)
+        # a subgoal's speed is judged against the same subgoal of peers that split the task the same way
+        peer_subs = [subgoals(records[p], fs[p]) for p in by_group[groups[f]] if p != f and fs[p]["outcome"] == "success"]
         for i, st in enumerate(subs):
             same = [ps[i]["duration_s"] for ps in peer_subs if len(ps) == len(subs)]
             st["efficiency"] = _ratio_score(st["duration_s"], same)
             st["peers"] = len(same)
+            st["peer_median_s"] = statistics.median(same) if len(same) >= MIN_PEERS else None
+            parts = [v for v in (st["cleanliness"], st["steady"], st["efficiency"]) if v is not None]
+            st["execution"] = round(statistics.mean(parts), 1)
         out[f] = {"version": VERSION, "execution": execution, "outcome": outcome, **dims, "relation": x["relation"],
-                  "subtasks": subs,
+                  "subgoals": subs,
                   "peers": len(peers), "group": groups[f],
                   "inputs": {**o_in, **c_in, "time_to_goal_s": took, "peer_median_time_to_goal_s":
                              statistics.median(peer_took) if peer_took else None,

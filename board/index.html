@@ -1624,26 +1624,31 @@ h3.section .count {
   vector-effect: non-scaling-stroke; }
 .prog-overlay .po-past { fill: none; stroke: #f3f2ec; stroke-width: 2; vector-effect: non-scaling-stroke; }
 .prog-overlay .po-dot { fill: #f3f2ec; }
-/* the quality chip beside the progress chip (board/scores.py): two scores, each a number and a bar out of 10 */
-.score-chip { display: grid; grid-template-columns: auto auto 46px; align-items: center; column-gap: 7px;
-  row-gap: 2px; padding: 5px 11px; border-radius: 10px; background: rgba(0,0,0,0.55);
-  border: 1px solid rgba(255,255,255,0.12); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
-  pointer-events: auto; cursor: pointer; }
-.score-chip .sc-scope { grid-column: 1 / -1; font-size: 10px; color: rgba(255,255,255,0.7); white-space: nowrap;
-  overflow: hidden; text-overflow: ellipsis; max-width: 190px; }
-.score-chip .sc-k { font-size: 10px; color: rgba(255,255,255,0.7); }
-.score-chip .sc-v { font-family: var(--mono); font-size: 13px; font-weight: 700; color: #f3f2ec; text-align: right;
-  min-width: 3ch; }
-.score-chip .sc-bar { height: 4px; border-radius: 2px; background: rgba(255,255,255,0.18); overflow: hidden; }
-.score-chip .sc-bar i { display: block; height: 100%; background: #f3f2ec; transition: width 0.35s ease; }
-.score-chip .sc-rel { grid-column: 1 / -1; font-size: 10px; color: #f0c674; }
-.q-row { display: grid; grid-template-columns: 92px 34px 1fr; gap: 10px; align-items: center; padding: 5px 0; }
-.q-row .q-k { color: var(--fg-2); font-weight: 600; font-size: 12px; }
-.q-row .q-v { font-family: var(--mono); font-weight: 700; font-size: 13px; text-align: right; }
-.q-row .q-bar { height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
-.q-row .q-bar i { display: block; height: 100%; background: var(--fg); }
-.q-why { grid-column: 1 / -1; font-size: 12px; color: var(--fg-2); margin: -2px 0 4px; }
-.q-sub { margin-top: 8px; }
+/* the Quality section: the two scores large, then each measure on one line, then one row per subgoal */
+.qual-top { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+.qual-big { padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-md); }
+.qual-big .qb-k { font-size: 11px; color: var(--fg-2); font-weight: 600; }
+.qual-big .qb-v { font-family: var(--mono); font-size: 26px; font-weight: 700; line-height: 1.1; margin: 2px 0 6px; }
+.qual-big .qb-v small { font-size: 12px; color: var(--fg-2); font-weight: 600; }
+.qual-big .qb-what { font-size: 11px; color: var(--fg-2); }
+.qual-bar { display: block; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.qual-bar i { display: block; height: 100%; background: var(--fg); }
+.qual-measures { display: grid; grid-template-columns: 96px 34px 70px 1fr; column-gap: 12px; row-gap: 8px;
+  align-items: center; font-size: 12px; }
+.qual-measures .qm-k { font-weight: 600; }
+.qual-measures .qm-v { font-family: var(--mono); font-weight: 700; text-align: right; }
+.qual-measures .qm-what { color: var(--fg-2); }
+.qual-measures .qm-none { color: var(--fg-2); font-family: var(--mono); text-align: right; }
+.qual-sub { margin-top: 16px; }
+.qual-sub .qs-head { font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+.qual-sub .qs-head span { font-weight: 400; color: var(--fg-2); margin-left: 6px; }
+.qual-sub .qs-row { display: grid; grid-template-columns: 20px 52px 1fr 64px 34px 70px; column-gap: 10px;
+  align-items: center; padding: 6px 0; border-top: 1px solid var(--line); font-size: 12px; cursor: pointer; }
+.qual-sub .qs-row:first-child { border-top: 0; }
+.qual-sub .qs-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qual-sub .qs-dur { font-family: var(--mono); color: var(--fg-2); text-align: right; }
+.qual-sub .qs-v { font-family: var(--mono); font-weight: 700; text-align: right; }
+.qual-sub .qs-miss { color: var(--danger); font-family: var(--mono); font-size: 11px; }
 /* top-right transient toast: object state changes, below the fullscreen button (.fs-btn, 8 px + 26 px) */
 .state-toast {
   position: absolute; top: calc(var(--fx-top, 0px) + 40px); right: calc(var(--fx-right, 0px) + 8px);
@@ -1744,6 +1749,19 @@ h3.section .count {
 }
 .timeline .marker.goal:hover { width: 5px; z-index: 8; }
 
+/* the score chip (board/scores.py): bottom left of the video, beside the caption, only while the caption shows a
+   subgoal or the goal reached (the caption's own key-event window), just the scores */
+.score-chip {
+  position: absolute; left: calc(var(--fx-left, 0px) + 12px); bottom: calc(var(--fx-bottom, 0px) + 70px); z-index: 4;
+  display: grid; grid-template-columns: auto auto; column-gap: 8px; row-gap: 1px; align-items: baseline;
+  padding: 5px 9px; border-radius: var(--r-md); background: rgba(0,0,0,0.6); border: 1px solid rgba(255,255,255,0.14);
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  opacity: 0; transform: translateY(6px); transition: opacity 150ms ease, transform 150ms ease; pointer-events: none;
+}
+.score-chip.active { opacity: 1; transform: translateY(0); }
+.score-chip .sc-k { font-size: 10px; color: rgba(255,255,255,0.7); }
+.score-chip .sc-v { font-family: var(--mono); font-size: 13px; font-weight: 700; color: #f3f2ec; text-align: right; }
+.section .ke-what { font-size: 12px; font-weight: 400; color: var(--fg-2); margin-left: 6px; }
 /* key-event flag module inside the bottom segment overlay */
 .video-overlay .vo-key { display: block; margin-bottom: 6px; }
 .video-overlay .vo-key-badge {
@@ -6301,41 +6319,43 @@ function renderEp(d, opts) {
     </div>`;
   }
 
-  // the episode's quality scores (board/scores.py): a chip beside the progress chip, and a Quality section below
+  // the episode's quality scores (board/scores.py): a chip on the video when each subgoal or the goal is reached, and
+  // a Quality section below that sets each score beside what it measured
   const Q = d.scores && d.scores.version === 1 ? d.scores : null;
   const qNum = v => v == null ? '-' : (Math.round(v * 10) / 10).toString();
-  const qBar = v => `${v == null ? 0 : Math.max(0, Math.min(10, v)) * 10}%`;
-  const subExecution = st => { const vs = [st.cleanliness, st.steady, st.efficiency].filter(v => v != null);
-    return vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null; };
-  const subOutcome = st => st.outcome === 'success' ? 10 : st.outcome === 'failure' ? 0 : null;
-  const scoreChipHtml = Q ? `<div class="score-chip" id="score-chip" title="Quality: open its breakdown">
-      <span class="sc-scope" id="sc-scope">Episode</span>
-      <span class="sc-k">Execution</span><span class="sc-v" id="sc-exec">${qNum(Q.execution)}</span>
-      <span class="sc-bar"><i id="sc-exec-bar" style="width:${qBar(Q.execution)}"></i></span>
-      <span class="sc-k">Outcome</span><span class="sc-v" id="sc-out">${qNum(Q.outcome)}</span>
-      <span class="sc-bar"><i id="sc-out-bar" style="width:${qBar(Q.outcome)}"></i></span>
-      ${Q.relation && Q.relation !== 'aligned' ? `<span class="sc-rel">Task ${esc(Q.relation)} from the label</span>` : ''}
-    </div>` : '';
+  const qPct = v => `${v == null ? 0 : Math.max(0, Math.min(10, v)) * 10}%`;
   const qIn = Q ? Q.inputs || {} : {};
-  const qRow = (k, v, why) => `<div class="q-row"><span class="q-k">${k}</span><span class="q-v">${qNum(v)}</span>`
-    + `<span class="q-bar"><i style="width:${qBar(v)}"></i></span>${why ? `<div class="q-why">${esc(why)}</div>` : ''}</div>`;
-  const peersWhy = Q && Q.peers < 5 ? `fewer than 5 other demonstrations of this task, so not compared` : '';
-  const qualityHtml = Q ? `<h3 class="section" id="quality">Quality <span class="count">measured from the labels, `
-    + `against ${Q.peers} other demonstrations of this task</span></h3><div class="info-block">`
-    + qRow('Execution', Q.execution, 'Cleanliness, efficiency and fluency together; the outcome is scored apart.')
-    + qRow('Outcome', Q.outcome, `${qIn.outcome || 'unclear'}, ${Math.round(100 * (qIn.progress_reached || 0))}% of the labelled goal reached`)
-    + qRow('Cleanliness', Q.cleanliness, `${Math.round(100 * (qIn.wasteful_share || 0))}% of the work wasteful; `
-      + ((qIn.penalties || []).length ? qIn.penalties.map(x => `${x.mistake} (${x.severity}${x.recovered ? ', recovered' : ''}, -${x.points})`).join('; ') : 'no operator mistakes'))
-    + qRow('Efficiency', Q.efficiency, Q.efficiency == null ? (peersWhy || 'the goal was not reached')
-      : `${qNum(qIn.time_to_goal_s)}s to the goal; peers' median ${qNum(qIn.peer_median_time_to_goal_s)}s`)
-    + qRow('Fluency', Q.fluency, `${Math.round(100 * (qIn.hesitation_share || 0))}% of the work with every arm waiting; `
-      + `${qNum(qIn.actions_per_progress)} actions for the whole task`)
-    + (Q.subtasks || []).map((st, i) => `<div class="q-sub"><div class="kv-k">Subtask ${i + 1}, ${fmtT(st.start_s)} to `
-      + `${fmtT(st.end_s)}: ${esc(st.label || '')}</div>` + qRow('Execution', subExecution(st),
-        `${st.duration_s}s${st.efficiency == null ? '' : `, against ${st.peers} peers' same subtask`}; `
-        + `${Math.round(100 * st.wasteful_share)}% wasteful${st.mistakes.length ? '; ' + st.mistakes.join('; ') : ''}`)
-      + qRow('Outcome', subOutcome(st), st.outcome || 'unclear') + '</div>').join('')
-    + '</div>' : '';
+  const subs = Q ? Q.subgoals || [] : [];
+  const qBar = v => `<span class="qual-bar"><i style="width:${qPct(v)}"></i></span>`;
+  const peerText = (n, median) => n >= 5 ? `median ${qNum(median)}s across ${n} other successful demos of this task`
+    : 'fewer than 5 other successful demos of this task to compare with';
+  const measure = (k, v, what) => `<span class="qm-k">${k}</span>`
+    + (v == null ? `<span class="qm-none">-</span><span></span>` : `<span class="qm-v">${qNum(v)}</span>${qBar(v)}`)
+    + `<span class="qm-what">${esc(what)}</span>`;
+  const mistakesText = (qIn.penalties || []).length
+    ? qIn.penalties.map(x => `${x.severity} mistake${x.recovered ? ', recovered' : ''} (-${x.points})`).join(', ')
+    : 'no operator mistakes';
+  const qualityHtml = Q ? `<h3 class="section" id="quality">Quality</h3><div class="info-block">
+    <div class="qual-top">
+      <div class="qual-big"><div class="qb-k">Execution</div><div class="qb-v">${qNum(Q.execution)}<small> / 10</small></div>
+        ${qBar(Q.execution)}<div class="qb-what">How cleanly, quickly and steadily the work was done</div></div>
+      <div class="qual-big"><div class="qb-k">Outcome</div><div class="qb-v">${qNum(Q.outcome)}<small> / 10</small></div>
+        ${qBar(Q.outcome)}<div class="qb-what">How much of the labelled goal was reached${Q.relation && Q.relation !== 'aligned'
+          ? `; the work done is ${esc(Q.relation)} from the label` : ''}</div></div>
+    </div>
+    <div class="qual-measures">
+      ${measure('Cleanliness', Q.cleanliness, `${Math.round(100 * (qIn.wasteful_share || 0))}% of the work wasteful; ${mistakesText}`)}
+      ${measure('Speed', Q.efficiency, Q.efficiency == null && qIn.outcome !== 'success' ? 'the goal was not reached'
+        : `${qNum(qIn.time_to_goal_s)}s to the goal; ${peerText(Q.peers, qIn.peer_median_time_to_goal_s)}`)}
+      ${measure('Steadiness', Q.fluency, `${Math.round(100 * (qIn.hesitation_share || 0))}% of the work with every arm waiting`)}
+    </div>
+    ${subs.length ? `<div class="qual-sub"><div class="qs-head">Subgoals <span>execution of the stretch that ends in each one</span></div>${subs.map((st, i) => `<div class="qs-row" data-t="${st.start_s}">
+      <span class="ke-num">${i + 1}</span><span class="ke-time">${fmtT(st.end_s)}</span>
+      <span class="qs-label" title="${esc(st.label || '')}">${esc(st.label || '')}</span>
+      <span class="qs-dur">${qNum(st.duration_s)}s</span>
+      ${st.reached ? `<span class="qs-v">${qNum(st.execution)}</span>${qBar(st.execution)}`
+        : `<span class="qs-miss">not reached</span><span></span>`}</div>`).join('')}</div>` : ''}
+  </div>` : '';
 
   // lanes under the timeline, on its time scale: when the wearer's hands leave a head camera (the model's
   // per-step hands_visible), and the dataset's own timed labels as the publisher ships them
@@ -6765,6 +6785,7 @@ function renderEp(d, opts) {
           <div class="state-toast" id="state-toast"></div>
           <div class="recovery-overlay" id="recovery-overlay"></div>
           <div class="video-overlay" id="video-overlay"></div>
+          ${Q ? '<div class="score-chip" id="score-chip"></div>' : ''}
   `;
   const mainCameraLabel = isEgo && !unshownCams(d).some(u => u.view === mainCam) ? ''
     : `<span class="cam-label" title="${esc(camLabel(mainCam))}">${esc(unshownCams(d).some(u => u.view === mainCam)
@@ -6779,7 +6800,7 @@ function renderEp(d, opts) {
             mainCam)}`}></video>${dpHtml(mainCam, dpViews)}
           ${isEgo ? '<canvas class="hp-canvas" id="hp-canvas" aria-hidden="true"></canvas>' : ''}
           ${isEgo ? `<div class="top-hud" id="top-hud"><div class="top-hud-in">
-            <div class="th-l">${mainCameraLabel}${progOverlayHtml}${scoreChipHtml}</div>
+            <div class="th-l">${mainCameraLabel}${progOverlayHtml}</div>
             <div class="ego-status" id="ego-status">
               <span class="es-pov ${d.viewpoint === 'third_person' ? 'exo' : ''}">${
                 d.viewpoint === 'third_person' ? '&#9673; exo &middot; third-person'
@@ -6788,7 +6809,7 @@ function renderEp(d, opts) {
               <span class="es-hand" id="es-hand"></span>
             </div>
             <div class="th-r"></div>
-          </div></div>` : `<div class="top-hud top-hud-scene" id="top-hud"><div class="top-hud-in">${mainCameraLabel}${progOverlayHtml}${scoreChipHtml}</div></div>`}
+          </div></div>` : `<div class="top-hud top-hud-scene" id="top-hud"><div class="top-hud-in">${mainCameraLabel}${progOverlayHtml}</div></div>`}
           ${(evidence.insights.length || evidence.warnings.length || evidence.contacts.length || evidence.moments.length) ? `<div class="sensor-overlay-stack" id="sensor-overlay-stack" aria-label="Sensor findings">
             ${evidence.overlayFindings.length ? '<div class="sensor-finding-group" id="grip-finding-overlay" role="group" aria-label="Sensor findings" hidden></div>' : '<button type="button" class="sensor-overlay" id="sensor-overlay" aria-label="Inspect current tactile evidence"></button>'}
           </div>` : ''}
@@ -6830,7 +6851,8 @@ function renderEp(d, opts) {
 
     ${pubHtml}
     ` : `
-    <h3 class="section">Key events <span class="count">${keyEvents.length + untimed.keys.length}</span></h3>
+    <h3 class="section">Key events <span class="count">${keyEvents.length + untimed.keys.length}</span>${Q
+      ? '<span class="ke-what">(each "subgoal complete" ends one of the subgoals scored under Quality)</span>' : ''}</h3>
     <div class="info-block"><div class="key-events">${keyPanelHtml || '<span style="color:var(--fg-3)">none</span>'}`
       + `</div></div>
 
@@ -7151,6 +7173,29 @@ function renderEp(d, opts) {
       <span class="vo-contrib ${cc}">${esc(cl)}</span>`;
     overlay.classList.remove('adv', 'waste', 'idle', 'none');
     overlay.classList.add('active', cc);
+  }
+
+  // the score chip shows a subgoal's execution while the caption shows that subgoal (its key event's window), and the
+  // episode's execution and outcome while it shows the goal reached
+  // (it is first called while the page is still being wired, so it looks up what it needs itself)
+  let _scSig = null, _subByT = null;
+  function renderScoreChip(t) {
+    const scoreChip = document.getElementById('score-chip');
+    if (!scoreChip) return;
+    const subByT = _subByT || (_subByT = new Map(subs.filter(st => !st.goal).map(st => [Math.round(st.end_s * 100), st])));
+    const goalT = comp.completed_at_s;
+    const atGoal = goalT != null && t >= goalT - 0.3 && t <= goalT + 3.0;
+    const k = keyEvents.find(k => k.kind === 'subgoal_complete' && t >= k.t_s - 0.3 && t <= k.t_s + 2.5);
+    const st = k ? subByT.get(Math.round(k.t_s * 100)) : null;
+    const sig = atGoal ? 'goal' : st ? String(st.end_s) : '';
+    if (sig === _scSig) return;
+    _scSig = sig;
+    if (!sig) { scoreChip.classList.remove('active'); return; }
+    scoreChip.innerHTML = atGoal
+      ? `<span class="sc-k">Execution</span><span class="sc-v">${qNum(Q.execution)}</span>`
+        + `<span class="sc-k">Outcome</span><span class="sc-v">${qNum(Q.outcome)}</span>`
+      : `<span class="sc-k">Execution</span><span class="sc-v">${qNum(st.execution)}</span>`;
+    scoreChip.classList.add('active');
   }
 
   // ----- head camera: hands out of view -----
@@ -7521,24 +7566,6 @@ function renderEp(d, opts) {
     poPct.textContent = progressPct(p) + '%';
   }
 
-  // the quality chip follows the shown frame's time: inside a subtask it shows that subtask's scores
-  const scChip = document.getElementById('score-chip');
-  if (scChip) scChip.addEventListener('click', () => document.getElementById('quality')?.scrollIntoView({behavior: 'smooth'}));
-  let _scIdx = -2;
-  function renderScores(t) {
-    if (!scChip) return;
-    const subs = Q.subtasks || [];
-    const i = subs.findIndex(st => t + 1e-6 >= st.start_s && t < st.end_s);
-    if (i === _scIdx) return;
-    _scIdx = i;
-    const st = subs[i];
-    const set = (id, v) => { document.getElementById(id).textContent = qNum(v);
-      document.getElementById(id + '-bar').style.width = qBar(v); };
-    document.getElementById('sc-scope').textContent = st ? `Subtask ${i + 1} of ${subs.length}` : 'Episode';
-    set('sc-exec', st ? subExecution(st) : Q.execution);
-    set('sc-out', st ? subOutcome(st) : Q.outcome);
-  }
-
   // the lanes' playheads, the dataset label under the playhead, and its row in the list
   let _pubIdx = -2, _handIdx = -2;
   function syncLanes(t) {
@@ -7599,7 +7626,7 @@ function renderEp(d, opts) {
     if (duration > 0 && ph) ph.style.left = (100 * t / duration) + '%';
     // progress + state first so the recovery banner can place itself below the
     // corner chips that are actually visible this frame.
-    renderProgress(t); renderScores(t); renderState(t); renderRecovery(t);
+    renderProgress(t); renderState(t); renderScoreChip(t); renderRecovery(t);
     renderOverlay(t); renderHands(t); renderTaskGoal(t); syncFeed(t); syncKeyEvents(t); renderSceneGraph(t);
     placeSensors();
       syncLanes(t);

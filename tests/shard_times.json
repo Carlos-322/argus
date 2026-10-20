@@ -126,6 +126,7 @@
  "tests/test_review_download_limits.py": 0.4,
  "tests/test_rig_subtasks.py": 0.0,
  "tests/test_route_accounting.py": 7.4,
+ "tests/test_scores.py": 0.3,
  "tests/test_semantic_evidence.py": 1.25,
  "tests/test_sensor_analysis.py": 1.25,
  "tests/test_sensor_analysis_media.py": 1.25,
