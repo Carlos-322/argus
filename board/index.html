@@ -4777,7 +4777,9 @@ function sensorEvidence(d) {
   const legacy = d.grip_evidence && d.grip_evidence.version === 1 ? d.grip_evidence : null;
   const grip = generic || legacy;
   const seen = new Set();
-  for (const owner of [generic, legacy].filter(Boolean)) for (const f of Array.isArray(owner.findings) ? owner.findings : []) {
+  // Findings from separate passes are listed together in playback order.
+  const byStart = (a, b) => (finite(a?.start_s) ? a.start_s : Infinity) - (finite(b?.start_s) ? b.start_s : Infinity);
+  for (const owner of [generic, legacy].filter(Boolean)) for (const f of (Array.isArray(owner.findings) ? [...owner.findings] : []).sort(byStart)) {
     const grip = owner;
     if (!f || f.review_status === 'rejected' || f.withheld_from_final || grip.source_current === false
       || (grip.generic && d.evidence_inspection?.source_current === false) || (grip.generic && f.adds_beyond_video !== true) || !finite(f.start_s) || !finite(f.end_s)
@@ -4791,21 +4793,23 @@ function sensorEvidence(d) {
       return /\b(thumb|index finger|middle finger|ring finger|little finger)\b/i.test(sensor?.name || '');
     });
     const copy = value => anatomical ? gripFingerCopy(text(value)) : text(value);
+    // The card call writes every finding in plain words: a chosen one reads the same in the list as on the video.
+    const written = entry => grip.generic && entry && entry.version === 1 && text(entry.headline) && text(entry.detail)
+      ? {headline: text(entry.headline), detail: text(entry.detail)} : null;
+    const videoCard = written(f.video_card), plain = videoCard || written(f.list_copy);
     insights.push({anatomical, evidenceSource: grip, findingIndex: insights.length, start: f.start_s, end: f.end_s, index: -1, priority: 3, kind: 'insight',
-      headline: grip.generic ? text(typeof f.overlay_headline === 'string' && text(f.overlay_headline)
+      headline: plain ? plain.headline : grip.generic ? text(typeof f.overlay_headline === 'string' && text(f.overlay_headline)
         ? f.overlay_headline : f.headline) : gripFingerCopy(text(f.headline)),
-      detail: copy(f.detail), reading: grip.generic ? 'Recorded sensor evidence' : 'Relative grip loading',
+      detail: plain ? plain.detail : copy(f.detail), reading: grip.generic ? 'Recorded sensor evidence' : 'Relative grip loading',
       visual: f.confidence === 'high' ? 'High confidence' : f.confidence === 'medium' ? 'Medium confidence' : 'Low confidence',
       t: finite(f.inspect_s) && f.inspect_s >= f.start_s && f.inspect_s <= f.end_s ? f.inspect_s : f.start_s,
       timing: '', alternative: copy(f.alternative), observation: copy(f.observation), claim: copy(f.claim),
-      overlayDetail: typeof f.overlay_detail === 'string' ? copy(f.overlay_detail)
+      overlayDetail: plain ? plain.detail : typeof f.overlay_detail === 'string' ? copy(f.overlay_detail)
         : [2, 3].includes(f.copy_contract_version) ? copy(f.detail) : null,
       quotedTimeOffset: finite(f.quoted_time_offset_s) ? f.quoted_time_offset_s : 0,
       generic: !!grip.generic, evidence: grip.generic && Array.isArray(f.evidence) ? f.evidence : [],
       display: grip.generic && f.display && f.display.version === 1 && Array.isArray(f.display.rows) ? f.display.rows : null,
-      videoCard: grip.generic && f.video_card && f.video_card.version === 1 && text(f.video_card.headline) && text(f.video_card.detail)
-        ? {headline: text(f.video_card.headline), detail: text(f.video_card.detail)} : null,
-      addsBeyond: f.adds_beyond_video === true || f.adds_beyond_rgb_pose === true, cellGroups: Array.isArray(f.cell_groups) ? f.cell_groups : []});
+      videoCard, addsBeyond: f.adds_beyond_video === true || f.adds_beyond_rgb_pose === true, cellGroups: Array.isArray(f.cell_groups) ? f.cell_groups : []});
   }
   for (const [i, c] of (d.contacts || []).entries()) {
     if (!c || c.review_status === 'rejected' || !finite(c.start_s) || !finite(c.end_s) || c.end_s < c.start_s) continue;
@@ -4841,8 +4845,7 @@ function sensorEvidence(d) {
   moments.sort((a, b) => a.t - b.t || b.priority - a.priority);
   // When the run chose video cards, the video plays only those, in their own words; every finding stays in the list.
   const carded = !!generic && generic.video_cards?.version === 1;
-  const onVideo = carded ? insights.filter(f => f.videoCard).map(f => ({...f, headline: f.videoCard.headline,
-    detail: f.videoCard.detail, overlayDetail: f.videoCard.detail})) : insights;
+  const onVideo = carded ? insights.filter(f => f.videoCard) : insights;
   const overlayFindings = [...onVideo, ...warnings.map((w, i) => ({
     findingIndex: insights.length + i, start: w.start_s, end: w.end_s, t: w.start_s,
     headline: w.headline, detail: w.detail, kind: 'quality', priority: 6, generic: true, evidence: []

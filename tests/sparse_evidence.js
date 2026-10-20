@@ -90,7 +90,15 @@ const cardsDoc=chosen=>({sensor_evidence:{version:1,sensors:[],series:[],finding
 const C=api.sensorEvidence(cardsDoc(true));
 assert.deepEqual(C.overlayFindings.map(f=>f.headline),['Thumb presses harder','Thumb pressure eases'],'the video plays only the chosen cards, in their words');
 assert.equal(C.overlayFindings[1].overlayDetail,'Thumb pressure eases on the video.');
-assert.deepEqual(C.insights.map(f=>f.headline),['Loading builds','Local redistribution','Thumb loading eases'],'every finding stays in the list');
+assert.deepEqual(C.insights.map(f=>f.headline),['Thumb presses harder','Local redistribution','Thumb pressure eases'],
+  'every finding stays in the list, and a carded one reads the same there as on the video');
+assert.equal(C.insights[1].detail,'Local redistribution in full');
+const listed=cardsDoc(true);listed.sensor_evidence.findings[1].list_copy={version:1,headline:'One thumb part presses',detail:'One part presses while another eases.'};
+const L=api.sensorEvidence(listed);
+assert.deepEqual(L.insights.map(f=>f.headline),['Thumb presses harder','One thumb part presses','Thumb pressure eases'],'the list reads in one voice');
+assert.deepEqual(L.overlayFindings.map(f=>f.findingIndex),[0,2],'list copy never puts a finding on the video');
+const late=cardsDoc(true);late.sensor_evidence.findings.reverse();
+assert.deepEqual(api.sensorEvidence(late).insights.map(f=>f.start),[0,.2,2],'findings from separate passes list in playback order');
 assert.deepEqual(C.overlayFindings.map(f=>f.findingIndex),[0,2],'a card keeps its finding identity');
 assert.equal(api.sensorEvidence(cardsDoc(false)).overlayFindings.length,3,'a record without chosen cards plays every finding');
 const none=cardsDoc(true);none.sensor_evidence.findings.forEach(f=>delete f.video_card);

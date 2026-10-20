@@ -74,12 +74,31 @@ def test_a_card_that_names_no_finding_or_is_not_short_plain_copy_is_left_out():
         {'finding': 0, 'headline': 'Duplicate', 'detail': 'Same finding twice.'},
         {'finding': 5, 'headline': 'Out of range', 'detail': 'No such finding.'},
         {'finding': '1', 'headline': 'Not an index', 'detail': 'A string index.'},
-        {'finding': 1, 'headline': 'Pressure eases — then returns', 'detail': 'A typographic dash.'},
+        {'finding': 1, 'headline': 'Pressure eases \u2014 then returns', 'detail': 'A typographic dash.'},
         {'finding': 1, 'headline': ' '.join(['word'] * 12), 'detail': 'Too long a headline.'}]}), count=2)
-    assert [c['headline'] for c in cards] == ['Index finger presses harder']
-    assert sc.parse_response('```json\n{"cards": []}\n```') == []
+    assert [c['headline'] for c in cards['cards']] == ['Index finger presses harder'] and cards['list'] == []
+    assert sc.parse_response('```json\n{"cards": []}\n```') == {'cards': [], 'list': []}
     with pytest.raises(ValueError):
         sc.parse_response('{"findings": []}')
+    both = sc.parse_response(json.dumps({
+        'cards': [{'finding': 1, 'headline': 'Thumb pressure eases', 'detail': 'The thumb eases first.'}],
+        'list': [{'finding': 1, 'headline': 'Also listed', 'detail': 'A card wins over a list entry.'},
+                 {'finding': 0, 'headline': 'Index finger presses', 'detail': 'The index finger presses harder.'}]}), count=2)
+    assert [e['finding'] for e in both['cards']] == [1] and [e['finding'] for e in both['list']] == [0]
+
+
+def test_every_written_finding_reads_in_one_voice_and_only_cards_reach_the_video():
+    d = doc()
+    request = sc.build(d, config={'model': 'm', 'reasoning': 'r'})
+    receipt = {**received(request, [{'finding': 0, 'headline': 'Index finger presses', 'detail': 'It presses harder first.'}]),
+               'response_text': json.dumps({
+                   'cards': [{'finding': 0, 'headline': 'Index finger presses', 'detail': 'It presses harder first.'}],
+                   'list': [{'finding': 1, 'headline': 'Thumb pressure eases', 'detail': 'The thumb eases later.'}]})}
+    assert sc.apply(d, receipt['request'], receipt) == 1
+    earlier, later = d['findings'][1], d['findings'][0]
+    assert earlier['video_card']['headline'] == 'Index finger presses' and 'list_copy' not in earlier
+    assert later['list_copy'] == {'version': 1, 'headline': 'Thumb pressure eases', 'detail': 'The thumb eases later.'}
+    assert 'video_card' not in later and d['video_cards']['cards'] == 1
 
 
 def ledger():
