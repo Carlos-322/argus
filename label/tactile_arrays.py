@@ -14,6 +14,11 @@ MAX_FRAMES = 32
 MAX_SCALE_VALUES = 16_000_000
 MAX_NATIVE_VALUES = 65536
 MAX_NATIVE_ROWS = 4096
+# A snapshot's selection_priority says why it was chosen: 0 an endpoint, 1 a
+# reference-change maximum, SPACED a row spaced along the native clock. Only SPACED
+# rows may be dropped to fit a prompt. Priority 2 once meant a spaced RGB instant;
+# selection stopped depending on RGB sampling, so nothing is given 2 any more.
+SPACED = 3
 # Every tactile change image uses one colour convention, so a colour means the same
 # sign on every sensor in a request. Captions and legends quote these words.
 SIGNED_CHANGE_KEY = 'Orange is negative, dark is zero, blue is positive.'
@@ -71,14 +76,14 @@ def comparison(a, shape, times, ks, value_budget, semantics=None, native_value_b
         k = int(np.argmin(np.abs(times - target)))
         if len(selected) < limit:
             selected.add(k)
-            priority.setdefault(k, 3)
+            priority.setdefault(k, SPACED)
     while len(selected) < limit:
         available = [k for k in range(len(a)) if k not in selected]
         if not available:
             break
         k = max(available, key=lambda k: min(abs(times[k] - times[j]) for j in selected))
         selected.add(k)
-        priority[k] = 3
+        priority[k] = SPACED
     def values(row):
         return [float(v) if np.isfinite(v) else None for v in row]
     from prepare.sensor_semantics import validate
