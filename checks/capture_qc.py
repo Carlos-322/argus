@@ -55,12 +55,13 @@ import os
 import re
 import threading
 import time
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 
 from checks import EXIT_PARTIAL
+from checks.workers import run_each
 from checks.vendor import public_dataset_adapter_qc as up
 from checks.camera_intervals import to_anchor
 from label import episode as me
@@ -1641,31 +1642,9 @@ def _one(d: str) -> tuple[str, dict, str | None, float]:
         return d, errored_record(e), f"{type(e).__name__}: {e}"[:300], time.time() - t0
 
 
-def _pool(eps: list[str], jobs: int, record) -> list[str]:
-    """Run each episode's _one on one pool of jobs worker processes and record each answer as it finishes. Returns the
-    episodes the pool never finished: a worker that dies (killed by a signal, out of memory) breaks the whole pool, so
-    the episode it was on and every one still waiting come back unfinished, not only the one that killed it."""
-    lost = []
-    with ProcessPoolExecutor(jobs) as ex:
-        futures = {ex.submit(_one, d): d for d in eps}
-        for fut in as_completed(futures):
-            try:
-                res = fut.result()
-            except Exception:  # noqa: BLE001 - the pool broke: retried alone (_alone)
-                lost.append(futures[fut])
-                continue
-            record(*res)
-    return sorted(lost)
-
-
-def _alone(d: str) -> tuple[str, dict, str | None, float]:
-    """_one for one episode in a worker process of its own, so a worker that dies costs that episode only: then it gets
-    a record with every check errored and the error."""
-    try:
-        with ProcessPoolExecutor(1) as ex:
-            return ex.submit(_one, d).result()
-    except Exception as e:  # noqa: BLE001 - its worker died again
-        return d, errored_record(e), f"{type(e).__name__}: {e}"[:300], 0.0
+def _died(d: str, e: Exception) -> tuple[str, dict, str | None, float]:
+    """The answer of an episode whose worker died on its retry alone too: every check errored, with the error."""
+    return d, errored_record(e), f"{type(e).__name__}: {e}"[:300], 0.0
 
 
 def needs_check(ctx: dict) -> bool:
@@ -1723,13 +1702,7 @@ def main() -> int:
         if done % 25 == 0:
             print(f"progress {done}/{len(eps)} flagged={flagged} failed={failed} last={secs:.1f}s", flush=True)
 
-    lost = _pool(eps, args.jobs, record)
-    if lost:
-        print(f"retrying {len(lost)} episodes a worker's death left unfinished, each in a process of its own",
-              flush=True)
-        with ThreadPoolExecutor(args.jobs) as ex:
-            for res in ex.map(_alone, lost):
-                record(*res)
+    run_each(_one, eps, args.jobs, lambda res: record(*res), _died)
     print(f"done {done} flagged={flagged} failed={failed}", flush=True)
     return EXIT_FAILED if failed else 0
 
