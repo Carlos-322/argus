@@ -66,7 +66,6 @@ import json
 import math
 import os
 import re
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -82,13 +81,13 @@ from board import serve as sa
 from board.to_board import dumps
 from board.public_export import project as public_json, public_build_manifest, publication_policy
 from label.atomic import temporary_path, write_atomic, write_bytes_atomic
+from prepare import tools
 
 HERE_DIR = Path(__file__).resolve().parent
 TITLE = "Data Dashboard"
 
 FFMPEG = sa.FFMPEG
-FFPROBE = (str(Path(FFMPEG).with_name("ffprobe")) if FFMPEG and Path(FFMPEG).with_name("ffprobe").exists()
-           else shutil.which("ffprobe"))
+FFPROBE = tools.ffprobe_or_none()     # the one ffprobe every caller runs (prepare/tools.py)
 # the clips' recipe is board/clips.py's (the build records its name)
 ENC_TAG = bc.ENC_TAG
 # every published video's name carries this tag, the recipe's name when the board's media were first built. A static
@@ -982,7 +981,10 @@ def main():
         ap.error('No board qa directory exists. A free review stops before board generation; use a built board with labels.')
     a.out = a.out or a.board / "static"
     if not FFMPEG or not FFPROBE:
-        sys.exit("ffmpeg/ffprobe not found")
+        try:
+            tools.ffmpeg(), tools.ffprobe()
+        except tools.Missing as e:
+            sys.exit(e.strerror)
     from board.public_export import publish_uploader_values
     publish_uploader_values(getattr(a, "publish_uploader_values", False))
     return {"measure": cmd_measure, "media": cmd_media, "site": cmd_site, "status": cmd_status}[a.cmd](a) or 0

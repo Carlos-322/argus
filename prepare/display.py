@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 from fractions import Fraction
 
@@ -40,8 +39,10 @@ def _version(path) -> tuple:
 
 @cached_while_unchanged(4096, lambda path, version, ffprobe: version is not None and _version(path) == version)
 def _geometry(path: str, version, ffprobe: str | None) -> dict:
-    exe = ffprobe or shutil.which("ffprobe") or "ffprobe"
     try:
+        # the one ffprobe every caller runs (prepare/tools.py); none found reads as no size, like one that fails
+        from prepare import tools
+        exe = ffprobe or tools.ffprobe()
         r = subprocess.run([exe, "-v", "error", "-select_streams", "v:0", "-show_entries",
                             "stream=width,height,sample_aspect_ratio:stream_tags=rotate:"
                             "stream_side_data=rotation,displaymatrix", "-of", "json", str(path)],

@@ -250,6 +250,9 @@ def test_real_http_footage_probes_have_finite_processes_and_no_duplicate_work(tm
         '    while not release.exists() and time.monotonic()<deadline: time.sleep(.01)\n'
         f'os.execv({ffprobe!r}, [{ffprobe!r}, *sys.argv[1:]])\n')
     wrapper.chmod(0o755)
+    # the install in use is the one $FFMPEG names, and its ffprobe the one beside it (prepare/tools.py)
+    monkeypatch.setenv('FFMPEG', str(programs / 'ffmpeg'))
+    monkeypatch.delenv('FFPROBE', raising=False)
     monkeypatch.setattr(serve, 'FFMPEG', str(programs / 'ffmpeg'))
     monkeypatch.setattr(serve, 'HERE', tmp_path / 'qa')
     monkeypatch.setattr(serve, 'MP4_DIR', source)

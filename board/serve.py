@@ -77,27 +77,15 @@ from board.clips import DEPTH, clip_path    # one rule for where a camera's clip
 from board.families import Families
 from board.public_export import project as public_json
 from board.to_board import dumps, finite
+from prepare import tools
 from compare.metrics import model_names, reasoning_effort
 from label.atomic import (cached_while_unchanged, file_version, remove_if, small_file, sweep_removals,
                           write_atomic)
 
 
-def _find_ffmpeg() -> str | None:
-    """$FFMPEG (as board/clips.py reads it, so the frames come from the same binary as the clips), else the ffmpeg on
-    PATH, else the usual install places."""
-    if os.environ.get("FFMPEG") and os.access(os.environ["FFMPEG"], os.X_OK):
-        return os.environ["FFMPEG"]
-    found = shutil.which("ffmpeg")
-    if found:
-        return found
-    # a server started outside a login shell may not have Homebrew or /usr/local on its PATH
-    for c in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"):
-        if os.access(c, os.X_OK):
-            return c
-    return None
-
-
-FFMPEG = _find_ffmpeg()
+# the ffmpeg board/clips.py cuts the clips with (prepare/tools.py), so the frames come from the same binary; None
+# when there is none, and the board then serves no frames or footage
+FFMPEG = tools.ffmpeg_or_none()
 
 
 # Frames cut from the clips (goal frames, per-task goal frames, posters) are asked for again and again, and each
@@ -126,15 +114,10 @@ def _still_clip(mp4, key: tuple) -> bool:
         return False
 
 
-def _ffprobe() -> str:
-    probe = Path(FFMPEG).with_name("ffprobe") if FFMPEG else None
-    return str(probe) if probe and probe.exists() else "ffprobe"
-
-
 @cached_while_unchanged(2048, lambda *key: _still_clip(key[0], key))
 def _read_clip_times(*key) -> list:
     try:
-        r = subprocess.run([_ffprobe(), "-v", "error", "-select_streams", "v:0", "-show_entries",
+        r = subprocess.run([tools.ffprobe(), "-v", "error", "-select_streams", "v:0", "-show_entries",
                             "packet=pts_time,flags", "-of", "csv=p=0", key[0]], capture_output=True, text=True,
                            timeout=60)
         return sorted(float(a) for a, *f in (ln.split(",") for ln in r.stdout.split() if ln)
@@ -155,7 +138,7 @@ def _clip_times(mp4: Path) -> list:
 @cached_while_unchanged(2048, lambda *key: _still_clip(key[0], key))
 def _read_clip_comment(*key) -> str:
     # an ffprobe that cannot run raises, so its failure is never kept as the clip's answer
-    r = subprocess.run([_ffprobe(), "-v", "error", "-show_entries", "format_tags=comment", "-of",
+    r = subprocess.run([tools.ffprobe(), "-v", "error", "-show_entries", "format_tags=comment", "-of",
                         "default=nw=1:nk=1", key[0]], capture_output=True, text=True, timeout=60)
     return r.stdout.strip()
 
@@ -605,8 +588,7 @@ def _probe_uncached(p: Path) -> tuple:
     a frame half a step long, which puts its average rate above the camera's own and the footage canvas
     (footage_command) at a rate that samples on the frames' boundaries."""
     p = _source_path(p)
-    probe = Path(FFMPEG).with_name("ffprobe") if FFMPEG else None
-    r = subprocess.run([str(probe) if probe and probe.exists() else "ffprobe", "-v", "error", "-select_streams", "v:0",
+    r = subprocess.run([tools.ffprobe(), "-v", "error", "-select_streams", "v:0",
                         "-show_entries", "stream=width,height,avg_frame_rate:format=duration",
                         "-of", "json", str(p)], capture_output=True, text=True, timeout=30, check=True,
                        **_source_process_options())

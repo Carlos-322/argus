@@ -62,10 +62,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import shutil
 import subprocess
-import sys
 from collections import Counter
 from fractions import Fraction
 from pathlib import Path
@@ -73,6 +70,7 @@ from pathlib import Path
 from board.clips import clip_path
 from board.to_board import dumps
 from label.atomic import write_bytes_atomic
+from prepare import tools
 
 FORMAT = "board-hand-pose/1"
 STEP = 4
@@ -80,13 +78,6 @@ TOL = 0.5
 B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 B64_INV = {c: i for i, c in enumerate(B64)}
 HEAD_RIG = "ego_head"
-
-
-def _ffprobe() -> str:
-    for c in (os.environ.get("FFPROBE"), shutil.which("ffprobe")):
-        if c and Path(c).exists():
-            return c
-    sys.exit("ffprobe not found")
 
 
 # ---------------------------------------------------------------- VLQ
@@ -204,7 +195,7 @@ def decode_hand(h: dict, n_frames: int, step: int = STEP) -> list:
 def probe_pts(clip: Path) -> tuple:
     """(width, height, time base, every frame's presentation timestamp): packets sorted by pts, which is display
     order, so the i-th is the i-th decoded frame the keypoints are numbered by."""
-    r = subprocess.run([_ffprobe(), "-v", "error", "-select_streams", "v:0", "-show_entries",
+    r = subprocess.run([tools.ffprobe(), "-v", "error", "-select_streams", "v:0", "-show_entries",
                         "stream=width,height,time_base:packet=pts,flags", "-of", "json", str(clip)],
                        capture_output=True, text=True, timeout=300)
     if r.returncode != 0:

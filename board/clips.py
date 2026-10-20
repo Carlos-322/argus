@@ -67,17 +67,13 @@ from pathlib import Path
 
 from label.atomic import temporary_path, write_atomic
 from label.presented import presented, presented_pts
+from prepare import tools
 from prepare.isolation import run_while_progressing
 
 CAMS = ("exo", "left", "right")
 
 
-def find_ffmpeg() -> str:
-    """$FFMPEG, else the ffmpeg on PATH."""
-    c = os.environ.get("FFMPEG") or shutil.which("ffmpeg")
-    if not c:
-        raise SystemExit("ffmpeg not found: put it on PATH or set FFMPEG")
-    return c
+find_ffmpeg = tools.ffmpeg       # the one ffmpeg every caller runs (prepare/tools.py)
 
 
 def clip_path(mp4_dir: Path, eid: str, cam: str) -> Path:
@@ -186,18 +182,14 @@ def clip_threads(clips: int, jobs: int, threads: int) -> int:
     return max(threads, (jobs * threads) // clips)
 
 
-def source_size(ffmpeg: str, path: str) -> tuple:
+def source_size(path: str) -> tuple:
     """(width, height, resample) of a video's first stream as it is shown (prepare/display.py, the reader's rule):
     pixels that are not square made square (resample says they must be), and a rotation of 90 or 270 degrees
     swapping the stored size, since ffmpeg turns the frames upright before scaling. Scaling a portrait phone video to
     its stored landscape size squashed it."""
     from prepare import display
-    probe = Path(ffmpeg).with_name("ffprobe")
-    exe = str(probe) if probe.exists() else shutil.which("ffprobe")
-    if not exe:
-        # a missing tool is the machine's (machine_stopped), never a size the video does not have
-        raise FileNotFoundError(errno.ENOENT, "ffprobe not found beside ffmpeg or on PATH", "ffprobe")
-    g = display.geometry(str(path), exe)
+    # a missing ffprobe raises tools.Missing, the machine's (machine_stopped), never a size the video does not have
+    g = display.geometry(str(path), tools.ffprobe())
     if not g["stored"][0]:
         raise RuntimeError(f"ffprobe could not read the size of {path}")
     w, h = display.shown_size(g)
@@ -288,7 +280,7 @@ def extract_one(packed: str, base_s: float, n_frames: int, out_mp4: Path,
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
     # a temporary file of this call's own, so two builders (processes or threads) on one clip never share one
     tmp = temporary_path(out_mp4, '.mp4')
-    w, h, resample = source_size(ffmpeg, packed)
+    w, h, resample = source_size(packed)
     want = int(n_frames) - int(skip)
     dense = False
     timing = ((f"select=gte(n\\,{int(skip)})",) if skip else ()) + ("setpts=PTS-STARTPTS",)
@@ -1551,7 +1543,10 @@ def main() -> int:
                          "run/out beside the episodes folder, as python -m review and Data Review lay a job out)")
     args = ap.parse_args()
 
-    ffmpeg = find_ffmpeg()
+    try:
+        ffmpeg = find_ffmpeg()
+    except tools.Missing as e:
+        raise SystemExit(e.strerror) from e
     labels = args.labels or args.episodes.parent / "run" / "out"
     if args.only:
         want = {x.strip() for x in args.only.split(",") if x.strip()}
