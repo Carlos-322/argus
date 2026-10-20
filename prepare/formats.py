@@ -3177,7 +3177,11 @@ def write_signals(ep: Path, ctx: dict, signals: dict | None, t: np.ndarray | Non
                 valid[key] = np.asarray(values[:n], dtype=np.float64)
                 if scale is not None:
                     scales[key] = scale
-        normalized = _clocks_in_seconds(valid, declared_scales=scales)
+        doubts = {}
+        normalized = _clocks_in_seconds(valid, declared_scales=scales, doubts=doubts)
+        for key, doubt in doubts.items():
+            issue = clock_doubt_issue(key, doubt)
+            add_issue(ctx, issue["kind"], issue["what"], signal=key)
         if normalized:
             base = next(iter(normalized.values()))
             ctx["clocks"] = [{"name": key, "offset_ms": round(float(np.nanmedian(values - base)) * 1000, 2),
@@ -7424,9 +7428,11 @@ def _epoch_scale(a: np.ndarray) -> float | None:
 
 def _seconds_scale(a: np.ndarray) -> float:
     """Seconds per unit of a clock: the unit its size settles (_epoch_scale), else the unit its step says (one sample
-    every 1 ms to 10 s, judged on its steps between distinct values, so repeated stamps never shrink it), and for a
+    every 1.5 ms to 1.5 s, judged on its steps between distinct values, so repeated stamps never shrink it), and for a
     clock that never steps the unit its size says alone. frame_times reads a recorder's per-frame stamps by this same
-    rule."""
+    rule. A step that also reads as a sample every 0.1 to 1.5 ms in the next smaller unit (a 1 kHz pad in nanoseconds
+    steps by 1e6, as a 1 Hz clock in microseconds does) leaves the unit in doubt (clock_unit_doubt); this reading
+    is then a guess, which _clocks_in_seconds settles against another clock where it can and reports where not."""
     scale = _epoch_scale(a)
     if scale is not None:
         return scale
@@ -7443,13 +7449,36 @@ def _seconds(a: np.ndarray) -> np.ndarray:
 
 
 CLOCK_SCALES = (1e-9, 1e-6, 1e-3, 1.0)
+CLOCK_UNIT_NAMES = {1e-9: "nanoseconds", 1e-6: "microseconds", 1e-3: "milliseconds", 1.0: "seconds"}
+STREAM_STEP_S = (1e-4, 1.5)    # a sampled stream steps once every 0.1 ms (10 kHz) to 1.5 s
+
+
+def clock_unit_doubt(a: np.ndarray) -> list[float]:
+    """The units a clock could be in when nothing on the clock itself settles which: [] when its size settles its unit
+    (_epoch_scale), when it never steps, or when only one of CLOCK_SCALES puts its step within STREAM_STEP_S, and
+    otherwise every unit that does. The units are 1000 apart, so at most two do."""
+    if _epoch_scale(a) is not None:
+        return []
+    _, step, _ = _clock_facts(a)
+    units = [s for s in CLOCK_SCALES if step > 0 and STREAM_STEP_S[0] <= step * s <= STREAM_STEP_S[1]]
+    return units if len(units) > 1 else []
+
+
+def clock_doubt_issue(name: str, doubt: dict) -> dict:
+    """A clock whose unit its step leaves in doubt and nothing beside it settled: the reading kept and the other."""
+    readings = " or ".join(f"one sample every {doubt['step'] * s:g} s in {CLOCK_UNIT_NAMES[s]}" for s in doubt["units"])
+    return {"kind": "clock_unit_assumed", "signal": name,
+            "what": f"{name} steps by {doubt['step']:g} per sample, which reads as {readings}. No camera clock or "
+                    f"clock of known unit beside it settles which, so it is read in {CLOCK_UNIT_NAMES[doubt['kept']]}, "
+                    "an assumption; its seconds may be 1000 times off."}
 FAR_FROM_ZERO_STEPS = 1000     # a clock counts from far from zero when its median is more than this many of its steps
 RANGE_PERCENTILES = (1, 99)    # a clock's time range, so a stray stamp (a 0 before the first) does not stretch it
 SPAN_MATCH = 2.0               # a clock from near zero takes the unit that puts its span within this factor
 
 
 def _clocks_in_seconds(raw: dict[str, np.ndarray], reference: str | None = None,
-                       declared_scales: dict[str, float] | None = None) -> dict[str, np.ndarray]:
+                       declared_scales: dict[str, float] | None = None,
+                       doubts: dict | None = None) -> dict[str, np.ndarray]:
     """{path: seconds} for the clocks of one episode. Each driver stamps in its own unit: a 1 kHz pad beside a 30 fps
     camera steps by 1e6 in nanoseconds or 1e3 in microseconds, which its step alone reads as microseconds or
     milliseconds. So each clock is read against a reference clock, which is read with its own _seconds_scale.
@@ -7464,16 +7493,27 @@ def _clocks_in_seconds(raw: dict[str, np.ndarray], reference: str | None = None,
     - A clock stuck at one value can share the reference's unit by its size, but gives no row timing. Otherwise,
       and when it has fewer than two finite values, a clock keeps its own _seconds_scale.
     The reference is the camera's clock (reference). Without one, the clock with the largest step is a guess, so it is
-    used only when its size settles its unit (_epoch_scale), and otherwise every clock keeps its own reading. A
-    reference that does not step forward (one value, or stuck at one) says nothing about units, so then too every
-    clock keeps its own reading. Declared scales always take precedence over these inferences."""
+    used only when its size settles its unit (_epoch_scale). Otherwise only clocks whose unit their step leaves in doubt
+    (clock_unit_doubt) are read, by the same rules, against the clock with the largest step in seconds among those
+    whose unit is not in doubt; every other clock keeps its own reading. A clock still in doubt after that keeps its
+    own reading too, and is listed in doubts ({path: {"step", "units", "kept"}}, for clock_doubt_issue). A reference
+    that does not step forward (one value, or stuck at one) says nothing about units, so then too every clock keeps
+    its own reading. Declared scales always take precedence over these inferences."""
     declared_scales = declared_scales or {}
     scale_of = lambda p: declared_scales[p] if p in declared_scales else _seconds_scale(raw[p])
     facts = {p: _clock_facts(a) for p, a in raw.items()}
+    doubtful = None
     if reference not in raw:
         guess = max(raw, key=lambda p: facts[p][1], default=None)
         reference = guess if guess is not None and _epoch_scale(raw[guess]) is not None else None
+        if reference is None:
+            doubtful = {p: units for p in raw if p not in declared_scales and (units := clock_unit_doubt(raw[p]))}
+            settled = [p for p in raw if p not in doubtful and facts[p][1] > 0]
+            reference = max(settled, key=lambda p: facts[p][1] * scale_of(p), default=None) if doubtful else None
     if reference is None or facts[reference][1] <= 0:
+        if doubts is not None:
+            doubts.update({p: {"step": facts[p][1], "units": units, "kept": scale_of(p)}
+                           for p, units in (doubtful or {}).items()})
         return {p: a * scale_of(p) for p, a in raw.items()}
 
     def far_from_zero(p):
@@ -7487,18 +7527,21 @@ def _clocks_in_seconds(raw: dict[str, np.ndarray], reference: str | None = None,
     ref_lo, ref_hi = (x * ref_scale for x in bounds(reference))
     out = {}
     for p, a in raw.items():
-        scale = scale_of(p)
-        if p not in declared_scales and p != reference and len(facts[p][0]) > 1:
+        scale, matched = scale_of(p), False
+        if (p not in declared_scales and p != reference and len(facts[p][0]) > 1
+                and (doubtful is None or p in doubtful)):
             lo, hi = bounds(p)
             if far_from_zero(p) and far_from_zero(reference):
                 overlapping = [s for s in CLOCK_SCALES if lo * s <= ref_hi and hi * s >= ref_lo]
                 if overlapping:
-                    scale = overlapping[0]
+                    scale, matched = overlapping[0], True
             elif len(facts[p][0]) >= COUNTER_MIN_MESSAGES and hi > lo and ref_hi > ref_lo:
                 off = {s: abs(np.log((hi - lo) * s / (ref_hi - ref_lo))) for s in CLOCK_SCALES}
                 closest = min(off, key=off.get)
                 if off[closest] <= np.log(SPAN_MATCH):
-                    scale = closest
+                    scale, matched = closest, True
+        if doubts is not None and doubtful and p in doubtful and not matched:
+            doubts[p] = {"step": facts[p][1], "units": doubtful[p], "kept": scale}
         out[p] = a * scale
     return out
 
@@ -7876,7 +7919,9 @@ def h5_streams(f, group: str) -> dict:
                 break
         out[k].append({"path": f"{group}/{p}" if group else p, "name": p, "n": n, "clock": clock})
     camera_clock = next((c["clock"] for c in out["camera"] if c["clock"]), None)
-    out["clock"] = _clocks_in_seconds(clocks, reference=camera_clock, declared_scales=declared_scales)
+    doubts = {}
+    out["clock"] = _clocks_in_seconds(clocks, reference=camera_clock, declared_scales=declared_scales, doubts=doubts)
+    clock_issues.extend(clock_doubt_issue(p, doubt) for p, doubt in doubts.items())
     # names inside the episode: a group every camera and signal sits under (OpenTouch's data/demo_023/ in a file of one
     # demo) says nothing about any one of them, so it is left off their names
     timed = out["camera"] + out["depth"] + out["signal"]

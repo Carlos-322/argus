@@ -1497,6 +1497,63 @@ def test_without_a_camera_clock_an_ambiguous_largest_step_clock_is_no_reference(
     assert abs(_step_s(out["encoder"]) - 1e-2) < 1e-9
 
 
+def test_without_a_camera_clock_a_fast_pad_in_nanoseconds_is_read_against_a_clock_of_known_unit():
+    """A 1 kHz pad in nanoseconds from boot steps by 1e6, as a 1 Hz clock in microseconds does, so its step alone
+    left it read as microseconds, 1000 times slow. A 100 Hz encoder in milliseconds beside it has a step only one unit
+    reads as a sampled stream, so the pad is read where its range overlaps the encoder's, and nothing is in doubt."""
+    import numpy as np
+    raw = {"pad": BOOT_NS + np.arange(30000) * 1e6, "encoder": BOOT_NS / 1e6 + np.arange(3000) * 10.0}
+    doubts = {}
+    out = f._clocks_in_seconds(raw, doubts=doubts)
+    assert abs(_step_s(out["pad"]) - 1e-3) < 1e-9 and abs(_step_s(out["encoder"]) - 1e-2) < 1e-9
+    assert doubts == {}
+
+
+def test_a_clock_whose_unit_nothing_settles_keeps_its_reading_and_says_so():
+    """Alone, or beside clocks whose units are in doubt too, the pad keeps its own reading and is reported with both
+    readings, rather than guessed silently."""
+    import numpy as np
+    pad = BOOT_NS + np.arange(3000) * 1e6
+    for raw in ({"pad": pad}, {"pad": pad, "other": BOOT_NS / 1e3 + np.arange(2000) * 1e3}):
+        doubts = {}
+        out = f._clocks_in_seconds(raw, doubts=doubts)
+        assert np.array_equal(out["pad"], f._seconds(pad))
+        assert doubts["pad"] == {"step": 1e6, "units": [1e-9, 1e-6], "kept": 1e-6}
+        issue = f.clock_doubt_issue("pad", doubts["pad"])
+        assert issue["kind"] == "clock_unit_assumed"
+        assert "0.001 s in nanoseconds" in issue["what"] and "1 s in microseconds" in issue["what"]
+
+
+def test_with_a_camera_clock_no_reading_changes_and_nothing_is_reported():
+    import numpy as np
+    cam = BOOT_NS + np.arange(40) * 33_333_333.0
+    for pad in (cam[0] - 1e7 + np.arange(1400) * 1e6, np.arange(100) * 1e7):
+        raw, doubts = {"cam": cam, "pad": pad}, {}
+        assert all(np.array_equal(a, b) for a, b in zip(f._clocks_in_seconds(raw, reference="cam", doubts=doubts).values(),
+                                                         f._clocks_in_seconds(raw, reference="cam").values()))
+        assert doubts == {}
+
+
+def test_an_hdf5_recording_without_a_camera_clock_reports_a_pad_clock_it_cannot_settle(tmp_path):
+    import h5py
+    import numpy as np
+    for name, encoder in (("both.h5", True), ("pad.h5", False)):
+        with h5py.File(tmp_path / name, "w") as h:
+            pad = h.create_group("pad")
+            pad.create_dataset("timestamp", data=(BOOT_NS + np.arange(3000) * 1e6).astype(np.int64))
+            pad["pressure"] = np.arange(3000, dtype=np.float32)
+            if encoder:
+                enc = h.create_group("encoder")
+                enc.create_dataset("timestamp", data=(BOOT_NS / 1e6 + np.arange(300) * 10.0).astype(np.int64))
+                enc["position"] = np.arange(300, dtype=np.float32)
+            st = f.h5_streams(h, "")
+        assumed = [i for i in st["clock_issues"] if i["kind"] == "clock_unit_assumed"]
+        if encoder:
+            assert abs(_step_s(st["clock"]["pad/timestamp"]) - 1e-3) < 1e-9 and not assumed
+        else:
+            assert [i["signal"] for i in assumed] == ["pad/timestamp"]
+
+
 def test_a_reference_clock_that_never_steps_leaves_the_other_clocks_alone():
     """A camera clock stuck at one value says nothing about its unit, so nothing is matched to it."""
     import numpy as np
