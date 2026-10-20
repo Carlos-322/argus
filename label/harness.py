@@ -307,6 +307,7 @@ def _post(url: str, body: dict, api_key: str, timeout: int, *, attempts: int = 6
 def label_episode(ep_dir: Path, out_path: Path, *, model: str, reasoning: str, api_key: str, max_tokens: int,
                   timeout: int, cell_w: int = 0, example_dir: str | None = None, dry_run: bool = False,
                   reserve_final=None, reserve_selection=None, settle_selection=None, force_refresh=False,
+                  settle_final=None,
                   sample_fps=None, task_mode=None, dataset_note=None, require_known_pricing=False,
                   inspection_refresh_id=None) -> dict:
     context = json.loads((Path(ep_dir) / 'context.json').read_text())
@@ -382,7 +383,7 @@ def label_episode(ep_dir: Path, out_path: Path, *, model: str, reasoning: str, a
                             reasoning=reasoning, api_key=api_key, max_tokens=max_tokens, timeout=timeout,
                             dry_run=dry_run, prompt_text=req["prompt"], evidence_access=req["evidence_access"],
                             reserve_final=reserve_final, reserve_selection=reserve_selection,
-                            settle_selection=settle_selection, force_refresh=force_refresh,
+                            settle_selection=settle_selection, settle_final=settle_final, force_refresh=force_refresh,
                             require_known_pricing=require_known_pricing, inspection_refresh_id=inspection_refresh_id,
                             pricing_quote=pricing_quote)
 
@@ -1173,7 +1174,7 @@ def camera_observation_sources_match(parent, child, views) -> bool:
 def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int, fields: dict, *, model: str,
                      reasoning: str, api_key: str, max_tokens: int, timeout: int, dry_run: bool = False,
                      prompt_text: str = "", evidence_access=None, reserve_final=None,
-                     reserve_selection=None, settle_selection=None, force_refresh=False,
+                     reserve_selection=None, settle_selection=None, settle_final=None, force_refresh=False,
                      require_known_pricing=False, inspection_refresh_id=None, pricing_quote=None) -> dict:
     """Send one request (or, in a dry run, record exactly what would be sent) and write the result."""
     fields = {**fields, **(_billing_fields(out_path) if 'final_cost_history' not in fields else {})}
@@ -1415,6 +1416,9 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
     received_path = Path(out_path).with_name(f'failed_{Path(out_path).name}') if finish == 'length' else Path(out_path)
     persist_final_claim(received_path, received)
     claim_path.unlink(missing_ok=True)
+    if received_cost is not None and settle_final is not None:
+        # The reply is billed: hold its real cost, not its upper bound, so later calls see the true allowance.
+        settle_final(received_cost)
     if finish == "length":
         # the output hit max_tokens, so the JSON is cut off: keep what came back beside the outputs (never as an
         # episode_*.json), then fail. Paid retry requires --retry-received for this episode.
@@ -1489,15 +1493,17 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
             generation_id=result.get('generation_id'), method='episode annotation with bounded evidence inspection')
     if bound_sensor_analysis is not None:
         sensor_analysis.attach(result, bound_sensor_analysis)
-    if parse_ok and isinstance(result.get('sensor_evidence'), dict) and isinstance(result.get('evidence_inspection'), dict) \
-            and result['evidence_inspection'].get('digest'):
-        _video_cards(result, out_path, model=model, reasoning=reasoning, api_key=api_key, timeout=timeout,
-                     pricing_quote=pricing_quote, require_known_pricing=require_known_pricing,
-                     reserve_selection=reserve_selection, settle_selection=settle_selection, verify_inputs=verify_inputs)
     if msg.get("reasoning"):
         # the reasoning text or summary the provider returned, when it returns one
         result["reasoning_text"] = msg["reasoning"][:20000]
     write_atomic(out_path, result)
+    if parse_ok and isinstance(result.get('sensor_evidence'), dict) and isinstance(result.get('evidence_inspection'), dict) \
+            and result['evidence_inspection'].get('digest'):
+        # The paid annotation is saved first, so nothing that happens during the card call can cost it.
+        _video_cards(result, out_path, model=model, reasoning=reasoning, api_key=api_key, timeout=timeout,
+                     pricing_quote=pricing_quote, require_known_pricing=require_known_pricing,
+                     reserve_selection=reserve_selection, settle_selection=settle_selection, verify_inputs=verify_inputs)
+        write_atomic(out_path, result)
     claim_path.unlink(missing_ok=True)
     c = fields.get("config") or {}
     cost_text = f"cost=${cost:.3f}" if cost is not None else f"reserved=${bound:.3f} cost=unverified"
@@ -1906,6 +1912,13 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                 spent['usd'] += new_amount
                 reserved[0] = new_amount
                 pending[ep] = new_amount
+        def settle_final(cost):
+            with spend_lock:
+                held = max(0.0, cost - selection_accounted[0] - prior_cost)
+                spent['usd'] += held - reserved[0]
+                reserved[0] = held
+                pending[ep] = 0.0
+                spend_lock.notify_all()
         while True:
             key = pool.take() if not dry else "dry-run"
             if key is None:
@@ -1913,6 +1926,7 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
             try:
                 r = label_episode(ep, out_for(ep), api_key=key, reserve_final=reserve_final,
                                   reserve_selection=reserve_selection, settle_selection=settle_selection,
+                                  settle_final=settle_final,
                                   force_refresh=force, inspection_refresh_id=inspection_refresh_id,
                                   require_known_pricing=max_spend > 0, **label_kw)
                 _release_memory()
