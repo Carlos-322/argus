@@ -1284,6 +1284,42 @@ def test_an_object_a_task_carries_across_the_cut_is_one_object_with_each_parts_r
     assert all('continues' not in o for o in pieces.join_scene_objects(objects, [first, second]))
 
 
+def test_a_join_across_the_cut_never_puts_two_objects_of_one_part_into_one():
+    """The join was transitive: part 1's red cup and blue cup each answered to part 2's cup, so all three became one
+    object, red cup, continued by blue cup and cup."""
+    one, two = {'index': 1, 't0_s': 0., 't1_s': 5.}, {'index': 2, 't0_s': 5., 't1_s': 9.}
+    objects = [(1, {'name': 'red cup', 'source_piece': one}), (1, {'name': 'blue cup', 'source_piece': one}),
+               (2, {'name': 'cup', 'source_piece': two}), (2, {'name': 'tray', 'source_piece': two})]
+    half = lambda names, source: {'objects': names, 'source_piece': source}
+    stack = {'task': 'stack the cups', 'joined_from': [half(['red cup', 'blue cup'], one), half(['cup'], two)]}
+    # the task's cup answers to two of its first half's names, so it names neither of them
+    assert pieces.join_scene_objects(objects, [stack]) == [o for _, o in objects]
+    # two tasks, each pairing one of the cups with part 2's cup, contradict each other, in either order
+    red = {'task': 'move the red cup', 'joined_from': [half(['red cup'], one), half(['cup'], two)]}
+    blue = {'task': 'move the blue cup', 'joined_from': [half(['blue cup'], one), half(['cup'], two)]}
+    assert pieces.join_scene_objects(objects, [red, blue]) == pieces.join_scene_objects(objects, [blue, red]) == [
+        o for _, o in objects]
+    # one task alone joins its cup
+    joined = pieces.join_scene_objects(objects, [red])
+    assert [(o['name'], [c['name'] for c in o.get('continues', [])]) for o in joined] == [
+        ('red cup', ['cup']), ('blue cup', []), ('tray', [])]
+    # joins chain across three parts into one object, one record of each part
+    three = {'index': 3, 't0_s': 9., 't1_s': 12.}
+    chained = objects + [(3, {'name': 'blue cup', 'source_piece': three})]
+    on = {'task': 'carry the cup on', 'joined_from': [half(['cup'], two), half(['blue cup'], three)]}
+    joined = pieces.join_scene_objects(chained, [red, on])
+    assert [(o['name'], [c['name'] for c in o.get('continues', [])]) for o in joined] == [
+        ('red cup', ['cup', 'blue cup']), ('blue cup', []), ('tray', [])]
+    # the normal join: each cup is named in both halves and answers to one name in the other half
+    objects2 = objects[:2] + [(2, {'name': 'red cup', 'source_piece': two}), (2, {'name': 'blue cup', 'source_piece': two})]
+    both = {'task': 'stack the cups', 'joined_from': [half(['red cup', 'blue cup'], one),
+                                                      half(['red cup', 'blue cup'], two)]}
+    joined = pieces.join_scene_objects(objects2, [both])
+    assert [(o['name'], [c['name'] for c in o.get('continues', [])]) for o in joined] == [
+        ('red cup', ['red cup']), ('blue cup', ['blue cup'])]
+    assert joined[0]['continues'][0]['source_piece'] == two
+
+
 def test_the_board_names_the_parts_a_stitched_object_came_from():
     from board import to_board
     one, two = {'index': 1, 't0_s': 0., 't1_s': 5.}, {'index': 2, 't0_s': 5., 't1_s': 9.}

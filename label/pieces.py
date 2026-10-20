@@ -926,10 +926,12 @@ def join_scene_objects(objects: list, tasks: list) -> list:
     source_piece. Parts are labelled by separate requests, so a name proves nothing across them: two parts' "cup" can be
     two cups, and one cup can be named differently in each. Objects are joined only where the parts show they are one:
     a task joined across a cut (join_across_cuts, which already requires its halves to share an object) names the
-    object in both halves, and in each half's part exactly one listed object answers to that name. A joined object
-    keeps its first part's record, with every later part's own record under "continues"; every other object stays
-    its own entry."""
+    object in both halves, the name in each half answers to exactly one name in the other, and in each half's part
+    exactly one listed object answers to that name. A join never holds two objects of one part: part 1's red cup and
+    blue cup are two objects, so part 2's cup cannot join both of them into one. A joined object keeps its first
+    part's record, with every later part's own record under "continues"; every other object stays its own entry."""
     parent = list(range(len(objects)))
+    parts = {k: {n} for k, (n, _) in enumerate(objects)}     # the parts each joined object's records come from
 
     def root(k):
         while parent[k] != k:
@@ -937,23 +939,36 @@ def join_scene_objects(objects: list, tasks: list) -> list:
             k = parent[k]
         return k
 
+    def join(x, y):
+        x, y = root(x), root(y)
+        if x != y and not parts[x] & parts[y]:
+            parent[y] = x
+            parts[x] |= parts.pop(y)
+
     def listed(part, name_tokens):
         hits = [k for k, (n, obj) in enumerate(objects) if n == part
                 and any(a <= name_tokens or name_tokens <= a for a in _object_tokens([obj]))]
         return hits[0] if len(hits) == 1 else None
 
+    pairs = set()
     for task in tasks:
         halves = task.get("joined_from") or []
         for left, right in zip(halves, halves[1:]):
             a_part, b_part = (left.get("source_piece") or {}).get("index"), (right.get("source_piece") or {}).get("index")
             if not isinstance(a_part, int) or b_part != a_part + 1:
                 continue
-            for a in _object_tokens(left.get("objects")):
-                for b in _object_tokens(right.get("objects")):
-                    if a <= b or b <= a:
+            names_a, names_b = _object_tokens(left.get("objects")), _object_tokens(right.get("objects"))
+            fits = lambda a, b: a <= b or b <= a
+            for a in names_a:
+                for b in names_b:
+                    if fits(a, b) and sum(fits(a, o) for o in names_b) == 1 and sum(fits(o, b) for o in names_a) == 1:
                         x, y = listed(a_part, a), listed(b_part, b)
                         if x is not None and y is not None:
-                            parent[root(y)] = root(x)
+                            pairs.add((x, y))
+    # two tasks that pair one object with two different objects of the next part contradict each other: neither joins
+    for x, y in sorted(pairs):
+        if sum(p[0] == x for p in pairs) == 1 and sum(p[1] == y for p in pairs) == 1:
+            join(x, y)
     out, entry = [], {}
     for k, (_, obj) in enumerate(objects):
         r = root(k)
