@@ -144,30 +144,71 @@ def native_plot(times, values):
             'values': [float(v) if v is not None and np.isfinite(v) else None for v in values]}
 
 
-def _groups(meta, entry, a, remaining):
+def _trusted_validity(semantics):
+    if not semantics or 'valid_indices' not in semantics:
+        return None
+    authority = (semantics.get('provenance') or {}).get('authority', 'recorded')
+    if authority not in ('recorded', 'recording_verified'):
+        return None
+    return {'valid_indices': copy.deepcopy(semantics['valid_indices']), 'authority': authority}
+
+
+def _sensor_validity(doc, sensor, source_context=None):
+    name = sensor.get('name')
+    if isinstance(source_context, dict) and isinstance(name, str):
+        meta = next((meta for meta in source_context.get('signals') or []
+                     if isinstance(meta, dict) and meta.get('name') == name), None)
+        shape = meta.get('shape', sensor.get('shape')) if meta is not None else None
+        if (meta is not None and isinstance(shape, list)
+                and _descriptor_digest(meta) == sensor.get('descriptor_digest')):
+            from label.semantic_evidence import _semantics
+            # A matching current interpretation can withdraw saved semantics.
+            return _trusted_validity(_semantics(source_context, meta,
+                field_interpretation(source_context, name), shape))
+    validity = sensor.get('component_validity')
+    if isinstance(validity, dict) and validity.get('authority') in ('recorded', 'recording_verified'):
+        return validity
+    for derivation in doc.get('derivations') or []:
+        if derivation.get('sensor_id') == sensor['id']:
+            validity = _trusted_validity(derivation.get('semantics'))
+            if validity is not None:
+                return validity
+    return None
+
+
+def _groups(meta, entry, a, remaining, valid_indices=None):
     width = a.shape[1]
+    eligible = list(range(width)) if valid_indices is None else list(valid_indices)
+    allowed = set(eligible)
+    if not eligible:
+        return []
     units = meta.get('units', meta.get('unit'))
     unit_list = [u if isinstance(u, str) else None for u in units] if isinstance(units, list) and len(units) == width else [units if isinstance(units, str) else None] * width
     # Group names describe organization, not permission to cancel force axes or
     # opposing taxels when every component already fits the evidence budget.
     vector = sg._role(entry.get('role')) in ('force_torque', 'shear_force')
-    layout = [] if meta.get('summary_of') or width <= remaining or vector else entry.get('layout') or []
+    layout = [] if meta.get('summary_of') or len(eligible) <= remaining or vector else entry.get('layout') or []
     claimed = []
     groups = []
     for g in layout:
         if not isinstance(g, dict) or type(g.get('start')) is not int or type(g.get('count')) is not int:
             groups = []; break
         ids = list(range(g['start'], g['start'] + g['count']))
-        if not ids or min(ids) < 0 or max(ids) >= width or len({unit_list[i] for i in ids}) > 1:
+        if not ids or min(ids) < 0 or max(ids) >= width:
+            groups = []; break
+        ids = [i for i in ids if i in allowed]
+        if not ids:
+            continue
+        if len({unit_list[i] for i in ids}) > 1:
             groups = []; break
         claimed.extend(ids)
         groups.append((str(g.get('name') or 'Recorded group'), ids))
-    if groups and sorted(claimed) != list(range(width)):
+    if groups and sorted(claimed) != sorted(eligible):
         groups = []
     if not groups:
         names = meta.get('names') or []
-        if width <= remaining:
-            ids = list(range(width))
+        if len(eligible) <= remaining:
+            ids = sorted(eligible)
         else:
             # No full-array float64 copy: rank columns in small blocks.
             ranks = []
@@ -177,7 +218,7 @@ def _groups(meta, entry, a, remaining):
                 high = np.max(np.where(valid, block, -np.inf), axis=0)
                 low = np.min(np.where(valid, block, np.inf), axis=0)
                 ranks.extend((float(h - l) if math.isfinite(h - l) else -1, start + j)
-                             for j, (h, l) in enumerate(zip(high, low)))
+                             for j, (h, l) in enumerate(zip(high, low)) if start + j in allowed)
             ids = sorted(i for _, i in sorted(ranks, reverse=True)[:remaining])
         shape = meta.get('shape') or []
         for i in ids:
@@ -281,6 +322,9 @@ def build(ep, pl, *, shown=None, images=None, native_images=None, capture_select
             elif semantics.get('response_direction'):
                 sensor['response_direction'] = semantics['response_direction']
                 sensor['response_direction_authority'] = (semantics.get('provenance') or {}).get('authority')
+        validity = _trusted_validity(semantics)
+        if validity is not None:
+            sensor['component_validity'] = validity
         units = meta.get('units', meta.get('unit'))
         same_unit = not isinstance(units, list) or len(units) == a.shape[1] and len(set(map(str, units))) == 1
         if (not summary and same_unit and quantity != 'contact_state' and a.shape[1] > MAX_SERIES
@@ -304,7 +348,8 @@ def build(ep, pl, *, shown=None, images=None, native_images=None, capture_select
         width = a.shape[1]
         if width <= 6 and len(meta.get('names') or []) == width and free - (len(numeric) - position - 1) >= width:
             remaining = width
-        groups = _groups(meta, entry, a, remaining)
+        groups = _groups(meta, entry, a, remaining,
+                         validity['valid_indices'] if validity is not None else None)
         for label, ids, unit in groups:
             values = np.asarray(a[:, ids[0]], dtype=float)
             if len(ids) > 1:
@@ -788,7 +833,7 @@ def _component_union(sensor, table, position, row, trace):
     return result
 
 
-def bind(doc, findings, *, ep=None):
+def bind(doc, findings, *, ep=None, source_context=None):
     """Keep unbound replies for inspection; only evidence-backed findings reach overlays."""
     result = copy.deepcopy(doc)
     previous = {r['id']: r for r in result.get('series') or [] if r.get('array_constituent')}
@@ -797,6 +842,8 @@ def bind(doc, findings, *, ep=None):
         _restore_trace_view(row)
     result['findings'], result['unbound_findings'] = [], []
     sensors = {s['id']: s for s in doc.get('sensors') or []}
+    validity = {ident: _sensor_validity(doc, sensor, source_context or (ep or {}).get('context'))
+                for ident, sensor in sensors.items()}
     # Validate against the exact prompt projection, including its byte budget.
     sent = _prompt(doc)[1] if sensors else {'series': []}
     sensors = {s['id']: s for s in sent.get('sensors') or []}
@@ -838,6 +885,14 @@ def bind(doc, findings, *, ep=None):
                     sensor, table, position = constituents[ref['series_id']]
                     r = _constituent_series(sensor, table, position, sent['series'], ep)
                     selected[r['id']] = r
+                mask = validity.get(ref.get('sensor_id'))
+                if r is not None and mask is not None:
+                    columns = r.get('columns') or []
+                    if isinstance(columns, dict):
+                        columns = range(columns['start'], columns['start'] + columns['count'])
+                    allowed = set(mask['valid_indices'])
+                    if any(column not in allowed for column in columns):
+                        reason = 'cited source component is excluded by a recorded validity mask'; break
                 component = components.get(ref.get('sensor_id'))
                 if r is not None and component:
                     sensor, table, traces = component

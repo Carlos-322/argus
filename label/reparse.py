@@ -30,9 +30,13 @@ def rebind(record: dict) -> None:
         fields = se.finding_fields(finding)
         fields.pop('review_status', None)
         return json.dumps(fields, sort_keys=True, separators=(',', ':'), allow_nan=False)
+    def unbound_findings(doc):
+        return [row['finding'] for row in doc.get('unbound_findings') or []
+                if isinstance(row, dict) and isinstance(row.get('finding'), dict)]
     reviewed = {}
     for doc in (record.get('sensor_evidence') or {}, record.get('evidence_inspection') or {}):
-        for finding in [*doc.get('findings', []), *doc.get('untimed_findings', []), *doc.get('withheld_findings', [])]:
+        for finding in [*doc.get('findings', []), *doc.get('untimed_findings', []), *doc.get('withheld_findings', []),
+                        *unbound_findings(doc)]:
             if isinstance(finding, dict) and finding.get('review_status') is not None:
                 reviewed[finding_key(finding)] = finding['review_status']
     def retain_reviews(findings):
@@ -54,8 +58,16 @@ def rebind(record: dict) -> None:
         native['sensors'] = [s for s in native.get('sensors', []) if 'access_field_id' not in s]
         sensor_ids = {s['id'] for s in native['sensors']}
         native['series'] = [r for r in native.get('series', []) if r['sensor_id'] in sensor_ids]
-        record['sensor_evidence'] = se.bind(native, labels.get('sensor_findings'))
+        source_context = None
+        if not problem and record.get('episode_dir'):
+            try:
+                source_context = json.loads((Path(record['episode_dir']) / 'context.json').read_text())
+            except (OSError, ValueError):
+                pass
+        record['sensor_evidence'] = se.bind(native, labels.get('sensor_findings'),
+                                            source_context=source_context)
         retain_reviews(record['sensor_evidence']['findings'])
+        retain_reviews(unbound_findings(record['sensor_evidence']))
         record['sensor_evidence']['provenance'] = provenance
         if problem:
             bound = record['sensor_evidence']
@@ -85,6 +97,7 @@ def rebind(record: dict) -> None:
         additional = {'sensors': [], 'series': [], 'findings': [], 'coverage': [], 'limitations': [],
                       'unbound_findings': [{'finding': copy.deepcopy(f), 'reason': str(error)}
                                            for f in labels.get('evidence_findings') or []]}
+    retain_reviews(unbound_findings(additional))
     evidence = record.setdefault('sensor_evidence', {'version': 1})
     for key in ('sensors', 'series', 'findings', 'unbound_findings', 'coverage', 'limitations'):
         evidence.setdefault(key, []).extend(additional[key])
