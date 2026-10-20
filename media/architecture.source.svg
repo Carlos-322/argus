@@ -130,12 +130,12 @@ text {font-family:'EB Garamond',Georgia,serif;fill:#292820;font-weight:400}
 <path class="point-marker" d="M1122 940 h5" fill="none" stroke="#625d54" stroke-width="1.6" stroke-linecap="round" aria-hidden="true" /><text x="1132.000" y="946" class="body" data-width="328" data-bullet="true">Explain artificial chunk boundaries</text>
 <text x="1132.000" y="974" class="body" data-width="328" data-bullet="false">to the VLM</text>
 <rect id="validate" x="1980" y="104" width="308" height="206" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5" />
-<text x="1996.000" y="130" class="kind" data-width="276" data-bullet="false">Code</text>
+<text x="1996.000" y="130" class="kind" data-width="276" data-bullet="false">Code + text LLM</text>
 <text x="1996.000" y="166" class="heading" data-width="276" data-bullet="false">Validate annotations</text>
 <path class="point-marker" d="M1994 192 h5" fill="none" stroke="#625d54" stroke-width="1.6" stroke-linecap="round" aria-hidden="true" /><text x="2004.000" y="198" class="body" data-width="268" data-bullet="true">Validate JSON and event</text>
 <text x="2004.000" y="226" class="body" data-width="268" data-bullet="false">timestamps</text>
 <path class="point-marker" d="M1994 248 h5" fill="none" stroke="#625d54" stroke-width="1.6" stroke-linecap="round" aria-hidden="true" /><text x="2004.000" y="254" class="body" data-width="268" data-bullet="true">Verify evidence citations</text>
-<path class="point-marker" d="M1994 276 h5" fill="none" stroke="#625d54" stroke-width="1.6" stroke-linecap="round" aria-hidden="true" /><text x="2004.000" y="282" class="body" data-width="268" data-bullet="true">Save failed model responses</text>
+<path class="point-marker" d="M1994 276 h5" fill="none" stroke="#625d54" stroke-width="1.6" stroke-linecap="round" aria-hidden="true" /><text x="2004.000" y="282" class="body" data-width="268" data-bullet="true">Pick and write video cards</text>
 <rect id="stitch" x="1980" y="338" width="308" height="262" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5" />
 <text x="1996.000" y="364" class="kind" data-width="276" data-bullet="false">Code</text>
 <text x="1996.000" y="400" class="heading" data-width="276" data-bullet="false">Rejoin annotated chunks</text>
@@ -147,7 +147,7 @@ text {font-family:'EB Garamond',Georgia,serif;fill:#292820;font-weight:400}
 <text x="2004.000" y="572" class="body" data-width="268" data-bullet="false">capture defects</text>
 <rect id="issues" x="1980" y="628" width="308" height="206" rx="5" fill="#f1f5f7" stroke="#c7c2b9" stroke-width="1.5" />
 <rect id="exports" x="1980" y="862" width="308" height="178" rx="5" fill="#fff" stroke="#c7c2b9" stroke-width="1.5" />
-<text x="1996.000" y="888" class="kind" data-width="276" data-bullet="false">Code + text LLM</text>
+<text x="1996.000" y="888" class="kind" data-width="276" data-bullet="false">Code</text>
 <text x="1996.000" y="924" class="heading" data-width="276" data-bullet="false">Viewer and JSON</text>
 <path class="point-marker" d="M1994 950 h5" fill="none" stroke="#625d54" stroke-width="1.6" stroke-linecap="round" aria-hidden="true" /><text x="2004.000" y="956" class="body" data-width="268" data-bullet="true">Play footage and sensor cards</text>
 <path class="point-marker" d="M1994 978 h5" fill="none" stroke="#625d54" stroke-width="1.6" stroke-linecap="round" aria-hidden="true" /><text x="2004.000" y="984" class="body" data-width="268" data-bullet="true">Download annotations,</text>
