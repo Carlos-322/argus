@@ -131,6 +131,7 @@
  "tests/test_sensor_analysis_media.py": 1.25,
  "tests/test_sensor_analysis_run.py": 1.25,
  "tests/test_sensor_cards.py": 1.25,
+ "tests/test_sensor_cards_harness.py": 1.7,
  "tests/test_sensor_display.py": 1.25,
  "tests/test_sensor_evidence.py": 0.4,
  "tests/test_sensor_native_plots.py": 1.25,

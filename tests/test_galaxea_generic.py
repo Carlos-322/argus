@@ -19,8 +19,9 @@ def native(root, *, reverse=False, width=6):
     expected = {}
     for prefix, offset in [('observation.state', 0), ('action', 1000)]:
         groups = []
-        for side, base in [('left', 10), ('right', 100)]:
-            arms = np.arange(4 * width, dtype=np.float64).reshape(4, width) / 100 + base + offset
+        for side, base in [('left', 0.1), ('right', 1.0)]:
+            # Distinct per side and array, and within one turn, as joints declared in radians are.
+            arms = np.arange(4 * width, dtype=np.float64).reshape(4, width) / 100 + base + offset / 2000
             gripper = np.array([0, 25, 50, 100], dtype=np.float64) + (1 if side == 'right' else 0) + offset
             df[f'{prefix}.{side}_arm'] = list(arms)
             df[f'{prefix}.{side}_gripper'] = gripper
