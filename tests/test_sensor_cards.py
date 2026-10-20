@@ -35,13 +35,13 @@ def test_request_lists_only_findings_the_viewer_can_show_in_playback_order():
     listed = json.loads(request['content'][0]['text'].split('\nRECORDING\n', 1)[1])
     assert [f['headline'] for f in listed['findings']] == ['Earlier', 'Later']
     assert listed['task'] == 'pick up a cup' and listed['sensors'][0]['stronger_response'] == 'down'
-    assert request['config'] == {'model': 'm', 'reasoning': 'medium', 'max_tokens': sc.MAX_TOKENS}
+    assert request['config'] == {'model': 'm', 'reasoning': 'medium', 'max_tokens': sc.ANSWER_TOKENS + 4000}
     assert sc.build({'findings': [finding(0, 'x', adds=False)]}, config={}) is None
 
 
 def test_cards_attach_by_content_and_a_changed_finding_loses_its_card():
     d = doc()
-    request = sc.build(d, config={'model': 'm', 'reasoning': 'r'})
+    request = sc.build(d, config={'model': 'm', 'reasoning': 'medium'})
     receipt = received(request, [{'finding': 1, 'headline': 'Thumb pressure eases', 'detail': 'The thumb eases as the cup lowers.'}])
     assert sc.apply(d, receipt['request'], receipt) == 1
     assert d['findings'][0]['video_card'] == {'version': 1, 'headline': 'Thumb pressure eases',
@@ -58,7 +58,7 @@ def test_cards_attach_by_content_and_a_changed_finding_loses_its_card():
 
 def test_only_the_exact_request_authorizes_cards():
     d = doc()
-    request = sc.build(d, config={'model': 'm', 'reasoning': 'r'})
+    request = sc.build(d, config={'model': 'm', 'reasoning': 'medium'})
     receipt = received(request, [])
     tampered = copy.deepcopy(receipt['request'])
     tampered['finding_keys'].reverse()
@@ -89,7 +89,7 @@ def test_a_card_that_names_no_finding_or_is_not_short_plain_copy_is_left_out():
 
 def test_every_written_finding_reads_in_one_voice_and_only_cards_reach_the_video():
     d = doc()
-    request = sc.build(d, config={'model': 'm', 'reasoning': 'r'})
+    request = sc.build(d, config={'model': 'm', 'reasoning': 'medium'})
     receipt = {**received(request, [{'finding': 0, 'headline': 'Index finger presses', 'detail': 'It presses harder first.'}]),
                'response_text': json.dumps({
                    'cards': [{'finding': 0, 'headline': 'Index finger presses', 'detail': 'It presses harder first.'}],
@@ -123,14 +123,14 @@ def provider_for(cards, cost=.05):
 
 def test_cards_bill_into_the_inspection_invoice_and_a_new_request_supersedes_a_settled_one(tmp_path):
     path, d = tmp_path / '.evidence' / 'episode_a.json.inspection.json', ledger()
-    first = sc.build(doc(), config={'model': 'm', 'reasoning': 'r'})
+    first = sc.build(doc(), config={'model': 'm', 'reasoning': 'medium'})
     provider, calls = provider_for([])
     assert run(first, d, path, provider)['state'] == 'received'
     assert d['cost_usd'] == pytest.approx(.06) and len(calls) == 1
     assert run(first, ledger(), path, provider)['state'] == 'received' and len(calls) == 1
     changed = doc()
     changed['findings'][0]['headline'] = 'Changed'
-    second = sc.build(changed, config={'model': 'm', 'reasoning': 'r'})
+    second = sc.build(changed, config={'model': 'm', 'reasoning': 'medium'})
     again = ledger()
     assert run(second, again, path, provider)['digest'] == second['digest'] and len(calls) == 2
     assert again['cost_usd'] == pytest.approx(.11)
@@ -139,7 +139,7 @@ def test_cards_bill_into_the_inspection_invoice_and_a_new_request_supersedes_a_s
 
 def test_a_spend_cap_pause_leaves_the_inspection_complete(tmp_path):
     path, d = tmp_path / 'cache.json', ledger()
-    request = sc.build(doc(), config={'model': 'm', 'reasoning': 'r'})
+    request = sc.build(doc(), config={'model': 'm', 'reasoning': 'medium'})
     provider, calls = provider_for([])
     with pytest.raises(SpendCap):
         run(request, d, path, provider, reserve_dispatch=lambda amount: False)
@@ -151,7 +151,7 @@ def test_a_spend_cap_pause_leaves_the_inspection_complete(tmp_path):
 
 def test_an_unknown_card_charge_is_held_and_never_resent(tmp_path):
     path, d = tmp_path / 'cache.json', ledger()
-    request = sc.build(doc(), config={'model': 'm', 'reasoning': 'r'})
+    request = sc.build(doc(), config={'model': 'm', 'reasoning': 'medium'})
     calls = []
     def lost(parts):
         calls.append(parts)
@@ -162,7 +162,7 @@ def test_an_unknown_card_charge_is_held_and_never_resent(tmp_path):
     changed = doc()
     changed['findings'][0]['headline'] = 'Changed'
     with pytest.raises(ValueError):
-        run(sc.build(changed, config={'model': 'm', 'reasoning': 'r'}), d, path, lost)
+        run(sc.build(changed, config={'model': 'm', 'reasoning': 'medium'}), d, path, lost)
     assert len(calls) == 1
 
 

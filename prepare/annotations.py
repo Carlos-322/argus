@@ -361,7 +361,7 @@ def metadata_value(value):
 def episode_metadata(meta, read_jsonl):
     """Full metadata claims by explicit episode owner. Unassigned malformed rows never acquire an owner."""
     import pandas as pd
-    from prepare.formats import recorded_index
+    from prepare.formats import names_annotation, recorded_index
     meta = Path(meta)
     paths = set(meta.glob('*.jsonl')) | set(meta.glob('*.parquet'))
     paths |= set((meta / 'episodes').rglob('*.parquet'))
@@ -398,7 +398,7 @@ def episode_metadata(meta, read_jsonl):
             unassigned.append({'source': str(path), 'why': f'metadata table read failed ({error})'})
             continue
         for number, row in rows:
-            if 'episode_index' not in row and not (_episode_catalog(path, meta) or 'annotat' in path.name):
+            if 'episode_index' not in row and not (_episode_catalog(path, meta) or names_annotation(path.name)):
                 continue
             claim = {'source': str(path), 'row': number, 'fields': metadata_value(row)}
             try:

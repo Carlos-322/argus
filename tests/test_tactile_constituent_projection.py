@@ -607,3 +607,27 @@ def test_byte_thinning_updates_native_and_selected_endpoint_coverage(monkeypatch
         finding.update(start_s=retained, end_s=retained)
         finding['evidence'][0]['time_s'] = [retained]
         assert se.bind(payload, [finding])['findings']
+
+
+def test_snapshot_thinning_targets_the_one_priority_selection_assigns(monkeypatch):
+    # Thinning used to look for priority 2 first, which no snapshot is given. Every
+    # priority a snapshot carries must be one the selection assigns, and under prompt
+    # pressure only spaced native-clock rows are dropped.
+    from label import tactile_arrays
+    raw, times, semantics = spatial_case()
+    for ks, budget in (([0, 103, 185], 16384), ([], 8192), ([0, 185], 2048)):
+        frames = tactile_arrays.comparison(raw, [16, 16], times, ks, budget, semantics=semantics)['frames']
+        assert {frame['selection_priority'] for frame in frames} <= {0, 1, tactile_arrays.SPACED}
+    signals = {'right_pressure': raw, 'left_pressure': raw + 1}
+    ep = episode(signals, [{'name': name, 'shape': [16, 16], 'sensor_semantics': semantics} for name in signals])
+    ep['times']['exo'] = times
+    doc = se.build(ep, {'n': len(raw), 'ks': [0, 103, 185]})
+    kept = {s['id']: {f['time_s'] for f in s['array_evidence']['frames'] if f['selection_priority'] != tactile_arrays.SPACED}
+            for s in doc['sensors']}
+    from label import sensor_copy
+    rule_growth = len(sensor_copy.rule('sensor', sensor_copy.VERSION).encode()) - len(sensor_copy.rule('sensor', 2).encode())
+    monkeypatch.setattr(se, 'MAX_PROMPT_BYTES', 24000 + max(0, rule_growth))
+    sent = expand_prompt(json.loads(se.prompt(doc).splitlines()[-1]))
+    assert any('Array snapshot rows were reduced' in note for note in sent['limitations'])
+    for sensor in sent['sensors']:
+        assert kept[sensor['id']] <= set(sensor['array_evidence']['constituents']['times_s'])

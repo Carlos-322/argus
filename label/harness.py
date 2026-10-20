@@ -1209,7 +1209,7 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
         fields['evidence_inspection'] = evidence_access.record()
         if not dry_run:
             def select(parts):
-                response = call_model_once(parts, model, reasoning, api_key, ea.MAX_SELECTION_TOKENS, min(timeout, 120),
+                response = call_model_once(parts, model, reasoning, api_key, ea.selection_tokens(reasoning), min(timeout, 120),
                     **({'pricing_quote': pricing_quote} if pricing_quote is not None else {}))
                 usage = response.get('usage') or {}
                 cost, _ = _verified_final_cost(usage, model)
@@ -1218,7 +1218,7 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
                 return response
             # Reserve the maximum output and a conservative input allowance before each selection dispatch.
             def reserve(parts):
-                return final_cost_bound(parts, ea.MAX_SELECTION_TOKENS, model=model,
+                return final_cost_bound(parts, ea.selection_tokens(reasoning), model=model,
                                         require_known_pricing=require_known_pricing,
                                         **({'pricing_quote': pricing_quote} if pricing_quote is not None else {}))
             cache = Path(out_path).parent / '.evidence' / (Path(out_path).name + '.inspection.json')
@@ -1528,8 +1528,9 @@ def _video_cards(result, out_path, *, model, reasoning, api_key, timeout, pricin
     try:
         receipt = sensor_analysis_run.execute(
             request, inspection, cache, key='sensor_cards', model=model,
-            call=lambda parts: call_model_once(parts, model, reasoning, api_key, sensor_cards.MAX_TOKENS, timeout, **quote),
-            reserve_cost=lambda parts: final_cost_bound(parts, sensor_cards.MAX_TOKENS, model=model,
+            call=lambda parts: call_model_once(parts, model, reasoning, api_key, request['config']['max_tokens'], timeout,
+                                               **quote),
+            reserve_cost=lambda parts: final_cost_bound(parts, request['config']['max_tokens'], model=model,
                                                         require_known_pricing=require_known_pricing, **quote),
             reserve_dispatch=reserve_selection, settle_dispatch=settle_selection, verify_inputs=verify_inputs)
         sensor_cards.apply(evidence, receipt['request'], receipt)

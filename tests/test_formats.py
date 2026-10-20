@@ -1497,6 +1497,63 @@ def test_without_a_camera_clock_an_ambiguous_largest_step_clock_is_no_reference(
     assert abs(_step_s(out["encoder"]) - 1e-2) < 1e-9
 
 
+def test_without_a_camera_clock_a_fast_pad_in_nanoseconds_is_read_against_a_clock_of_known_unit():
+    """A 1 kHz pad in nanoseconds from boot steps by 1e6, as a 1 Hz clock in microseconds does, so its step alone
+    left it read as microseconds, 1000 times slow. A 100 Hz encoder in milliseconds beside it has a step only one unit
+    reads as a sampled stream, so the pad is read where its range overlaps the encoder's, and nothing is in doubt."""
+    import numpy as np
+    raw = {"pad": BOOT_NS + np.arange(30000) * 1e6, "encoder": BOOT_NS / 1e6 + np.arange(3000) * 10.0}
+    doubts = {}
+    out = f._clocks_in_seconds(raw, doubts=doubts)
+    assert abs(_step_s(out["pad"]) - 1e-3) < 1e-9 and abs(_step_s(out["encoder"]) - 1e-2) < 1e-9
+    assert doubts == {}
+
+
+def test_a_clock_whose_unit_nothing_settles_keeps_its_reading_and_says_so():
+    """Alone, or beside clocks whose units are in doubt too, the pad keeps its own reading and is reported with both
+    readings, rather than guessed silently."""
+    import numpy as np
+    pad = BOOT_NS + np.arange(3000) * 1e6
+    for raw in ({"pad": pad}, {"pad": pad, "other": BOOT_NS / 1e3 + np.arange(2000) * 1e3}):
+        doubts = {}
+        out = f._clocks_in_seconds(raw, doubts=doubts)
+        assert np.array_equal(out["pad"], f._seconds(pad))
+        assert doubts["pad"] == {"step": 1e6, "units": [1e-9, 1e-6], "kept": 1e-6}
+        issue = f.clock_doubt_issue("pad", doubts["pad"])
+        assert issue["kind"] == "clock_unit_assumed"
+        assert "0.001 s in nanoseconds" in issue["what"] and "1 s in microseconds" in issue["what"]
+
+
+def test_with_a_camera_clock_no_reading_changes_and_nothing_is_reported():
+    import numpy as np
+    cam = BOOT_NS + np.arange(40) * 33_333_333.0
+    for pad in (cam[0] - 1e7 + np.arange(1400) * 1e6, np.arange(100) * 1e7):
+        raw, doubts = {"cam": cam, "pad": pad}, {}
+        assert all(np.array_equal(a, b) for a, b in zip(f._clocks_in_seconds(raw, reference="cam", doubts=doubts).values(),
+                                                         f._clocks_in_seconds(raw, reference="cam").values()))
+        assert doubts == {}
+
+
+def test_an_hdf5_recording_without_a_camera_clock_reports_a_pad_clock_it_cannot_settle(tmp_path):
+    import h5py
+    import numpy as np
+    for name, encoder in (("both.h5", True), ("pad.h5", False)):
+        with h5py.File(tmp_path / name, "w") as h:
+            pad = h.create_group("pad")
+            pad.create_dataset("timestamp", data=(BOOT_NS + np.arange(3000) * 1e6).astype(np.int64))
+            pad["pressure"] = np.arange(3000, dtype=np.float32)
+            if encoder:
+                enc = h.create_group("encoder")
+                enc.create_dataset("timestamp", data=(BOOT_NS / 1e6 + np.arange(300) * 10.0).astype(np.int64))
+                enc["position"] = np.arange(300, dtype=np.float32)
+            st = f.h5_streams(h, "")
+        assumed = [i for i in st["clock_issues"] if i["kind"] == "clock_unit_assumed"]
+        if encoder:
+            assert abs(_step_s(st["clock"]["pad/timestamp"]) - 1e-3) < 1e-9 and not assumed
+        else:
+            assert [i["signal"] for i in assumed] == ["pad/timestamp"]
+
+
 def test_a_reference_clock_that_never_steps_leaves_the_other_clocks_alone():
     """A camera clock stuck at one value says nothing about its unit, so nothing is matched to it."""
     import numpy as np
@@ -5027,3 +5084,34 @@ def test_trimming_prepared_signals_preserves_native_clocks_and_placement_limits(
                                                          if s['name'] == signal['name'])
                 assert not {'touch', 'rest', 'swing', 'scale_note'} & signal.keys()
         assert not lc.of_episode(me.load(ep))
+
+
+def test_camera_words_are_matched_whole_so_a_laptop_camera_is_not_the_top_camera():
+    """scene_rank matched words inside words: laptop_cam ranked as a top camera and took the scene slot from a front
+    camera, and every name containing cam ranked 8th. The mount and fixed words matched any word they began, so
+    handle_cam was a hand camera."""
+    views, _ = f.assign_views(["laptop_cam", "front_cam"], "teleop_arms")
+    assert views["exo"] == "front_cam"
+    assert f.scene_rank("laptop_cam") == f.scene_rank("camera_0") == f.SCENE_WORDS.index(("cam", "camera"))
+    assert f.scene_rank("top_cam") == f.scene_rank("topcam") == 0 and f.scene_rank("realsense_d435") == 99
+    assert not f.is_mount_named("handle_cam") and f.is_mount_named("wristcam") and f.is_mount_named("cam_left_wrist")
+    # glued and camelCase camera words still split; a stereo camera's model name is still a fixed camera
+    assert f.side_of("leftCam") == f.side_of("leftcam") == "left" and f.mounted_side("zedx_left") is None
+    assert f.word_tokens("RGBCamera2") == ["rgb", "camera", "2"]
+    # an episode's uuid is one id, never letters that read as ee
+    assert not f.is_mount_named("episode_e73c0f86-4739-42cd-81b2-3a7229fe71ee")
+
+
+def test_a_joint_state_topic_that_says_action_inside_a_word_is_a_state_not_a_command():
+    """ACTION_TOPIC matched inside words, so /interaction_arm/joint_states was read as a command and its arm lost from
+    the state. Command words now match whole, as every other name word does (_names_word)."""
+    import numpy as np
+    arm = {"pos": np.zeros((5, 7)), "t": np.arange(5) / 10.0, "names": None}
+    streams = {"/interaction_arm/joint_states": arm, "/leader/joint_states": dict(arm)}
+    assert f.arm_streams(streams, False) == {"only": "/interaction_arm/joint_states"}
+    assert f.arm_streams(streams, True) == {"only": "/leader/joint_states"}
+    assert not f.names_action("extreme_exposure_fraction") and f.names_action("action.arm") and f.names_action("/cmd_vel")
+    assert f.names_text("/task/subtask") and not f.names_text("/multitasking_status")
+    assert f.names_depth("/camera/aligned_depth_to_color/image_raw") and not f.names_depth("/depthai/rgb/image")
+    assert f.names_joint("panda_joint1") and f.names_joint("arm_j2") and not f.names_joint("obj1")
+    assert f.names_gripper("left_finger_joint") and not f.names_gripper("system_fingerprint")

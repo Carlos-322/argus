@@ -857,7 +857,7 @@ def test_a_part_whose_output_does_not_read_is_a_gap_and_one_that_breaks_the_form
     r = json.loads((tmp_path / "final" / f"{src.name}.json").read_text())
     assert [s["action"] for s in r["labels"]["timeline"]] == ["reach", "untimed"]
     assert [k["label"] for k in r["labels"]["key_events"]] == ["lifted"]
-    assert r["labels"]["scene"]["objects"] == [{"name": "plate"}]
+    assert [(o["name"], o["source_piece"]["index"]) for o in r["labels"]["scene"]["objects"]] == [("plate", 1)]
     assert sorted((x["field"], x["part"]) for x in r["labels"]["_dropped"]) == [("key_events", 1), ("scene.objects", 1)]
     whys = {g["part"]: g["why"] for g in r["stitched"]["missing"]}
     assert whys[2].startswith("its output file does not read (JSONDecodeError")
@@ -1237,3 +1237,59 @@ def test_stitch_preserves_session_policy_and_segmented_jaw_receipts(tmp_path, mo
     assert no_labels['parse_ok'] is False and no_labels['prompt_mode'] == 'session'
     assert no_labels['annotation_policy'] == parent['annotation_policy']
     assert no_labels['jaw_evidence']['right']['parts'][2]['record'] == measured
+
+
+def test_stitched_objects_keep_their_own_part_unless_a_task_across_the_cut_shows_they_are_one(tmp_path, monkeypatch):
+    """Objects were merged across parts by lowercase name: part 1's red cup and part 2's green "Cup" became one object,
+    and part 1's second cup was dropped. Each part's objects now stay apart with their part, so all three cups remain."""
+    job, src, parts = _three_parts(tmp_path, monkeypatch)
+    out = job / "run" / "out"
+    objects = {0: [{"name": "cup", "attributes": ["red"]}, {"name": "cup", "attributes": ["blue"]}],
+               1: [{"name": "Cup", "attributes": ["green"]}], 2: []}
+    for k, part in enumerate(parts):
+        result = _part_result(part, "reach")
+        result["labels"]["scene"] = {"objects": objects[k], "setting": "table"}
+        (out / f"{part.name}.json").write_text(json.dumps(result))
+    pieces.stitch_run(job, src.parent, {src.name: [p.name for p in parts]}, tmp_path / "final")
+    r = json.loads((tmp_path / "final" / f"{src.name}.json").read_text())
+    got = r["labels"]["scene"]["objects"]
+    assert [(o["name"], o["attributes"]) for o in got] == [("cup", ["red"]), ("cup", ["blue"]), ("Cup", ["green"])]
+    assert [o["source_piece"]["index"] for o in got] == [1, 1, 2]
+
+
+def test_an_object_a_task_carries_across_the_cut_is_one_object_with_each_parts_record():
+    # The UMI pilot's blanket task joined at 304.833s names the blanket in both halves, each part naming it its own way.
+    source = lambda index, lo, hi: {'index': index, 't0_s': lo, 't1_s': hi}
+    first = {'start_s': 190., 'end_s': 304.8, 'task': 'Unfold the blanket over the bed',
+             'objects': ['floral fleece blanket', 'penguin plush'], 'outcome': 'partial',
+             'note': 'The clip ends while the task is still under way.', 'source_piece': source(1, 0., 304.833)}
+    second = {'start_s': 304.833, 'end_s': 313.833, 'task': 'Settle the floral blanket over the bed',
+              'objects': ['floral blanket', 'bed'], 'outcome': 'success', 'completed_at_s': 313.4,
+              'note': 'Continues the task from the previous part.', 'source_piece': source(2, 304.833, 500.)}
+    tasks = pieces.join_across_cuts([first, second], [304.833])
+    one, two = source(1, 0., 304.833), source(2, 304.833, 500.)
+    objects = [(1, {'name': 'floral fleece blanket', 'source_piece': one}), (1, {'name': 'penguin plush', 'source_piece': one}),
+               (1, {'name': 'cup', 'source_piece': one}),
+               (2, {'name': 'floral blanket', 'source_piece': two}), (2, {'name': 'bed', 'source_piece': two}),
+               (2, {'name': 'Cup', 'source_piece': two})]
+    joined = pieces.join_scene_objects(objects, tasks)
+    assert joined == [{'name': 'floral fleece blanket', 'source_piece': one,
+                       'continues': [{'name': 'floral blanket', 'source_piece': two}]},
+                      {'name': 'penguin plush', 'source_piece': one}, {'name': 'cup', 'source_piece': one},
+                      {'name': 'bed', 'source_piece': two}, {'name': 'Cup', 'source_piece': two}]
+    # Two blankets in the second part: the task's name no longer picks out one, so nothing is joined.
+    crowded = objects + [(2, {'name': 'floral blanket', 'source_piece': two})]
+    assert all('continues' not in o for o in pieces.join_scene_objects(crowded, tasks))
+    # Without the joined task the names alone join nothing.
+    assert all('continues' not in o for o in pieces.join_scene_objects(objects, [first, second]))
+
+
+def test_the_board_names_the_parts_a_stitched_object_came_from():
+    from board import to_board
+    one, two = {'index': 1, 't0_s': 0., 't1_s': 5.}, {'index': 2, 't0_s': 5., 't1_s': 9.}
+    result = {'episode_dir': 'episode_x', 'parse_ok': True, 'labels': {'scene': {'objects': [
+        {'name': 'blanket', 'source_piece': one, 'continues': [{'name': 'floral blanket', 'source_piece': two}]},
+        {'name': 'cup', 'attributes': ['red'], 'source_piece': two}, {'name': 'plate'}]}}}
+    assert to_board.convert(result, 'demo')['objects'] == [
+        {'name': 'blanket', 'color': None, 'parts': [1, 2]}, {'name': 'cup', 'color': 'red', 'parts': [2]},
+        {'name': 'plate', 'color': None}]

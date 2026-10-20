@@ -6427,7 +6427,9 @@ function renderEp(d, opts) {
   let invHtml = '';
   for (const o of inv) {
     invHtml += `<div class="it"><span class="name">${esc(o.name || '?')}</span>`
-      + `${o.color ? `<span class="color">${esc(o.color)}</span>` : ''}</div>`;
+      + `${o.color ? `<span class="color">${esc(o.color)}</span>` : ''}`
+      + `${(o.parts || []).length ? `<span class="color">${o.parts.length > 1 ? 'parts' : 'part'} `
+        + `${esc(o.parts.join(', '))}</span>` : ''}</div>`;
   }
 
   // a key event's mark by kind: the goal and a subgoal green, a failure red, the rest ink

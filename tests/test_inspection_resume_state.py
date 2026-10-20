@@ -29,9 +29,9 @@ def test_partial_inspection_budget_resume_finishes_without_rebilling(tmp_path, m
     out = tmp_path / 'out'
     args = dict(keys=['sk-or-test'], concurrency=1, force=False, model='custom/model',
                 reasoning='medium', max_tokens=100, timeout=1, cell_w=128)
-    # a selection reserves about $0.17 and is bought only with the final's $0.20 still covered; $0.40 allows one
+    # a selection reserves about $0.21 and is bought only with the final's $0.20 still covered; $0.44 allows one
     # selection, and after its $0.10 charge the second no longer fits, so the inspection pauses
-    assert harness.run_batch([ep], out, max_spend=.4, **args) == 1
+    assert harness.run_batch([ep], out, max_spend=.44, **args) == 1
     cache = out / '.evidence' / (ep.name + '.json.inspection.json')
     paused = json.loads(cache.read_text())
     assert paused['pause_reason'] == 'spend_cap'

@@ -24,10 +24,12 @@ from contextlib import nullcontext
 from pathlib import Path
 
 from label import episode as me
+from label import policy
 
 ROUTE_MODEL = "openai/gpt-6-sol"
 ROUTE_REASONING = "low"
-ROUTE_MAX_TOKENS = 2000
+# The answer is a short JSON object; the limit adds reasoning room at ROUTE_REASONING.
+ROUTE_MAX_TOKENS = policy.output_limit(500, ROUTE_REASONING)
 ROUTE_PROMPT = (
     "You choose the image resolution for labelling one episode of a robot-learning dataset, from its text alone. "
     "The labeller sees the episode's cameras as small frames, about 200 pixels wide. That is enough for most tasks: "

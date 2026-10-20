@@ -395,6 +395,14 @@
    ]
   },
   {
+   "slug": "clock-unit-assumed",
+   "list": "handling",
+   "name": "A clock's unit was read from its step alone",
+   "reader_issues": [
+    "clock_unit_assumed"
+   ]
+  },
+  {
    "slug": "camera-clock-repeated",
    "list": "data",
    "name": "Distinct camera frames share recorded timestamps",

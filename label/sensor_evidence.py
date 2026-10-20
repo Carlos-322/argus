@@ -695,19 +695,16 @@ Return an additional JSON field "sensor_findings": [{"start_s": number, "end_s":
             payload['limitations'].append(note)
     # Keep complete maps, never half a grid. The budgeted projection is rendered
     # into image parts too, so every supplied picture remains citable.
+    from label.tactile_arrays import SPACED
     while len((text + _json(_prompt_projection(payload))).encode()) > MAX_PROMPT_BYTES:
         candidates = [s for s in payload['sensors'] if
                       len((s.get('array_evidence') or {}).get('frames') or []) > 4 and
-                      any(f['selection_priority'] in (2, 3) for f in s['array_evidence']['frames'])]
+                      any(f['selection_priority'] == SPACED for f in s['array_evidence']['frames'])]
         if not candidates:
             break
         sensor = max(candidates, key=lambda s: len(_json(_prompt_projection({'sensors': [s]}))))
         frames = sensor['array_evidence']['frames']
-        removable = [i for i, f in enumerate(frames) if f['selection_priority'] == 2]
-        if not removable and len(frames) > 4:
-            removable = [i for i, f in enumerate(frames) if f['selection_priority'] == 3]
-        if not removable:
-            break
+        removable = [i for i, f in enumerate(frames) if f['selection_priority'] == SPACED]
         # Preserve endpoint/extremum rows and spread remaining native coverage.
         remove = min(removable, key=lambda i: frames[i + 1]['time_s'] - frames[i - 1]['time_s'])
         del frames[remove]

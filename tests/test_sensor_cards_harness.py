@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from label import harness, sensor_cards
+from label import harness, policy, sensor_cards
 from label.dictionary_stage import output_spend
 from test_dispatch_integrity_v5 import options, provider_kind, response
 from test_label import _packed_episode
@@ -51,14 +51,14 @@ def test_a_failed_card_call_leaves_the_paid_annotation_current_after_a_code_chan
     calls = []
     install(monkeypatch, calls, lost if failure == 'unknown outcome' else (lambda: response('{"cards": []}')))
     if failure == 'spend cap':
-        monkeypatch.setattr(sensor_cards, 'MAX_TOKENS', 10 ** 6)   # the card reservation exceeds the cap; the final fits
+        monkeypatch.setattr(sensor_cards, 'ANSWER_TOKENS', 10 ** 6)   # the card reservation exceeds the cap; the final fits
     out = tmp_path / 'out'
     assert harness.run_batch([ep], out, **options()) == 0
     saved = json.loads((out / (ep.name + '.json')).read_text())
     assert saved['parse_ok'] is True and saved['evidence_inspection']['status'] == 'complete'
     assert saved['evidence_inspection']['limitations'] == []
     paid, before = output_spend(out), list(calls)
-    monkeypatch.setattr(sensor_cards, 'MAX_TOKENS', 16000)
+    monkeypatch.setattr(sensor_cards, 'ANSWER_TOKENS', 16000)
     source_edit(monkeypatch, 'label/run.py')
     assert harness.run_batch([ep], out, **options()) == 0
     assert not (out / ('stale_' + ep.name + '.json')).exists()
@@ -66,8 +66,9 @@ def test_a_failed_card_call_leaves_the_paid_annotation_current_after_a_code_chan
 
 
 def test_the_card_call_is_checked_against_what_the_final_call_billed_not_its_bound(tmp_path, monkeypatch):
-    # At this cap the final call's bound ($1.34) plus the card bound ($0.84) exceeds the cap, while the billed final
-    # ($0.003) plus the card bound fits easily: an unsettled final bound refused these cards.
+    # At this cap the final call's bound ($1.36) plus the card bound ($1.05) exceeds the cap, while the billed final
+    # ($0.003) plus the card bound fits easily: an unsettled final bound refused these cards. The cap also holds each
+    # selection reservation beside the final call's bound ($0.66 + $1.01).
     bounds = []
     real = harness.final_cost_bound
     def spy(content, max_tokens, **kw):
@@ -79,10 +80,10 @@ def test_the_card_call_is_checked_against_what_the_final_call_billed_not_its_bou
     calls = []
     install(monkeypatch, calls, lambda: response('{"cards": []}'))
     out = tmp_path / 'out'
-    assert harness.run_batch([ep], out, **{**options(), 'max_tokens': 12000, 'max_spend': 1.6}) == 0
+    assert harness.run_batch([ep], out, **{**options(), 'max_tokens': 12000, 'max_spend': 1.9}) == 0
     final_bound = max(v for t, v in bounds if t == 12000)
-    card_bound = next(v for t, v in bounds if t == sensor_cards.MAX_TOKENS)
-    assert final_bound + card_bound > 1.6 > output_spend(out) + card_bound
+    card_bound = next(v for t, v in bounds if t == policy.output_limit(sensor_cards.ANSWER_TOKENS, 'medium'))
+    assert final_bound + card_bound > 1.9 > output_spend(out) + card_bound
     assert 'cards' in calls
 
 
