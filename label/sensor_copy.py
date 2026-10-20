@@ -35,13 +35,15 @@ assert SHARED_RULE_V4 != SHARED_RULE_V3
 # had to decode. PLAIN_ENGLISH asks for what a person would say aloud, with every specific kept; the card prompt
 # (label/sensor_cards.py) uses the same sentence, so the annotation and the cards read in one voice.
 PLAIN_ENGLISH = (
-    'Write the headline and detail in plain English, the way a person watching would say it aloud, and keep every '
-    'specific the finding supports: which part, how many places on it, which way each one went, what it is compared '
-    'with and when in the action. Plain means ordinary words in whole sentences, never fewer facts. Never compress a '
-    'pattern into an abstract word such as concentrates, shifts, diverges, uneven, locally, returns or rebuilds; say '
+    'Write the headline and detail in plain English, the way a person watching would say it aloud. Plain means '
+    'ordinary words in whole sentences, never a vaguer claim: what you say keeps its specifics, such as which part, '
+    'how many places on it, which way each one went, what it is compared with and when in the action. Never compress '
+    'a pattern into an abstract word such as concentrates, shifts, diverges, uneven, locally, returns or rebuilds; say '
     'the thing it stands for, for example "two spots on the thumb press harder again while a third stays the same" '
     'rather than "thumb pressure returns locally". A component inside a named part is a spot on that part, counted '
-    'when there are several. ')
+    'when there are several. Measurement words such as reading, offset, average or component are not plain '
+    'English; say what the hand, pad or object did. Each sentence says one thing a person can take in at a glance, so '
+    'choose the one comparison that matters most rather than listing every spot and every step. ')
 SHARED_RULE_V5 = SHARED_RULE_V4.replace(
     'The headline says what changed in a few plain words. ',
     PLAIN_ENGLISH + 'The headline is one short sentence of at most eight words; when eight words cannot hold the '
