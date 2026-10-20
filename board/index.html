@@ -5290,11 +5290,12 @@ function setupSensorEvidence(E, seek, on, inspectContact, d = null, file = null,
     const delta = previousTime == null ? 0 : t - previousTime;
     if (delta < -1e-6 && explicitFindingIndex == null) chosenGrip = null;
     const allFindings = E.overlayFindings || E.insights || [];
-    const ended = media?.ended === true;
-    const available = ended ? [] : displayGripFindings(E, t, presentationWindows);
+    // The end of playback is the timeline's last moment, not an event: the cards and evidence shown are the ones the
+    // final frame's time calls for, so a card leaves only when its own window has passed.
+    const available = displayGripFindings(E, t, presentationWindows);
     const explicit = allFindings.find(f => f.findingIndex === chosenGrip) || (E.insights || []).find(f => f.findingIndex === chosenGrip);
     // A manual inspection follows its source interval, even after another onset replaces its automatic card.
-    if (!ended && explicit && explicit.start <= t && t <= explicit.end + 1e-6
+    if (explicit && explicit.start <= t && t <= explicit.end + 1e-6
         && !available.some(f => f.findingIndex === explicit.findingIndex))
       available.push({...explicit, phase: t <= explicit.end + 1e-6 ? 'Now' : 'Earlier'});
     available.sort((a, b) => Number(b.phase === 'Now') - Number(a.phase === 'Now')
@@ -5302,7 +5303,7 @@ function setupSensorEvidence(E, seek, on, inspectContact, d = null, file = null,
     currentCandidates = available;
     displayedGrip = available.find(f => f.findingIndex === chosenGrip) || available[0] || null;
     if (!available.some(f => f.findingIndex === chosenGrip)) chosenGrip = null;
-    const e = ended ? null : activeSensorEvidence(E, t);
+    const e = activeSensorEvidence(E, t);
     if (strip) {
       const key = JSON.stringify(available.map(f => [f.findingIndex, f.phase]));
       strip.hidden = !available.length;

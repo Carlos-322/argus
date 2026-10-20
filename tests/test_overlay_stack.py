@@ -247,7 +247,7 @@ wire.dispose();
     subprocess.run(['node', '-e', CARD_DOM + script, str(SOURCE), str(HERE / 'fixtures/overlapping_sensor_findings.json')], check=True)
 
 
-def test_sensor_overlays_end_with_encoded_media_before_declared_episode_end():
+def test_the_end_of_playback_keeps_the_cards_its_final_moment_calls_for():
     script = r"""
 const fs=require('fs'),assert=require('assert');
 const src=fs.readFileSync(process.argv[1],'utf8');
@@ -257,16 +257,19 @@ const doc={createElement,getElementById:id=>id==='grip-finding-overlay'?strip:nu
 const api=new Function('esc','fmtT','document',src.slice(begin,end)
  +'return {sensorEvidence,setupSensorEvidence};')(String,String,doc);
 const data={duration_s:4.2,sensor_evidence:{version:1,findings:[
+ {start_s:0.5,end_s:0.9,headline:'Early grip change',adds_beyond_video:true},
  {start_s:3.8,end_s:4.166001,headline:'Regional response falls',adds_beyond_video:true}]}};
 const original=JSON.stringify(data),media=new EventTarget();
 media.currentTime=4.182665;media.ended=false;
 const on=(el,type,fn)=>{if(el.addEventListener)el.addEventListener(type,fn);};
 const wire=api.setupSensorEvidence(api.sensorEvidence(data),()=>{},on,()=>{},data,null,()=>{},media);
-wire.sync(media.currentTime);assert(!strip.hidden,'the final short event receives its presentation minimum');
+const shown=()=>[...strip.querySelectorAll('[data-sensor-finding]')].map(c=>c.dataset.sensorFinding).sort();
+wire.sync(media.currentTime);assert.deepEqual(shown(),['1'],'the final short event receives its presentation minimum');
 media.ended=true;media.dispatchEvent(new Event('ended'));
-assert(strip.hidden,'encoded media end clears overlays even before the declared episode end');
-wire.sync(media.currentTime);assert(strip.hidden,'a late timeupdate cannot revive an ended overlay');
-media.ended=false;media.currentTime=0;wire.reset(0);assert(strip.hidden);
+assert.deepEqual(shown(),['1'],'the end of playback keeps the card the final frame shows');
+wire.sync(media.currentTime);assert.deepEqual(shown(),['1'],'a late timeupdate keeps the same card');
+assert.ok(!shown().includes('0'),'a card whose window closed long before the end stays gone');
+media.ended=false;media.currentTime=0;wire.reset(0);assert(strip.hidden,'replay starts from the timeline, not the last frame');
 wire.sync(3.9);assert(!strip.hidden,'replay and paused inspection still show their source event');
 assert.equal(JSON.stringify(data),original,'media state does not rewrite annotation timestamps');
 wire.dispose();
