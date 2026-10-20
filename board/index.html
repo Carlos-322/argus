@@ -4659,7 +4659,7 @@ function genericSensorPanelHtml(G, f) {
 function genericSensorMethodHtml(G) {
   if (!G || !G.generic) return '';
   return `<details class="se-method grip-method"><summary>Method and limits</summary>
-    <p>These findings use the video and the recorded sensor evidence supplied in the same annotation request. They have not been validated by a matched control or an accuracy study.</p>
+    <p>These findings use the video and sensor evidence supplied in their annotation requests. They have not been validated by a matched control or an accuracy study.</p>
     <p>Traces show recorded readings or the named computed measurement, each on its own fixed scale. Points mark supplied samples, without implying continuous measurements between them. Units and locations come from recorded descriptors and the data dictionary. Unknown units remain unknown. Zero codes are retained unless the source declares them invalid. Missing readings remain blank. A larger electrical reading does not establish a stronger squeeze.</p>
     ${(G.sensors || []).flatMap(s => (s.derivations || []).map(d => `<p><strong>${esc(s.name)}</strong><br>${esc(d.operation)}<br>${esc((d.reference || {}).method || '')}${d.provenance ? '<br>' + esc(d.provenance.authority || '') : ''}${(d.limitations || []).map(x => '<br>' + esc(x)).join('')}</p>`)).join('')}
     ${(G.limitations || []).map(x => `<p>${esc(x)}</p>`).join('')}

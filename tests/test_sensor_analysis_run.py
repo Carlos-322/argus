@@ -31,7 +31,10 @@ def execute(request, doc, path, call, **kwargs):
                model=harness.DEFAULT_MODEL, **kwargs)
 
 
-def test_received_response_is_durable_before_parser_and_reused_without_payment(tmp_path):
+@pytest.mark.parametrize('text', ['{"sensor_findings":[]}',
+                                '```json\n{"sensor_findings":[]}\n```',
+                                '```\n{"sensor_findings":[]}\n```'])
+def test_received_response_is_durable_before_parser_and_reused_without_payment(tmp_path, text):
     path = tmp_path / 'out' / '.evidence' / 'episode_a.json.inspection.json'
     doc, calls, settlements = ledger(), [], []
     def provider(parts):
@@ -41,16 +44,16 @@ def test_received_response_is_durable_before_parser_and_reused_without_payment(t
         assert saved['cost_usd'] == pytest.approx(.41)
         assert output_spend(path.parents[1]) == pytest.approx(.41)
         assert not output_spend_complete(path.parents[1])
-        return response()
+        return response(text)
     receipt = execute(REQUEST, doc, path, provider, reserve_dispatch=lambda bound: True,
                       settle_dispatch=lambda held, paid: settlements.append((held, paid)))
-    assert receipt['response'] == response() and receipt['response_text'] == '{"sensor_findings":[]}'
+    assert receipt['response'] == response(text) and receipt['response_text'] == text
     assert receipt['state'] == 'received'
     assert settlements == [(.4, .1)] and doc['cost_usd'] == pytest.approx(.11)
     assert output_spend(path.parents[1]) == pytest.approx(.11)
     assert output_spend_complete(path.parents[1])
     saved = path.read_bytes()
-    assert execute(REQUEST, ledger(), path, provider)['response'] == response()
+    assert execute(REQUEST, ledger(), path, provider)['response'] == response(text)
     assert len(calls) == 1 and path.read_bytes() == saved
     out = path.parents[1]
     (out / 'noreply_episode_a.json').write_text(json.dumps({

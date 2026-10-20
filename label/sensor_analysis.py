@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 
 from label import regional_analysis, sensor_copy, sensor_evidence as se
 
@@ -92,21 +93,24 @@ def build(content, sensor_doc, *, config, ep=None):
             'omitted_series_ids': [r['id'] for r in sensor_doc.get('series') or [] if not r.get('derivation_id')]}
 
 
+def parse_response(text):
+    """Read a complete regional reply identically on receipt, resume and rebind."""
+    if not isinstance(text, str):
+        raise ValueError('Regional sensor analysis has no retained response text')
+    fenced = re.fullmatch(r'\s*```(?:json)?\s*(.*?)\s*```\s*', text, re.S)
+    labels = json.loads(fenced.group(1) if fenced else text)
+    if not isinstance(labels, dict) or not isinstance(labels.get('sensor_findings'), list):
+        raise ValueError('Regional sensor analysis must return a sensor_findings array')
+    return labels
+
+
 def bind(request, receipt):
     """Only the exact regional request may authorize this pass's findings."""
     if request.get('digest') != _digest(request) or receipt.get('digest') != request['digest']:
         raise ValueError('Regional sensor analysis request proof changed')
     if receipt.get('state') != 'received' or receipt.get('finish_reason') != 'stop':
         raise ValueError('Regional sensor analysis has no complete received response')
-    text = receipt.get('response_text')
-    if not isinstance(text, str):
-        raise ValueError('Regional sensor analysis has no retained response text')
-    text = text.strip()
-    if text.startswith('```') and text.endswith('```'):
-        text = text.split('\n', 1)[1].rsplit('```', 1)[0]
-    labels = json.loads(text)
-    if not isinstance(labels, dict) or not isinstance(labels.get('sensor_findings'), list):
-        raise ValueError('Regional sensor analysis must return a sensor_findings array')
+    labels = parse_response(receipt.get('response_text'))
     result = se.bind(request['sensor_evidence'], labels['sensor_findings'],
                      copy_contract_version=request.get('copy_contract_version'))
     provenance = {'model': receipt.get('model'), 'generation_id': receipt.get('generation_id'),

@@ -15,16 +15,15 @@ CAP_NOTE = 'Sensor analysis exceeds the remaining batch spend cap.'
 
 
 def _received(receipt):
+    from label.sensor_analysis import parse_response
     if receipt.get('cost_is_conservative_estimate'):
         raise ValueError('Sensor analysis charge is unresolved; no automatic retry.')
     if receipt.get('finish_reason') != 'stop':
         raise ValueError('Sensor analysis response is incomplete; no automatic retry.')
     try:
-        answer = json.loads(receipt.get('response_text') or '')
+        parse_response(receipt.get('response_text'))
     except (ValueError, TypeError) as error:
         raise ValueError('Sensor analysis response is not a complete JSON object; no automatic retry.') from error
-    if not isinstance(answer, dict):
-        raise ValueError('Sensor analysis response is not a JSON object; no automatic retry.')
     return copy.deepcopy(receipt)
 
 
