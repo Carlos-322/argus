@@ -2,8 +2,9 @@
 VERSION = 2
 SHARED_RULE = (
     'Use detail as the shared explanation in the findings list and on video: one or two short sentences, no more than 45 words. '
-    'State the supported added information, including any useful comparison, and only the uncertainty essential to read it correctly. '
-    'Headline and detail appear together, so avoid repeating the headline. Put supporting measurement lists, component IDs and detailed technical limitations in observation and alternative. A compact task-relevant quantity may remain in detail when it explains the finding.')
+    'Headline and detail must together preserve every substantive qualitative conclusion in claim, including each comparison or temporal relationship. '
+    'Do not leave the added inference only in claim or observation. Include only the uncertainty essential to read it correctly. '
+    'Headline and detail appear together, so avoid repeating the headline. Put supporting measurement lists, component IDs and detailed technical limitations in observation and alternative. A compact task-relevant quantity may remain in detail when it explains the finding. Use plain hyphens rather than typographic dashes.')
 SENSOR_RULE = (
     'Also provide overlay_detail: one short sentence explaining the added information and any uncertainty needed to read the headline correctly. '
     'Headline and overlay_detail appear together on video, so avoid redundant wording and keep them readable at a glance. '
