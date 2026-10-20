@@ -1285,7 +1285,7 @@ aside.left .cam-row-grippers.cam-main-scene:has(.sensor-overlay-stack) .cam-cell
 .key-ev .ke-body { min-width: 0; }
 .key-ev .ke-row1 { display: flex; align-items: baseline; gap: 10px; justify-content: space-between; }
 .key-ev .ke-kind { display: inline-block; margin-right: 8px; padding: 1px 7px; border-radius: var(--r-pill);
-  font-family: var(--mono); font-size: 10px; font-weight: 600; color: var(--fg-2); border: 1px solid var(--line);
+  font-family: var(--mono); font-size: 10px; font-weight: 600; color: var(--fg-2); border: 1px solid var(--border);
   vertical-align: 1px; }
 .key-ev .ke-kind.sub { background: var(--fg); color: var(--bg, #fff); border-color: var(--fg); }
 .key-ev .ke-label { color: var(--fg); font-size: 13px; line-height: 1.4; }
@@ -1631,20 +1631,20 @@ h3.section .count {
 /* the Quality section: Execution and Outcome are two boxes side by side, each its score over a grid of cells, and
    Subgoals is a table in a box of its own; every box has the same header, the same cell and the same bar */
 .qual { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.qual-box { border: 1px solid var(--line); border-radius: var(--r-md); background: var(--panel, #fff); overflow: hidden; }
+.qual-box { border: 1px solid var(--border); border-radius: var(--r-md); background: var(--raised); overflow: hidden; }
 .qual-box.wide { grid-column: 1 / -1; }
 .qual-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
-  padding: 12px 14px 10px; border-bottom: 1px solid var(--line); }
+  padding: 12px 14px 10px; border-bottom: 1px solid var(--row-divider); }
 .qual-title { font-size: 14px; font-weight: 600; color: var(--fg); }
 .qual-score { font-family: var(--mono); font-size: 24px; font-weight: 700; line-height: 1; }
 .qual-score small { font-size: 12px; font-weight: 600; color: var(--fg-2); margin-left: 2px; }
-.qual-headbar { padding: 0 14px 12px; border-bottom: 1px solid var(--line); }
+.qual-headbar { padding: 0 14px 12px; border-bottom: 1px solid var(--row-divider); }
 /* every bar is drawn against its full track to 10, so a short fill reads as a share of the whole */
 .qual-bar { display: block; height: 8px; border-radius: 4px; background: rgba(0,0,0,0.10);
   box-shadow: inset 0 0 0 1px rgba(0,0,0,0.06); overflow: hidden; }
 .qual-bar i { display: block; height: 100%; background: var(--fg); }
 .qual-cells { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.qual-cell { padding: 10px 14px 12px; border-right: 1px solid var(--line); min-width: 0; }
+.qual-cell { padding: 10px 14px 12px; border-right: 1px solid var(--row-divider); min-width: 0; }
 .qual-cell:last-child { border-right: 0; }
 .qual-cell .qc-k { font-size: 11px; color: var(--fg-2); font-weight: 600; }
 .qual-cell .qc-v { font-family: var(--mono); font-size: 17px; font-weight: 700; margin: 3px 0 6px; }
@@ -1654,8 +1654,8 @@ h3.section .count {
 .qual-cell .qc-word { font-family: var(--sans, inherit); font-size: 14px; font-weight: 600; }
 .qual-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .qual-table th { text-align: left; font-size: 11px; font-weight: 600; color: var(--fg-2); padding: 8px 14px;
-  border-bottom: 1px solid var(--line); white-space: nowrap; }
-.qual-table td { padding: 8px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  border-bottom: 1px solid var(--row-divider); white-space: nowrap; }
+.qual-table td { padding: 8px 14px; border-bottom: 1px solid var(--row-divider); vertical-align: middle; }
 .qual-table tr:last-child td { border-bottom: 0; }
 .qual-table .num { font-family: var(--mono); text-align: right; white-space: nowrap; }
 
@@ -1663,10 +1663,10 @@ h3.section .count {
 .qual-table .qt-score b { font-family: var(--mono); text-align: right; }
 .qual-table { table-layout: fixed; }
 .qual-table .qt-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.qual-box.folds .ck-all-in .qual-table tr:first-child td { border-top: 1px solid var(--line); }
+.qual-box.folds .ck-all-in .qual-table tr:first-child td { border-top: 1px solid var(--row-divider); }
 .qual-box.open .ck-all { grid-template-rows: 1fr; }
 .qual-box.open .ck-all-in { opacity: 1; }
-.qual-box .qual-more { margin: 0; padding: 10px 14px; border-top: 1px solid var(--line); width: 100%; text-align: left; }
+.qual-box .qual-more { margin: 0; padding: 10px 14px; border-top: 1px solid var(--row-divider); width: 100%; text-align: left; }
 .qual-table tr[data-t] { cursor: pointer; }
 .qual-table tr[data-t]:hover td { background: var(--hover, rgba(0,0,0,0.03)); }
 @media (max-width: 900px) { .qual { grid-template-columns: 1fr; } }
