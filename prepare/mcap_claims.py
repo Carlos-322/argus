@@ -4,8 +4,6 @@ import re
 from pathlib import PurePosixPath
 from collections.abc import Mapping
 
-UPLOAD = None
-
 
 def snapshot(value):
     """Copy protobuf defaults too, so an explicit source false remains false."""

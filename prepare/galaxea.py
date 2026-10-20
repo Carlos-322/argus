@@ -37,8 +37,6 @@ from prepare import cli
 from prepare import hub
 from label.presented import presented_pts
 
-# Uploads use structural LeRobot fields. Published preparation and sampling stay available here.
-UPLOAD = None
 GALAXEA_COLUMNS = ("observation.state.left_arm", "observation.state.right_arm", "observation.state.left_gripper",
                    "observation.state.right_gripper", "coarse_task_index", "task_index", "quality_index")
 
@@ -79,21 +77,6 @@ def meta_from(get, folder: str) -> dict:
     eps = [json.loads(s) for s in lines if s.strip()]
     info = json.loads(get("meta/info.json").read_text())
     return {"folder": folder, "tasks": tasks, "episodes": eps, "info": info}
-
-
-def recognizes(r: dict) -> bool:
-    """A LeRobot dataset (prepare/formats.py read_root) in Galaxea's layout."""
-    return all(k in (r.get("features") or {}) for k in GALAXEA_COLUMNS)
-
-
-def convert_upload(item: dict, rig: str, out: Path, dataset: str) -> dict:
-    from prepare import formats
-    root = Path(item["root"]["dir"])
-    get = lambda rel: formats.inside(root, root / rel)
-    meta = meta_from(get, item["root"]["rel"] or root.name)
-    eidx = int(item["row"]["eidx"])
-    ep = next(e for e in meta["episodes"] if int(e["episode_index"]) == eidx)
-    return write_episode(meta, ep, get, out / (item.get("output_name") or formats.episode_name(item["name"])), dataset)
 
 
 def episode_dir_name(folder: str, index: int) -> str:

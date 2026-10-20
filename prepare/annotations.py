@@ -5,7 +5,6 @@ import math
 from pathlib import Path
 
 
-UPLOAD = None
 BOOKKEEPING_COLUMNS = frozenset({'frame_index', 'episode_index', 'index', 'timestamp'})
 SCOPE_FILES = ('info.json', 'metadata.json', 'dataset.json', 'meta/info.json')
 DESCRIPTION_FIELDS = ('dataset_note', 'dataset_description', 'description', 'collection_note')

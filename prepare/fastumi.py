@@ -29,9 +29,6 @@ from prepare import cli
 from prepare import hub
 from label.presented import presented_pts
 
-# Data Review and python -m prepare folder hand an upload to an adapter that recognizes it (prepare/formats.py
-# upload_adapters); this one reads only the published dataset
-UPLOAD = None
 
 REPO = "IPEC-COMMUNITY/FastUMI_100k_lerobot"
 CAMS = {"observation.images.left_camera_rgb_image": ("left", "left"),

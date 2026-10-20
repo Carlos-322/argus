@@ -45,9 +45,6 @@ from prepare import cli
 from prepare import hub
 from prepare.formats import scalar
 
-# Data Review and python -m prepare folder hand an upload to an adapter that recognizes it (prepare/formats.py
-# upload_adapters); this one reads only the published dataset
-UPLOAD = None
 
 REPO = "allenai/MolmoAct2-BimanualYAM-Dataset"
 CAM_TO_VIEW = {"top": "exo", "left": "left", "right": "right"}
