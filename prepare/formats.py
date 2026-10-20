@@ -2267,12 +2267,13 @@ def state_units(metadata: dict, names: list[str] | None, dims: int) -> list[str 
     return result
 
 
-def physical_state_layout(dims: int, rig: str, names=None, *, metadata=None, value_roles=None):
-    """Canonical physical state needs units as well as explicit roles and ordered axes."""
+def physical_state_layout(dims: int, rig: str, names=None, *, metadata=None, value_roles=None, conversion=None):
+    """Canonical physical state needs units as well as explicit roles and ordered axes. conversion is the record of
+    columns converted from degrees (joint_degrees), whose names may still say their source unit (unit_names)."""
     kind, note = state_layout(dims, rig, names, value_roles=value_roles)
     if kind == "none":
         return kind, note
-    units = state_units(metadata or {}, names, dims)
+    units = state_units(metadata or {}, unit_names(names, conversion), dims)
     expected = ["rad"] * 6 if kind == "joints" else ["m"] * 3 + ["rad"] * 3
     if any(units[offset + i] != unit for offset in range(0, dims, 7) for i, unit in enumerate(expected)):
         return "none", ("Kinematic checks unavailable: physical state units are undeclared, conflicting, or outside "
@@ -2284,28 +2285,35 @@ DEGREE_UNITS = {"deg", "degree", "degrees"}
 DEGREE_EVIDENCE_JOINTS = 3     # of an arm's six joints that must read past one turn in radians
 
 
-def joint_degrees(readings, names, roles, units, rig) -> dict | None:
-    """The joint columns of a joint state (state_layout "joints") that hold degrees, and why: declared as degrees by the
-    column metadata, or declared in no unit with readings only degrees explain. Radians are never more than one turn
-    for most of an arm's joints, so at least DEGREE_EVIDENCE_JOINTS of each arm's six joints reading beyond 2 pi, with
-    every joint within two turns of degrees (720), tells degrees from radians; readings that do not, a radian or other
-    declared unit, conflicting units, or names that carry their own unit leave the state as it was (None)."""
+def unit_names(names, conversion):
+    """The names a state's units are read from (state_units): a column converted from degrees (joint_degrees) may say
+    its source unit in its name (joint1_deg), which the conversion records, so its unit is read from its converted unit
+    alone. Anything but a well formed degree conversion changes nothing."""
+    if not names or not isinstance(conversion, dict) or conversion.get("from") != "deg" \
+            or conversion.get("to") != "rad" or not isinstance(conversion.get("columns"), list):
+        return names
+    converted = {c for c in conversion["columns"] if type(c) is int}
+    return ["" if i in converted and state_units({}, [name], 1)[0] in DEGREE_UNITS else name
+            for i, name in enumerate(names)]
+
+
+def _joint_columns(readings, names, roles, rig) -> list[int] | None:
+    """The six joint columns of each arm of a joint state (state_layout "joints"), else None."""
     if readings is None or getattr(readings, "ndim", 0) != 2:
         return None
     dims = readings.shape[1]
     if not names or len(names) != dims or state_layout(dims, rig, names, value_roles=roles)[0] != "joints":
         return None
-    columns = [offset + i for offset in range(0, dims, 7) for i in range(6)]
-    if any(state_units({}, [names[c]], 1)[0] is not None for c in columns):
-        return None                    # the name says its unit; a converted value would contradict it
-    declared = [units[c] for c in columns]
-    if all(unit in DEGREE_UNITS for unit in declared):
-        return {"from": "deg", "to": "rad", "columns": columns, "basis": "declared"}
-    if any(unit is not None for unit in declared):
-        return None
+    return [offset + i for offset in range(0, dims, 7) for i in range(6)]
+
+
+def degree_evidence(readings, columns) -> list[int] | None:
+    """How many of each arm's six joints read beyond one turn, when the readings prove degrees, else None. Radians are
+    never more than one turn for most of an arm's joints, so at least DEGREE_EVIDENCE_JOINTS of each arm's six joints
+    reading beyond 2 pi, with every joint within two turns of degrees (720), tells degrees from radians."""
     values = np.abs(np.asarray(readings, dtype=float)[:, columns])
     values[~np.isfinite(values)] = np.nan
-    if np.isnan(values).all(axis=0).any():
+    if not len(values) or np.isnan(values).all(axis=0).any():
         return None
     peak = np.nanmax(values, axis=0)
     beyond = []
@@ -2314,7 +2322,61 @@ def joint_degrees(readings, names, roles, units, rig) -> dict | None:
         if int(np.sum(arm > 2 * np.pi)) < DEGREE_EVIDENCE_JOINTS or bool(np.any(arm > 720)):
             return None
         beyond.append(int(np.sum(arm > 2 * np.pi)))
+    return beyond
+
+
+def joint_degrees(readings, names, roles, units, rig) -> dict | None:
+    """The joint columns of a joint state (state_layout "joints") that hold degrees, and why: declared as degrees by the
+    column metadata or by the names themselves (joint1_deg; units are state_units', which read both), or declared in
+    no unit with readings only degrees explain (degree_evidence). Readings that do not, a radian or other declared
+    unit, or conflicting units leave the state as it was (None)."""
+    columns = _joint_columns(readings, names, roles, rig)
+    if columns is None:
+        return None
+    declared = [units[c] for c in columns]
+    if all(unit in DEGREE_UNITS for unit in declared):
+        return {"from": "deg", "to": "rad", "columns": columns, "basis": "declared"}
+    if any(unit is not None for unit in declared):
+        return None
+    beyond = degree_evidence(readings, columns)
+    if beyond is None:
+        return None
     return {"from": "deg", "to": "rad", "columns": columns, "basis": "readings", "joints_beyond_one_turn": beyond}
+
+
+def qualified_state(readings, names, roles, units, rig, source: str):
+    """The one rule every reader (LeRobot, HDF5, MCAP) qualifies a recorded state or command array by, before it may
+    join kinematic checks: (kind, note, readings, units, conversion). units are the array's declared units
+    (state_units, which reads the metadata and the names). Joints in degrees, declared or proven by the readings
+    (joint_degrees), are converted to radians and the conversion is returned for the contract; the layout and units
+    are then checked (physical_state_layout). A kind of "none" returns the readings and units as recorded; source
+    names the array."""
+    dims = readings.shape[1] if readings is not None and getattr(readings, "ndim", 0) == 2 else len(units or [])
+    degrees = joint_degrees(readings, names, roles, units, rig)
+    converted, converted_units = in_radians(readings, units, degrees)
+    kind, note = physical_state_layout(dims, rig, names, value_roles=roles, metadata={"units": converted_units},
+                                       conversion=degrees)
+    if kind == "none":
+        return kind, note, readings, units, None
+    return kind, None, converted, converted_units, degrees
+
+
+def joined_conversion(conversions: list, widths: list[int]) -> dict | None:
+    """One record of the columns converted from degrees across arrays joined side by side (each widths wide, in
+    order), from each array's own (qualified_state), or None when none was converted."""
+    columns, bases, beyond, offset = [], [], [], 0
+    for conversion, width in zip(conversions, widths):
+        if conversion:
+            columns += [offset + c for c in conversion["columns"]]
+            bases.append(conversion["basis"])
+            beyond += conversion.get("joints_beyond_one_turn") or []
+        offset += width
+    if not columns:
+        return None
+    out = {"from": "deg", "to": "rad", "columns": columns, "basis": " and ".join(sorted(set(bases)))}
+    if beyond:
+        out["joints_beyond_one_turn"] = beyond
+    return out
 
 
 def in_radians(readings, units, degrees):
@@ -2355,9 +2417,7 @@ def qualified_lerobot_action(action, features, columns, rig, kind):
         names.extend(named)
         roles.extend(["gripper" if dims == 1 and column.endswith("_gripper") else None] * dims)
     units = state_units(lerobot_state_units(features, columns, "action"), names, action.shape[1])
-    degrees = joint_degrees(action, names, roles, units, rig)
-    action, units = in_radians(action, units, degrees)
-    action_kind, _ = physical_state_layout(action.shape[1], rig, names, value_roles=roles, metadata={"units": units})
+    action_kind, _, action, units, degrees = qualified_state(action, names, roles, units, rig, "action")
     return (action, units, degrees) if action_kind == kind else (None, None, None)
 
 
@@ -2377,24 +2437,22 @@ def lerobot_preparation_contract(kind, names, roles, features, columns, action, 
         command = declared_contract("prepare.formats:lerobot", kind, action_names,
                                     action_units if action_units is not None else
                                     state_units(lerobot_state_units(features, action_columns, "action"),
-                                                action_names, len(action_names)), action_roles)
-        if action_degrees is not None:
-            command["unit_conversion"] = action_degrees
+                                                action_names, len(action_names)), action_roles,
+                                    unit_conversion=action_degrees)
         semantics = [source_action_semantics(features.get(column), 'prepare.formats:lerobot')
                      for column in action_columns or ['action']]
         if semantics and semantics[0] is not None and all(item == semantics[0] for item in semantics):
             command['action_semantics'] = semantics[0]
     contract = declared_contract("prepare.formats:lerobot", kind, names,
                                  units if units is not None else
-                                 state_units(lerobot_state_units(features, columns), names, len(names)), roles, command)
-    if degrees is not None:
-        contract["unit_conversion"] = degrees
+                                 state_units(lerobot_state_units(features, columns), names, len(names)), roles, command,
+                                 unit_conversion=degrees)
     return contract
 
 
 
 def lerobot_physical_state(state, action, rig, names, roles, features, columns, action_columns, native_adapter=None):
-    """Use the selected producer's native contract or qualify the original generic column metadata."""
+    """Use the selected producer's native contract or qualify the original generic column metadata (qualified_state)."""
     if native_adapter is not None:
         # HABIT's writer knows its two seven-value Cartesian arm blocks and matching native commands.
         # This argument comes from the selected adapter, never source dataset/robot strings.
@@ -2407,11 +2465,7 @@ def lerobot_physical_state(state, action, rig, names, roles, features, columns, 
         return "ee_pose", None, state, action, native_contract("habit", "ee_pose", features.get('action'))
     dims = state.shape[1] if state is not None else 0
     units = state_units(lerobot_state_units(features, columns), names, dims)
-    degrees = joint_degrees(state, names, roles, units, rig)
-    state, units = in_radians(state, units, degrees)
-    kind, note = physical_state_layout(dims, rig, names, value_roles=roles, metadata={"units": units})
-    if kind == "none":
-        degrees = None
+    kind, note, state, units, degrees = qualified_state(state, names, roles, units, rig, "observation.state")
     action, action_units, action_degrees = qualified_lerobot_action(action, features, action_columns, rig, kind)
     proof = lerobot_preparation_contract(kind, names, roles, features, columns, action, action_columns, units,
                                          action_units, degrees, action_degrees) if kind != "none" else None
@@ -8157,7 +8211,16 @@ def h5_state(signals: Signals, rig: str, q: np.ndarray, files: list[str] | None 
                     rows[~ok, angles] = Slerp(q[ok], rotations)(missing_times).as_euler("xyz")
             rows[ok] = a[ok]  # Recorded rows keep their original angular representation.
         return rows, (gap_words(gap, q[0]) if gap else None)
-    notes, read, failed, filled_at = [], [], {}, {}
+    notes, read, failed, filled_at, qualified = [], [], {}, {}, {}
+
+    def qualify(k):
+        # each state or command array by the one rule every reader qualifies them by (qualified_state), once
+        if k not in qualified:
+            values = np.asarray(signals[k], dtype=np.float64)
+            value_names = (meta.get(k) or {}).get("names")
+            qualified[k] = qualified_state(values, value_names, None,
+                                           state_units(meta.get(k) or {}, value_names, values.shape[1]), rig, k)
+        return qualified[k]
     source_claims = {name: physical(name) if H5_JOINT_ACTION.search(physical(name)) else name for name in cands}
 
     def unsided(name):
@@ -8209,7 +8272,7 @@ def h5_state(signals: Signals, rig: str, q: np.ndarray, files: list[str] | None 
                             "a 6D pose and an opening per gripper.") + f" The recorded state is the HDF5 array {name}.",
                  "layout")
             continue
-        kind, note = physical_state_layout(dims, rig, names, metadata=meta.get(name))
+        kind, note, a, _, _ = qualify(name)
         if kind == "none":
             fail(name, f"{note} The recorded state is the HDF5 array {name}." if note else None, "layout")
             continue
@@ -8243,9 +8306,7 @@ def h5_state(signals: Signals, rig: str, q: np.ndarray, files: list[str] | None 
         side = side_of(name) if len(arms) > 1 else None
         return next((k for k in signals if H5_ACTION_NAME.search(own(k)) and np.shape(signals[k]) == shape
                      and (side is None or side_of(k) == side)
-                     and physical_state_layout(shape[1], rig, (meta.get(k) or {}).get("names"),
-                                               metadata=meta.get(k))[0] == state_layout(
-                                                   shape[1], rig, meta.get(name, {}).get("names"))[0]
+                     and qualify(k)[0] == state_layout(shape[1], rig, meta.get(name, {}).get("names"))[0]
                      and (meta.get(k) or {}).get("aligned_by") not in (COARSE_CLOCK, ALIGNED_CAMERA)
                      and not (meta.get(k) or {}).get("clock_problem")
                      and filled(np.asarray(signals[k], dtype=np.float64),
@@ -8255,6 +8316,7 @@ def h5_state(signals: Signals, rig: str, q: np.ndarray, files: list[str] | None 
         return None, None, None, None, StateNote(
             "Recorded state groups do not share one supported physical layout; original values remain signals.", "layout")
     acts = [command(name, a.shape) for name, a, _ in arms]
+    arm_dims = [a.shape[1] for _, a, _ in arms]
     if identity_ctx is not None:
         record_state_groups(identity_ctx, [(source_claims[name], nm, a.shape[1]) for name, a, nm in arms])
         from prepare.state_contract import declared_contract, source_action_semantics
@@ -8262,20 +8324,23 @@ def h5_state(signals: Signals, rig: str, q: np.ndarray, files: list[str] | None 
         command = None
         if all(acts):
             action_names = [value for key in acts for value in meta[key]["names"]]
-            action_units = [unit for key in acts for unit in state_units(
-                meta[key], meta[key]["names"], len(meta[key]["names"]))]
-            command = declared_contract("prepare.formats:hdf5", kind, action_names, action_units)
+            action_units = [unit for key in acts for unit in qualify(key)[3]]
+            command = declared_contract("prepare.formats:hdf5", kind, action_names, action_units,
+                                        unit_conversion=joined_conversion([qualify(key)[4] for key in acts], arm_dims))
             semantics = [source_action_semantics(meta[key], 'prepare.formats:hdf5') for key in acts]
             if semantics[0] is not None and all(item == semantics[0] for item in semantics):
                 command['action_semantics'] = semantics[0]
-        units = [unit for name, values, names in arms for unit in state_units(meta[name], names, values.shape[1])]
+        units = [unit for name, _, _ in arms for unit in qualify(name)[3]]
         identity_ctx["state_contract"] = declared_contract(
-            "prepare.formats:hdf5", kind, combined_names, units, action=command)
+            "prepare.formats:hdf5", kind, combined_names, units, action=command,
+            unit_conversion=joined_conversion([qualify(name)[4] for name, _, _ in arms], arm_dims))
     action = None
     if all(acts):
         action = np.concatenate([
-            filled(np.asarray(signals.pop(k), dtype=np.float64),
-                   state_layout(len(meta[k]["names"]), rig, meta[k]["names"])[0])[0] for k in acts], axis=1)
+            filled(qualify(k)[2], state_layout(len(meta[k]["names"]), rig, meta[k]["names"])[0])[0] for k in acts],
+            axis=1)
+        for k in acts:
+            signals.pop(k)
     for name, _, _ in arms:
         signals.pop(name)
         if name in filled_at and hasattr(signals, "issues"):
@@ -9910,11 +9975,30 @@ def compose_mcap_arms(streams: dict, q: np.ndarray, clock: str) -> dict:
     return out
 
 
+def qualify_arm_stream(streams: dict, key: str) -> tuple[str, str | None]:
+    """(kind, note) of one arm channel by the rule every reader qualifies a state by (qualified_state). A channel
+    whose joints are in degrees is replaced in streams by its readings in radians, with its converted units and the
+    record of the conversion (unit_conversion), so the state, the action and the contract (record_joint_state_identity)
+    all read it converted."""
+    stream = streams[key]
+    names = stream.get("names")
+    if stream.get("unit_conversion") is not None:          # converted when it was qualified before
+        return physical_state_layout(stream["pos"].shape[1], "teleop_arms", names, metadata=stream,
+                                     conversion=stream["unit_conversion"])
+    kind, note, pos, units, conversion = qualified_state(
+        stream["pos"], names, None, state_units(stream, names, stream["pos"].shape[1]), "teleop_arms",
+        _topic(streams, key))
+    if conversion is not None:
+        streams[key] = {**stream, "pos": pos, "units": units, "unit_conversion": conversion}
+    return kind, note
+
+
 def joint_state(streams: dict, q: np.ndarray, *, clock: str | None = None) -> tuple[np.ndarray | None, np.ndarray | None, StateNote | None]:
     """(state, action, note): the arms' joints and grippers interpolated onto the anchor camera's frame times q (the
     same clock as the streams), 7 values per arm, left arm first; the leader or command channels, when they match, as
     the action. None with a note when the streams are not a layout the checks read ("layout") or an arm does not
-    cover the footage ("short", StateNote)."""
+    cover the footage ("short", StateNote). Each arm channel is qualified as every reader's state is
+    (qualify_arm_stream)."""
     st, act = arm_streams(streams, False), arm_streams(streams, True)
     if not st:
         return None, None, None
@@ -9934,8 +10018,7 @@ def joint_state(streams: dict, q: np.ndarray, *, clock: str | None = None) -> tu
                                      "and a gripper per arm.", "layout")
     for s in order:
         # the channel's own value names settle six joints and a gripper against seven joints (a Franka arm)
-        kind, why = physical_state_layout(JOINT_DIMS, "teleop_arms", streams[st[s]].get("names"),
-                                          metadata=streams[st[s]])
+        kind, why = qualify_arm_stream(streams, st[s])
         if kind != "joints":
             return None, None, StateNote(why or ("Labelled from the cameras, because the recorded arm channels name "
                                                  "their values as a pose, not six joints and a gripper."), "layout")
@@ -9972,8 +10055,7 @@ def joint_state(streams: dict, q: np.ndarray, *, clock: str | None = None) -> tu
     state = np.concatenate([r for r, _ in rows], axis=1)
     action = None
     if all(s in act and streams[act[s]]["pos"].shape[1] == JOINT_DIMS and covers(act[s])
-           and physical_state_layout(JOINT_DIMS, "teleop_arms", streams[act[s]].get("names"),
-                                     metadata=streams[act[s]])[0] == "joints"
+           and qualify_arm_stream(streams, act[s])[0] == "joints"
            and coarse_rows(streams[act[s]]["t"])[1] is None and not streams[act[s]].get("clock_errors")
            and (not clock or streams[act[s]].get("clocks", {clock}) == {clock}) for s in order):
         cmd = [fill(act[s])[0] for s in order]
@@ -10038,14 +10120,19 @@ def record_joint_state_identity(ctx: dict, streams: dict) -> None:
                               for k in keys])
     from prepare.state_contract import declared_contract
     def contract(selected):
+        # a channel joint_state converted from degrees carries its converted units and the record (qualify_arm_stream)
         names = [name for key in selected for name in streams[key]["names"]]
         units = [unit for key in selected for unit in state_units(
-            streams[key], streams[key]["names"], streams[key]["pos"].shape[1])]
-        return declared_contract("prepare.formats:mcap-joints", "joints", names, units)
+            streams[key], unit_names(streams[key]["names"], streams[key].get("unit_conversion")),
+            streams[key]["pos"].shape[1])]
+        conversion = joined_conversion([streams[key].get("unit_conversion") for key in selected],
+                                       [streams[key]["pos"].shape[1] for key in selected])
+        return declared_contract("prepare.formats:mcap-joints", "joints", names, units, unit_conversion=conversion)
     commands = arm_streams(streams, True)
     action_keys = [commands.get(side) for side in joint_state_order(arms)]
     command = contract(action_keys) if all(key and physical_state_layout(
-        streams[key]["pos"].shape[1], "teleop_arms", streams[key].get("names"), metadata=streams[key])[0] == "joints"
+        streams[key]["pos"].shape[1], "teleop_arms", streams[key].get("names"), metadata=streams[key],
+        conversion=streams[key].get("unit_conversion"))[0] == "joints"
         for key in action_keys) else None
     ctx["state_contract"] = contract(keys)
     if command is not None:
