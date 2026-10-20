@@ -169,12 +169,12 @@ def test_requested_prompt_contract_reaches_both_outputs_and_legacy_stays_legacy(
     legacy = copy.deepcopy(doc)
     legacy.pop('copy_contract_version', None)
     assert 'overlay_detail' in se.prompt(legacy)
-    for version in (None, 2, 3, 999):
+    for version in (None, 2, 3, 4, 999):
         access = ea.Access(ep, plan={'n': 5}, copy_contract_version=version)
         parts, _, _ = ea.final_content([], 0, access, access.record(), [],
             image_limit=100, image_bytes_limit=100000, image_inflation=1)
         text = '\n'.join(p['text'] for p in parts)
-        assert ('overlay_detail' not in text) is (version in (2, 3))
+        assert ('overlay_detail' not in text) is (version in (2, 3, 4))
 
 
 @pytest.mark.parametrize('version', [None, 999])
@@ -183,6 +183,24 @@ def test_legacy_prompt_assembly_remains_byte_exact(tmp_path, version):
     doc['copy_contract_version'] = version
     assert hashlib.sha256(se.prompt(doc).encode()).hexdigest() == 'bdcf39d931f15892247af03e856543e656da895ecec6c8a5d89b959d31d594f0'
     assert hashlib.sha256(ea.final_prompt(version).encode()).hexdigest() == 'f5d6e5f73362a487085e3dad574d22a8183b96271a8d7652f8ae881710797d20'
+
+
+def test_version_3_prompts_stay_byte_exact_so_saved_requests_remain_reproducible(tmp_path):
+    doc = se.build(source(tmp_path), {'n': 5})
+    doc['copy_contract_version'] = 3
+    assert hashlib.sha256(se.prompt(doc).encode()).hexdigest() == 'a5372068cf1259088c0e052a75b728a4899d784bd7e8d93781a30cdc23449e1b'
+    assert hashlib.sha256(ea.final_prompt(3).encode()).hexdigest() == '611b01fcae96c133ad4679255832381f4e1becc38c70b51b5e3eee1a87b10143'
+
+
+def test_version_4_keeps_limits_off_the_card_and_words_an_undeclared_direction_as_rose_or_fell(tmp_path):
+    doc = se.build(source(tmp_path), {'n': 5})
+    doc['copy_contract_version'] = 4
+    text = se.prompt(doc)
+    assert sensor_copy.SHARED_RULE_V4 in text and 'say what rose or fell' in text
+    assert sensor_copy.V4_LIMITS in text and sensor_copy.LEGACY_LIMITS_LEAD not in text
+    assert sensor_copy.LEGACY_LIMITS_MAPPING not in text
+    inspection = ea.final_prompt(4)
+    assert sensor_copy.V4_LIMITS in inspection and sensor_copy.LEGACY_LIMITS_MAPPING not in inspection
 
 
 def test_new_request_saves_the_copy_contract_it_actually_supplies(tmp_path):
@@ -197,7 +215,7 @@ def test_new_request_saves_the_copy_contract_it_actually_supplies(tmp_path):
         reasoning='high', api_key='offline', max_tokens=128, timeout=1, cell_w=128, dry_run=True)
     assert result['config']['sensor_copy_contract_version'] == sensor_copy.VERSION
     assert result['sensor_evidence']['copy_contract_version'] == sensor_copy.VERSION
-    assert sensor_copy.SHARED_RULE_V3 in result['prompt_text']
+    assert sensor_copy.rule('sensor', sensor_copy.VERSION) in result['prompt_text']
     assert '"sensor_findings"' in result['prompt_text']
     assert 'overlay_detail' not in result['prompt_text']
 

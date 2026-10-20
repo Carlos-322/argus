@@ -1,8 +1,8 @@
 """Locally requested sensor explanation contract, separate from model fields."""
-VERSION = 3
+VERSION = 4
 # Versions whose detail is the shared explanation on video and in the findings list. A saved request keeps the exact
 # rule text of the version it was sent with, so earlier versions remain reproducible.
-SHARED_VERSIONS = (2, 3)
+SHARED_VERSIONS = (2, 3, 4)
 SHARED_RULE_V2 = (
     'Use detail as the shared explanation in the findings list and on video: one or two short sentences, no more than 45 words. '
     'Headline and detail must together preserve every substantive qualitative conclusion in claim, including each comparison or temporal relationship. '
@@ -20,6 +20,21 @@ SHARED_RULE_V3 = (
     'fields; they belong in observation, claim and alternative, which the viewer shows on request. '
     'When the interpretation is uncertain, one plain word such as likely is enough. '
     'Use plain hyphens rather than typographic dashes.')
+# Version 4 keeps version 3's card copy and resolves two conflicts with the older sensor rules: a recording that
+# declares no stronger direction is described by what rose or fell, and measurement limits and layout dependence
+# stay in observation, claim and alternative instead of on the card (V4_LIMITS replaces the older sentences).
+SHARED_RULE_V4 = SHARED_RULE_V3.replace(
+    'Describe a change in the direction the recording declares as a stronger response, '
+    'for example pressing harder or easing for a pressure response, never as raw readings rising or falling. ',
+    'When the recording declares which direction is a stronger response, describe a change that way, '
+    'for example pressing harder or easing for a pressure response, never as raw readings rising or falling; '
+    'when it declares none, say what rose or fell. ')
+assert SHARED_RULE_V4 != SHARED_RULE_V3
+V4_LIMITS = ('Keep measurement limits and any dependence on a candidate layout or response convention explicit in '
+             'observation, claim and alternative; the headline and detail follow the copy rule above. ')
+LEGACY_LIMITS_LEAD = 'Apply measurement limits to the headline and video overlay, not only to the alternative explanation. '
+LEGACY_LIMITS_MAPPING = ('Keep the candidate mapping dependency explicit in the interpretation and retain essential '
+                         'uncertainty in the headline or overlay. ')
 SENSOR_RULE = (
     'Also provide overlay_detail: one short sentence explaining the added information and any uncertainty needed to read the headline correctly. '
     'Headline and overlay_detail appear together on video, so avoid redundant wording and keep them readable at a glance. '
@@ -37,12 +52,21 @@ def shared(version):
 
 def rule(kind, version):
     if shared(version):
-        return SHARED_RULE_V3 if version == 3 else SHARED_RULE_V2
+        return {2: SHARED_RULE_V2, 3: SHARED_RULE_V3, 4: SHARED_RULE_V4}[version]
     return SENSOR_RULE if kind == 'sensor' else INSPECTION_RULE
 
 
+def limits_lead(version):
+    """Where measurement limits go: the card from version 4 on keeps them off, earlier prompts kept their text."""
+    return '' if version == 4 else LEGACY_LIMITS_LEAD
+
+
+def limits_mapping(version):
+    return V4_LIMITS if version == 4 else LEGACY_LIMITS_MAPPING
+
+
 def schema(kind, version):
-    if version == 3:
+    if version in (3, 4):
         return ('"detail": "one plain sentence for the video card, under 25 words",'
                 if kind == 'sensor' else
                 '"detail":"one plain sentence for the video card, under 25 words",')

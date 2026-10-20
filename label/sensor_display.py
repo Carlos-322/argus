@@ -3,13 +3,14 @@
 A finding cites recorded series: regional derivations, single array components, or other numeric fields. The card
 shows at most two rows that support the finding at a glance, so each row is named by what it measures and points the
 way the recording declares a stronger response. A cited region becomes that region's response; cited components of an
-array that declares regions are grouped by region and then by whether they respond above or below their initial
-reference during the finding, so opposite changes inside one region are not averaged away. Nothing here reads the
-finding's words or chooses components the finding did not cite.
+array that declares regions are grouped by region and then by how differently they move during the finding, so
+opposite changes inside one region are not averaged away. Nothing here reads the finding's words or chooses
+components the finding did not cite.
 """
 from __future__ import annotations
 
 import math
+import re
 
 VERSION = 1
 MAX_ROWS = 2
@@ -42,17 +43,40 @@ def _region_name(name):
     return name[:1].upper() + name[1:]
 
 
+def _part(sensor_id):
+    """The stitched part prefix of an id (part2:...), or '' for a recording labelled in one request."""
+    match = re.match(r'part\d+:', str(sensor_id))
+    return match.group(0) if match else ''
+
+
+def _direction(sensor, derivation):
+    """The declared stronger-response direction, from the array, its regional derivation or the sensor itself."""
+    array = (sensor or {}).get('array_evidence') or {}
+    for value in ((array.get('response_convention') or {}).get('direction'), (derivation or {}).get('response_direction'),
+                  (sensor or {}).get('response_direction')):
+        if value in ('up', 'down'):
+            return value
+    return None
+
+
 class _Source:
-    """One array sensor's declared layout, response direction and full-rate component values."""
+    """One array sensor's declared layout, response direction, reference and full-rate component values.
+
+    Every card row is the oriented change of some cited cells from the same starting level the regional derivation
+    uses (its per-cell median of the first readings), so a region row and an area row of that region agree, and a
+    response weaker than the start (a hand easing off) draws below zero instead of flat.
+    """
 
     def __init__(self, sensor, derivation):
         array = sensor.get('array_evidence') or {}
         semantics = (derivation or {}).get('semantics') or {}
-        self.direction = (array.get('response_convention') or {}).get('direction') or (derivation or {}).get('response_direction')
+        self.direction = _direction(sensor, derivation)
         self.zero_censored = bool(semantics.get('zero_exclusion_sensitivity'))
         self.regions = [(r.get('name'), set(_columns(r.get('indices')))) for r in semantics.get('regions') or []
                         if r.get('name') and _columns(r.get('indices'))]
-        reference = (array.get('reference') or {}).get('values')
+        reference = ((derivation or {}).get('reference') or {}).get('values')
+        if not isinstance(reference, list):
+            reference = (array.get('reference') or {}).get('values')
         self.reference = reference if isinstance(reference, list) else None
         native = array.get('native_constituents') or {}
         self.columns = {c: i for i, c in enumerate(_columns(native.get('source_columns')))}
@@ -64,7 +88,8 @@ class _Source:
         return next((name for name, ids in self.regions if column in ids), None)
 
     def response(self, column):
-        """Signed change from the initial reference, oriented so a stronger declared response is positive."""
+        """Change from the reference, oriented so a stronger declared response is positive. A zero the source flags
+        as suspect is left blank."""
         if self.times is None or self.values is None or column not in self.columns or self.reference is None \
                 or not 0 <= column < len(self.reference) or not _finite(self.reference[column]):
             return None
@@ -78,13 +103,16 @@ class _Source:
                 out.append(sign * (raw - ref))
         return out
 
-
-def _mean_rows(rows):
-    out = []
-    for values in zip(*rows):
-        finite = [v for v in values if _finite(v)]
-        out.append(sum(finite) / len(finite) if finite and len(finite) == len(values) else None)
-    return out
+    def mean(self, cells):
+        """The oriented mean over whichever of these cells has a reading at each sample, or None without any."""
+        rows = [r for r in (self.response(c) for c in cells) if r is not None]
+        if not rows:
+            return None
+        out = []
+        for values in zip(*rows):
+            finite = [v for v in values if _finite(v)]
+            out.append(sum(finite) / len(finite) if finite else None)
+        return out
 
 
 def _window(times, values, start, end):
@@ -132,7 +160,8 @@ def _split(cells, responses, times, start, end):
 
 
 def rows_for(doc, finding):
-    """At most MAX_ROWS card rows for one bound finding: {label, times, values, sample_period_s, source_ids}."""
+    """At most MAX_ROWS card rows for one bound finding: {label, times, values, sample_period_s, source_ids}, or a
+    {series_id} reference for a cited series the board draws as it always does."""
     series = {r['id']: r for r in doc.get('series') or [] if isinstance(r, dict) and isinstance(r.get('id'), str)}
     sensors = {s['id']: s for s in doc.get('sensors') or [] if isinstance(s, dict) and isinstance(s.get('id'), str)}
     derivations = {d['id']: d for d in doc.get('derivations') or [] if isinstance(d, dict) and isinstance(d.get('id'), str)}
@@ -143,15 +172,17 @@ def rows_for(doc, finding):
     items, seen = [], set()
     sources = {}
 
-    arrays = {s.get('descriptor_digest'): s['id'] for s in sensors.values()
-              if s.get('array_evidence') and s.get('descriptor_digest') and not s['id'].startswith('mechanics:')}
+    # An inspected read of an array field belongs to the array with its descriptor digest in the same stitched part;
+    # an independent analysis's copy of the array (mechanics:) is never the owner.
+    arrays = {(_part(s['id']), s.get('descriptor_digest')): s['id'] for s in sensors.values()
+              if s.get('array_evidence') and s.get('descriptor_digest')
+              and not s['id'][len(_part(s['id'])):].startswith('mechanics:')}
 
     def resolve(sensor_id):
-        """An inspected read of an array field belongs to that array when its descriptor digest is the array's."""
         sensor = sensors.get(sensor_id) or {}
         if sensor.get('array_evidence'):
             return sensor_id
-        return arrays.get(sensor.get('access_descriptor_digest'), sensor_id)
+        return arrays.get((_part(sensor_id), sensor.get('access_descriptor_digest')), sensor_id)
 
     def source(sensor_id):
         if sensor_id not in sources:
@@ -173,7 +204,8 @@ def rows_for(doc, finding):
                 key = ('region', row['sensor_id'], region['name'])
                 if key not in seen:
                     seen.add(key)
-                    items.append(key + (derivation['id'], tuple(sorted(_columns(region.get('indices'))))))
+                    # The cited trace's own cells: the region's cells that the recording counts as valid.
+                    items.append(key + (sid, tuple(sorted(columns))))
                 continue
         cells = _columns(row.get('columns'))
         owner = resolve(row.get('sensor_id'))
@@ -196,22 +228,25 @@ def rows_for(doc, finding):
         if len(out) >= MAX_ROWS:
             break
         if item[0] == 'region':
-            _, sensor_id, name, derivation_id, indices = item
+            _, sensor_id, name, cited, indices = item
             src = source(sensor_id)
-            direction = src.direction if src else None
-            # The region's own oriented response: the positive response in the declared direction, else the signed
-            # change from the initial reference when no direction is declared.
-            wanted = 'mean positive response' if direction in ('up', 'down') else 'mean signed'
-            match = next((r for r in series.values() if r.get('derivation_id') == derivation_id
-                          and tuple(sorted(_columns(r.get('source_columns')))) == indices
-                          and str(r.get('operation', '')).startswith(wanted)), None)
-            if match is None:
+            values = src.mean([c for c in indices if c in src.columns]) if src is not None else None
+            if values is not None:
+                out.append({'label': _region_name(name), 'times': src.times, 'values': values,
+                            'sample_period_s': src.sample_period_s,
+                            'source_ids': [f'{sensor_id}:array:{c}' for c in indices if c in src.columns]})
                 continue
-            times, values = _plot(match)
+            # Without the array's own readings (an independent analysis was given only its regional traces), draw
+            # the cited trace itself, turned so a stronger declared response points up.
+            row = series[cited]
+            times, values = _plot(row)
             if times is None:
                 continue
+            direction = _direction(sensors.get(sensor_id), derivations.get(row.get('derivation_id')))
+            if direction == 'down' and str(row.get('operation', '')).startswith('mean signed'):
+                values = [-v if _finite(v) else None for v in values]
             out.append({'label': _region_name(name), 'times': times, 'values': values,
-                        'sample_period_s': match.get('sample_period_s'), 'source_ids': [match['id']]})
+                        'sample_period_s': row.get('sample_period_s'), 'source_ids': [cited]})
         elif item[0] == 'cells':
             _, sensor_id, region, cells = item
             src = source(sensor_id)
@@ -222,13 +257,13 @@ def rows_for(doc, finding):
                 if len(out) >= MAX_ROWS:
                     break
                 label = f'{base} area {n}' if len(groups) > 1 else f'{base} area'
-                out.append({'label': label, 'times': src.times, 'values': _mean_rows([responses[c] for c in group]),
+                out.append({'label': label, 'times': src.times, 'values': src.mean(group),
                             'sample_period_s': src.sample_period_s,
                             'source_ids': [f'{sensor_id}:array:{c}' for c in group]})
         else:
             # Any other cited series is drawn by the board as it always is; the row only keeps its place in order.
             out.append({'series_id': item[1]})
-    return [r for r in out if 'series_id' in r or any(_finite(v) for v in r['values'])]
+    return [r for r in out if 'series_id' in r or (r['values'] and any(_finite(v) for v in r['values']))]
 
 
 def attach(doc):

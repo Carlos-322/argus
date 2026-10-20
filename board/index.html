@@ -4805,7 +4805,7 @@ function sensorEvidence(d) {
       t: finite(f.inspect_s) && f.inspect_s >= f.start_s && f.inspect_s <= f.end_s ? f.inspect_s : f.start_s,
       timing: '', alternative: copy(f.alternative), observation: copy(f.observation), claim: copy(f.claim),
       overlayDetail: plain ? plain.detail : typeof f.overlay_detail === 'string' ? copy(f.overlay_detail)
-        : [2, 3].includes(f.copy_contract_version) ? copy(f.detail) : null,
+        : [2, 3, 4].includes(f.copy_contract_version) ? copy(f.detail) : null,
       quotedTimeOffset: finite(f.quoted_time_offset_s) ? f.quoted_time_offset_s : 0,
       generic: !!grip.generic, evidence: grip.generic && Array.isArray(f.evidence) ? f.evidence : [],
       display: grip.generic && f.display && f.display.version === 1 && Array.isArray(f.display.rows) ? f.display.rows : null,
