@@ -275,7 +275,6 @@ def check_source(source):
 
 
 def read(source, field, pointer):
-    import h5py
     path = check_source(source)
     tokens = [t.replace('~1', '/').replace('~0', '~') for t in pointer.split('/')[1:]]
     with open_hdf5(path) as f:

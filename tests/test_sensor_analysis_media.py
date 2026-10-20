@@ -1,6 +1,5 @@
 """The regional pass may cite only the image bytes and clocks it actually receives."""
 import copy
-import hashlib
 import json
 
 import numpy as np

@@ -4,7 +4,6 @@ import json
 import av
 import numpy as np
 import pytest
-from PIL import Image
 
 from label import episode as me, optical_motion as om
 from prepare.formats import probe

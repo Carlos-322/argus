@@ -15,7 +15,7 @@ from pathlib import Path, PureWindowsPath
 
 import numpy as np
 
-from label.errors import DispatchError, KeyExhausted
+from label.errors import DispatchError
 
 SCHEMA = 1
 CHUNK_VALUES = 65_536

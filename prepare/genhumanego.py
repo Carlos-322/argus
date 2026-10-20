@@ -36,7 +36,6 @@ from label.presented import presented_pts
 
 REPO = "genrobot2025/Gen-HumanEgo"
 CAMERA_TOPIC = "/robot0/sensor/camera2/compressed"
-CALIB_TOPIC = "/robot0/sensor/camera2/camera_info"
 ANNOTATION_TOPIC = "/robot0/annotation_v2"
 CAMERA_DESC = ("the forward-facing fisheye camera on the headset the person wears (camera2 of the six-camera "
                "DAS-Ego rig), looking out and down at their hands and the work in front of them")

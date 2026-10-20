@@ -1636,9 +1636,6 @@ Measurements can add useful scale to a change already visible in RGB. A task-rel
 ''')
 
 
-FINAL = final_prompt()
-
-
 def merge(parts, ep_dir=None):
     """Keep each part's exact inspection receipt with an explicit origin, without rewriting source clocks."""
     rows = []
@@ -1887,7 +1884,6 @@ def discover(access, base_content, call, cache_path, *, rounds=2, reserve_cost=0
         doc['status'] = 'complete'
     count = 0
     skipped = {}
-    inventory = access.inventory()
     # Large inventories remain accessible through metadata inspection; do not silently drop their descriptors.
     for index in range(min(rounds, 2)):
         content = access.selection_content(base_content) + [{'type': 'text', 'text': SELECTION + '\nFIELD INVENTORY\n' + packed(access.page())}] + extra

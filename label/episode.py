@@ -57,7 +57,7 @@ from label import prompts, policy
 from label import sensor_evidence as se
 from label import state as ms
 from prepare.signal_alignment import ALIGNED_CAMERA, ALIGNED_ASSUMED, recorder_arrival, placement_text
-from prepare.state_notes import ASSUMED_CLOCK, LAYOUT, NOT_RECORDED, SHORT, STATE_WHY, UNREADABLE
+from prepare.state_notes import ASSUMED_CLOCK, LAYOUT, NOT_RECORDED, SHORT, UNREADABLE
 
 FPS = 30
 VIEW_ORDER = ("exo", "left", "right")          # stable presentation slots; their order does not establish content
@@ -361,13 +361,13 @@ def describe_spans(ep: dict, spans) -> list[dict]:
 # dataset name or the camera set.
 RIGS = ("teleop_arms", "handheld_gripper", "ego_head")
 STATE_KINDS = ("joints", "ee_pose", "none")
-# One sampled instant every N s for the whole episode, still spans included (a still span is exactly
-# where a stopped recording would hide). Teleop arms move slowly and are seen by up to three cameras, so one
-# instant every 1.5 s is enough. Handheld demonstrations are short and fast, so denser. Egocentric footage has one
-# low-resolution head camera and the hands are the whole point, so it is sampled twice as densely again.
-SAMPLE_EVERY_S = policy.PERIODS
 
 
+# One sampled instant every N s (label/policy.py PERIODS, per rig) for the whole episode, still spans included (a
+# still span is exactly where a stopped recording would hide). Teleop arms move slowly and are seen by up to three
+# cameras, so one instant every 1.5 s is enough. Handheld demonstrations are short and fast, so denser. Egocentric
+# footage has one low-resolution head camera and the hands are the whole point, so it is sampled twice as densely
+# again.
 def every_s(ep: dict) -> float:
     return policy.effective(ep['context'])['sample_every_s']
 

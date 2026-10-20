@@ -3993,7 +3993,6 @@ def test_structured_recordings_read_owned_side_notes():
 
 
 def _camera_metadata_keeps_its_owners_without_becoming_the_task(tmp_path):
-    import json
     videos = ['d/top_ep1.mp4', 'd/wrist_ep1.mp4', 'd/top_ep2.mp4', 'd/wrist_ep2.mp4',
               'd/top_ep1_ir.mp4', 'd/top_ep9_ir.mp4']
     notes = {'d/top.json': {'task': 'calibrate top', 'note': 'top lens glare'},
@@ -4477,7 +4476,6 @@ def test_valid_episode_rows_survive_invalid_and_fractional_recorded_indices():
 
 def test_partial_jsonl_notes_keep_valid_payloads_and_name_bad_lines():
     import json
-    import numpy as np
     with tempfile.TemporaryDirectory() as t:
         root = Path(t) / 'upload'
         root.mkdir()
@@ -4510,7 +4508,6 @@ def test_fractional_task_indices_never_borrow_an_integral_task():
 
 def test_v3_episode_tables_keep_valid_rows_beside_fractional_indices():
     import pandas as pd
-    import numpy as np
     with tempfile.TemporaryDirectory() as t:
         root = Path(t) / 'upload'
         camera = 'observation.images.cam_high'
@@ -4701,7 +4698,6 @@ def _episode_row_upload(root, version, changed):
 
 
 def test_bad_episode_lengths_keep_recorded_owners_and_readable_windows():
-    import json
     with tempfile.TemporaryDirectory() as t:
         for version in ('v2', 'v3'):
             for n, length in enumerate(('bad', {'unknown': 'length'}, 0.5, True, -1, 0, [10, 20])):
@@ -4750,7 +4746,6 @@ def test_bad_episode_tasks_stay_claims_without_asserted_nontext_instructions():
 
 
 def test_invalid_episode_tasks_keep_valid_recorded_table_tasks_and_note_sources():
-    import json
     import numpy as np
     import pandas as pd
     with tempfile.TemporaryDirectory() as t:

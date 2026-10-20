@@ -81,7 +81,7 @@ def request(ep: dict) -> list:
 
 
 def _paid_route(ep, api_key, call_model, timeout, out_path, identity, reserve_dispatch, settle_dispatch, billing_fields, force_refresh):
-    from label.errors import DispatchError, KeyExhausted, SpendCap
+    from label.errors import DispatchError, SpendCap
     from label.harness import OPENAI_PRICES, _verified_final_cost, persist_final_claim, same_input_identity
     text = route_text(ep)
     routing_identity = {'version': 1, 'task_sha256': hashlib.sha256(text.encode()).hexdigest(),

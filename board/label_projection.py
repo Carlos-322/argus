@@ -106,11 +106,6 @@ def source_row_indices(labels: dict, scope: str, dropped: list | None = None) ->
     return [index for index in range(total) if index not in omitted]
 
 
-def source_row_index(labels: dict, scope: str, index: int, dropped: list | None = None) -> int:
-    mapping = source_row_indices(labels, scope, dropped)
-    return mapping[index] if 0 <= index < len(mapping) else index
-
-
 def diagnostics(labels: dict, dropped: list[dict]) -> dict[str, str]:
     """One diagnostic per source field, independent of the layer reporting it."""
     entries = {}

@@ -359,7 +359,7 @@ def signal_doc(meta: dict, a: np.ndarray, t: np.ndarray, stride: int, in_contact
     return doc
 
 
-def depth_doc(entry: dict, ctx_depth: dict) -> dict:
+def depth_doc(entry: dict) -> dict:
     """One camera's depth: its units and the colour bar of its pictures (label/depth.py)."""
     from label import depth as dp
     out = {"units": "metres" if dp.metric_scale(entry) else "relative",
@@ -447,11 +447,10 @@ def episode_doc(ep_dir: Path) -> dict | None:
         from label import depth as dp
         entries = dp.load(ep_dir)
         src = json.loads((ep_dir / "sources.json").read_text()) if (ep_dir / "sources.json").exists() else {}
-        cd = ctx.get("depth") or {}
         doc["depth"] = {}
         for view, entry in entries.items():
             unpaired = view not in src or entry.get('paired_camera', view) is None
-            detail = depth_doc(entry, cd.get(view) or {})
+            detail = depth_doc(entry)
             detail['paired_camera'] = None if unpaired else entry.get('paired_camera', view)
             if unpaired:
                 from board.clips import DEPTH_SOURCE_FPS

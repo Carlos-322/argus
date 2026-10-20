@@ -64,7 +64,6 @@ from label.route import route_width
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 DEFAULT_MODEL = "openai/gpt-6-astra"
-DEFAULT_REASONING = "medium"
 DETAIL = "high"
 GRID_COLS = 4
 

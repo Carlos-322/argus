@@ -115,7 +115,6 @@ def test_assumed_or_unaligned_clocks_and_sensor_roles_do_not_gain_pairing(tmp_pa
 
 
 def test_capture_and_byte_limits_omit_images_honestly_without_source_mutation(tmp_path):
-    from label import sensor_scene
     ep = episode(tmp_path)
     doc = arrays(.1, .2, .3, .4, .5)
     before = copy.deepcopy(doc)

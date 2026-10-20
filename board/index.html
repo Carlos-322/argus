@@ -5436,8 +5436,6 @@ function tcData(d) {
   const rows = ['left', 'right', ''].filter(h => named.has(h));
   return {contacts, missing, rows};
 }
-// the rows a missed grasp is marked on: its hand's, or every row when it names none (or both)
-const tcMissRows = (x, rows) => rows.includes(tcHandKey(x.hand)) ? [tcHandKey(x.hand)] : rows;
 // the Touch lane, in the lane markup the Hands out of view lane uses
 function touchLaneHtml(T, lanePct, chev, duration = null) {
   const {contacts, missing, rows} = T;

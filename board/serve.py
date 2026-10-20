@@ -2405,7 +2405,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except OSError as error:
                 return self._send(507 if error.errno in (errno.ENOSPC, errno.EDQUOT) else 503,
                                   {'error': 'Prepared video storage is unavailable.', 'retryable': False})
-            except (RuntimeError, subprocess.SubprocessError, KeyError) as e:
+            except (RuntimeError, subprocess.SubprocessError, KeyError):
                 logging.getLogger(__name__).error("Footage preparation failed", exc_info=True)
                 self._send(500, {"error": "The requested footage could not be prepared.",
                                  "stage": "footage preparation"})

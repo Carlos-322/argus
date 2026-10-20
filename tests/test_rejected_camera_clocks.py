@@ -7,11 +7,10 @@ import h5py
 import numpy as np
 import pytest
 
-from board import families
 from checks import capture_qc
 from label import episode
 from label import signals as signal_words
-from prepare import camera_clock, formats
+from prepare import camera_clock
 from test_container_camera_clocks import convert, hdf_upload
 from test_timing_truth import native_recording
 from test_prepare import joint_names

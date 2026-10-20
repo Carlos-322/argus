@@ -136,7 +136,7 @@ def test_reparse_recovers_received_reply_without_releasing_unknown_charge(tmp_pa
 
 @pytest.mark.parametrize('finish,text', [('length', '{"fine_detail":false}'), ('stop', 'not json')])
 def test_routing_keeps_unusable_paid_reply_and_uses_wide_cells(tmp_path, monkeypatch, finish, text):
-    from test_route_accounting import observed_packed_episode, args
+    from test_route_accounting import observed_packed_episode
     ep = observed_packed_episode(tmp_path)
     monkeypatch.setattr(route, '_CACHE', {})
     def provider(content, model, *args, **kwargs):
@@ -275,7 +275,6 @@ def test_long_free_job_reuses_pieces_then_labels_without_rebuying_dictionary(tmp
 
 
 def test_orphan_staged_harness_finalizes_run_after_wrapper_sigkill(tmp_path, monkeypatch):
-    import os
     import time
     from label import run as staged
     ep = recording(tmp_path, np.arange(12) / 30)

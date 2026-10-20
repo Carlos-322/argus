@@ -1,6 +1,5 @@
 """HTTP framing and cache transactions at the public download boundary."""
 import concurrent.futures
-import contextlib
 import json
 import socket
 import socketserver

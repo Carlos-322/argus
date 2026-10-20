@@ -1,7 +1,6 @@
 """Upload adapters share the original output identity allocation."""
 import json
 import shutil
-from pathlib import Path
 
 import pytest
 

@@ -131,7 +131,6 @@ from __future__ import annotations
 
 import collections
 import dataclasses
-import functools
 import json
 import os
 import re
@@ -153,7 +152,6 @@ from prepare.signal_alignment import ALIGNED_ROWS, ALIGNED_ASSUMED, ALIGNED_CAME
 
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 RIGS = ("teleop_arms", "handheld_gripper", "ego_head")
-STATE_KIND = {"teleop_arms": "joints", "handheld_gripper": "ee_pose"}
 TIME_BASE_DEN = 1_000_000
 ANNOTATION_MAX_CHARS = 4000
 EGO_DESC = ("the camera worn on the person's head, looking forward and down at their hands and the work "
@@ -1682,11 +1680,6 @@ def read_note(p: Path) -> tuple[object, str | None]:
     return text, None
 
 
-def read_annotation(p: Path):
-    """One note as sent, with valid JSON Lines rows and any unparsed lines retained separately."""
-    return read_note(p)[0]
-
-
 NOTE_OWN_EXT = (".json", ".txt", ".jsonl", ".md")
 # Shared text needs a note name; arbitrary dataset documentation does not establish an episode claim.
 RECORDER_NOTE_WORDS = frozenset({"note", "notes", "annotation", "annotations", "meta", "metadata"})
@@ -2112,6 +2105,7 @@ STATE_JOINT_NAME = re.compile(r"joint|(^|[^a-z])j\d|waist|shoulder|elbow|forearm
 STATE_QUAT_NAME = re.compile(r"(^|[._/ -])q[._/ -]?[wxyz]$|(^|[^a-z])quat", re.I)
 STATE_WORD_SPLIT = re.compile(r"[._/ -]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Za-z])(?=[0-9])")
 STATE_UNIT_WORDS = {"m", "mm", "cm", "rad", "deg", "degree", "degrees"}
+# STATE_AXIS_WORDS is not read here; Data Review's upload tests (upload/test_formats.py) build state-name cases from it
 STATE_AXIS_WORDS = {"x", "y", "z", "roll", "pitch", "yaw", "rx", "ry", "rz"}
 STATE_POSITION_AXES = {"x", "y", "z"}
 STATE_POSITION_WORDS = {"pos", "position", "positions"}
@@ -6530,7 +6524,7 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
 
 def lerobot_rows_on_frames(parts, df, state, action, n, fps, kind, note):
     """state_on_frames, with the recorded state an optional part: if placing it fails the episode has no state."""
-    with part(parts, "the recorded state's rows") as placing:
+    with part(parts, "the recorded state's rows"):
         skip_when_cameras_only()
         return state_on_frames(df, state, action, n, fps, kind, note)
     return None, None, "none", StateNote("The recorded state could not be placed on the frames; the episode is "
@@ -6963,20 +6957,6 @@ def packed_window_indices(facts: dict, base: float, stop: float, *, fps: float |
         clock = memo['microseconds'] if microseconds else memo['seconds']
         indices.append(int(np.searchsorted(clock, rounded if microseconds else boundary, side='left')))
     return tuple(indices)
-
-
-def _stream_facts(p: Path) -> dict:
-    with open_video(p) as c:
-        st = c.streams.video[0]
-        return {"width": st.codec_context.width, "height": st.codec_context.height, "codec": st.codec_context.name}
-
-
-def _shown_size(p: Path) -> tuple[int, int]:
-    """(width, height) of a video as it is shown (prepare/display.py; read once per file, so a packed file shared by
-    many episodes is probed once); (0, 0) when ffprobe cannot read it."""
-    from prepare import display
-    g = display.geometry(str(p))
-    return display.shown_size(g) if g["stored"][0] else (0, 0)
 
 
 def lerobot_image_clock(df, root, fps):
@@ -8320,8 +8300,6 @@ def convert_hdf5(item: dict, rig: str, out: Path, dataset: str, *, source_scope:
     frames as they are), its depth stored losslessly in FFV1, every signal on the anchor camera's frames, and its text as the
     instruction and the uploader's notes (h5_streams says what each array is). An array named as the state is read as
     the state by the same rule as LeRobot's (h5_state)."""
-    import h5py
-    from PIL import Image
     if item.get("error"):
         raise ValueError(item["error"])
     ep = unique_dir(out, item.get("output_name") or episode_name(item["name"]))
@@ -8780,7 +8758,6 @@ def depth_scale_attr(ds) -> float | None:
 
 
 def h5_has_camera(path: Path) -> bool:
-    import h5py
     try:
         with open_hdf5(path) as f:
             return any(h5_kind(p, ds) == "camera" for p, ds in _h5_datasets(f))
@@ -8792,7 +8769,6 @@ def h5_file_signals(paths: list[Path], q_abs: np.ndarray, n_anchor: int, fps: fl
                     presentation_q: np.ndarray | None = None) -> Signals:
     """Every signal of HDF5 files that hold no camera, placed on videos' frame times (q_abs, the recorder's clock):
     a glove's pressure and hand pose recorded beside a head camera. Only arrays with their own clock can be placed."""
-    import h5py
     out = Signals()
     for p in paths:
         try:
@@ -10606,7 +10582,7 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
                         lose(ch.topic, msg)
                         continue
                     recovered_schemas[ch.topic] = schema
-                except (json.JSONDecodeError, UnicodeDecodeError, DecodeError) as error:
+                except (json.JSONDecodeError, UnicodeDecodeError, DecodeError):
                     message_failures[ch.topic] = message_failures.get(ch.topic, 0) + 1
                     lose(ch.topic, msg)
                     continue
@@ -12312,7 +12288,6 @@ def _read_file_times(p: Path) -> np.ndarray | None:
                 return np.linspace(st.message_start_time, st.message_end_time, max(int(st.message_count), 1)) / 1e9
             t = np.sort(np.array([m.log_time for _, _, m in _mcap_stream(Path(p))], dtype=np.float64)) / 1e9
             return t if len(t) else None
-        import h5py
         with open_hdf5(p) as f:
             clocks = [np.sort(t[np.isfinite(t)]) for t in h5_streams(f, "")["clock"].values() if len(t)]
         clocks = [t for t in clocks if len(t)]
@@ -12332,7 +12307,6 @@ def no_time_why(p: Path) -> str:
             if sensor_cut(p):
                 return "it is cut short before its first message, so nothing in it could be read"
         else:
-            import h5py
             with open_hdf5(p):
                 pass
     except Exception:
@@ -12377,7 +12351,6 @@ def unread_sensors_note(bad: list[tuple[str, str]], others: str | None) -> State
 
 def h5_state_arrays(p: Path) -> list[str]:
     """The arrays of an HDF5 file that are named as the state (H5_STATE_NAME, outside an action group)."""
-    import h5py
     try:
         with open_hdf5(p) as f:
             return sorted(s["name"] for s in h5_streams(f, "")["signal"]
@@ -12523,7 +12496,6 @@ def sensor_clock_namespace(path: Path, basis: str, reference_records=()) -> tupl
         if not count:
             return None, 'sidecar contains no readable timed numeric stream', None
     else:
-        import h5py
         keys = ('log_clock_id',) if basis == 'arrival' else ('capture_clock_id', 'clock_id')
         try:
             with open_hdf5(path) as source:
@@ -12619,7 +12591,6 @@ def note_sensors(extra: dict, signals: Signals, by_clock: list, assumed: list, u
                for a in extra.get('recorded_sensor_fields') or []):
             continue
         try:
-            import h5py
             with open_hdf5(path) as f:
                 metadata = h5_original_metadata(f, '', [])
             extra.setdefault('recorded_sensor_fields', []).append(

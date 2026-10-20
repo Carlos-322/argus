@@ -225,7 +225,7 @@ def test_subsecond_footage_replacement_gets_a_new_clip(tmp_path, monkeypatch):
 @pytest.mark.parametrize('failure', ['exit', 'interrupt', 'return', 'stitch', 'board', 'success'])
 def test_review_records_label_failure_atomically(tmp_path, monkeypatch, failure):
     import sys
-    from board import clips, rules
+    from board import clips
     from label import dictionary_stage, pieces
     data = tmp_path / 'input'
     data.mkdir()

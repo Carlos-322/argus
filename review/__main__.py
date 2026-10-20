@@ -34,7 +34,6 @@ import hashlib
 import json
 import math
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -348,7 +347,6 @@ def review_job(a, overrides, lock_fd, output_lock_fd) -> int:
     from board import clips as board_clips
     from checks import EXIT_PARTIAL, timebase
     from label import pieces, dictionary_stage
-    from prepare import formats
 
     job = a.out.resolve()
     job.mkdir(parents=True, exist_ok=True)
