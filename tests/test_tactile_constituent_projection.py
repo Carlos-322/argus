@@ -189,7 +189,7 @@ def test_piece_merge_shifts_component_source_views_before_prompt_and_reparse(off
     assert bound == before
 
 
-def test_factored_matrix_columns_directly_name_cells_and_their_declared_positions():
+def test_each_wire_column_owns_its_values_reference_identity_and_declared_position():
     raw, times, semantics = spatial_case()
     semantics['valid_indices'] = [11, 90, 10, 106, 26]
     ep = episode({'right_pressure': raw}, [{'name': 'right_pressure', 'shape': [16, 16],
@@ -199,14 +199,21 @@ def test_factored_matrix_columns_directly_name_cells_and_their_declared_position
     before = copy.deepcopy(doc)
     wire = json.loads(se.prompt(doc).splitlines()[-1])
     table = wire['sensors'][0]['array_evidence']['constituents']
-    header = table['value_column_layout']
-    assert header['columns'] == ['source_column', 'region', 'x', 'y']
-    assert header['rows'] == [[cell, 'branch A', *semantics['positions'][cell]]
-                              for cell in [90, 10, 106, 26]]
-    assert table['constant_column_values'] == {'0': 1000}
+    records = table['columns']
+    assert [r['source_column'] for r in records] == [11, 90, 10, 106, 26]
+    assert records[0]['constant_value'] == 1000
+    assert all(r['series_id'] == 'signal:right_pressure:array:' + str(r['source_column']) for r in records)
+    assert all(r['reference_value'] == 1000 for r in records)
+    for record in records:
+        assert record['position'] == dict(zip(('x', 'y'), semantics['positions'][record['source_column']]))
+        assert record.get('region') == ('branch A' if record['source_column'] != 11 else None)
+    assert not any(key in table for key in ('source_columns', 'series_ids', 'reference_values',
+                   'values', 'constant_column_values', 'varying_column_positions', 'value_column_layout'))
     clock = wire['sample_clocks'][table['time_clock']]
     row = clock.index(times[60])
-    assert table['values'][row] == [1400, 600, 1400, 600]
+    trajectories = [record.get('values', [value for count, value in record.get('value_runs', [])
+                                         for _ in range(count)]) for record in records[1:]]
+    assert [values[row] for values in trajectories] == [1400, 600, 1400, 600]
     assert doc == before
 
 
@@ -451,6 +458,17 @@ def expand_prompt(payload):
             continue
         if 'time_clock' in table:
             table['times_s'] = clocks[table.pop('time_clock')]
+        if 'columns' in table:
+            records = table.pop('columns')
+            table['source_columns'] = [r['source_column'] for r in records]
+            table['series_ids'] = [r['series_id'] for r in records]
+            if records and 'reference_value' in records[0]:
+                table['reference_values'] = [r['reference_value'] for r in records]
+            for record in records:
+                if 'value_runs' in record:
+                    record['values'] = [value for count, value in record['value_runs'] for _ in range(count)]
+            table['values'] = [[r['constant_value'] if 'constant_value' in r else r['values'][i]
+                                for r in records] for i in range(len(table['times_s']))]
         if 'constant_column_values' in table:
             table.pop('value_column_layout', None)  # Redundant direct header; full source geometry is retained.
             constants = table.pop('constant_column_values')
@@ -473,6 +491,7 @@ def test_prompt_encoding_roundtrips_nulls_counts_ids_and_exact_values():
         {'id': 'c', 'times': [0., .3], 'values': [1, 2]}],
         'sensors': [{'id': 'pad', 'array_evidence': {'shape': [2, 2], 'reference': {}, 'constituents': {
             'source_columns': [3, 9, 17, 25], 'series_ids': ['c3', 'c9', 'c17', 'c25'], 'times_s': clocks,
+            'reference_values': [None, 1e100, 2**53 + 1, .125],
             'values': [[None, 1e100, 2**53 + 1, i + .125] for i in range(4)]}}}]}
     before = copy.deepcopy(payload)
     packed = se._prompt_projection(payload)
@@ -481,11 +500,44 @@ def test_prompt_encoding_roundtrips_nulls_counts_ids_and_exact_values():
     assert packed['series'][1]['valid_counts'] == [2, 1, 0, 2]
     assert packed['series'][2]['times'] == [0., .3]
     table = packed['sensors'][0]['array_evidence']['constituents']
-    assert table['constant_column_values'] == {'0': None, '1': 1e100, '2': 2**53 + 1}
-    assert table['varying_column_positions'] == [3]
+    assert [record.get('constant_value') for record in table['columns'][:3]] == [None, 1e100, 2**53 + 1]
+    assert table['columns'][2]['reference_value'] == 2**53 + 1
+    assert type(table['columns'][2]['reference_value']) is int
+    assert table['columns'][3] == {'source_column': 25, 'series_id': 'c25', 'reference_value': .125,
+                                   'values': [.125, 1.125, 2.125, 3.125]}
     assert expand_prompt(json.loads(se._json(packed))) == before
     assert se._prompt_projection(packed) == packed
     assert payload == before
+
+
+def test_owned_column_format_description_is_not_added_to_image_only_array_metadata():
+    doc = {'sensors': [{'id': 'optical', 'kind': 'image', 'capabilities': ['image_response_change'],
+            'array_evidence': {'shape': [16, 16], 'reference': {'method': 'not numeric reference values'},
+                               'frames': [{'time_s': 0.}]} }], 'series': [], 'limitations': []}
+    text = se._prompt(doc)[0]
+    assert 'constant_column_values maps zero-based source_columns positions' in text
+    assert 'each columns record owns' not in text
+
+
+def test_owned_column_runs_preserve_each_exact_value_type_and_shared_clock_without_thinning():
+    times = [i / 30 for i in range(100)]
+    values = [[10 if i < 50 else 10., i + .125, None] for i in range(100)]
+    payload = {'series': [], 'sensors': [{'id': 'pad', 'array_evidence': {'reference': {},
+        'constituents': {'source_columns': [3, 9, 17], 'series_ids': ['c3', 'c9', 'c17'],
+            'reference_values': [10, .125, None], 'times_s': times, 'source_rows': list(range(100)),
+            'values': values, 'native_samples': 100, 'omitted_rows': 0}}}]}
+    before = copy.deepcopy(payload)
+    wire = se._prompt_projection(payload)
+    records = wire['sensors'][0]['array_evidence']['constituents']['columns']
+    assert records[0]['value_runs'] == [[50, 10], [50, 10.]]
+    assert type(records[0]['value_runs'][0][1]) is int
+    assert type(records[0]['value_runs'][1][1]) is float
+    assert records[1]['values'] == [i + .125 for i in range(100)]
+    assert records[2]['constant_value'] is None
+    restored = expand_prompt(json.loads(se._json(wire)))
+    assert restored == before
+    assert type(restored['sensors'][0]['array_evidence']['constituents']['values'][50][0]) is float
+    assert se._prompt_projection(wire) == wire and payload == before
 
 
 def test_lossless_encoding_keeps_native_cells_and_dense_curves_under_byte_pressure(monkeypatch):

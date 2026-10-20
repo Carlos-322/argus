@@ -577,25 +577,37 @@ def _prompt_projection(payload):
             continue
         if 'times_s' in table:
             targets.append((table, 'times_s'))
-        rows = table.get('values') or []
-        if rows and 'constant_column_values' not in table:
-            constants = {str(i): rows[0][i] for i in range(len(table['source_columns']))
-                         if all(row[i] == rows[0][i] for row in rows)}
-            if constants:
-                varying = [i for i in range(len(table['source_columns'])) if str(i) not in constants]
-                table['constant_column_values'] = constants
-                table['varying_column_positions'] = varying
-                table['values'] = [[row[i] for i in varying] for row in rows]
-                positions = {row['index']: row for row in
-                    ((sensor.get('array_evidence') or {}).get('physical_layout') or {}).get('positions', [])}
-                cells = [table['source_columns'][i] for i in varying]
-                # Keep the matrix's changing columns readable without following
-                # a second index vector into an unrelated geometry descriptor.
-                located = bool(positions) and all(cell in positions for cell in cells)
-                table['value_column_layout'] = {
-                    'columns': ['source_column', 'region', 'x', 'y'] if located else ['source_column'],
-                    'rows': [[cell, positions[cell].get('region'), positions[cell]['x'], positions[cell]['y']]
-                             if located else [cell] for cell in cells]}
+        if 'columns' not in table:
+            rows = table.pop('values')
+            source_columns, series_ids = table.pop('source_columns'), table.pop('series_ids')
+            reference = table.pop('reference_values', None)
+            positions = {row['index']: row for row in
+                ((sensor.get('array_evidence') or {}).get('physical_layout') or {}).get('positions', [])}
+            records = []
+            for index, (column, ident) in enumerate(zip(source_columns, series_ids)):
+                record = {'source_column': column, 'series_id': ident}
+                if reference is not None:
+                    record['reference_value'] = reference[index]
+                values = [row[index] for row in rows]
+                runs = []
+                for value in values:
+                    if runs and type(value) is type(runs[-1][1]) and value == runs[-1][1]:
+                        runs[-1][0] += 1
+                    else:
+                        runs.append([1, value])
+                if len(runs) == 1:
+                    record['constant_value'] = runs[0][1]
+                elif len(_json({'value_runs': runs})) < len(_json({'values': values})):
+                    record['value_runs'] = runs
+                else:
+                    record['values'] = values
+                position = positions.get(column)
+                if position is not None:
+                    record['position'] = {key: position[key] for key in ('x', 'y')}
+                    if position.get('region') is not None:
+                        record['region'] = position['region']
+                records.append(record)
+            table['columns'] = records
     for row, key in targets:
         clocks.setdefault(_json(row[key]), []).append((row, key))
     shared = payload.get('sample_clocks', {})
@@ -622,8 +634,14 @@ def prompt(doc):
 def _prompt(doc):
     if not doc.get('sensors'):
         return ''
+    constituent_format = any('native_constituents' in array or 'constituents' in array
+        or ('values' in array.get('reference', {}) and 'frames' in array)
+        for sensor in doc['sensors'] for array in [sensor.get('array_evidence') or {}])
+    encoding = ('Prompt encoding is lossless: time_clock names an exact timestamp vector in sample_clocks, replacing series times or constituent times_s. A singular valid_count applies at every timestamp; nonuniform valid_counts remain explicit. In constituent tables, each columns record owns one original source_column, its exact series_id, reference_value and values on the shared table clock. A constant_value instead applies at every supplied time, including null. value_runs instead lists [repeat_count, value] pairs in clock order; expand each value exactly repeat_count times to recover every supplied reading, including null. Any position and region in that record come from the shared declared physical layout, with its authority unchanged. Reference values and readings belong only to their named source column. Every series_id and its exact citation times remain available.'
+        if constituent_format else
+        'Prompt encoding is lossless: time_clock names an exact timestamp vector in sample_clocks, replacing series times or constituent times_s. A singular valid_count applies at every timestamp; nonuniform valid_counts remain explicit. In constituent tables, constant_column_values maps zero-based source_columns positions to values repeated at every timestamp, including null. varying_column_positions names the matrix columns in values; combine them with those constants to recover every declared cell at every supplied time. value_column_layout describes those values columns directly, in order, using original source cell IDs and any declared physical positions/regions. Its layout authority is unchanged. Every series_id and its exact citation times remain available.')
     text = '''\nSENSOR EVIDENCE FOR ADDITIONAL ANNOTATION
-Prompt encoding is lossless: time_clock names an exact timestamp vector in sample_clocks, replacing series times or constituent times_s. A singular valid_count applies at every timestamp; nonuniform valid_counts remain explicit. In constituent tables, constant_column_values maps zero-based source_columns positions to values repeated at every timestamp, including null. varying_column_positions names the matrix columns in values; combine them with those constants to recover every declared cell at every supplied time. value_column_layout describes those values columns directly, in order, using original source cell IDs and any declared physical positions/regions. Its layout authority is unchanged. Every series_id and its exact citation times remain available.
+''' + encoding + '''
 When array_evidence is supplied, compare the complete raw grids and their signed changes from the initial per-cell reference. Look for responses that diverge, recover at different times, move between array locations, or change while the visible hold remains similar. A whole-array average can cancel opposing cell changes. Use array coordinates unless supplied source semantics names physical regions; preserve any qualification on that mapping. Unknown polarity or anatomy limits physical interpretation but does not invalidate an observed contrast between cell responses. The initial reference is not a verified unloaded baseline. Cite sensor_id and the exact snapshot times without series_id for whole-array evidence; cite series_id for the separate numeric traces. In constituents, same_source_series_ids links a per-cell ID to its canonical recorded single-column trace ID. They identify the same source measurement: either ID can cite the union of their actually supplied finite samples, including retained matrix rows and sparse trace extrema. Native viewer plots and omitted source rows never extend this coverage. Conflicting readings cannot be combined. Grids are discrete snapshots, not continuous coverage.
 When marker_motion is supplied, compare its paired image-space displacement with the cited tactile images and scene video. In its pairs and samples tables, each row follows the named columns; dotted columns name correspondence diagnostics. Null is unavailable, never zero. A dot pattern shifting during a closed grip can support contact movement or surface deformation. Assess whether this reveals a grip adjustment, an object shifting against the grip, or another useful manipulation detail. Marker movement alone cannot distinguish object slip from elastic shear of the pad. Null displacement means tracking was unreliable, not zero movement. A high whole-pad displacement with a small local residual is coherent movement, not an absence of movement. Write headlines about the manipulation in plain English; keep dot counts, pixels and tracker terminology in observation. Use marker_motion only for pairs with valid displacement, citing both supplied image times.
 When derived regional responses or point-set shape measurements are supplied, compare them jointly with the scene and other recorded state. The operations, source columns, reference, coverage and semantic authority are part of the evidence. Compare localized responses across regions and repeated phases; compare response changes with direct pose-shape distances, declared finger-chain curl or recorded jaw state. A distance from the first pose is not the distance between two later poses. A selected-pose measurement is cited at its end time; comparison_from_s identifies the other endpoint. Exactly repeated estimates can be stale; small estimated motion alone does not prove a physically unchanged hand. Check that coverage and the visual reference support the comparison. Describe the supported manipulation implication, with alternatives, instead of stopping at a list of cell values. Preserve distinct supported events within an episode, without inventing a required number of findings.
@@ -1073,6 +1091,8 @@ def merge(parts, ctx, ep_dir=None):
             if sensor.get('derivations'):
                 sensor['derivations'] = [_shift_derivation(item, prefix, offset) for item in sensor['derivations']]
             sensor['id'] = prefix + sensor['id']
+            if sensor.get('citation_alias_of'):
+                sensor['citation_alias_of'] = prefix + sensor['citation_alias_of']
             if 'times' in sensor:
                 sensor['times'] = [t + offset for t in sensor['times']]
             for capture in sensor.get('native_captures') or []:

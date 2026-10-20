@@ -79,6 +79,8 @@ def build(content, sensor_doc, *, config, ep=None):
             'caption_sha256': hashlib.sha256(caption['text'].encode()).hexdigest()})
     if not images:
         return None
+    from label import sensor_analysis_media
+    selected = sensor_analysis_media.admit(sensor_doc, selected, images, config, ep)
     parts = [{'type': 'text', 'text': HEADER}, {'type': 'text', 'text': se.prompt(selected)}, *images]
     settings = {key: copy.deepcopy(config[key]) for key in (
         'model', 'reasoning', 'max_tokens', 'input_identity', 'sensor_copy_contract_version') if key in config}
@@ -120,6 +122,8 @@ def attach(result, bound_stage):
     stage = copy.deepcopy(bound_stage)
     for sensor in stage.get('sensors') or []:
         sensor['id'] = PREFIX + sensor['id']
+        if sensor.get('citation_alias_of'):
+            sensor['citation_alias_of'] = PREFIX + sensor['citation_alias_of']
         if sensor.get('derivations'):
             sensor['derivations'] = [se._shift_derivation(d, PREFIX, 0) for d in sensor['derivations']]
     for row in stage.get('series') or []:
