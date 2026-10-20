@@ -75,7 +75,7 @@ from pathlib import Path
 
 import numpy as np
 
-from board.hands import vlq_append, vlq_decode
+from board.hands import vlq_append
 from board.to_board import dumps
 from label.atomic import write_atomic
 
@@ -138,16 +138,6 @@ def quantize(a: np.ndarray, bits: int = 16, per_value: bool = True) -> dict:
     return {"lo": float(lo[0]), "step": float(step[0]), "data": data}
 
 
-def dequantize(block: dict, rows: int, bits: int = 16) -> np.ndarray:
-    """The page's decoder, in Python: rows x values floats, NaN for no reading."""
-    raw = np.frombuffer(base64.b64decode(block["data"]), dtype="<u2" if bits == 16 else "u1").astype(np.float64)
-    q = raw.reshape(rows, -1)
-    lo, step = np.asarray(block["lo"], dtype=np.float64), np.asarray(block["step"], dtype=np.float64)
-    v = lo + q * step
-    v[q == (NONE16 if bits == 16 else NONE8)] = np.nan
-    return v
-
-
 def encode_times(t_s: np.ndarray) -> dict:
     ms = np.round(np.asarray(t_s, dtype=np.float64) * 1000).astype(np.int64)
     gaps = np.diff(ms)
@@ -156,15 +146,6 @@ def encode_times(t_s: np.ndarray) -> dict:
     for g in gaps:
         vlq_append(int(g) - dur, out)
     return {"ms0": int(ms[0]) if len(ms) else 0, "dur": dur, "d": "".join(out)}
-
-
-def decode_times(block: dict) -> np.ndarray:
-    p = block["ms0"]
-    out = [p]
-    for g in vlq_decode(block["d"]):
-        p += block["dur"] + g
-        out.append(p)
-    return np.asarray(out, dtype=np.float64) / 1000.0
 
 
 # ---------------------------------------------------------------- one episode

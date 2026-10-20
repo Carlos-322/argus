@@ -67,9 +67,8 @@ DEFAULT_MODEL = "openai/gpt-6-astra"
 DETAIL = "high"
 GRID_COLS = 4
 
-# gpt-6-astra list prices (USD per token), used only when a response carries no billed cost.
+# gpt-6-astra's input list price (USD per token); gate/score.py prices prompt cache reads and writes from it
 PRICE_IN = 1.0e-5
-PRICE_OUT = 5.0e-5
 # OpenAI list prices (USD per token: input, cached input, output), and from LONG_PROMPT_TOKENS prompt tokens the
 # long-context ones, for a call sent straight to OpenAI, whose response carries tokens but no cost
 OPENAI_PRICES = {"gpt-6-astra": ((1.0e-5, 1.0e-6, 5.0e-5), (2.0e-5, 2.0e-6, 7.5e-5)),
@@ -1534,16 +1533,6 @@ def _video_cards(result, out_path, *, model, reasoning, api_key, timeout, pricin
         sensor_cards.apply(evidence, receipt['request'], receipt)
     except Exception as error:
         evidence.setdefault('limitations', []).append(f'Video cards were not written: {error}')
-
-
-def _cost(usage: dict) -> float:
-    """The billed cost of a call, or the list-price estimate when the response carries none (list_cost on a call
-    straight to OpenAI)."""
-    if usage.get("cost") is not None:
-        return float(usage["cost"])
-    if usage.get("list_cost") is not None:
-        return float(usage["list_cost"])
-    return usage.get("prompt_tokens", 0) * PRICE_IN + usage.get("completion_tokens", 0) * PRICE_OUT
 
 
 def _served(resp: dict) -> dict:

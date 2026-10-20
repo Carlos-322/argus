@@ -10,7 +10,7 @@ import urllib.request
 import pytest
 
 from board import serve, static
-from test_prepared_footage import count_media_reads, media, serving, get
+from test_prepared_footage import count_media_reads, media, served, serving, get
 
 
 def test_get_with_body_closes_connection_without_parsing_body_as_request(tmp_path, monkeypatch):
@@ -70,10 +70,10 @@ def test_ready_receipts_do_not_age_out_before_media_and_zero_count_keeps_ticket(
     serve.footage('episode_x', .1, .3)
     assert serve.footage('episode_x', 0, .1)[0] == first[0]
     assert serve._footage_version(first[0]) == version
-    assert serve.ticket_footage(token) == first
+    assert served(token) == first
     monkeypatch.setattr(serve, '_FOOTAGE_DISK_FILES', 0)
     token = serve.prepare_footage_ticket(first)
-    assert serve.ticket_footage(token) == first
+    assert served(token) == first
 
 
 def test_parallel_ticket_range_downloads_do_not_consume_probe_admission(tmp_path, monkeypatch):
@@ -271,5 +271,5 @@ def test_live_ticket_recovers_an_unusable_canonical_receipt_without_replacing_mo
             receipt.unlink()
     assert serve.footage('episode_x', 0, .1) == result
     assert serve._footage_version(result[0]) == version
-    assert serve.ticket_footage(token) == result
-    assert serve.ticket_footage(serve.prepare_footage_ticket(result)) == result
+    assert served(token) == result
+    assert served(serve.prepare_footage_ticket(result)) == result

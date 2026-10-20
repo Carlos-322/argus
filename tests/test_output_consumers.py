@@ -253,10 +253,10 @@ def test_schema_defects_are_counted_once_per_field_across_layers(scope, key, val
         labels['timeline'] = [[labels['timeline'][0].get(column) for column in TIMELINE_COLUMNS]]
     parsed, ok = parse_response(json.dumps(labels))
     assert ok
-    violations = metrics.schema_violations(parsed)
+    violations = metrics.measure(parsed, None)['violations']
     assert len(violations) == want, violations
     projected, _ = to_board.typed({'labels': parsed})
-    assert len(metrics.schema_violations(projected)) == want
+    assert len(metrics.measure(projected, None)['violations']) == want
 
 
 def test_each_bad_row_and_field_keeps_its_own_schema_identity():
@@ -266,7 +266,7 @@ def test_each_bad_row_and_field_keeps_its_own_schema_identity():
     labels['data_issues'] = [{'issue': 'visible issue', 'severity': 'Critical'}]
     parsed, ok = parse_response(json.dumps(labels))
     assert ok
-    assert len(metrics.schema_violations(parsed)) == 3
+    assert len(metrics.measure(parsed, None)['violations']) == 3
 
 
 def test_schema_identity_retains_source_row_indices_after_compaction():
@@ -279,7 +279,7 @@ def test_schema_identity_retains_source_row_indices_after_compaction():
     labels['timeline'][2][8] = True
     parsed, ok = parse_response(json.dumps(labels))
     assert ok
-    assert len(metrics.schema_violations(parsed)) == 3
+    assert len(metrics.measure(parsed, None)['violations']) == 3
     d = to_board.convert({'labels': parsed})
     assert len(d['_schema_violations']) == 3
     assert any('timeline[1].contribution' in text for text in d['_schema_violations'])

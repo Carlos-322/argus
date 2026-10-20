@@ -15,6 +15,28 @@ import pytest
 
 from board import build as board_build
 from board import clips, sensors
+from board.hands import vlq_decode
+
+
+def dequantize(block: dict, rows: int, bits: int = 16) -> np.ndarray:
+    """The page's decoder of a quantize block (board/sensors.py), in Python: rows x values floats, NaN for no
+    reading."""
+    raw = np.frombuffer(base64.b64decode(block["data"]), dtype="<u2" if bits == 16 else "u1").astype(np.float64)
+    q = raw.reshape(rows, -1)
+    lo, step = np.asarray(block["lo"], dtype=np.float64), np.asarray(block["step"], dtype=np.float64)
+    v = lo + q * step
+    v[q == (sensors.NONE16 if bits == 16 else sensors.NONE8)] = np.nan
+    return v
+
+
+def decode_times(block: dict) -> np.ndarray:
+    """The page's decoder of an encode_times block (board/sensors.py), in Python: seconds."""
+    p = block["ms0"]
+    out = [p]
+    for g in vlq_decode(block["d"]):
+        p += block["dur"] + g
+        out.append(p)
+    return np.asarray(out, dtype=np.float64) / 1000.0
 
 
 # ---------------------------------------------------------------- quantization
@@ -36,7 +58,7 @@ def test_quantized_wire_format_has_independent_codes_and_missing_sentinels(bits,
     assert base64.b64decode(block['data']) == encoded
     # Decode independently authored bytes, so matching writer and reader mistakes cannot cancel.
     authored = {**metadata, 'data': base64.b64encode(encoded).decode()}
-    decoded = sensors.dequantize(authored, len(raw), bits=bits)
+    decoded = dequantize(authored, len(raw), bits=bits)
     wanted = np.array([[np.nan if value is None else value for value in row] for row in expected])
     np.testing.assert_equal(decoded, wanted)
 
@@ -62,7 +84,7 @@ def test_values_round_trip_within_half_a_step():
     a = np.c_[rng.normal(0, 1, 500), rng.normal(1000, 50, 500), np.full(500, 3.0)]
     a[17, 1] = np.nan
     blk = sensors.quantize(a)
-    back = sensors.dequantize(blk, len(a))
+    back = dequantize(blk, len(a))
     assert np.isnan(back[17, 1]) and np.isfinite(back[16, 1])
     for c in range(3):
         ok = np.isfinite(a[:, c])
@@ -75,7 +97,7 @@ def test_a_map_round_trips_in_one_byte_a_value():
     a = 3072 - np.clip(rng.normal(0, 400, (40, 256)), 0, None)
     a[3] = np.nan                              # a frame with no reading
     blk = sensors.quantize(a, bits=8, per_value=False)
-    back = sensors.dequantize(blk, len(a), bits=8)
+    back = dequantize(blk, len(a), bits=8)
     assert np.isnan(back[3]).all()
     ok = np.isfinite(a)
     assert np.max(np.abs(back[ok] - a[ok])) <= blk["step"] / 2 + 1e-9
@@ -83,7 +105,7 @@ def test_a_map_round_trips_in_one_byte_a_value():
 
 def test_times_round_trip_to_the_millisecond():
     t = np.cumsum(np.r_[0.0, np.full(60, 1 / 30), [0.1], np.full(20, 1 / 30)])
-    back = sensors.decode_times(sensors.encode_times(t))
+    back = decode_times(sensors.encode_times(t))
     assert len(back) == len(t) and np.max(np.abs(back - t)) <= 0.0005 + 1e-9
 
 
@@ -131,7 +153,7 @@ def test_an_episode_file_keeps_what_label_signals_reads(tmp_path):
     # 30 frames a second sampled every second frame: at most 15 a second, on the clip's clock (first frame 0)
     assert doc["stride"] == 2 and doc["n"] <= 150
     pick = np.asarray(doc["sample_indices"])
-    t = sensors.decode_times(doc["times"])
+    t = decode_times(doc["times"])
     assert t[0] == 0.0 and t[-1] == pytest.approx(299 / 30, abs=1e-3)
     force, pmap, health = doc["signals"]
     assert health["constant"] is True and health["value"] == [1.0] and "values" not in health
@@ -139,16 +161,16 @@ def test_an_episode_file_keeps_what_label_signals_reads(tmp_path):
     assert force["rests_and_rises"] is True and force["direction"] == "up"
     # Independent frame boundaries from the fixture's two recorded presses.
     assert force["spans"] == [[2.0, 2.967], [6.667, 7.967]]
-    v = sensors.dequantize(force["values"], doc["n"])
+    v = dequantize(force["values"], doc["n"])
     assert np.max(np.abs(v[:, 0] - a[pick, 0])) <= force["values"]["step"][0] / 2 + 1e-9
     # the pressure map behaves like touch: falls when pressed, drawn as a heatmap against its rest and swing
     assert pmap["touch"] is True and pmap["direction"] == "down" and pmap["shape"] == [4, 4]
     assert np.allclose(pmap["rest"], 3072.0, atol=10) and pmap["swing_from"] == "episode" and pmap["swing"] > 0
-    m = sensors.dequantize(pmap["map"], doc["n"], bits=8)
+    m = dequantize(pmap["map"], doc["n"], bits=8)
     raw = np.load(ep / "signals.npz")["s1"].astype(np.float64)
     assert m.shape == (doc["n"], 16)
     assert np.max(np.abs(m - raw[pick])) <= pmap["map"]["step"] / 2 + 1e-6
-    act = sensors.dequantize(pmap["activity"], doc["n"])[:, 0]
+    act = dequantize(pmap["activity"], doc["n"])[:, 0]
     assert np.median(act[pick < 60]) == 0
     assert np.median(act[(pick >= 200) & (pick < 240)]) > np.median(act[(pick >= 60) & (pick < 90)]) > 0
 
@@ -180,7 +202,7 @@ def test_each_signal_keeps_its_own_length_and_its_gaps(tmp_path):
     assert doc["frames"] == 300 and doc["n"] <= 150
     pick = np.asarray(doc["sample_indices"])
     f = next(s for s in doc["signals"] if s["name"] == "fingertip force")
-    v = sensors.dequantize(f["values"], doc["n"])[:, 0]
+    v = dequantize(f["values"], doc["n"])[:, 0]
     missing = (pick >= 250) | ((pick >= 100) & (pick < 120)) | (pick < 10)
     assert np.isnan(v[missing]).all() and np.isfinite(v[~missing]).all()
 
@@ -677,10 +699,10 @@ def test_full_rate_tactile_keeps_distribution_and_gaps():
     a = np.array([[0, 0, 0, 0], [4, 0, 0, 0], [1, 1, 1, 1],
                   [0, 0, 0, 4], [np.nan, 0, 0, 0]], dtype=float)
     doc = sensors.tactile_doc(a, np.zeros(4), 4, 'up', [2, 2])
-    intensity = sensors.dequantize(doc['intensity'], 5)[:, 0]
-    count = sensors.dequantize(doc['active'], 5)[:, 0]
-    focus = sensors.dequantize(doc['focus'], 5)[:, 0]
-    row = sensors.dequantize(doc['row'], 5)[:, 0]
+    intensity = dequantize(doc['intensity'], 5)[:, 0]
+    count = dequantize(doc['active'], 5)[:, 0]
+    focus = dequantize(doc['focus'], 5)[:, 0]
+    row = dequantize(doc['row'], 5)[:, 0]
     assert intensity[1] == pytest.approx(intensity[2], abs=1e-4)
     assert count[1] == pytest.approx(1, abs=1e-4) and count[2] == pytest.approx(4, abs=1e-4)
     assert focus[1] == pytest.approx(1) and focus[2] == pytest.approx(.25, abs=1e-4)
@@ -693,9 +715,9 @@ def test_full_rate_tactile_keeps_distribution_and_gaps():
 def test_full_rate_tactile_does_not_threshold_away_small_changes():
     a = np.array([[10, 10, 10, 10], [9.8, 10, 10, 10], [9, 10, 10, 10]])
     doc = sensors.tactile_doc(a, np.full(4, 10), 4, 'down', [2, 2])
-    values = sensors.dequantize(doc['intensity'], 3)[:, 0]
+    values = dequantize(doc['intensity'], 3)[:, 0]
     assert values[1] == pytest.approx(.05, abs=1e-4)
-    assert sensors.dequantize(doc['active'], 3)[1, 0] == 0
+    assert dequantize(doc['active'], 3)[1, 0] == 0
 
 
 def test_contact_map_sidecar_retains_full_rate_metrics():
@@ -705,7 +727,7 @@ def test_contact_map_sidecar_retains_full_rate_metrics():
     meta = {'name': 'right_pressure', 'dims':256, 'shape':[16,16], 'rest':np.zeros(256), 'swing':2}
     doc = sensors.signal_doc(meta, a, np.arange(30) / 30, 3, True)
     assert doc['tactile']['n'] == 30
-    assert len(sensors.dequantize(doc['strength'], 10)) == 10
+    assert len(dequantize(doc['strength'], 10)) == 10
     assert doc['tactile']['shape'] == [16,16]
 
 
@@ -729,7 +751,7 @@ def test_overview_keeps_a_between_stride_peak_and_native_gap(tmp_path):
     _resave(ep, s0=a)
     doc = sensors.episode_doc(ep)
     pick = np.asarray(doc.get('sample_indices', list(range(0, 120, doc['stride']))))
-    value = sensors.dequantize(doc['signals'][0]['values'], doc['n'])[:, 0]
+    value = dequantize(doc['signals'][0]['values'], doc['n'])[:, 0]
     assert 61 in pick and value[np.flatnonzero(pick == 61)[0]] == pytest.approx(9)
     assert len(pick) <= 15 and np.all(np.diff(pick) > 0)
     assert doc['sampling']['method'] == 'bucket extrema'
@@ -758,7 +780,7 @@ def test_overview_keeps_a_between_stride_peak_and_native_gap(tmp_path):
     trim_episode(short, 4 / 30)
     tiny = sensors.episode_doc(short)
     assert tiny['frames'] == 4 and tiny['sample_indices'] == [0, 1, 2, 3]
-    decoded = sensors.dequantize(tiny['signals'][0]['values'], tiny['n'])[:, 0]
+    decoded = dequantize(tiny['signals'][0]['values'], tiny['n'])[:, 0]
     assert decoded.max() == pytest.approx(9) and decoded.min() == pytest.approx(-4)
     assert (short / 'exo.mp4').read_bytes() == source_bytes
     if shutil.which('node'):

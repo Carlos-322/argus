@@ -239,16 +239,6 @@ def _list(L: dict, key: str) -> list:
     return L[key] if isinstance(L.get(key), list) else []
 
 
-def schema_violations(L: dict, config: dict | None = None) -> list[str]:
-    """Where a parsed response departs from the schema every model was given: the board's own list
-    (board/label_projection.py project and schema_rules), so a model is never scored on a rule the board does not
-    show."""
-    from board.to_board import typed
-    from board.label_projection import diagnostics
-    projected, dropped = typed({"labels": L, "config": config})
-    return list(diagnostics(projected, dropped).values())
-
-
 def measure(L: dict, dataset: str | None, config: dict | None = None) -> dict:
     """The counts one parsed response contributes."""
     from board.to_board import typed

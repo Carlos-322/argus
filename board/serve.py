@@ -1235,14 +1235,6 @@ def _ticket_record(token: str) -> dict | None:
     return None
 
 
-def ticket_footage(token: str) -> tuple | None:
-    try:
-        record = _ticket_record(token)
-        return _receipt_footage(record) if record is not None else None
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        return None
-
-
 @contextmanager
 def _ticket_reader(token):
     try:

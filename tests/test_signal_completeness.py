@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from board import sensors as bs
+from test_board_sensors import decode_times, dequantize
 from checks import sensors as cs
 from label import episode as me
 
@@ -88,7 +89,7 @@ def test_a_value_with_no_reading_is_preserved_without_a_warning():
         doc = bs.signal_doc({"name": "qpos"}, a, np.arange(3) / 30, 1)
         notes = cs.signal_findings(ep)
     assert "partial reading at 3 of 3 frames" in text
-    back = bs.dequantize(doc["values"], 3)
+    back = dequantize(doc["values"], 3)
     assert np.array_equal(back[:, 0], [1., 2., 3.]) and np.isnan(back[:, 1]).all()
     assert any(x["check"] == "partial_reading" for x in notes)
 
@@ -107,7 +108,7 @@ def test_board_signals_use_anchor_frames_even_when_the_only_signal_has_another_l
         np.savez(tmp_path / "times.npz", exo=np.array([12., 12.2, 12.5]))
     doc = bs.episode_doc(tmp_path)
     assert doc["frames"] == 3
-    assert np.allclose(bs.decode_times(doc["times"]), [12, 12.2, 12.5] if real_clock else [0, .1, .2])
+    assert np.allclose(decode_times(doc["times"]), [12, 12.2, 12.5] if real_clock else [0, .1, .2])
     sig = doc["signals"][0]
     assert sig["constant"] and sig["value"] == [1.]
     assert sig.get("no_reading_frames", 0) == (1 if rows == 2 else 0)

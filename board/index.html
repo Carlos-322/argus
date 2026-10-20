@@ -4896,7 +4896,6 @@ function displayGripFindings(E, t, windows = sensorFindingWindows(E)) {
 }
 const MAX_CARDS_ON_VIDEO = 2;
 
-function displayGripFinding(E, t) { return displayGripFindings(E, t)[0] || null; }
 function gripOverlaySeries(G, f, limit = 3) {
   G = f?.evidenceSource || G;
   if (G && G.generic) return genericSensorSeries(G, f, limit);
