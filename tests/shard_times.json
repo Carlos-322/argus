@@ -81,6 +81,7 @@
  "tests/test_label_report_regressions.py": 56.7,
  "tests/test_label_review_v2.py": 3.2,
  "tests/test_large_chunk_index.py": 0.1,
+ "tests/test_left_out_is_named.py": 1.5,
  "tests/test_mcap_fields.py": 0.1,
  "tests/test_measured_bounds.py": 0.0,
  "tests/test_merged_reader_rules.py": 0.6,
