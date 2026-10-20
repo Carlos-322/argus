@@ -46,3 +46,13 @@ def test_a_sensor_result_saved_with_na_needs_no_rerun_and_reads_as_not_applicabl
     assert serve.withheld_status({"checks": rows}) == serve.withheld_status({"checks": now})
     rows[0]["status"] = "errored"
     assert sensors.needs_check(ctx)
+
+
+def test_a_stored_number_is_read_one_way_and_a_reading_is_written_one_way():
+    """Five modules each had a _num: two wrote a reading as text (label/signals.py and label/episode.py, which wrote
+    nan where the other wrote -), two parsed a stored number (checks/label_consistency.py, which refused true and
+    infinity, and checks/timebase.py, which took both), and one checked a type nothing called."""
+    from label import signals as sg
+    assert [results.stored_number(x) for x in ("1.5", 2, None, "x", True, float("nan"), float("inf"))] == [
+        1.5, 2.0, None, None, None, None, None]
+    assert [sg.reading_text(x) for x in (0.123456, 1e6, float("nan"))] == ["0.123", "1e+06", "-"]

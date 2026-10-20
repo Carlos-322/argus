@@ -133,7 +133,7 @@ def _signal_findings(ep: dict, name: str, a, skipped: dict) -> list[dict]:
                 many = np.flatnonzero(pinned > PINNED_SHARE)
                 if len(many):
                     out.append({"check": "pinned", "signal": name, "count": int(len(many)),
-                                "evidence": f"{len(many)} values of {name} read exactly {sg._num(edge)}, the "
+                                "evidence": f"{len(many)} values of {name} read exactly {sg.reading_text(edge)}, the "
                                             f"{'top' if way == 'up' else 'bottom'} of its range, at more than "
                                             f"{PINNED_SHARE:.0%} of the frames ("
                                             + ", ".join(_cell(i, m.get("shape")) for i in many[:8])

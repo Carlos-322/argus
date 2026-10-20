@@ -13,9 +13,13 @@ check per result (stream_pairing's three modes) gives {"error": ...} when it sto
 {"not_assessed": why} when it does not apply.
 
 checks/sensors.py wrote "na" for not_applicable until 2026-10-20. status() reads it as not_applicable, so a result
-saved before then needs no rerun and reads the same everywhere."""
+saved before then needs no rerun and reads the same everywhere.
+
+stored_number is how a check reads a number out of a stored label or table (checks/label_consistency.py,
+checks/timebase.py)."""
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 FIRED, CLEAR, NOT_APPLICABLE, ERRORED = "fired", "clear", "not_applicable", "errored"
@@ -71,3 +75,15 @@ def run_safely(d: str, run, errored) -> tuple:
         return d, run(Path(d)), None
     except Exception as e:  # noqa: BLE001 - recorded as the result, never silently skipped
         return d, errored(e), None
+
+
+def stored_number(x) -> float | None:
+    """A number read from a stored label or table: a finite float, else None (no value, text, true or false, NaN or
+    infinity)."""
+    if isinstance(x, bool):
+        return None
+    try:
+        value = float(x)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None

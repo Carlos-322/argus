@@ -219,7 +219,8 @@ def names_scalar_observed_state(name: str) -> bool:
             and _names_word(words[-2], ("observation", "arm", "robot", "gripper", "leader", "follower")))
 
 
-def _num(x: float) -> str:
+def reading_text(x: float) -> str:
+    """A reading as the request writes it: three significant figures, and - for no reading."""
     return "-" if not np.isfinite(x) else f"{float(x):.3g}"
 
 
@@ -731,7 +732,7 @@ def summary_rows(name: str, a: np.ndarray, ks: list[int], shape=None, names=None
     d = a.shape[1]
     if per_value(name, d, shape, names, role):
         labels = names if names and len(names) == d else ([""] if d == 1 else [f"[{i}]" for i in range(d)])
-        return [(f"{name}{(' ' + lb) if lb else ''}", [_num(a[k, i]) for k in ks]) for i, lb in enumerate(labels)]
+        return [(f"{name}{(' ' + lb) if lb else ''}", [reading_text(a[k, i]) for k in ks]) for i, lb in enumerate(labels)]
     rows = []
     if _role(role) not in MOVEMENT_ROLES and localized(a, rest, swing):
         # the distances, the active values and the activity at the sampled instants alone, as the whole would give them
@@ -742,7 +743,7 @@ def summary_rows(name: str, a: np.ndarray, ks: list[int], shape=None, names=None
                for k, v in dist.items()}
         unread = {k: not np.isfinite(a[k]).any() for k in ks}
         m = {k: (np.nan if unread[k] else float(np.where(act[k], dist[k], 0.0).sum())) for k in ks}
-        rows.append((f"{name} total activity", [_num(m[k]) for k in ks]))
+        rows.append((f"{name} total activity", [reading_text(m[k]) for k in ks]))
         rows.append((f"{name} active values", ["-" if unread[k] else str(int(act[k].sum())) for k in ks]))
         if shape and len(shape) == 2:
             h, w = int(shape[0]), int(shape[1])
@@ -761,7 +762,7 @@ def summary_rows(name: str, a: np.ndarray, ks: list[int], shape=None, names=None
             with np.errstate(invalid="ignore"):
                 x = np.abs(np.asarray(a[b0], dtype=np.float64) - np.asarray(a[a0], dtype=np.float64))
             x = x[np.isfinite(x)]
-            ch.append(_num(x.max()) if len(x) else "-")
+            ch.append(reading_text(x.max()) if len(x) else "-")
         rows.append((f"{name} largest change of any value since the instant before", ch))
     return rows
 
@@ -788,7 +789,7 @@ def describe(name: str, a: np.ndarray, shape=None, names=None, rest=None, swing=
             what = (f"{d} named values in value order, value names retained in episode metadata"
                     + (f", {' x '.join(str(int(x)) for x in shape)} shape" if shape and len(shape) > 1 else ""))
     if rate_hz and fps and float(rate_hz) < RATE_SLOWER * float(fps):
-        rate = _num(float(rate_hz))
+        rate = reading_text(float(rate_hz))
         what += (f", recorder arrivals at {rate} Hz" if aligned_by == RECORDER_ARRIVAL else
                  f", estimated at {rate} Hz from assumed placement" if aligned_by == COARSE_CLOCK or clock_problem else
                  f", recorded at {rate} Hz")
@@ -818,19 +819,19 @@ def describe(name: str, a: np.ndarray, shape=None, names=None, rest=None, swing=
     if d > PER_VALUE_MAX:
         if (hi == lo).all():
             return f"{head}: every value constant throughout{tail}"
-        return f"{head}: values from {_num(np.nanmin(lo))} to {_num(np.nanmax(hi))}{tail}"
+        return f"{head}: values from {reading_text(np.nanmin(lo))} to {reading_text(np.nanmax(hi))}{tail}"
     if (hi == lo).all():
-        value = _num(lo[0]) if d == 1 else "[" + ", ".join(_num(x) for x in lo) + "]"
+        value = reading_text(lo[0]) if d == 1 else "[" + ", ".join(reading_text(x) for x in lo) + "]"
         text = f"{head}: {value} throughout{tail}"
     else:
-        text = f"{head}: " + ", ".join(_num(l) if l == h else f"{_num(l)} to {_num(h)}"
+        text = f"{head}: " + ", ".join(reading_text(l) if l == h else f"{reading_text(l)} to {reading_text(h)}"
                                      for l, h in zip(lo, hi)) + tail
     if len(text) <= DESCRIBE_ROW_MAX_CHARS:
         return text
     if named and f" ({named})" in what:
         what = what.replace(f" ({named})", "", 1)
         what += ", value names retained in episode metadata"
-    readings = [_num(l) + " throughout" if l == h else f"{_num(l)} to {_num(h)}" for l, h in zip(lo, hi)]
+    readings = [reading_text(l) + " throughout" if l == h else f"{reading_text(l)} to {reading_text(h)}" for l, h in zip(lo, hi)]
     # Eight ranges fit within the descriptor allowance even at the longest numeric format. The signal name and
     # clock qualifications are never truncated; the allowance bounds value detail, not original source identities.
     groups = [f"    values {i}-{min(i + 7, d - 1)}: " + ", ".join(readings[i:i + 8])

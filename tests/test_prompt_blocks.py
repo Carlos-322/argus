@@ -10,6 +10,7 @@ import pytest
 from label import episode as me
 from label import frames as mf
 from label import policy, prompts
+from label import signals as sg
 from label import state as ms
 
 
@@ -915,7 +916,7 @@ def test_with_no_row_that_fits_each_signal_with_rows_is_named_as_left_out_becaus
     """A budget smaller than the times row or any value row names every omitted signal with the actual reason."""
     ep, pl = _sweeps_wide_and_flags()
     head = len("    at: " + " ".join(f"{me.frame_time(ep, k):.2f}" for k in pl["ks"]))
-    shortest = min(len("    " + name + ": " + " ".join(me._num(x) for x in a[pl["ks"], 0]))
+    shortest = min(len("    " + name + ": " + " ".join(sg.reading_text(x) for x in a[pl["ks"], 0]))
                    for name, a in ep["signals"].items())
     for budget in (head - 1, head + shortest - 1):
         monkeypatch.setattr(me, "SIGNAL_TABLE_MAX_CHARS", budget)
