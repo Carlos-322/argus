@@ -1,7 +1,8 @@
 """Label a long recording in pieces and stitch the labels back into one timeline.
 
-A recording longer than PIECE_MAX_S is one episode on the board, with one clip and one timeline, but the model
-labels it in parts: the recording is cut at frame boundaries within the request limit, preferring the least motion near each evenly
+A recording longer than its part limit (piece_max: the part_max_s that label/policy.py resolve gives, 450s at a
+rig's default sampling and at most 330s at denser sampling) is one episode on the board, with one clip and one
+timeline, but the model labels it in parts: the recording is cut at frame boundaries within the request limit, preferring the least motion near each evenly
 spaced target (from recorded state when available and anchor-camera image change otherwise), each
 part is labelled as its own request, and the parts' labels are shifted back onto the recording's clock and
 joined. Nothing about the recording's episode boundaries is invented: an unsplit recording stays one episode,
@@ -16,8 +17,8 @@ the whole recording, so a part is shown it as context, not as its goal.
     python -m label.pieces plan EP_DIR            # print the cuts
 
 The path for your own data (python -m review) cuts every episode that needs it, labels the parts and stitches
-them, and Data Review runs the same functions on uploads. No episode on the published board is longer than
-PIECE_MAX_S, so none of them is cut.
+them, and Data Review runs the same functions on uploads. No episode on the published board is longer than 450s,
+so none of them is cut.
 """
 from __future__ import annotations
 
@@ -35,8 +36,8 @@ import numpy as np
 from label.atomic import write_atomic
 from label import policy
 
-# the longest recording the published board labels in one request is 443 s (OpenAoE); a recording longer than
-# this is labelled in parts, so an upload is never sent to the model in a longer request than the board's
+# Not read here: the part limit is piece_max (policy part_max_s). Kept because Data Review's vendor check
+# (upload/vendor_repo.py NEEDS in the Data repo) requires this name in this file.
 PIECE_MAX_S = {"teleop_arms": 450.0, "handheld_gripper": 450.0, "ego_head": 450.0}
 SEARCH = 0.3                # a cut is sought within +-30% of a part's length around its target
 SMOOTH_S = 2.0              # motion is averaged over 2 s so a cut lands in a still stretch, not a still frame

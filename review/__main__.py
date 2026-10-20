@@ -16,8 +16,8 @@ in the job and each prepared episode:
               (checks.timebase measure_folder), the capture checks (checks.capture_qc), and the checks on the
               other signals and depth streams where the data has them (checks.sensors)
   4. clips    browser-playable copies of each camera for the board (python -m board clips)
-  5. dry run  every request built exactly as it would be sent, free. A recording longer than label/pieces.py's
-              PIECE_MAX_S is labelled in parts cut at still moments
+  5. dry run  every request built exactly as it would be sent, free. A recording longer than its part limit
+              (label/pieces.py piece_max) is labelled in parts cut at still moments
   6. label    the model labels every episode or part, stopping at --cap dollars (skipped with --free)
   7. board    parts stitched back into one timeline per recording, and the board's files (board.build with the
               rig's rules, plus fixed_window when the reader found fixed-length files)

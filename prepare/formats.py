@@ -868,7 +868,7 @@ def lerobot_roots(root: Path, files: list[Path]) -> list[str]:
     return [str(r) for r in sorted(out)]
 
 
-# ---------------------------------------------------------------- shared helpers
+# ---------------------------------------------------------------- shared helpers: opening videos and placing cameras
 
 DEMUXER = {".mp4": "mov", ".mov": "mov", ".m4v": "mov", ".mkv": "matroska", ".webm": "matroska", ".avi": "avi"}
 
@@ -1599,6 +1599,8 @@ def _short(name: str, view: str) -> str:
     return "_".join(kept or words)[:32] or view
 
 
+# ---------------------------------------------------------------- shared helpers: notes and the task
+
 def set_uploader_notes(ctx: dict, obj, files: bool = False) -> None:
     """The uploader's notes for an episode, as text for the prompt (uploader_annotation) and as sent (uploader_notes,
     which the board shows beside the labels). files: obj holds several note files, {file name: notes}."""
@@ -2101,6 +2103,8 @@ def task_rank(p: Path, named: bool = False, own: bool = False) -> int | None:
     return 1 if p.name.lower() in TASK_NOTE_NAMES else None
 
 
+# ---------------------------------------------------------------- shared helpers: recorded state layout
+
 # Generic physical state requires named joints and a gripper, or ordered Cartesian pose axes and an opening.
 # Layout classification is separate from unit qualification. Unsupported readings remain signals.
 STATE_GRIPPER_NAME = re.compile(r"grip|finger|jaw|claw|opening", re.I)
@@ -2523,6 +2527,8 @@ def recorded_value_roles(features, names, columns):
             roles[index], sources[index] = "gripper", column
     return roles, sources
 
+
+# ---------------------------------------------------------------- shared helpers: signals
 
 # Per-frame columns that are the table's bookkeeping, not a recording: never kept as a signal
 SIGNAL_SKIP = re.compile(r"(^|\.)(index|timestamp)$|_index$")
@@ -3447,6 +3453,8 @@ class DepthWriter:
             self.dst.close()
         return len(self.pts)
 
+
+# ---------------------------------------------------------------- finishing an episode
 
 # Stored context times and capture arrays share one raw clock. Consumers subtract clock_zero_s (default zero).
 # The fields of context.json that hold times on that clock, {field: the time keys of each entry}. A step that
@@ -7244,7 +7252,7 @@ def convert_recording(item: dict, rig: str, out: Path, dataset: str) -> dict:
     return ctx
 
 
-# ---------------------------------------------------------------- MCAP
+# ---------------------------------------------------------------- MCAP: planning an upload
 
 def plan_mcap(det: dict, root: Path) -> list[dict]:
     from mcap.reader import make_reader
@@ -8658,6 +8666,8 @@ def convert_hdf5(item: dict, rig: str, out: Path, dataset: str, *, source_scope:
                         placeholders={v: written[nm].placeholders() for v, (nm, _) in files.items()})
 
 
+# ---------------------------------------------------------------- converting one item, here or in a child process
+
 def with_hdf5_sources(sources, fn, *args, **kwargs):
     """fn(*args, **kwargs) with the upload's files as the only HDF5 sources (authorized_sources): a child process
     starts without the context its parent set."""
@@ -8716,6 +8726,8 @@ def read_episode(it: dict, rig: str, out: Path, dataset: str, scope: dict) -> di
         it.update(after)
     return ctx
 
+
+# ---------------------------------------------------------------- HDF5: camera names, depth scale, files with no camera
 
 def names_shown(files: dict) -> list[str]:
     return [nm for nm, _ in files.values()]
@@ -9365,11 +9377,10 @@ def mcap_joint_streams(paths: list[Path], q: np.ndarray | None = None, unread: l
 
 # Every other number an MCAP records (a gripper's IMU, an arm's joint velocities and torques, a base's odometry), read
 # as recorded_signals reads a LeRobot table's other columns: per channel, each numeric field under the dataset's own
-# name, placed on the anchor camera's frames. A channel slower than SIGNAL_MIN_HZ (a battery report) is kept with its
-# rate (rate_hz), each frame its nearest message; one with a single message is a setting, listed with its values,
-# not a reading over time. One that starts or ends inside the footage is NaN
-# outside its messages, never held flat where nothing was recorded, and the span it misses is a data issue.
-SIGNAL_MIN_HZ = 1.0
+# name, placed on the anchor camera's frames. Every channel, however slow (a battery report), is kept with its rate
+# (rate_hz); one with a single message is a setting, listed with its values, not a reading over time. One that starts
+# or ends inside the footage is NaN outside its messages, never held flat where nothing was recorded, and the span it
+# misses is a data issue.
 SIGNAL_SKIP_PARTS = {"header", "timestamp", "stamp"}      # a message's own time and sequence bookkeeping
 # A gap between two readings inside the footage longer than STATE_GAP_S is a stop the state is never filled across,
 # when it is also longer than STATE_STOP_STEPS of the stream's own median steps: a 30 Hz recorder that stops for 2 s
@@ -10058,6 +10069,8 @@ def third_arm_camera_desc(topics: list[str]) -> str:
             "not the scene changing. Use it for the scene layout, object locations and where things end up, working "
             "out from each frame where it looks")
 
+
+# ---------------------------------------------------------------- MCAP: decoding messages, and the generic MCAP reader
 
 class McapSchemaError(ValueError):
     """A channel's recorded schema cannot be parsed by its supported decoder."""
@@ -11205,6 +11218,8 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
                                for v, (topic, _) in files.items()} if rig == "ego_head" else None,
                         signals=signals, depth=depth)
 
+
+# ---------------------------------------------------------------- encoded video frames, and trimming an episode
 
 def nal_units(b: bytes):
     """Header bytes of each NAL unit in an Annex-B buffer."""
