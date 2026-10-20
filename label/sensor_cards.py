@@ -1,7 +1,7 @@
 """The cards a person watching a recording sees on the video, chosen and written from its bound sensor findings.
 
 The analysis passes find every supported change and describe it in analysis terms. This one text-only call reads
-those findings, chooses the few a watcher should see while they happen, and writes every finding in everyday words: a
+those findings, chooses the few a watcher should see while they happen, and writes every finding in plain English: a
 chosen finding gains a video_card, and every other one a list_copy, so the list reads as one voice. Every finding stays
 in the list. An entry names its finding by the finding's own content (finding_key), never by position, so a rebind
 that changes a finding drops its entry.
@@ -13,24 +13,25 @@ import hashlib
 import json
 import re
 
-from label import sensor_display
+from label import sensor_copy, sensor_display
 from label import sensor_evidence as se
 
 VERSION = 1
 MAX_TOKENS = 16000
-HEADLINE_WORDS = 8
-DETAIL_WORDS = 30
+# What the prompt asks for, and the most a reply may use before an entry is left out.
+HEADLINE_WORDS, HEADLINE_LIMIT = 8, 10
+DETAIL_WORDS, DETAIL_LIMIT = 25, 30
 
 PROMPT = '''A person will watch this recording with short cards on the video, one card per sensor finding chosen for it. A card appears when its finding starts and stays on screen for at least two seconds. Every finding below stays available in a list beside the video, so the cards are only for what the watcher should see while it happens.
 
 Choose the cards and write them. Choose so that, in playback order, the cards tell the watcher what the sensors add to the video: the clearest change at each moment, never two cards about the same change, never more than two cards on screen at once, and no more cards than the watcher can read in the time they are on screen. The sensors matter most where the video cannot show the change, such as a change out of view or hidden under the hand, or one part of a region changing differently from the rest. Between findings about the same moment, choose the most specific one the evidence supports. Leave a finding off the video only because another card covers its moment better or the watcher could not read it in time, never because cards should be few: a finding that adds something the video cannot show and competes with no other deserves its card, even when it is the only finding.
 
-For each card write a headline of at most six words saying what changed and naming the part or parts it changed in, and a detail of one sentence under 20 words giving the comparison that makes it worth knowing, such as which part changes relative to another part, the start or the visible motion. Name parts by the names the finding's rows use, written as ordinary words in a sentence (the thumb, the index finger, one part of the thumb). Name the measured quantity in everyday words, for example pressure for a pressure sensor, and describe the change as the findings' claims interpret it, for example pressing harder or easing; where a sensor declares no stronger direction (stronger_response is null), say what rose or fell instead. Never use analysis words such as response, loading, signal, reference, component, estimate or configuration. Say only what the chosen finding's observation and claim support. When the finding is uncertain, the single word likely is enough. Use plain hyphens rather than typographic dashes.
+For each card write a headline of one short sentence, at most {headline} words, saying what changed and naming the part or parts it changed in, and a detail of one sentence under {detail} words giving the comparison that makes it worth knowing, such as which part changes relative to another part, the start or the visible motion. {plain}Name parts by the names the finding's rows use, written as ordinary words in a sentence (the thumb, the index finger, two spots on the thumb); a numbered label such as Region 1 is not a name, so say what is there, as the finding's claim describes it. Name the measured quantity in everyday words, for example pressure for a pressure sensor, and describe the change as the findings' claims interpret it, for example pressing harder or easing; where a sensor declares no stronger direction (stronger_response is null), say what rose or fell instead. Never use analysis words such as response, loading, signal, reference, component, estimate or configuration. Say only what the chosen finding's observation and claim support. When the finding is uncertain, the single word likely is enough. Use plain hyphens rather than typographic dashes.
 
-Then write the list entry for every finding you did not choose, the same way and in the same everyday words, so the list reads as one voice: a headline of at most six words and one sentence under 20 words.
+Then write the list entry for every finding you did not choose, the same way and in the same plain English, so the list reads as one voice: a headline of at most {headline} words and one sentence under {detail} words.
 
-Return only JSON: {"cards": [{"finding": <index>, "headline": "...", "detail": "..."}], "list": [{"finding": <index>, "headline": "...", "detail": "..."}]}, each in playback order. An empty cards array is valid.
-'''
+Return only JSON: {{"cards": [{{"finding": <index>, "headline": "...", "detail": "..."}}], "list": [{{"finding": <index>, "headline": "...", "detail": "..."}}]}}, each in playback order. An empty cards array is valid.
+'''.format(headline=HEADLINE_WORDS, detail=DETAIL_WORDS, plain=sensor_copy.PLAIN_ENGLISH)
 
 
 def _packed(value):
@@ -89,7 +90,7 @@ def _entries(rows, count, taken):
         index = row.get('finding')
         if type(index) is not int or index < 0 or (count is not None and index >= count) or index in taken:
             continue
-        if not _words(row.get('headline'), HEADLINE_WORDS) or not _words(row.get('detail'), DETAIL_WORDS):
+        if not _words(row.get('headline'), HEADLINE_LIMIT) or not _words(row.get('detail'), DETAIL_LIMIT):
             continue
         taken.add(index)
         out.append({'finding': index, 'headline': row['headline'].strip(), 'detail': row['detail'].strip()})

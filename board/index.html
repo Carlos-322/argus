@@ -4761,6 +4761,9 @@ function recordingFindingsHtml(findings) {
       ${f.alternative ? `<p>${esc(f.alternative)}</p>` : ''}</details></article>`).join('')}</section>`;
 }
 
+// The copy contract versions whose detail is the shared explanation on video and in the list (label/sensor_copy.py
+// SHARED_VERSIONS; a test keeps the two equal).
+const SHARED_COPY_VERSIONS = [2, 3, 4, 5];
 function sensorEvidence(d) {
   const text = v => v != null && String(v).trim() && String(v).toLowerCase() !== 'null'
     ? String(v).replace(/[\u2013\u2014]/g, '-') : '';
@@ -4806,7 +4809,7 @@ function sensorEvidence(d) {
       t: finite(f.inspect_s) && f.inspect_s >= f.start_s && f.inspect_s <= f.end_s ? f.inspect_s : f.start_s,
       timing: '', alternative: copy(f.alternative), observation: copy(f.observation), claim: copy(f.claim),
       overlayDetail: plain ? plain.detail : typeof f.overlay_detail === 'string' ? copy(f.overlay_detail)
-        : [2, 3, 4].includes(f.copy_contract_version) ? copy(f.detail) : null,
+        : SHARED_COPY_VERSIONS.includes(f.copy_contract_version) ? copy(f.detail) : null,
       quotedTimeOffset: finite(f.quoted_time_offset_s) ? f.quoted_time_offset_s : 0,
       generic: !!grip.generic, evidence: grip.generic && Array.isArray(f.evidence) ? f.evidence : [],
       display: grip.generic && f.display && f.display.version === 1 && Array.isArray(f.display.rows) ? f.display.rows : null,

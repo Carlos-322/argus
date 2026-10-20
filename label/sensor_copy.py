@@ -1,8 +1,8 @@
 """Locally requested sensor explanation contract, separate from model fields."""
-VERSION = 4
+VERSION = 5
 # Versions whose detail is the shared explanation on video and in the findings list. A saved request keeps the exact
 # rule text of the version it was sent with, so earlier versions remain reproducible.
-SHARED_VERSIONS = (2, 3, 4)
+SHARED_VERSIONS = (2, 3, 4, 5)
 SHARED_RULE_V2 = (
     'Use detail as the shared explanation in the findings list and on video: one or two short sentences, no more than 45 words. '
     'Headline and detail must together preserve every substantive qualitative conclusion in claim, including each comparison or temporal relationship. '
@@ -30,6 +30,27 @@ SHARED_RULE_V4 = SHARED_RULE_V3.replace(
     'for example pressing harder or easing for a pressure response, never as raw readings rising or falling; '
     'when it declares none, say what rose or fell. ')
 assert SHARED_RULE_V4 != SHARED_RULE_V3
+# Version 5 keeps version 4 and replaces how the headline and detail are worded. "A few plain words" read as fewer
+# facts, and the model compressed each finding into a coined phrase ("thumb pressure returns locally") that a reader
+# had to decode. PLAIN_ENGLISH asks for what a person would say aloud, with every specific kept; the card prompt
+# (label/sensor_cards.py) uses the same sentence, so the annotation and the cards read in one voice.
+PLAIN_ENGLISH = (
+    'Write the headline and detail in plain English, the way a person watching would say it aloud. Plain means '
+    'ordinary words in whole sentences, never a vaguer claim: what you say keeps its specifics, such as which part, '
+    'how many places on it, which way each one went, what it is compared with and when in the action. Never compress '
+    'a pattern into an abstract word such as concentrates, shifts, diverges, uneven, locally, returns or rebuilds; say '
+    'the thing it stands for, for example "two spots on the thumb press harder again while a third stays the same" '
+    'rather than "thumb pressure returns locally". A component inside a named part is a spot on that part, counted '
+    'when there are several. Measurement words such as reading, offset, average or component are not plain '
+    'English; say what the hand, pad or object did. Each sentence says one thing a person can take in at a glance, so '
+    'choose the one comparison that matters most rather than listing every spot and every step. ')
+SHARED_RULE_V5 = SHARED_RULE_V4.replace(
+    'The headline says what changed in a few plain words. ',
+    PLAIN_ENGLISH + 'The headline is one short sentence of at most eight words; when eight words cannot hold the '
+    'specifics, the headline keeps the part and the change, and the detail carries the comparison. ').replace(
+    'Components inside a named part are parts of it, such as one part of that region, not cells, patches or sensors. ',
+    'Never call them cells, patches or sensors. ')
+assert SHARED_RULE_V5.count(PLAIN_ENGLISH) == 1 and 'one part of that region' not in SHARED_RULE_V5
 V4_LIMITS = ('Keep measurement limits and any dependence on a candidate layout or response convention explicit in '
              'observation, claim and alternative; the headline and detail follow the copy rule above. ')
 LEGACY_LIMITS_LEAD = 'Apply measurement limits to the headline and video overlay, not only to the alternative explanation. '
@@ -52,21 +73,21 @@ def shared(version):
 
 def rule(kind, version):
     if shared(version):
-        return {2: SHARED_RULE_V2, 3: SHARED_RULE_V3, 4: SHARED_RULE_V4}[version]
+        return {2: SHARED_RULE_V2, 3: SHARED_RULE_V3, 4: SHARED_RULE_V4, 5: SHARED_RULE_V5}[version]
     return SENSOR_RULE if kind == 'sensor' else INSPECTION_RULE
 
 
 def limits_lead(version):
     """Where measurement limits go: the card from version 4 on keeps them off, earlier prompts kept their text."""
-    return '' if version == 4 else LEGACY_LIMITS_LEAD
+    return '' if version in (4, 5) else LEGACY_LIMITS_LEAD
 
 
 def limits_mapping(version):
-    return V4_LIMITS if version == 4 else LEGACY_LIMITS_MAPPING
+    return V4_LIMITS if version in (4, 5) else LEGACY_LIMITS_MAPPING
 
 
 def schema(kind, version):
-    if version in (3, 4):
+    if version in (3, 4, 5):
         return ('"detail": "one plain sentence for the video card, under 25 words",'
                 if kind == 'sensor' else
                 '"detail":"one plain sentence for the video card, under 25 words",')
