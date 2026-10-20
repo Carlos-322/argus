@@ -1624,27 +1624,40 @@ h3.section .count {
   vector-effect: non-scaling-stroke; }
 .prog-overlay .po-past { fill: none; stroke: #f3f2ec; stroke-width: 2; vector-effect: non-scaling-stroke; }
 .prog-overlay .po-dot { fill: #f3f2ec; }
-/* the Quality section: one grid, so every number, bar and note sits on the same column lines; execution and outcome
-   are the main rows, execution's three measures sit indented under it, then one row per subgoal */
-.qual-grid { display: grid; grid-template-columns: 168px 44px 140px minmax(0, 1fr); column-gap: 16px;
-  align-items: center; }
-.qual-grid > .q-row { display: contents; }
-.qual-grid .q-name, .qual-grid .q-v, .qual-grid .q-bar, .qual-grid .q-what { padding: 7px 0; }
-.qual-grid .q-name { font-size: 13px; font-weight: 600; color: var(--fg); }
-.qual-grid .q-v { font-family: var(--mono); font-size: 14px; font-weight: 700; text-align: right; }
-.qual-grid .q-what { font-size: 12px; color: var(--fg-2); min-width: 0; }
-.qual-grid .q-bar { display: block; }
-.qual-grid .q-bar span { display: block; height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
-.qual-grid .q-bar i { display: block; height: 100%; background: var(--fg); }
-.qual-grid .q-main .q-name { font-size: 14px; }
-.qual-grid .q-main .q-v { font-size: 20px; }
-.qual-grid .q-main .q-bar span { height: 7px; }
-.qual-grid .q-part .q-name { padding-left: 16px; font-weight: 500; color: var(--fg-2); }
-.qual-grid .q-gap { grid-column: 1 / -1; height: 1px; background: var(--line); margin: 6px 0; }
-.qual-grid .q-head { grid-column: 1 / -1; font-size: 12px; font-weight: 600; color: var(--fg-2); padding: 2px 0 0; }
-.qual-grid .q-sub .q-name { font-weight: 500; font-family: var(--mono); font-size: 12px; color: var(--fg-2); }
-.qual-grid .q-miss { font-family: var(--mono); font-size: 11px; color: var(--danger); text-align: right; }
-.qual-grid .q-what b { color: var(--fg); font-weight: 600; }
+/* the Quality section: Execution and Outcome are two boxes side by side, each its score over a grid of cells, and
+   Subgoals is a table in a box of its own; every box has the same header, the same cell and the same bar */
+.qual { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.qual-box { border: 1px solid var(--line); border-radius: var(--r-md); background: var(--panel, #fff); overflow: hidden; }
+.qual-box.wide { grid-column: 1 / -1; }
+.qual-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  padding: 12px 14px 10px; border-bottom: 1px solid var(--line); }
+.qual-title { font-size: 14px; font-weight: 600; color: var(--fg); }
+.qual-score { font-family: var(--mono); font-size: 24px; font-weight: 700; line-height: 1; }
+.qual-score small { font-size: 12px; font-weight: 600; color: var(--fg-2); margin-left: 2px; }
+.qual-headbar { padding: 0 14px 12px; border-bottom: 1px solid var(--line); }
+.qual-bar { display: block; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.qual-bar i { display: block; height: 100%; background: var(--fg); }
+.qual-cells { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.qual-cell { padding: 10px 14px 12px; border-right: 1px solid var(--line); min-width: 0; }
+.qual-cell:last-child { border-right: 0; }
+.qual-cell .qc-k { font-size: 11px; color: var(--fg-2); font-weight: 600; }
+.qual-cell .qc-v { font-family: var(--mono); font-size: 17px; font-weight: 700; margin: 3px 0 6px; }
+.qual-cell .qual-bar { height: 4px; margin-bottom: 6px; }
+.qual-cell .qc-sub { font-family: var(--mono); font-size: 11px; color: var(--fg-2); line-height: 1.35; }
+.qual-cell .qc-bad { color: var(--danger); }
+.qual-cell .qc-word { font-family: var(--sans, inherit); font-size: 14px; font-weight: 600; }
+.qual-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.qual-table th { text-align: left; font-size: 11px; font-weight: 600; color: var(--fg-2); padding: 8px 14px;
+  border-bottom: 1px solid var(--line); white-space: nowrap; }
+.qual-table td { padding: 8px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.qual-table tr:last-child td { border-bottom: 0; }
+.qual-table .num { font-family: var(--mono); text-align: right; white-space: nowrap; }
+.qual-table .qt-name { width: 100%; }
+.qual-table .qt-score { display: grid; grid-template-columns: 34px 110px; gap: 10px; align-items: center; }
+.qual-table .qt-score b { font-family: var(--mono); text-align: right; }
+.qual-table tr[data-t] { cursor: pointer; }
+.qual-table tr[data-t]:hover td { background: var(--hover, rgba(0,0,0,0.03)); }
+@media (max-width: 900px) { .qual { grid-template-columns: 1fr; } }
 /* top-right transient toast: object state changes, below the fullscreen button (.fs-btn, 8 px + 26 px) */
 .state-toast {
   position: absolute; top: calc(var(--fx-top, 0px) + 40px); right: calc(var(--fx-right, 0px) + 8px);
@@ -6322,31 +6335,42 @@ function renderEp(d, opts) {
   const qPct = v => `${v == null ? 0 : Math.max(0, Math.min(10, v)) * 10}%`;
   const qIn = Q ? Q.inputs || {} : {};
   const subs = Q ? Q.subgoals || [] : [];
-  const peerText = (n, median) => n >= 5 ? `median ${qNum(median)}s across ${n} other successful demos of this task`
-    : 'fewer than 5 other successful demos of this task to compare with';
-  const mistakesText = (qIn.penalties || []).length
-    ? qIn.penalties.map(x => `${x.severity} mistake${x.recovered ? ', recovered' : ''} (-${x.points})`).join(', ')
-    : 'no operator mistakes';
-  // one row of the grid: name, number, bar, what it measured; a missing score shows a dash and no bar
-  const qRow = (kind, name, v, what, miss) => `<div class="q-row ${kind}"><span class="q-name">${name}</span>`
-    + (miss ? `<span class="q-miss">${miss}</span><span class="q-bar"></span>`
-      : `<span class="q-v">${qNum(v)}</span><span class="q-bar">${v == null ? '' : `<span><i style="width:${qPct(v)}"></i></span>`}</span>`)
-    + `<span class="q-what">${what}</span></div>`;
-  const qualityHtml = Q ? `<h3 class="section" id="quality">Quality <span class="count">out of 10</span></h3>
-  <div class="info-block"><div class="qual-grid">
-    ${qRow('q-main', 'Execution', Q.execution, 'How cleanly, quickly and steadily the work was done')}
-    ${qRow('q-part', 'Cleanliness', Q.cleanliness, esc(`${Math.round(100 * (qIn.wasteful_share || 0))}% of the work wasteful; ${mistakesText}`))}
-    ${qRow('q-part', 'Speed', Q.efficiency, esc(Q.efficiency == null && qIn.outcome !== 'success' ? 'the goal was not reached'
-      : `${qNum(qIn.time_to_goal_s)}s to the goal; ${peerText(Q.peers, qIn.peer_median_time_to_goal_s)}`))}
-    ${qRow('q-part', 'Steadiness', Q.fluency, esc(`${Math.round(100 * (qIn.hesitation_share || 0))}% of the work with every arm waiting`))}
-    <div class="q-gap"></div>
-    ${qRow('q-main', 'Outcome', Q.outcome, esc(`How much of the labelled goal was reached${Q.relation && Q.relation !== 'aligned'
-      ? `; the work done is ${Q.relation} from the label` : ''}`))}
-    ${subs.length ? `<div class="q-gap"></div><div class="q-head">Subgoals, scored on the stretch of work that ends in each</div>`
-      + subs.map((st, i) => qRow('q-sub', `${st.goal ? 'Goal' : `Subgoal ${i + 1}`}, ${fmtT(st.end_s)}`, st.execution,
-        `<b>${esc(st.label || '')}</b> &middot; ${qNum(st.duration_s)}s${st.peer_median_s != null ? `, median ${qNum(st.peer_median_s)}s` : ''}`,
-        st.reached ? '' : 'not reached')).join('') : ''}
-  </div></div>` : '';
+  const bar = v => `<span class="qual-bar"><i style="width:${qPct(v)}"></i></span>`;
+  // one cell: a short label, the number, its bar, one short value; the longer explanation is its tooltip
+  const cell = (k, v, sub, tip, bad, shown) => `<div class="qual-cell" title="${esc(tip)}"><div class="qc-k">${k}</div>`
+    + (v == null ? `<div class="qc-v qc-word${bad ? ' qc-bad' : ''}">${esc(sub)}</div>`
+       : `<div class="qc-v">${shown ?? qNum(v)}</div>${bar(v)}${sub ? `<div class="qc-sub">${esc(sub)}</div>` : ''}`) + '</div>';
+  const box = (title, v, body, wide) => `<div class="qual-box${wide ? ' wide' : ''}"><div class="qual-head">`
+    + `<span class="qual-title">${title}</span>${v === undefined ? '' : `<span class="qual-score">${qNum(v)}<small>/10</small></span>`}</div>`
+    + (v === undefined ? '' : `<div class="qual-headbar">${bar(v)}</div>`) + body + '</div>';
+  const nMistakes = (qIn.penalties || []).length;
+  const goalT = comp.completed_at_s ?? comp.goal_reached_at_s;
+  const qualityHtml = Q ? `<h3 class="section" id="quality">Quality</h3><div class="qual">
+    ${box('Execution', Q.execution, `<div class="qual-cells">
+      ${cell('Cleanliness', Q.cleanliness, `${Math.round(100 * (qIn.wasteful_share || 0))}% wasteful, ${nMistakes} mistake${nMistakes === 1 ? '' : 's'}`,
+        (qIn.penalties || []).map(x => `${x.mistake} (${x.severity}${x.recovered ? ', recovered' : ''}, -${x.points})`).join('\n')
+        || 'Share of the work marked wasteful, and points off per operator mistake')}
+      ${cell('Speed', Q.efficiency, Q.efficiency == null ? (qIn.outcome === 'success' ? 'no peers' : 'goal not reached')
+        : `${qNum(qIn.time_to_goal_s)}s, median ${qNum(qIn.peer_median_time_to_goal_s)}s`,
+        Q.peers >= 5 ? `Time from the first action to the goal, against ${Q.peers} other successful demos of this task`
+          : 'Fewer than 5 other successful demos of this task to compare with')}
+      ${cell('Steadiness', Q.fluency, `${Math.round(100 * (qIn.hesitation_share || 0))}% waiting`,
+        'Share of the work with every arm waiting')}
+    </div>`)}
+    ${box('Outcome', Q.outcome, `<div class="qual-cells">
+      ${cell('Goal', null, goalT != null ? `reached ${fmtT(goalT)}` : 'not reached', 'When the labelled goal was first met', goalT == null)}
+      ${cell('Progress', 10 * (qIn.progress_reached || 0), '', 'The furthest the work got toward the labelled goal',
+        false, `${Math.round(100 * (qIn.progress_reached || 0))}%`)}
+      ${cell('Label', null, Q.relation || 'no label', 'How the work done relates to the labelled task', Q.relation && Q.relation !== 'aligned')}
+    </div>`)}
+    ${subs.length ? box('Subgoals', undefined, `<table class="qual-table"><thead><tr><th>#</th><th>Done at</th>
+      <th class="qt-name">Subgoal</th><th class="num">Took</th><th class="num">Median</th><th>Execution</th></tr></thead><tbody>
+      ${subs.map((st, i) => `<tr data-t="${st.start_s}"><td class="num">${st.goal ? 'Goal' : i + 1}</td>
+        <td class="num">${st.reached ? fmtT(st.end_s) : 'not reached'}</td><td class="qt-name">${esc(st.label || '')}</td>
+        <td class="num">${qNum(st.duration_s)}s</td><td class="num">${st.peer_median_s != null ? qNum(st.peer_median_s) + 's' : '-'}</td>
+        <td><span class="qt-score"><b>${qNum(st.execution)}</b>${bar(st.execution)}</span></td></tr>`).join('')}
+      </tbody></table>`, true) : ''}
+  </div>` : '';
 
   // lanes under the timeline, on its time scale: when the wearer's hands leave a head camera (the model's
   // per-step hands_visible), and the dataset's own timed labels as the publisher ships them
@@ -7188,6 +7212,8 @@ function renderEp(d, opts) {
       : `<span class="sc-k">Execution</span><span class="sc-v">${qNum(st.execution)}</span>`;
     scoreChip.classList.add('active');
   }
+
+  document.querySelectorAll('.qual-table tr[data-t]').forEach(r => r.addEventListener('click', () => seek(Number(r.dataset.t))));
 
   // ----- head camera: hands out of view -----
   // A head camera often points away from the hands, so a step's action is inferred rather than seen. The model marks
