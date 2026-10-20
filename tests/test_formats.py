@@ -5101,3 +5101,17 @@ def test_camera_words_are_matched_whole_so_a_laptop_camera_is_not_the_top_camera
     # an episode's uuid is one id, never letters that read as ee
     assert not f.is_mount_named("episode_e73c0f86-4739-42cd-81b2-3a7229fe71ee")
 
+
+def test_a_joint_state_topic_that_says_action_inside_a_word_is_a_state_not_a_command():
+    """ACTION_TOPIC matched inside words, so /interaction_arm/joint_states was read as a command and its arm lost from
+    the state. Command words now match whole, as every other name word does (_names_word)."""
+    import numpy as np
+    arm = {"pos": np.zeros((5, 7)), "t": np.arange(5) / 10.0, "names": None}
+    streams = {"/interaction_arm/joint_states": arm, "/leader/joint_states": dict(arm)}
+    assert f.arm_streams(streams, False) == {"only": "/interaction_arm/joint_states"}
+    assert f.arm_streams(streams, True) == {"only": "/leader/joint_states"}
+    assert not f.names_action("extreme_exposure_fraction") and f.names_action("action.arm") and f.names_action("/cmd_vel")
+    assert f.names_text("/task/subtask") and not f.names_text("/multitasking_status")
+    assert f.names_depth("/camera/aligned_depth_to_color/image_raw") and not f.names_depth("/depthai/rgb/image")
+    assert f.names_joint("panda_joint1") and f.names_joint("arm_j2") and not f.names_joint("obj1")
+    assert f.names_gripper("left_finger_joint") and not f.names_gripper("system_fingerprint")

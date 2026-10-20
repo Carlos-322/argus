@@ -1388,7 +1388,19 @@ def not_rgb(name: str) -> bool:
     return _names_word(name, NOT_RGB_WORDS)
 
 
-TEXT_TOPIC = re.compile(r"instruction|task|annotation|language|prompt", re.I)
+# a topic of notes names one of these words (/task, /language_instruction, /annotations), whole (_names_word)
+TEXT_WORDS = ("instruction", "task", "subtask", "annotation", "language", "prompt")
+
+
+def names_text(topic: str) -> bool:
+    return _names_word(topic, TEXT_WORDS)
+
+
+def names_annotation(file_name: str) -> bool:
+    """Whether a file's name says it holds annotations (annotations.parquet, task_annotation_v2.json, auto_annotated)."""
+    return _names_word(file_name, ("annotate", "annotated", "annotation"))
+
+
 TEXT_MSGS_MAX = 50           # a text topic with more distinct messages than this is a log (a heartbeat), not notes
 # a topic named for the task itself (/task, /instruction), which a sub-topic (/task/subtask, /task/health) is not
 TASK_TOPIC_NAME = re.compile(r"(language_)?(instruction|task|task_description|prompt|goal)", re.I)
@@ -1446,7 +1458,10 @@ def raw_image(msg):
     return None
 
 
-DEPTH_TOPIC = re.compile(r"depth", re.I)
+def names_depth(name: str) -> bool:
+    """Whether a camera, topic or field name says depth as a word (/camera/depth/image_raw, observation.images.depth;
+    never depthai_rgb)."""
+    return _names_word(name, ("depth",))
 
 
 def depth_image(msg) -> tuple[np.ndarray, float | None] | None:
@@ -1546,7 +1561,7 @@ def pick_cameras(topics: list[str], rig: str, all_topics: list[str] | None = Non
 
     def rank(t):
         base = t.rsplit("/", 1)[0] if "/" in t else ""
-        has_depth = bool(base) and any(o != t and o.startswith(base + "/") and "depth" in o.lower()
+        has_depth = bool(base) and any(o != t and o.startswith(base + "/") and names_depth(o)
                                        for o in (all_topics if all_topics is not None else topics))
         return (0 if has_depth else 1, scene_rank(t), t)
     best = sorted(rgb, key=rank)[0]
@@ -2125,8 +2140,20 @@ def task_rank(p: Path, named: bool = False, own: bool = False) -> int | None:
 
 # Generic physical state requires named joints and a gripper, or ordered Cartesian pose axes and an opening.
 # Layout classification is separate from unit qualification. Unsupported readings remain signals.
-STATE_GRIPPER_NAME = re.compile(r"grip|finger|jaw|claw|opening", re.I)
-STATE_JOINT_NAME = re.compile(r"joint|(^|[^a-z])j\d|waist|shoulder|elbow|forearm|wrist", re.I)
+# a state value's name says a gripper or a joint by one of these words, whole (_names_word), or a joint by j and its
+# number (j1, arm_j2)
+STATE_GRIPPER_WORDS = ("grip", "gripper", "gripping", "finger", "fingertip", "jaw", "claw", "opening")
+STATE_JOINT_WORDS = ("joint", "waist", "shoulder", "elbow", "forearm", "wrist")
+
+
+def names_gripper(name: str) -> bool:
+    return _names_word(name, STATE_GRIPPER_WORDS)
+
+
+def names_joint(name: str) -> bool:
+    words = word_tokens(name)
+    return _names_word(name, STATE_JOINT_WORDS) or any(
+        a == "j" and b.isdigit() for a, b in zip(words, words[1:]))
 STATE_QUAT_NAME = re.compile(r"(^|[._/ -])q[._/ -]?[wxyz]$|(^|[^a-z])quat", re.I)
 STATE_WORD_SPLIT = re.compile(r"[._/ -]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Za-z])(?=[0-9])")
 STATE_UNIT_WORDS = {"m", "mm", "cm", "rad", "deg", "degree", "degrees"}
@@ -2208,7 +2235,7 @@ def state_layout(dims: int, rig: str, names: list[str] | None = None, *, value_r
     roles = value_roles if isinstance(value_roles, list) and len(value_roles) == dims else [None] * dims
     grippers = {name for name, role in zip(names, roles) if role == "gripper"}
     joints = {name for name, role in zip(names, roles) if role == "joint"}
-    grip = lambda name: bool(STATE_GRIPPER_NAME.search(name)) or name in grippers
+    grip = lambda name: names_gripper(name) or name in grippers
     if any(last[x] in STATE_POSITION_AXES and (x in joints or "base" in words[x]) for x in names):
         return "none", ("Kinematic checks unavailable because recorded joint positions or base axes do not establish "
                         "an end effector Cartesian pose. Original names and values remain signals.")
@@ -2224,7 +2251,7 @@ def state_layout(dims: int, rig: str, names: list[str] | None = None, *, value_r
                         + per)
     # Numbered pose fields do not establish the Cartesian axes on any rig.
     framed = next((x for x in names if set(words[x]) & STATE_FRAME_WORDS and last[x].isdigit()
-                   and not STATE_GRIPPER_NAME.search(x)), None)
+                   and not names_gripper(x)), None)
     unaxed = framed is not None
     seventh = all(grip(g[6]) for g in groups)
     if seventh and not any(grip(x) for g in groups for x in g[:6]):
@@ -2232,10 +2259,10 @@ def state_layout(dims: int, rig: str, names: list[str] | None = None, *, value_r
             return "ee_pose", None
         if unaxed:
             return "none", STATE_UNAXED_NOTE.format(framed)
-        if all((STATE_JOINT_NAME.search(x) or x in joints) and last[x] not in STATE_POSITION_AXES
+        if all((names_joint(x) or x in joints) and last[x] not in STATE_POSITION_AXES
                for g in groups for x in g[:6]):
             return "joints", None
-        if any(g[6] in grippers and not STATE_GRIPPER_NAME.search(g[6]) for g in groups):
+        if any(g[6] in grippers and not names_gripper(g[6]) for g in groups):
             return "none", ("Recorded scalar gripper columns do not establish six named arm joints or a "
                             "complete Cartesian pose; every original value remains a signal.")
         # a name of a position axis (x, y or z) in a group that is no full pose is never read by width
@@ -2248,7 +2275,7 @@ def state_layout(dims: int, rig: str, names: list[str] | None = None, *, value_r
                         "seventh in each group of seven, and our checks read six values and then the gripper.")
     if unaxed:
         return "none", STATE_UNAXED_NOTE.format(framed)
-    if all(STATE_JOINT_NAME.search(x) for x in names):
+    if all(names_joint(x) for x in names):
         return "none", (f"Kinematic checks unavailable: the recorded state's value names give {dims} joints and no gripper, "
                         "and our checks read six joints and a gripper per arm.")
     placed = next((x for g in groups for x in g[:6] if last[x] in STATE_POSITION_AXES), None)
@@ -3389,7 +3416,7 @@ def depth_entry(ep: Path, view: str, path: Path, t_depth: np.ndarray, t_anchor: 
     entry = {"packed": str(Path(path).resolve()), "base_s": 0.0, "n_frames": int(len(t_depth)),
              "kmap": f"depth_kmap_{view}.npy", "scale_m": scale_m, "source": source,
              # a disparity (or inverse depth) stream reads larger where nearer; label/depth.py draws it reversed
-             "kind": "disparity" if re.search(r"disparit|inverse", source or "", re.I) else "depth"}
+             "kind": "disparity" if _names_word(source or "", ("disparity", "disparities", "inverse")) else "depth"}
     return entry, {f"depth_{view}": np.asarray(t_depth, dtype=np.float64), f"depth_{view}_pts": np.asarray(pts)}
 
 
@@ -5070,7 +5097,7 @@ def annotated_instructions(meta: Path, reads: dict | None = None) -> tuple[dict,
             conflicts.add(owner)
             if reads is not None:
                 for path in files:
-                    if "annotat" in Path(path).name:
+                    if names_annotation(Path(path).name):
                         metadata_failure(reads, Path(path), f"episode {owner} has competing or malformed "
                                          "instruction claims; all claims are retained without an instruction")
     if reads is not None:
@@ -5124,7 +5151,7 @@ def read_root(rdir: Path, rel: str) -> dict:
                     and sensor_representation(f) in ('depth', 'disparity')]
     image_signals = [k for k, f in feats.items() if f.get("dtype") == "image" and k not in image_depths
                      and (sensor_representation(f) == 'signal' or 0 < side(f) < CAMERA_MIN_PX)]
-    is_depth = lambda k, f: bool((f.get("info") or {}).get("video.is_depth_map")) or bool(DEPTH_TOPIC.search(k))
+    is_depth = lambda k, f: bool((f.get("info") or {}).get("video.is_depth_map")) or names_depth(k)
     depth_cams = [k for k, f in feats.items() if f.get("dtype") == "video" and is_depth(k, f)]
     cams = [k for k, f in feats.items() if f.get("dtype") == "video" and k not in depth_cams]
     image_cams = [k for k, f in feats.items() if f.get("dtype") == "image" and k not in image_signals and k not in image_depths]
@@ -5174,7 +5201,7 @@ def read_root(rdir: Path, rel: str) -> dict:
         _episodes_v2(root, rdir, data_v2, vids_v2)
     for episode in root["episodes"]:
         claims = [claim["fields"]["tasks"] for path, rows in root["episode_metadata"].get(episode["eidx"], {}).items()
-                  if "annotat" not in Path(path).name for claim in rows if "tasks" in claim["fields"]]
+                  if not names_annotation(Path(path).name) for claim in rows if "tasks" in claim["fields"]]
         if len(claims) > 1:
             tasks = [[t.strip() for t in (x if isinstance(x, list) else [x]) if isinstance(t, str) and t.strip()]
                      for x in claims]
@@ -5931,7 +5958,7 @@ def missing_lerobot_state(df) -> StateNote:
     """Why observation.state cannot supply the state. Other recorded observation motion stays a signal, so absence
     of that one field never claims that the recording contains no state at all. Commands do not count as state."""
     motion = [str(c) for c in df if str(c).startswith("observation.") and OBSERVATION_MOTION.search(str(c))
-              and not ACTION_TOPIC.search(str(c)) and _cells(df[c]) is not None]
+              and not names_action(str(c)) and _cells(df[c]) is not None]
     if motion:
         return StateNote("Labelled from the video: the dataset records " + ", ".join(motion)
                          + ", but no usable observation.state in the layout our checks read.", "layout")
@@ -7652,7 +7679,7 @@ def h5_kind(name: str, ds) -> str | None:
     if _picture_axes(per) is not None and (dt == np.uint8 or (dt.kind == "f" and _picture_values(ds))):
         return "camera"
     if len(per) == 2 and min(per) >= CAMERA_MIN_PX:
-        if "depth" in leaf.lower() or "depth" in name.lower():
+        if names_depth(leaf) or names_depth(name):
             return "depth"
         if dt == np.uint8:
             return "camera"
@@ -8355,8 +8382,8 @@ def h5_state(signals: Signals, rig: str, q: np.ndarray, files: list[str] | None 
         dims = a.shape[1]
         if H5_JOINT_ACTION.search(physical(name)) and not (
                 names and len(names) == dims and dims in (7, 14)
-                and all(STATE_GRIPPER_NAME.search(names[i + 6]) for i in range(0, dims, 7))
-                and all(STATE_JOINT_NAME.search(names[i + j]) and not STATE_GRIPPER_NAME.search(names[i + j])
+                and all(names_gripper(names[i + 6]) for i in range(0, dims, 7))
+                and all(names_joint(names[i + j]) and not names_gripper(names[i + j])
                         for i in range(0, dims, 7) for j in range(6))):
             fail(name, f"The recorded array {physical(name)} has an ambiguous action or state meaning without "
                        "six named joints and a gripper per arm; its original values remain a signal.", "layout")
@@ -9267,7 +9294,7 @@ def damaged_unread(p: Path, chans: list[tuple[str, str]], seen: set, damaged: li
         return []
     counts = mcap_message_counts(p)
     return sorted(t for t, s in chans if t not in seen and counts.get(t, 1) and not bookkeeping_why(t, s)
-                  and not ACTION_TOPIC.search(t))
+                  and not names_action(t))
 
 
 def _mcap_channels_by_scan(path: Path) -> list[tuple[str, str]]:
@@ -9315,7 +9342,14 @@ def mcap_has_camera(path: Path) -> bool:
 # side, and a leader arm or a command channel is the action rather than the state.
 JOINT_KEYS = ("joint_pos", "joint_positions", "joint_position", "positions", "position", "qpos")
 GRIPPER_KEYS = ("gripper_pos", "gripper_position", "gripper", "gripper_width", "gripper_opening")
-ACTION_TOPIC = re.compile(r"leader|action|command|cmd|target|teleop", re.I)
+# a topic or field of commands names one of these words, whole (_names_word): /leader/joint_states, action.arm,
+# /cmd_vel; never /interaction_arm/joint_states
+ACTION_WORDS = ("leader", "action", "command", "commanded", "cmd", "target", "teleop", "teleoperated",
+                "teleoperation")
+
+
+def names_action(name: str) -> bool:
+    return _names_word(name, ACTION_WORDS)
 
 
 def _vector(x) -> list[float] | None:
@@ -9491,12 +9525,12 @@ def _join_gripper(groups: list[dict], q: np.ndarray | None = None) -> list[dict]
     of two, as _joint_row takes a gripper field's first value), placed at the arm's message times, follows the joints.
     Kept apart when the gripper leaves a gap fill_rows does not fill in the footage's frame times q,
     or in the arm's message times without q, or the channel has any other name set."""
-    grip = [g for g in groups if g["names"] and all(STATE_GRIPPER_NAME.search(x) for x in g["names"])]
+    grip = [g for g in groups if g["names"] and all(names_gripper(x) for x in g["names"])]
     if len(groups) != 2 or len(grip) != 1:
         return groups
     grip = grip[0]
     arm = groups[1] if groups[0] is grip else groups[0]
-    if not arm["names"] or any(STATE_GRIPPER_NAME.search(x) for x in arm["names"]) or len(arm["t"]) < 2:
+    if not arm["names"] or any(names_gripper(x) for x in arm["names"]) or len(arm["t"]) < 2:
         return groups
     one = grip["pos"][:, :1]
     if fill_rows(arm["t"] if q is None else q, grip["t"], one)[1]:
@@ -9524,7 +9558,7 @@ def mcap_joint_streams(paths: list[Path], q: np.ndarray | None = None, unread: l
     (state_blockers)."""
     found, facs = {}, _decoders()
     for p in paths:
-        chans = [(t, s) for t, s in mcap_channels(p) if not CAMERA_SCHEMA.search(s) and not TEXT_TOPIC.search(t)]
+        chans = [(t, s) for t, s in mcap_channels(p) if not CAMERA_SCHEMA.search(s) and not names_text(t)]
         decs, skip, seen, damaged = {}, set(), set(), []
         with open(p, "rb") as fh:
             for schema, ch, msg in mcap_messages(fh, p, [t for t, _ in chans], damaged):
@@ -9867,7 +9901,7 @@ def mcap_signals(paths: list[Path], q: np.ndarray, used: dict | None = None, *, 
         everything = mcap_channels(p)
         books.update({t: bookkeeping_why(t, s) for t, s in everything if bookkeeping_why(t, s)})
         kinds.update(everything)
-        chans = [t for t, s in everything if not CAMERA_SCHEMA.search(s) and not TEXT_TOPIC.search(t)
+        chans = [t for t, s in everything if not CAMERA_SCHEMA.search(s) and not names_text(t)
                  and not (t in used and used[t] is None) and t not in books]
         decs = {}
         with open(p, "rb") as fh:
@@ -10044,11 +10078,11 @@ def compose_mcap_arms(streams: dict, q: np.ndarray, clock: str) -> dict:
     for role in (False, True):
         for side in ("left", "right"):
             candidates = [k for k in streams if side_of(_topic(streams, k)) == side
-                          and bool(ACTION_TOPIC.search(_topic(streams, k))) == role]
+                          and names_action(_topic(streams, k)) == role]
             arms = [k for k in candidates if streams[k]["pos"].shape[1] == 6
-                    and re.search(r"(^|[/_.-])arm([/_.-]|$)", _topic(streams, k), re.I)]
+                    and _names_word(_topic(streams, k), ("arm",))]
             grips = [k for k in candidates if streams[k]["pos"].shape[1] == 1
-                     and re.search(r"(^|[/_.-])(ee|gripper)([/_.-]|$)", _topic(streams, k), re.I)]
+                     and _names_word(_topic(streams, k), ("ee", "gripper"))]
             if len(arms) != 1 or len(grips) != 1:
                 continue
             arm, grip = arms[0], grips[0]
@@ -10172,7 +10206,7 @@ def _sides(streams: dict, role: bool) -> dict:
     says (left_joint1 .. left_gripper) only when that completes one left and one right arm the topics did not, so two
     arms in messages of their own on one /joint_states are two arms, as two topics are. Otherwise the topics' sides
     stand: one arm named right_* beside a base's left and right wheels is still the only arm."""
-    keys = [t for t in streams if bool(ACTION_TOPIC.search(_topic(streams, t))) == role]
+    keys = [t for t in streams if names_action(_topic(streams, t)) == role]
     sides = {t: side_of(_topic(streams, t)) for t in keys}
     named = dict(sides)
     for t in keys:
@@ -10260,7 +10294,7 @@ def state_fields(streams: dict, state, action) -> dict:
     out = {}
     for t, s in streams.items():
         topic = _topic(streams, t)
-        if t in third or (action is None and ACTION_TOPIC.search(topic)):
+        if t in third or (action is None and names_action(topic)):
             continue
         if s.get("components"):
             if t in read:
@@ -10467,7 +10501,7 @@ def retain_mcap_fields(path: Path, ep: Path, ctx: dict, *, archive_name="recorde
             if error:
                 row["errors"].append({"message_index": index, "what": error})
             text = _field(decoded, "data")
-            if isinstance(text, str) and TEXT_TOPIC.search(channel.topic):
+            if isinstance(text, str) and names_text(channel.topic):
                 row["text"].append({"message_index": index, "text": text})
             for field, (values, _, names, shape) in _numbers(decoded).items():
                 group = row["fields"].setdefault((field, len(values)), {"indices": [], "values": [], "names": [], "shape": shape})
@@ -10566,7 +10600,7 @@ def mcap_task_texts(texts: dict, counts: dict, t0: int | None, end_s: float | No
         return bool(TASK_TOPIC_NAME.fullmatch(t.rstrip("/").rsplit("/", 1)[-1]))
     # a timeline of steps (several messages on a sub-topic) is never read as the task: with no task topic the
     # episode goes to the model with no instruction rather than its first step
-    cands = [t for t in texts if re.search("instruction|task", t, re.I) and texts[t] and isinstance(texts[t][0][1], str)
+    cands = [t for t in texts if _names_word(t, ("instruction", "task")) and texts[t] and isinstance(texts[t][0][1], str)
              and 0 < len(texts[t][0][1].strip()) < 400 and (named(t) or len(texts[t]) == 1)]
     cands.sort(key=lambda t: (not named(t), len(texts[t]) != 1))
     it = cands[0] if cands else None
@@ -10707,11 +10741,11 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
     # every camera channel but depth (distances, read as depth below) is chosen among (pick_cameras): one whose name
     # says it is not colour (thermal, a mask) goes to the unused cameras and the board, never nowhere, and a recording
     # whose only cameras are not colour is labelled from them, as a data issue
-    video_topics = [t for t in cam_topics if not DEPTH_TOPIC.search(t)]
+    video_topics = [t for t in cam_topics if not names_depth(t)]
     raw_topics = {t for t, s in chan_topics if RAW_IMAGE_SCHEMA.search(s)}
     # a recording whose only cameras are depth is labelled from its depth drawn as a picture (depth_picture), as a
     # data issue (camera_not_colour), as one whose only camera is a mask is
-    video_topics = video_topics or [t for t in cam_topics if DEPTH_TOPIC.search(t)]
+    video_topics = video_topics or [t for t in cam_topics if names_depth(t)]
     if not video_topics:
         raise ValueError("the file has no camera channel"
                          + (f" (its channels: {', '.join(item['topics'][:12])})" if item["topics"] else ""))
@@ -10733,14 +10767,14 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
     if rig == "ego_head" and primary is not None:
         vmap, unused = {"exo": primary}, [t for t in video_topics if t != primary]
     not_colour = [t for t in vmap.values() if not_rgb(t)]
-    text_topics = sorted({t for t in all_topics if TEXT_TOPIC.search(t) and t not in video_topics})
+    text_topics = sorted({t for t in all_topics if names_text(t) and t not in video_topics})
     # depth image channels, each with the camera whose topic it shares the most of (depth_partner), one per camera
     depth_of, lone = {}, []
     for t, sname in sorted(chan_topics):
-        if CAMERA_SCHEMA.search(sname) and DEPTH_TOPIC.search(t) and t in vmap.values():
+        if CAMERA_SCHEMA.search(sname) and names_depth(t) and t in vmap.values():
             depth_of[t] = next(v for v, topic in vmap.items() if topic == t)
             continue
-        if CAMERA_SCHEMA.search(sname) and DEPTH_TOPIC.search(t) and t not in vmap.values() and t not in unused:
+        if CAMERA_SCHEMA.search(sname) and names_depth(t) and t not in vmap.values() and t not in unused:
             v = depth_partner(t, vmap)
             if v is not None and v not in depth_of.values():
                 depth_of[t] = v
@@ -10753,7 +10787,7 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
     # the cameras the model is not shown are written too, for the board (unshown_cameras), a depth channel with no
     # camera of its own drawn as a picture of near and far
     unshown_of = {t: f"unshown{i + 1}.mp4" for i, t in enumerate([x for x in unused if x in cam_topics] + lone)}
-    pictured = {t for t in set(vmap.values()) | set(unshown_of) if DEPTH_TOPIC.search(t)}
+    pictured = {t for t in set(vmap.values()) | set(unshown_of) if names_depth(t)}
     depth_rng: dict = {}
     info_topics = {topic for topic, schema in chan_topics if CAMERA_INFO.search(schema)}
     want = set(all_topics)  # Clock selection includes numeric streams that will later be aligned to footage.
@@ -11372,8 +11406,9 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
         note_sensors(extra, signals, by_clock, assumed, unplaced, q=q)
     # motion the file records but this reader does not use (hand, body or camera poses in a human recording, joints
     # in a layout the checks do not read): named on the job page, so a missing check is never a silent gap
-    motion = [t for t in item["topics"] if re.search(r"hand|pose|slam|body|joint|odom|/tf$", t, re.I)
-              and not re.search(r"health|info|meta|static|image|mask", t, re.I)]
+    motion = [t for t in item["topics"] if (_names_word(t, ("hand", "pose", "slam", "body", "bodies", "joint", "odom",
+                                                            "odometry")) or t.endswith("/tf"))
+              and not _names_word(t, ("health", "info", "information", "meta", "metadata", "static", "image", "mask"))]
     shown_topics = {n.split(" ", 1)[0] for n in signals}
     motion = [t for t in motion if t not in shown_topics]            # kept as signals, so shown to the model
     if state is not None:
@@ -12408,7 +12443,7 @@ def unread_files(root: Path, det: dict, items: list[dict]) -> list[str]:
             continue
         if x in VIDEO_EXT or x in H5_EXT or x in TABLE_EXT or x == ".mcap" or ARCHIVE_RE.search(p.name):
             continue
-        if x == ".npy" and p.parent in vid_dirs and any(t.startswith(("time", "stamp")) for t in tokens(p.stem)):
+        if x == ".npy" and p.parent in vid_dirs and _names_word(p.stem, TIME_WORDS):
             continue
         out.append(p.relative_to(root).as_posix())
     return out
@@ -12617,7 +12652,7 @@ def h5_state_arrays(p: Path) -> list[str]:
 
 def assumed_arms(paths: list[Path], clocked: dict) -> list[tuple[str, list[str]]]:
     """[(name, its arm channels)] of the sensor files placed from both starts (split_sensors) that record a working
-    arm: an MCAP channel of an arm's joints (mcap_joint_streams) that is not a command channel (ACTION_TOPIC, which
+    arm: an MCAP channel of an arm's joints (mcap_joint_streams) that is not a command channel (names_action, which
     gives the action, never the state) and not a third arm beside a left and a right arm (third_arms, with the arms
     of the files on the footage's clock, clocked), or an HDF5 array named as the state (h5_state_arrays). Such an arm
     is never the recorded state, so a state of the other files would lack it (state_blockers)."""
@@ -12626,7 +12661,7 @@ def assumed_arms(paths: list[Path], clocked: dict) -> list[tuple[str, list[str]]
         if p.suffix.lower() == ".mcap":
             own = {f"{k} ({p.name})": v for k, v in mcap_joint_streams([p]).items()}
             third = set(third_arms({**clocked, **own}))
-            arms = sorted({_topic(own, k) for k in own if k not in third and not ACTION_TOPIC.search(_topic(own, k))})
+            arms = sorted({_topic(own, k) for k in own if k not in third and not names_action(_topic(own, k))})
         else:
             arms = h5_state_arrays(p)
         if arms:
@@ -12710,7 +12745,7 @@ def sensor_clock_namespace(path: Path, basis: str, reference_records=()) -> tupl
     if path.suffix.lower() == '.mcap':
         from mcap.exceptions import McapError
         wanted = [topic for topic, schema in mcap_channels(path)
-                  if not CAMERA_SCHEMA.search(schema) and not TEXT_TOPIC.search(topic)
+                  if not CAMERA_SCHEMA.search(schema) and not names_text(topic)
                   and not bookkeeping_why(topic, schema)]
         decoders, factories, count = {}, _decoders(), 0
         try:
