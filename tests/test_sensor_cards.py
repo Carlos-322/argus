@@ -164,3 +164,48 @@ def test_an_unknown_card_charge_is_held_and_never_resent(tmp_path):
     with pytest.raises(ValueError):
         run(sc.build(changed, config={'model': 'm', 'reasoning': 'r'}), d, path, lost)
     assert len(calls) == 1
+
+
+def test_rejoined_parts_keep_their_cards_and_list_copy_and_play_only_chosen_cards():
+    from label import sensor_evidence as se
+    from label.dictionary_context import field_interpretation
+    meta = {'name': 'p', 'key': 'p', 'shape': [2]}
+    ctx = {'fps': 30, 'signals': [meta]}
+    sensor = {'id': 'signal:p', 'name': 'p', 'kind': 'numeric', 'capabilities': ['response_change'],
+              'descriptor_digest': se._descriptor_digest(meta), 'interpretation': field_interpretation(ctx, 'p')}
+    def part(card, carded):
+        f = {'start_s': 0.1, 'end_s': 0.5, 'headline': 'h', 'adds_beyond_video': True,
+             'evidence': [{'sensor_id': 'signal:p', 'series_id': 'signal:p:columns:0', 'time_s': [0.1]}], **card}
+        doc = {'version': 1, 'sensors': [copy.deepcopy(sensor)], 'findings': [f],
+               'series': [{'id': 'signal:p:columns:0', 'sensor_id': 'signal:p', 'times': [0.1, 0.5], 'values': [1, 2]}]}
+        if carded:
+            doc['video_cards'] = {'version': 1, 'cards': 1 if 'video_card' in card else 0}
+        return doc
+    chosen = {'video_card': {'version': 1, 'headline': 'Thumb presses harder', 'detail': 'The thumb presses first.'}}
+    listed = {'list_copy': {'version': 1, 'headline': 'Palm eases', 'detail': 'The palm eases later.'}}
+    parts = [({'piece': {'index': 0, 't0_s': 0.0}}, {'sensor_evidence': part(chosen, True)}),
+             ({'piece': {'index': 1, 't0_s': 10.0}}, {'sensor_evidence': part(listed, True)})]
+    merged = se.merge(parts, ctx)
+    assert [f.get('video_card', {}).get('headline') for f in merged['findings']] == ['Thumb presses harder', None]
+    assert merged['findings'][1]['list_copy']['headline'] == 'Palm eases'
+    assert merged['video_cards'] == {'version': 1, 'parts': 2, 'cards': 1}
+    uncarded = [parts[0], ({'piece': {'index': 1, 't0_s': 10.0}}, {'sensor_evidence': part({}, False)})]
+    assert 'video_cards' not in se.merge(uncarded, ctx), 'a part without a card choice plays every finding'
+
+
+def test_a_context_citation_need_not_span_the_finding_on_its_own():
+    from label import sensor_evidence as se
+    times = [i * 0.5 for i in range(21)]
+    doc = {'version': 1, 'episode_window_s': [0, 10.5], 'limitations': [], 'coverage': [],
+           'sensors': [{'id': 'signal:p', 'name': 'p', 'kind': 'numeric', 'capabilities': ['response_change'], 'timing': {}},
+                       {'id': 'camera:tac', 'name': 'tac', 'kind': 'image', 'view': 'tac', 'capabilities': ['image_response_change'],
+                        'times': [3.0, 4.0], 'timing': {}, 'episode_alignment_verified': True}],
+           'series': [{'id': 'signal:p:columns:0', 'sensor_id': 'signal:p', 'columns': [0], 'times': times,
+                       'values': [float(i) for i in range(21)], 'operation': 'recorded value', 'native_samples': 21}]}
+    trace = {'sensor_id': 'signal:p', 'series_id': 'signal:p:columns:0', 'time_s': [2.0, 5.0]}
+    image = {'sensor_id': 'camera:tac', 'time_s': [3.0]}
+    finding = {'start_s': 2.0, 'end_s': 5.0, 'headline': 'pad pressure rises while the image shows contact',
+               'claim_type': 'response_change', 'evidence': [trace, image]}
+    assert len(se.bind(doc, [finding])['findings']) == 1
+    alone = {**finding, 'evidence': [image]}
+    assert se.bind(doc, [alone])['unbound_findings'][0]['reason'] == 'finding exceeds the evidence clock'

@@ -177,7 +177,9 @@ def test_constant_duplicate_task_claims_cannot_supply_an_instruction(tmp_path):
     assert 'instruction' not in ctx
     assert not ctx.get('annotation_subtasks')
     assert len(ctx['annotation_unresolved'][0]['claims']) == 2
-    assert any(i['kind'] == 'metadata_unreadable' for i in ctx['reader_issues'])
+    texts = [i['what'] for i in ctx['reader_issues'] if i['kind'] == 'metadata_unreadable']
+    assert 'meta/tasks.jsonl could not be fully read: task_index 1 has conflicting recorded rows for this index.' in texts
+    assert not any('{' in t for t in texts), 'a reader issue is a sentence, never a raw record'
 
 
 def test_an_index_column_without_a_table_keeps_all_claims(tmp_path):
@@ -200,6 +202,7 @@ def test_invalid_table_keys_keep_their_original_claims(tmp_path, value):
     table = annotations().index_tables(meta, ['phase_index'], f.read_jsonl)[('phase_index', str(path))]
     assert table['labels'] == {}
     assert table['issues'][0]['value'] == value and type(table['issues'][0]['value']) is type(value)
+    assert annotations().index_issue_text('phase_index', table['issues'][0]).startswith(f'row 0 has phase_index {value!r}, which is not an index (')
 
 
 def test_nonzero_image_timestamps_map_once_and_keep_the_raw_annotation_clock(tmp_path):

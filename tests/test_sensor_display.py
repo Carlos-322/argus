@@ -62,7 +62,8 @@ def test_a_cited_region_shows_its_oriented_response_under_its_own_name():
     rows = sd.rows_for(doc, _finding(_cite('signal:p:derivation:regional_response:10')))
     assert [r['label'] for r in rows] == ['Thumb']
     assert rows[0]['values'][-1] > rows[0]['values'][0] >= 0
-    assert rows[0]['source_ids'] == ['signal:p:derivation:regional_response:0']
+    # The row is the region's cells, measured from the derivation's own starting level.
+    assert rows[0]['source_ids'] == ['signal:p:array:0', 'signal:p:array:1', 'signal:p:array:2', 'signal:p:array:3']
 
 
 def test_opposite_cited_patches_in_one_region_stay_two_areas():
@@ -152,3 +153,56 @@ def test_attach_adds_display_and_leaves_citations_untouched():
     assert doc['findings'][0]['display']['version'] == sd.VERSION
     assert doc['findings'][0]['evidence'] == before
     assert 'display' not in doc['findings'][1]
+
+
+def test_a_region_easing_below_its_start_draws_below_zero():
+    # The recording starts with the thumb loaded; it then eases, raw codes rising 3000 to 3900 under 'down'.
+    doc = _doc([_ramp(REF, 3900)] * 4 + [_flat()] * 2)
+    row = sd.rows_for(doc, _finding(_cite('signal:p:derivation:regional_response:10')))[0]
+    assert row['label'] == 'Thumb' and min(row['values']) == -900 and max(row['values']) == 0
+
+
+def test_an_inspected_read_joins_the_array_of_its_own_stitched_part():
+    def part(doc, prefix, offset):
+        d = copy.deepcopy(doc)
+        for s in d['sensors']:
+            s['id'] = prefix + s['id']
+            native = s['array_evidence']['native_constituents']
+            native['times_s'] = [t + offset for t in native['times_s']]
+        for x in d['derivations']:
+            x['id'], x['sensor_id'] = prefix + x['id'], prefix + x['sensor_id']
+        for r in d['series']:
+            r['id'], r['sensor_id'], r['times'] = prefix + r['id'], prefix + r['sensor_id'], [t + offset for t in r['times']]
+            if r.get('derivation_id'):
+                r['derivation_id'] = prefix + r['derivation_id']
+        return d
+    first, second = part(_doc([_ramp(REF, 2000)] + [_flat()] * 5), 'part0:', 0.0), part(_doc([_flat()] * 6), 'part1:', 10.0)
+    doc = {key: first[key] + second[key] for key in ('sensors', 'derivations', 'series')}
+    doc['sensors'].append({'id': 'part0:numeric:abc', 'name': 'p', 'access_descriptor_digest': 'd1'})
+    doc['series'].append({'id': 'part0:numeric:abc:0', 'sensor_id': 'part0:numeric:abc', 'columns': [0],
+                          'times': TIMES[:5], 'values': [REF] * 5})
+    row = sd.rows_for(doc, _finding([{'sensor_id': 'part0:numeric:abc', 'series_id': 'part0:numeric:abc:0', 'time_s': [0.1]}]))[0]
+    assert row['source_ids'] == ['part0:signal:p:array:0'] and row['times'][0] == 0.0 and row['values'][-1] == 1000
+
+
+def test_a_region_cited_without_its_array_still_points_the_declared_way():
+    doc = _doc([_ramp(REF, 2000)] * 4 + [_flat()] * 2)
+    for sensor in doc['sensors']:
+        sensor.pop('array_evidence')
+    row = sd.rows_for(doc, _finding(_cite('signal:p:derivation:regional_response:10')))[0]
+    assert row['label'] == 'Thumb' and row['values'][0] == 0 and row['values'][-1] == 1000
+
+
+def test_a_region_with_a_masked_cell_draws_only_its_valid_cells():
+    doc = _doc([_ramp(REF, 2000)] * 3 + [_ramp(REF, 4000)] + [_flat()] * 2)
+    for row in doc['series']:
+        if row.get('derivation_id') and row['source_columns'] == [0, 1, 2, 3]:
+            row['source_columns'] = [0, 1, 2]
+    row = sd.rows_for(doc, _finding(_cite('signal:p:derivation:regional_response:0')))[0]
+    assert row['source_ids'] == ['signal:p:array:0', 'signal:p:array:1', 'signal:p:array:2'] and row['values'][-1] == 1000
+
+
+def test_one_dead_cell_does_not_blank_its_area():
+    cells = [_ramp(REF, 2000)] * 3 + [[0.0] * len(TIMES)] + [_flat()] * 2
+    rows = sd.rows_for(_doc(cells, zero_censored=True), _finding(_cite(*(f'signal:p:array:{c}' for c in range(4)))))
+    assert [(r['label'], sum(v is not None for v in r['values'])) for r in rows] == [('Thumb area', 20)]

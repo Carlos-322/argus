@@ -328,6 +328,9 @@ def main() -> int:
 
     if a.force and a.retry_received:
         ap.error('--force and --retry-received cannot be combined')
+    if not a.data.startswith(('http://', 'https://')) and not Path(a.data).exists():
+        # checked before the job folder exists, so a mistyped path leaves nothing behind
+        raise SystemExit(f'--data {a.data} does not exist')
     from label.harness import execution_lock
     job = a.out.resolve()
     job.mkdir(parents=True, exist_ok=True)

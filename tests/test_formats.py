@@ -1289,6 +1289,24 @@ def _frame_times_read_relative_millisecond_stamps_as_milliseconds(tmp_path):
     assert abs(float(np.median(np.diff(t))) - 1 / 30) < 1e-6 and t[0] > 1.7e9
 
 
+def _frame_times_read_their_unit_by_the_clock_rule_of_every_reader(tmp_path):
+    """Frame stamps are read in the unit every other clock of a recording is read in (_seconds). A 60 fps camera
+    stamped by a 100 ms boot clock repeats each stamp three times, and the plain median step of its stamps is 0,
+    which had read the milliseconds as seconds (1.9 s of footage spanning 1900 s); stamps since 1970 in ms at
+    1000 fps step by 1 and had read as seconds too."""
+    import numpy as np
+    video = tmp_path / "exo_cam-images-rgb.mp4"
+    video.write_bytes(b"")
+    cases = {"boot ms, three frames per 100 ms tick": (5e6 + np.repeat(np.arange(20) * 100.0, 3), 1.9),
+             "boot ms, 60 fps by a 20 Hz clock": (5e6 + np.repeat(np.arange(100) * 50.0, 3), 4.95),
+             "epoch ms, 1000 fps": (1.7e12 + np.arange(300, dtype=np.float64), 0.299)}
+    for name, (stamps, span) in cases.items():
+        np.save(tmp_path / "exo_cam-rgb-timestamp.npy", stamps)
+        t = f.frame_times(video, len(stamps))
+        assert abs(float(t[-1] - t[0]) - span) < 1e-6, (name, float(t[-1] - t[0]))
+        np.testing.assert_array_equal(t, f._seconds(stamps))
+
+
 def _an_mcap_keeps_every_other_number_it_records_as_a_signal(tmp_path):
     """The recorder's arm channels also carry joint_vel, and a gripper IMU runs beside them: both reach the episode as
     signals under their own names, while the joints and gripper already read as the state and a status report sent
@@ -1334,6 +1352,12 @@ def test_frame_times_read_relative_millisecond_stamps_as_milliseconds():
     # no pytest fixture: Data Review runs this file's tests as plain functions (upload/test_formats.py)
     with tempfile.TemporaryDirectory() as t:
         _frame_times_read_relative_millisecond_stamps_as_milliseconds(Path(t))
+
+
+def test_frame_times_read_their_unit_by_the_clock_rule_of_every_reader():
+    # no pytest fixture: Data Review runs this file's tests as plain functions (upload/test_formats.py)
+    with tempfile.TemporaryDirectory() as t:
+        _frame_times_read_their_unit_by_the_clock_rule_of_every_reader(Path(t))
 
 
 def test_an_mcap_keeps_every_other_number_it_records_as_a_signal():

@@ -21,6 +21,19 @@ from test_formats import recorder_folder
 REPO = Path(__file__).resolve().parent.parent
 
 
+def test_review_refuses_a_missing_data_path_in_one_line_and_creates_no_job(tmp_path, monkeypatch, capsys):
+    """A mistyped --data path made a job folder and then stopped with a traceback ending in "the upload holds no ...
+    (it is empty)". It is now refused with one line naming the path, before anything is written."""
+    from review import __main__ as rv
+    missing, job = tmp_path / 'no_such_upload', tmp_path / 'job'
+    monkeypatch.setattr(sys, 'argv', ['review', '--data', str(missing), '--rig', 'teleop_arms', '--out', str(job),
+                                      '--free'])
+    with pytest.raises(SystemExit) as stop:
+        rv.main()
+    assert stop.value.code == f'--data {missing} does not exist'
+    assert not job.exists()
+
+
 @pytest.mark.parametrize('kind', ['video', 'mcap', 'hdf5'])
 def test_review_direct_file_retains_owned_metadata_without_reading_neighbor_recordings(tmp_path, monkeypatch, kind):
     import hashlib
@@ -683,6 +696,70 @@ def test_an_episode_none_of_whose_cameras_decodes_is_set_aside_with_its_reason(t
     assert not ep.exists() and (tmp_path / "episodes_unclipped" / ep.name).is_dir()
     clips.drop_from_report(rep, left)
     assert rep["episodes"] == [] and rep["failed"] == [{"name": "episode_1", "why": left[0]["why"]}]
+
+
+def _machine_failures():
+    import errno
+    import os
+    import signal
+    full = "Error writing trailer of out.mp4: " + os.strerror(errno.ENOSPC)
+    return {"a full disk": OSError(errno.ENOSPC, "No space left on device"),
+            "ffmpeg on a full disk": subprocess.CalledProcessError(1, ["ffmpeg"], b"", full.encode()),
+            "no progress": subprocess.TimeoutExpired(["ffmpeg"], 600.0),
+            "ffmpeg missing": FileNotFoundError(errno.ENOENT, "No such file or directory", "/no/ffmpeg"),
+            "ffmpeg killed": subprocess.CalledProcessError(-signal.SIGKILL, ["ffmpeg"], b"", b"")}
+
+
+@pytest.mark.parametrize("how", list(_machine_failures()))
+@pytest.mark.parametrize("which", ["every camera", "one camera beside one that does not decode"])
+def test_a_cut_the_machine_stopped_never_takes_a_camera_or_episode_out(tmp_path, monkeypatch, how, which):
+    """A full disk, a tool that stops making progress or is missing or killed says nothing about the video: the step
+    fails, nothing is taken out, flagged or set aside, and a rerun on a sound machine cuts the episode. An episode
+    whose every camera failed this way had been set aside as undecodable and never retried."""
+    from board import clips
+    rep, eps, ep = _two_camera_upload(tmp_path)
+    if which != "every camera":
+        Path(json.loads((ep / "sources.json").read_text())["exo"]["packed"]).write_bytes(b"not a video at all" * 50)
+    before = {p.name: p.read_bytes() for p in ep.iterdir() if p.suffix == ".json"}
+    out = tmp_path / "clips"
+    real = clips.extract_one
+
+    def machine(packed, base_s, n_frames, out_mp4, *args, **kwargs):
+        if which == "every camera" or "wrist_left" in str(out_mp4):
+            raise _machine_failures()[how]
+        return real(packed, base_s, n_frames, out_mp4, *args, **kwargs)
+    monkeypatch.setattr(clips, "extract_one", machine)
+    monkeypatch.setattr(sys, "argv", ["clips", "--episodes", str(eps), "--out", str(out), "--jobs", "1"])
+    assert clips.main() == 1
+    assert json.loads((out / clips.FAILED).read_text()) == {}
+    assert clips.set_aside_failed(eps, out) == [] and ep.is_dir()
+    assert {p.name: p.read_bytes() for p in ep.iterdir() if p.suffix == ".json"} == before
+    assert not list(out.rglob("*.mp4"))
+    # the machine is sound again: the rerun cuts what decodes, and only a video that does not decode is taken out
+    monkeypatch.setattr(clips, "extract_one", real)
+    assert clips.main() == 0
+    assert clips.set_aside_failed(eps, out) == [] and ep.is_dir()
+    issues = [x["kind"] for x in json.loads((ep / "context.json").read_text()).get("reader_issues", [])]
+    if which == "every camera":
+        assert (out / f"{ep.name}.mp4").exists() and (out / "wrist_left" / f"{ep.name}.mp4").exists()
+        assert "camera_not_decodable" not in issues
+    else:
+        assert (out / "wrist_left" / f"{ep.name}.mp4").exists() and not (out / f"{ep.name}.mp4").exists()
+        assert issues.count("camera_not_decodable") == 1
+        assert list(json.loads((ep / "sources.json").read_text())) == ["left"]
+
+
+def test_only_the_video_is_blamed_for_a_clip_that_does_not_decode():
+    import signal
+    import av
+    from board import clips
+    for error in _machine_failures().values():
+        assert clips.machine_stopped(error), error
+    for error in (RuntimeError("out.mp4: no frame of in.mp4 decodes"), ValueError("no usable presentation interval"),
+                  av.error.InvalidDataError(1094995529, "Invalid data found when processing input"),
+                  subprocess.CalledProcessError(1, ["ffmpeg"], b"", b"moov atom not found"),
+                  subprocess.CalledProcessError(-signal.SIGSEGV, ["ffmpeg"], b"", b"")):
+        assert not clips.machine_stopped(error), error
 
 
 def test_review_runs_the_sensor_checks_as_data_review_does(tmp_path, monkeypatch):

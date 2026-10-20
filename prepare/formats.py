@@ -335,12 +335,14 @@ class UnpackLimit(UploadInputError):
     """An upload that unpacks to more than one upload may hold: it stops the unpacking, never only one member."""
 
 
-def _archive_members(path: Path):
+def _archive_members(path: Path, max_files: int | None = None):
     """([(parts, size, open)] for every regular file in the archive, how many members were left out, the open archive,
     the members that cannot be read, each named with why, and the members whose owner the archive does not prove,
     [(label, size, open)]). Links, devices, folders, hidden files and __MACOSX are never unpacked. A password-protected member or one in a compression Python does not open is left out by itself,
     and a tar cut short keeps every member whose header comes before the cut, as the upload page does: one bad member
-    had cost the whole archive."""
+    had cost the whole archive. A tar with more than max_files files (what is left of the upload's UNPACK_MAX_FILES)
+    raises UnpackLimit the moment its headers pass it."""
+    max_files = UNPACK_MAX_FILES if max_files is None else max_files
     import stat
     import tarfile
     import zipfile
@@ -439,9 +441,24 @@ def _archive_members(path: Path):
         return out, skipped, zf, bad, unverified
     tf = tarfile.open(path, "r:*")
     members = []
+    files = folders = 0
     try:
         for m in tf:
+            # Every header is held in memory as it is read, so the file budget is spent as the headers are read, never
+            # after all are: a 5.6 MB .tgz of 1.2 million empty members had held 1.26 GB of headers before it was
+            # refused. A file counts as the upload counts it (every member but a folder, written or left out), and
+            # folders are held to the same number, which no upload within the budget needs more of.
             members.append(m)
+            if m.isdir():
+                folders += 1
+            else:
+                files += 1
+            if files > max_files or folders > UNPACK_MAX_FILES:
+                tf.close()
+                raise UnpackLimit(f"{path.name} holds more than one upload can: at most {UNPACK_MAX_FILES:,} files "
+                                  f"and {UNPACK_MAX_BYTES / 1e9:.0f} GB unpacked")
+    except UnpackLimit:
+        raise
     except Exception:
         # cut short: every member whose header came before the cut is listed, and one whose bytes the cut reaches
         # fails as it is unpacked (open_archives)
@@ -606,7 +623,9 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
             apart += [Path(p) for p in recorded if isinstance(p, str) and Path(p).is_dir()]
             continue
         try:
-            members, skipped, handle, bad, unverified = _archive_members(a)
+            members, skipped, handle, bad, unverified = _archive_members(a, UNPACK_MAX_FILES - count)
+        except UnpackLimit:
+            raise
         except ValueError as e:
             notes.append(f"{e}, so it was not opened.")
             continue
@@ -628,14 +647,16 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
                 notes.append(f"{a.name} could not be unpacked where it lies ({_written_why(error)}), so it was left "
                              "out.")
                 continue
-            wrote, made = 0, []
-            for label, filename, size, opener in unverified:
-                if count >= UNPACK_MAX_FILES or total + size > UNPACK_MAX_BYTES:
-                    raise UnpackLimit(f"{a.name} holds more than one upload can: at most {UNPACK_MAX_FILES:,} files "
-                                     f"and {UNPACK_MAX_BYTES / 1e9:.0f} GB unpacked")
+            wrote, made, conflicts = 0, [], []
+
+            def keep_apart(label, filename, size, opener, why_label=None) -> bool:
                 # A member kept apart is an upload of its own exactly as a direct upload is. An archive among them is
                 # held outside the folder it unpacks to, as open_archives holds a direct archive outside its tree, so
                 # the folder holds only what the archive holds and is read from its own dataset root.
+                nonlocal total, count
+                if count >= UNPACK_MAX_FILES or total + size > UNPACK_MAX_BYTES:
+                    raise UnpackLimit(f"{a.name} holds more than one upload can: at most {UNPACK_MAX_FILES:,} files "
+                                      f"and {UNPACK_MAX_BYTES / 1e9:.0f} GB unpacked")
                 is_archive = bool(ARCHIVE_RE.search(filename))
                 got = 0
                 try:
@@ -650,8 +671,8 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
                 except UnpackLimit:
                     raise
                 except Exception as error:
-                    bad.append(f"{label} ({_member_why(error)})")
-                    continue
+                    bad.append(f"{why_label or label} ({_member_why(error)})")
+                    return False
                 total += got
                 count += 1
                 apart.append(folder)
@@ -659,6 +680,9 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
                 if is_archive and target not in depth:
                     archives.append(target)
                     base_of[target], depth[target] = folder, depth[a] + 1
+                return True
+            for label, filename, size, opener in unverified:
+                keep_apart(label, filename, size, opener)
             for parts, size, opener in members:
                 if count >= UNPACK_MAX_FILES or total + size > UNPACK_MAX_BYTES:
                     raise UnpackLimit(f"{a.name} holds more than one upload can: at most {UNPACK_MAX_FILES:,} files "
@@ -670,7 +694,19 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
                     if broot not in target.resolve().parents:
                         skipped += 1
                         continue
-                    existed = target.exists()          # unpacked by an earlier run that stopped part way
+                    existed = target.exists() or target.is_symlink()
+                    if existed and not (target.is_file() and target.stat().st_size == size):
+                        # A file already at this path is this member only as an earlier run that stopped part way
+                        # unpacked it, so it has the member's size. Any other file there (the folder's own copy of
+                        # take1/cam.mp4 beside take1.zip) is a different file of the same name: neither is lost
+                        # for the other, and which one the path's folder describes is not proven, so the upload's
+                        # file keeps the path and the member is read as an upload of its own, as a member of
+                        # unproven name is.
+                        name = '/'.join(parts)
+                        label = f"{ARCHIVE_RE.sub('', a.name)}-{parts[-1]}"
+                        if keep_apart(label, parts[-1], size, opener, name):
+                            conflicts.append((name, Path(made[-1]).name))
+                        continue
                     if not existed:
                         target.parent.mkdir(parents=True, exist_ok=True)
                         with opener() as src, tempfile.NamedTemporaryFile(
@@ -729,6 +765,9 @@ def _unpack_archives(root: Path, dest: Path) -> tuple[Path, list[str], list[Path
                         f"not be unpacked: {_and_words(members_bad[:12])}"
                         + (f" and {len(members_bad) - 12} more" if len(members_bad) > 12 else "")
                         if members_bad else "") + "." + "".join(f" {c}." for c in cut))
+        notes.extend(f"{a.name} holds {name}, which differs from the {name} already in the upload, so the archive's "
+                     f"copy was read as an upload of its own, {folder}, which no other file describes."
+                     for name, folder in conflicts)
     if root.is_file():
         return Path(dest), notes, apart
     return root, notes, apart
@@ -2228,12 +2267,13 @@ def state_units(metadata: dict, names: list[str] | None, dims: int) -> list[str 
     return result
 
 
-def physical_state_layout(dims: int, rig: str, names=None, *, metadata=None, value_roles=None):
-    """Canonical physical state needs units as well as explicit roles and ordered axes."""
+def physical_state_layout(dims: int, rig: str, names=None, *, metadata=None, value_roles=None, conversion=None):
+    """Canonical physical state needs units as well as explicit roles and ordered axes. conversion is the record of
+    columns converted from degrees (joint_degrees), whose names may still say their source unit (unit_names)."""
     kind, note = state_layout(dims, rig, names, value_roles=value_roles)
     if kind == "none":
         return kind, note
-    units = state_units(metadata or {}, names, dims)
+    units = state_units(metadata or {}, unit_names(names, conversion), dims)
     expected = ["rad"] * 6 if kind == "joints" else ["m"] * 3 + ["rad"] * 3
     if any(units[offset + i] != unit for offset in range(0, dims, 7) for i, unit in enumerate(expected)):
         return "none", ("Kinematic checks unavailable: physical state units are undeclared, conflicting, or outside "
@@ -2243,30 +2283,38 @@ def physical_state_layout(dims: int, rig: str, names=None, *, metadata=None, val
 
 DEGREE_UNITS = {"deg", "degree", "degrees"}
 DEGREE_EVIDENCE_JOINTS = 3     # of an arm's six joints that must read past one turn in radians
+STATE_UNIT_CONTRADICTED = "state_unit_contradicted"     # reader issue: readings only degrees explain, declared radians
 
 
-def joint_degrees(readings, names, roles, units, rig) -> dict | None:
-    """The joint columns of a joint state (state_layout "joints") that hold degrees, and why: declared as degrees by the
-    column metadata, or declared in no unit with readings only degrees explain. Radians are never more than one turn
-    for most of an arm's joints, so at least DEGREE_EVIDENCE_JOINTS of each arm's six joints reading beyond 2 pi, with
-    every joint within two turns of degrees (720), tells degrees from radians; readings that do not, a radian or other
-    declared unit, conflicting units, or names that carry their own unit leave the state as it was (None)."""
+def unit_names(names, conversion):
+    """The names a state's units are read from (state_units): a column converted from degrees (joint_degrees) may say
+    its source unit in its name (joint1_deg), which the conversion records, so its unit is read from its converted unit
+    alone. Anything but a well formed degree conversion changes nothing."""
+    if not names or not isinstance(conversion, dict) or conversion.get("from") != "deg" \
+            or conversion.get("to") != "rad" or not isinstance(conversion.get("columns"), list):
+        return names
+    converted = {c for c in conversion["columns"] if type(c) is int}
+    return ["" if i in converted and state_units({}, [name], 1)[0] in DEGREE_UNITS else name
+            for i, name in enumerate(names)]
+
+
+def _joint_columns(readings, names, roles, rig) -> list[int] | None:
+    """The six joint columns of each arm of a joint state (state_layout "joints"), else None."""
     if readings is None or getattr(readings, "ndim", 0) != 2:
         return None
     dims = readings.shape[1]
     if not names or len(names) != dims or state_layout(dims, rig, names, value_roles=roles)[0] != "joints":
         return None
-    columns = [offset + i for offset in range(0, dims, 7) for i in range(6)]
-    if any(state_units({}, [names[c]], 1)[0] is not None for c in columns):
-        return None                    # the name says its unit; a converted value would contradict it
-    declared = [units[c] for c in columns]
-    if all(unit in DEGREE_UNITS for unit in declared):
-        return {"from": "deg", "to": "rad", "columns": columns, "basis": "declared"}
-    if any(unit is not None for unit in declared):
-        return None
+    return [offset + i for offset in range(0, dims, 7) for i in range(6)]
+
+
+def degree_evidence(readings, columns) -> list[int] | None:
+    """How many of each arm's six joints read beyond one turn, when the readings prove degrees, else None. Radians are
+    never more than one turn for most of an arm's joints, so at least DEGREE_EVIDENCE_JOINTS of each arm's six joints
+    reading beyond 2 pi, with every joint within two turns of degrees (720), tells degrees from radians."""
     values = np.abs(np.asarray(readings, dtype=float)[:, columns])
     values[~np.isfinite(values)] = np.nan
-    if np.isnan(values).all(axis=0).any():
+    if not len(values) or np.isnan(values).all(axis=0).any():
         return None
     peak = np.nanmax(values, axis=0)
     beyond = []
@@ -2275,7 +2323,81 @@ def joint_degrees(readings, names, roles, units, rig) -> dict | None:
         if int(np.sum(arm > 2 * np.pi)) < DEGREE_EVIDENCE_JOINTS or bool(np.any(arm > 720)):
             return None
         beyond.append(int(np.sum(arm > 2 * np.pi)))
+    return beyond
+
+
+def joint_degrees(readings, names, roles, units, rig) -> dict | None:
+    """The joint columns of a joint state (state_layout "joints") that hold degrees, and why: declared as degrees by the
+    column metadata or by the names themselves (joint1_deg; units are state_units', which read both), or declared in
+    no unit with readings only degrees explain (degree_evidence). Readings that do not, a radian or other declared
+    unit, or conflicting units leave the state as it was (None)."""
+    columns = _joint_columns(readings, names, roles, rig)
+    if columns is None:
+        return None
+    declared = [units[c] for c in columns]
+    if all(unit in DEGREE_UNITS for unit in declared):
+        return {"from": "deg", "to": "rad", "columns": columns, "basis": "declared"}
+    if any(unit is not None for unit in declared):
+        return None
+    beyond = degree_evidence(readings, columns)
+    if beyond is None:
+        return None
     return {"from": "deg", "to": "rad", "columns": columns, "basis": "readings", "joints_beyond_one_turn": beyond}
+
+
+def qualified_state(readings, names, roles, units, rig, source: str, issues: list | None = None):
+    """The one rule every reader (LeRobot, HDF5, MCAP) qualifies a recorded state or command array by, before it may
+    join kinematic checks: (kind, note, readings, units, conversion). units are the array's declared units
+    (state_units, which reads the metadata and the names). Joints in degrees, declared or proven by the readings
+    (joint_degrees), are converted to radians and the conversion is returned for the contract; the layout and units
+    are then checked (physical_state_layout). Joints declared in radians whose readings meet the degree evidence
+    (degree_evidence) keep their declared unit, but the readings contradict it, so the array is left out of
+    kinematic checks (kind "none") and a reader issue saying so goes into issues, named by source. A kind of "none"
+    returns the readings and units as recorded."""
+    dims = readings.shape[1] if readings is not None and getattr(readings, "ndim", 0) == 2 else len(units or [])
+    degrees = joint_degrees(readings, names, roles, units, rig)
+    converted, converted_units = in_radians(readings, units, degrees)
+    kind, note = physical_state_layout(dims, rig, names, value_roles=roles, metadata={"units": converted_units},
+                                       conversion=degrees)
+    if kind == "none":
+        return kind, note, readings, units, None
+    if kind == "joints" and degrees is None:
+        columns = _joint_columns(readings, names, roles, rig)
+        beyond = degree_evidence(readings, columns) if columns and all(units[c] == "rad" for c in columns) else None
+        if beyond is not None:
+            whose = "each arm" if len(beyond) > 1 else "the arm"
+            what = (f"{source} declares its joints in radians, but {' and '.join(str(b) for b in beyond)} of {whose}'s "
+                    "six joints read beyond one turn (2 pi) and none beyond 720, which only degrees explain; the "
+                    "declared unit is kept and the state is left out of kinematic checks.")
+            if issues is not None:
+                issues.append({"kind": STATE_UNIT_CONTRADICTED, "signal": source, "what": what})
+            return ("none", f"Kinematic checks unavailable: {what} Original readings remain signals without rescaling.",
+                    readings, units, None)
+    return kind, None, converted, converted_units, degrees
+
+
+def joined_conversion(conversions: list, widths: list[int]) -> dict | None:
+    """One record of the columns converted from degrees across arrays joined side by side (each widths wide, in
+    order), from each array's own (qualified_state), or None when none was converted."""
+    columns, bases, beyond, offset = [], [], [], 0
+    for conversion, width in zip(conversions, widths):
+        if conversion:
+            columns += [offset + c for c in conversion["columns"]]
+            bases.append(conversion["basis"])
+            beyond += conversion.get("joints_beyond_one_turn") or []
+        offset += width
+    if not columns:
+        return None
+    out = {"from": "deg", "to": "rad", "columns": columns, "basis": " and ".join(sorted(set(bases)))}
+    if beyond:
+        out["joints_beyond_one_turn"] = beyond
+    return out
+
+
+def add_state_issues(ctx: dict, issues: list[dict]) -> None:
+    """The reader issues qualified_state found, in ctx's reader_issues (add_issue)."""
+    for issue in issues:
+        add_issue(ctx, issue["kind"], issue["what"], signal=issue.get("signal"))
 
 
 def in_radians(readings, units, degrees):
@@ -2316,9 +2438,7 @@ def qualified_lerobot_action(action, features, columns, rig, kind):
         names.extend(named)
         roles.extend(["gripper" if dims == 1 and column.endswith("_gripper") else None] * dims)
     units = state_units(lerobot_state_units(features, columns, "action"), names, action.shape[1])
-    degrees = joint_degrees(action, names, roles, units, rig)
-    action, units = in_radians(action, units, degrees)
-    action_kind, _ = physical_state_layout(action.shape[1], rig, names, value_roles=roles, metadata={"units": units})
+    action_kind, _, action, units, degrees = qualified_state(action, names, roles, units, rig, "action")
     return (action, units, degrees) if action_kind == kind else (None, None, None)
 
 
@@ -2338,24 +2458,24 @@ def lerobot_preparation_contract(kind, names, roles, features, columns, action, 
         command = declared_contract("prepare.formats:lerobot", kind, action_names,
                                     action_units if action_units is not None else
                                     state_units(lerobot_state_units(features, action_columns, "action"),
-                                                action_names, len(action_names)), action_roles)
-        if action_degrees is not None:
-            command["unit_conversion"] = action_degrees
+                                                action_names, len(action_names)), action_roles,
+                                    unit_conversion=action_degrees)
         semantics = [source_action_semantics(features.get(column), 'prepare.formats:lerobot')
                      for column in action_columns or ['action']]
         if semantics and semantics[0] is not None and all(item == semantics[0] for item in semantics):
             command['action_semantics'] = semantics[0]
     contract = declared_contract("prepare.formats:lerobot", kind, names,
                                  units if units is not None else
-                                 state_units(lerobot_state_units(features, columns), names, len(names)), roles, command)
-    if degrees is not None:
-        contract["unit_conversion"] = degrees
+                                 state_units(lerobot_state_units(features, columns), names, len(names)), roles, command,
+                                 unit_conversion=degrees)
     return contract
 
 
 
-def lerobot_physical_state(state, action, rig, names, roles, features, columns, action_columns, native_adapter=None):
-    """Use the selected producer's native contract or qualify the original generic column metadata."""
+def lerobot_physical_state(state, action, rig, names, roles, features, columns, action_columns, native_adapter=None,
+                           issues: list | None = None):
+    """Use the selected producer's native contract or qualify the original generic column metadata (qualified_state);
+    the reader issues that finds go into issues."""
     if native_adapter is not None:
         # HABIT's writer knows its two seven-value Cartesian arm blocks and matching native commands.
         # This argument comes from the selected adapter, never source dataset/robot strings.
@@ -2368,11 +2488,7 @@ def lerobot_physical_state(state, action, rig, names, roles, features, columns, 
         return "ee_pose", None, state, action, native_contract("habit", "ee_pose", features.get('action'))
     dims = state.shape[1] if state is not None else 0
     units = state_units(lerobot_state_units(features, columns), names, dims)
-    degrees = joint_degrees(state, names, roles, units, rig)
-    state, units = in_radians(state, units, degrees)
-    kind, note = physical_state_layout(dims, rig, names, value_roles=roles, metadata={"units": units})
-    if kind == "none":
-        degrees = None
+    kind, note, state, units, degrees = qualified_state(state, names, roles, units, rig, "observation.state", issues)
     action, action_units, action_degrees = qualified_lerobot_action(action, features, action_columns, rig, kind)
     proof = lerobot_preparation_contract(kind, names, roles, features, columns, action, action_columns, units,
                                          action_units, degrees, action_degrees) if kind != "none" else None
@@ -3930,7 +4046,7 @@ def frame_times(video: Path, n: int, depth: bool = False, native: bool = False) 
     """A video's frames' capture times in seconds on its recorder's clock, from the per-frame timestamp array a
     recorder writes beside it (exo_cam-rgb-timestamp.npy beside exo_cam-images-rgb.mp4): a .npy in its folder whose
     name says time and has the video's camera words, holding n rising numbers (seconds, or ms, us or ns, read
-    from their size). Colour over depth when both fit, and depth over colour for a depth video (depth=True, whose
+    by _seconds, the unit rule of every clock). Colour over depth when both fit, and depth over colour for a depth video (depth=True, whose
     stamps exo_cam-depth-timestamp.npy are its own). None when there is none."""
     cands = []
     for p in frame_time_files(video, depth):
@@ -3949,13 +4065,10 @@ def frame_times(video: Path, n: int, depth: bool = False, native: bool = False) 
     chosen = min(cands, key=lambda c: c[:3])
     if native:
         return chosen[4], chosen[3]
-    a = chosen[3].astype(np.float64)
-    # the unit from the frame step (a camera runs at 1 to 1000 fps), so stamps counted from the recording's start
-    # (0, 33.3, 66.7 ms) read as well as stamps since 1970; a single frame falls back to the stamp's own size
-    step = float(np.median(np.diff(a))) if n > 1 else 0.0
-    if step > 0:
-        return a * (1e-9 if step > 1.5e6 else 1e-6 if step > 1.5e3 else 1e-3 if step > 1.5 else 1.0)
-    return a * (1e-9 if a[0] > 1e17 else 1e-6 if a[0] > 1e14 else 1e-3 if a[0] > 1e11 else 1.0)
+    # the unit is read by the rule every clock of a recording is read by (_seconds): its size when that is an epoch
+    # time, else its step between distinct stamps, so stamps counted from the recording's start (0, 33.3, 66.7 ms)
+    # read as well as stamps since 1970, and frames that share a stamp of a coarse clock never shrink the step
+    return _seconds(chosen[3])
 
 
 TABLE_CHUNK_ROWS = 200_000
@@ -4652,7 +4765,10 @@ def convert_video(item: dict, rig: str, out: Path, dataset: str) -> dict:
                 # only, and an HDF5 array named as the state below (h5_state)
                 merge_signals(signals, mcap_signals(mcap_files, real[anchor]) if mcap_files else Signals())
             else:
-                state, action, note = joint_state(streams, real[anchor]) if not blocked else (None, None, None)
+                state_issues = []
+                state, action, note = joint_state(streams, real[anchor], issues=state_issues) if not blocked \
+                    else (None, None, None)
+                add_state_issues(extra, state_issues)
                 merge_signals(signals, mcap_signals(mcap_files, real[anchor], state_fields(streams, state, action)))
                 signals.left_out += joint_left_out(streams, state, action)
                 if note:
@@ -5005,7 +5121,7 @@ def read_root(rdir: Path, rel: str) -> dict:
                              'fps is not a finite positive frame rate; readable source clocks determine timing')
         else:
             fps = candidate
-    from prepare.annotations import resolved_labels
+    from prepare.annotations import index_issue_text, resolved_labels
     from prepare.lerobot_labels import scoped_index_tables
     task_tables = scoped_index_tables(rdir / "meta", ["task_index"], lambda p: read_jsonl(p, reads)
                                if p.name == "tasks.jsonl" else read_jsonl(p))
@@ -5013,7 +5129,7 @@ def read_root(rdir: Path, rel: str) -> dict:
         if column is not None:
             reads["metadata_read"].add(Path(path).resolve())
         for issue in table["issues"]:
-            metadata_failure(reads, Path(path), issue["why"] if column is None else json.dumps(issue, default=str))
+            metadata_failure(reads, Path(path), index_issue_text(column, issue))
     task_labels = resolved_labels(task_tables, "task_index")
     tasks_by_index = {k: v["label"] for k, v in task_labels.items() if v["label"]}
     for path in (rdir / "meta" / "tasks.jsonl", rdir / "meta" / "tasks.parquet"):
@@ -6259,8 +6375,11 @@ def convert_lerobot(item: dict, rig: str, out: Path, dataset: str, hold_back=(),
     kind, note, proof = "none", None, None
     with part(parts, "the recorded state's layout") as layout:
         skip_when_cameras_only()
+        state_issues = []
         kind, note, state, action, proof = lerobot_physical_state(
-            state, action, rig, state_names, value_roles, feats, state_columns, action_columns, native_adapter)
+            state, action, rig, state_names, value_roles, feats, state_columns, action_columns, native_adapter,
+            state_issues)
+        add_state_issues(extra, state_issues)
     if layout.failed is not None:
         state = action = None
     if proof is not None:
@@ -7066,9 +7185,11 @@ def _convert_image_episode(item, rig, ep, dataset, df, fps, state, action, extra
                               {v: "timestamp" for v, key in vmap.items() if key in written},
                               {"timestamp": {"source": "parquet timestamp column", **metadata,
                                              "units": metadata.get("units", metadata.get("unit"))}})
+    state_issues = []
     kind, note, state, action, proof = lerobot_physical_state(
         state, action, rig, state_names if state_names is not None else state_value_names(r["features"], state),
-        extra.get("state_value_roles"), r["features"], state_columns, action_columns, native_adapter)
+        extra.get("state_value_roles"), r["features"], state_columns, action_columns, native_adapter, state_issues)
+    add_state_issues(extra, state_issues)
     if proof is not None:
         extra["state_contract"] = proof
     if state is not None and kind != "none" and not state_columns:
@@ -7303,8 +7424,9 @@ def _epoch_scale(a: np.ndarray) -> float | None:
 
 def _seconds_scale(a: np.ndarray) -> float:
     """Seconds per unit of a clock: the unit its size settles (_epoch_scale), else the unit its step says (one sample
-    every 1 ms to 10 s), as frame_times reads a recorder's stamps, and for a clock that never steps the unit its size
-    says alone."""
+    every 1 ms to 10 s, judged on its steps between distinct values, so repeated stamps never shrink it), and for a
+    clock that never steps the unit its size says alone. frame_times reads a recorder's per-frame stamps by this same
+    rule."""
     scale = _epoch_scale(a)
     if scale is not None:
         return scale
@@ -8120,7 +8242,17 @@ def h5_state(signals: Signals, rig: str, q: np.ndarray, files: list[str] | None 
                     rows[~ok, angles] = Slerp(q[ok], rotations)(missing_times).as_euler("xyz")
             rows[ok] = a[ok]  # Recorded rows keep their original angular representation.
         return rows, (gap_words(gap, q[0]) if gap else None)
-    notes, read, failed, filled_at = [], [], {}, {}
+    notes, read, failed, filled_at, qualified = [], [], {}, {}, {}
+
+    def qualify(k, issues=None):
+        # each state or command array by the one rule every reader qualifies them by (qualified_state), once
+        if k not in qualified:
+            values = np.asarray(signals[k], dtype=np.float64)
+            value_names = (meta.get(k) or {}).get("names")
+            qualified[k] = qualified_state(values, value_names, None,
+                                           state_units(meta.get(k) or {}, value_names, values.shape[1]), rig, k,
+                                           issues)
+        return qualified[k]
     source_claims = {name: physical(name) if H5_JOINT_ACTION.search(physical(name)) else name for name in cands}
 
     def unsided(name):
@@ -8172,7 +8304,7 @@ def h5_state(signals: Signals, rig: str, q: np.ndarray, files: list[str] | None 
                             "a 6D pose and an opening per gripper.") + f" The recorded state is the HDF5 array {name}.",
                  "layout")
             continue
-        kind, note = physical_state_layout(dims, rig, names, metadata=meta.get(name))
+        kind, note, a, _, _ = qualify(name, getattr(signals, "issues", None))
         if kind == "none":
             fail(name, f"{note} The recorded state is the HDF5 array {name}." if note else None, "layout")
             continue
@@ -8206,9 +8338,7 @@ def h5_state(signals: Signals, rig: str, q: np.ndarray, files: list[str] | None 
         side = side_of(name) if len(arms) > 1 else None
         return next((k for k in signals if H5_ACTION_NAME.search(own(k)) and np.shape(signals[k]) == shape
                      and (side is None or side_of(k) == side)
-                     and physical_state_layout(shape[1], rig, (meta.get(k) or {}).get("names"),
-                                               metadata=meta.get(k))[0] == state_layout(
-                                                   shape[1], rig, meta.get(name, {}).get("names"))[0]
+                     and qualify(k)[0] == state_layout(shape[1], rig, meta.get(name, {}).get("names"))[0]
                      and (meta.get(k) or {}).get("aligned_by") not in (COARSE_CLOCK, ALIGNED_CAMERA)
                      and not (meta.get(k) or {}).get("clock_problem")
                      and filled(np.asarray(signals[k], dtype=np.float64),
@@ -8218,6 +8348,7 @@ def h5_state(signals: Signals, rig: str, q: np.ndarray, files: list[str] | None 
         return None, None, None, None, StateNote(
             "Recorded state groups do not share one supported physical layout; original values remain signals.", "layout")
     acts = [command(name, a.shape) for name, a, _ in arms]
+    arm_dims = [a.shape[1] for _, a, _ in arms]
     if identity_ctx is not None:
         record_state_groups(identity_ctx, [(source_claims[name], nm, a.shape[1]) for name, a, nm in arms])
         from prepare.state_contract import declared_contract, source_action_semantics
@@ -8225,20 +8356,23 @@ def h5_state(signals: Signals, rig: str, q: np.ndarray, files: list[str] | None 
         command = None
         if all(acts):
             action_names = [value for key in acts for value in meta[key]["names"]]
-            action_units = [unit for key in acts for unit in state_units(
-                meta[key], meta[key]["names"], len(meta[key]["names"]))]
-            command = declared_contract("prepare.formats:hdf5", kind, action_names, action_units)
+            action_units = [unit for key in acts for unit in qualify(key)[3]]
+            command = declared_contract("prepare.formats:hdf5", kind, action_names, action_units,
+                                        unit_conversion=joined_conversion([qualify(key)[4] for key in acts], arm_dims))
             semantics = [source_action_semantics(meta[key], 'prepare.formats:hdf5') for key in acts]
             if semantics[0] is not None and all(item == semantics[0] for item in semantics):
                 command['action_semantics'] = semantics[0]
-        units = [unit for name, values, names in arms for unit in state_units(meta[name], names, values.shape[1])]
+        units = [unit for name, _, _ in arms for unit in qualify(name)[3]]
         identity_ctx["state_contract"] = declared_contract(
-            "prepare.formats:hdf5", kind, combined_names, units, action=command)
+            "prepare.formats:hdf5", kind, combined_names, units, action=command,
+            unit_conversion=joined_conversion([qualify(name)[4] for name, _, _ in arms], arm_dims))
     action = None
     if all(acts):
         action = np.concatenate([
-            filled(np.asarray(signals.pop(k), dtype=np.float64),
-                   state_layout(len(meta[k]["names"]), rig, meta[k]["names"])[0])[0] for k in acts], axis=1)
+            filled(qualify(k)[2], state_layout(len(meta[k]["names"]), rig, meta[k]["names"])[0])[0] for k in acts],
+            axis=1)
+        for k in acts:
+            signals.pop(k)
     for name, _, _ in arms:
         signals.pop(name)
         if name in filled_at and hasattr(signals, "issues"):
@@ -9873,11 +10007,31 @@ def compose_mcap_arms(streams: dict, q: np.ndarray, clock: str) -> dict:
     return out
 
 
-def joint_state(streams: dict, q: np.ndarray, *, clock: str | None = None) -> tuple[np.ndarray | None, np.ndarray | None, StateNote | None]:
+def qualify_arm_stream(streams: dict, key: str, issues: list | None = None) -> tuple[str, str | None]:
+    """(kind, note) of one arm channel by the rule every reader qualifies a state by (qualified_state). A channel
+    whose joints are in degrees is replaced in streams by its readings in radians, with its converted units and the
+    record of the conversion (unit_conversion), so the state, the action and the contract (record_joint_state_identity)
+    all read it converted; a reader issue it raises goes into issues."""
+    stream = streams[key]
+    names = stream.get("names")
+    if stream.get("unit_conversion") is not None:          # converted when it was qualified before
+        return physical_state_layout(stream["pos"].shape[1], "teleop_arms", names, metadata=stream,
+                                     conversion=stream["unit_conversion"])
+    kind, note, pos, units, conversion = qualified_state(
+        stream["pos"], names, None, state_units(stream, names, stream["pos"].shape[1]), "teleop_arms",
+        _topic(streams, key), issues)
+    if conversion is not None:
+        streams[key] = {**stream, "pos": pos, "units": units, "unit_conversion": conversion}
+    return kind, note
+
+
+def joint_state(streams: dict, q: np.ndarray, *, clock: str | None = None,
+                issues: list | None = None) -> tuple[np.ndarray | None, np.ndarray | None, StateNote | None]:
     """(state, action, note): the arms' joints and grippers interpolated onto the anchor camera's frame times q (the
     same clock as the streams), 7 values per arm, left arm first; the leader or command channels, when they match, as
     the action. None with a note when the streams are not a layout the checks read ("layout") or an arm does not
-    cover the footage ("short", StateNote)."""
+    cover the footage ("short", StateNote). Each arm channel is qualified as every reader's state is
+    (qualify_arm_stream), and the reader issues that finds go into issues."""
     st, act = arm_streams(streams, False), arm_streams(streams, True)
     if not st:
         return None, None, None
@@ -9897,8 +10051,7 @@ def joint_state(streams: dict, q: np.ndarray, *, clock: str | None = None) -> tu
                                      "and a gripper per arm.", "layout")
     for s in order:
         # the channel's own value names settle six joints and a gripper against seven joints (a Franka arm)
-        kind, why = physical_state_layout(JOINT_DIMS, "teleop_arms", streams[st[s]].get("names"),
-                                          metadata=streams[st[s]])
+        kind, why = qualify_arm_stream(streams, st[s], issues)
         if kind != "joints":
             return None, None, StateNote(why or ("Labelled from the cameras, because the recorded arm channels name "
                                                  "their values as a pose, not six joints and a gripper."), "layout")
@@ -9935,8 +10088,7 @@ def joint_state(streams: dict, q: np.ndarray, *, clock: str | None = None) -> tu
     state = np.concatenate([r for r, _ in rows], axis=1)
     action = None
     if all(s in act and streams[act[s]]["pos"].shape[1] == JOINT_DIMS and covers(act[s])
-           and physical_state_layout(JOINT_DIMS, "teleop_arms", streams[act[s]].get("names"),
-                                     metadata=streams[act[s]])[0] == "joints"
+           and qualify_arm_stream(streams, act[s])[0] == "joints"
            and coarse_rows(streams[act[s]]["t"])[1] is None and not streams[act[s]].get("clock_errors")
            and (not clock or streams[act[s]].get("clocks", {clock}) == {clock}) for s in order):
         cmd = [fill(act[s])[0] for s in order]
@@ -10001,14 +10153,19 @@ def record_joint_state_identity(ctx: dict, streams: dict) -> None:
                               for k in keys])
     from prepare.state_contract import declared_contract
     def contract(selected):
+        # a channel joint_state converted from degrees carries its converted units and the record (qualify_arm_stream)
         names = [name for key in selected for name in streams[key]["names"]]
         units = [unit for key in selected for unit in state_units(
-            streams[key], streams[key]["names"], streams[key]["pos"].shape[1])]
-        return declared_contract("prepare.formats:mcap-joints", "joints", names, units)
+            streams[key], unit_names(streams[key]["names"], streams[key].get("unit_conversion")),
+            streams[key]["pos"].shape[1])]
+        conversion = joined_conversion([streams[key].get("unit_conversion") for key in selected],
+                                       [streams[key]["pos"].shape[1] for key in selected])
+        return declared_contract("prepare.formats:mcap-joints", "joints", names, units, unit_conversion=conversion)
     commands = arm_streams(streams, True)
     action_keys = [commands.get(side) for side in joint_state_order(arms)]
     command = contract(action_keys) if all(key and physical_state_layout(
-        streams[key]["pos"].shape[1], "teleop_arms", streams[key].get("names"), metadata=streams[key])[0] == "joints"
+        streams[key]["pos"].shape[1], "teleop_arms", streams[key].get("names"), metadata=streams[key],
+        conversion=streams[key].get("unit_conversion"))[0] == "joints"
         for key in action_keys) else None
     ctx["state_contract"] = contract(keys)
     if command is not None:
@@ -11112,7 +11269,10 @@ def convert_mcap_generic(item: dict, rig: str, ep: Path, dataset: str) -> dict:
             if not blocked and (clock_errors and camera_clock != 'arrival' or camera_clock is None):
                 blocked = StateNote("Labelled from the cameras because their declared capture clocks are invalid or mixed "
                                     "with arrival stamps. Precise arm alignment was not inferred.", "assumed_clock")
-            state, action, note = joint_state(streams, q, clock=camera_clock) if not blocked else (None, None, blocked)
+            state_issues = []
+            state, action, note = joint_state(streams, q, clock=camera_clock, issues=state_issues) if not blocked \
+                else (None, None, blocked)
+            add_state_issues(extra, state_issues)
             used = state_fields(streams, state, action)
         elif rig == "handheld_gripper":
             from prepare.mcap_pose import pose_state

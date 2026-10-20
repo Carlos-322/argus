@@ -101,21 +101,22 @@ def execute(request, doc, cache_path, *, call, reserve_cost, model,
         rejected = (list(saved.get('rejected_attempts') or []) +
                     [{k: copy.deepcopy(v) for k, v in saved.items() if k != 'rejected_attempts'}]
                     if saved and ea.rejected_selection_proof(saved) else [])
-        if saved and saved.get('pause_reason') == 'spend_cap':
-            if stage['part_of_inspection']:
-                doc.pop('pause_reason', None)
-                doc['status'] = 'complete'
+        if saved and saved.get('pause_reason') == 'spend_cap' and stage['part_of_inspection']:
+            doc.pop('pause_reason', None)
+            doc['status'] = 'complete'
             doc['limitations'] = [note for note in doc['limitations'] if note != stage['cap_note']]
         reserve = reserve_cost(request['content'])
         if type(reserve) not in (int, float) or not math.isfinite(reserve) or reserve <= 0:
             raise ValueError(f'{name} reservation must be finite and positive.')
         if reserve_dispatch is not None and not reserve_dispatch(reserve):
+            # A stage after the annotation keeps its pause on its own receipt: the inspection's status and notes
+            # were part of the paid request, so changing them would make that finished request look stale.
             if stage['part_of_inspection']:
                 doc.update(status='incomplete', pause_reason='spend_cap')
+                if stage['cap_note'] not in doc['limitations']:
+                    doc['limitations'].append(stage['cap_note'])
             doc[key] = {'digest': request['digest'], 'state': 'not dispatched',
-                        'pause_reason': 'spend_cap', 'cost_usd': 0.0}
-            if stage['cap_note'] not in doc['limitations']:
-                doc['limitations'].append(stage['cap_note'])
+                        'pause_reason': 'spend_cap', 'note': stage['cap_note'], 'cost_usd': 0.0}
             persist_final_claim(path, doc)
             raise SpendCap(stage['cap_note'])
         try:
@@ -152,7 +153,8 @@ def execute(request, doc, cache_path, *, call, reserve_cost, model,
                 if settle_dispatch is not None:
                     settle_dispatch(reserve, 0.0)
                 raise
-            doc['status'] = 'incomplete'
+            if stage['part_of_inspection']:
+                doc['status'] = 'incomplete'
             persist_final_claim(path, doc)
             raise ValueError(f'{name} dispatch outcome is unresolved; no automatic retry.') from error
         envelope = response if isinstance(response, dict) else {}
@@ -169,7 +171,7 @@ def execute(request, doc, cache_path, *, call, reserve_cost, model,
         if cost is not None:
             doc['cost_usd'] += cost - reserve
             doc.pop('cost_is_conservative_estimate', None)
-        else:
+        elif stage['part_of_inspection']:
             doc['status'] = 'incomplete'
         persist_final_claim(path, doc)
         if cost is not None and settle_dispatch is not None:

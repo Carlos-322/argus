@@ -1472,7 +1472,7 @@ def test_the_checks_write_a_context_whole_or_not_at_all(tmp_path, monkeypatch):
     import os
     import sys
     from concurrent.futures import ThreadPoolExecutor
-    from checks import capture_qc, sensors, stream_pairing
+    from checks import capture_qc, sensors, stream_pairing, workers
     from label import atomic
     ep = tmp_path / "eps" / "episode_000000"
     ep.mkdir(parents=True)
@@ -1484,7 +1484,7 @@ def test_the_checks_write_a_context_whole_or_not_at_all(tmp_path, monkeypatch):
         raise KeyboardInterrupt("killed mid write")
     for mod, argv in ((capture_qc, ["--force"]), (stream_pairing, ["--force"]), (stream_pairing, ["--jumps"]),
                       (sensors, ["--force"])):
-        monkeypatch.setattr(mod, "ProcessPoolExecutor", ThreadPoolExecutor)
+        monkeypatch.setattr(workers, "ProcessPoolExecutor", ThreadPoolExecutor)
         monkeypatch.setattr(sys, "argv", ["main", *argv, str(tmp_path / "eps")])
         with monkeypatch.context() as m:
             m.setattr(atomic.os, "fsync", stops)

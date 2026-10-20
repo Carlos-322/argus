@@ -61,7 +61,6 @@ build_keypoints() when the board's manifest names "hands": {"src": ..., "clips":
 from __future__ import annotations
 
 import argparse
-import concurrent.futures as cf
 import json
 import os
 import shutil
@@ -443,6 +442,14 @@ def keypoints_one(job: tuple) -> dict:
         return {"key": key, "skip": f"{type(err).__name__}: {err}"[:300]}
 
 
+def _each(fn, jobs_, jobs):
+    """fn over every job on worker processes; a worker that dies skips only its own episode, with the reason."""
+    from checks.workers import run_each
+    res = []
+    run_each(fn, jobs_, jobs, res.append, lambda job, err: {"key": job[0], "skip": f"worker died: {type(err).__name__}"})
+    return res
+
+
 def build_keypoints(src: Path, qa: Path, episodes: dict, out_dir: Path, jobs: int = 8) -> dict:
     """Write the download of every head-camera board episode the run covers into out_dir (which must exist), and
     index.json: {"format", "licence", "files": {label file: {"frames", "bytes"}}}. episodes maps a label file to its
@@ -451,8 +458,7 @@ def build_keypoints(src: Path, qa: Path, episodes: dict, out_dir: Path, jobs: in
     board = head_camera_files(qa)
     jobs_ = [(key, src / e["hands2d"], qa / board[key][0], board[key][1], Path(episodes[board[key][0]]), out_dir)
              for key, e in index.items() if key in board and board[key][0] in episodes]
-    with cf.ProcessPoolExecutor(max(1, jobs)) as ex:
-        res = list(ex.map(keypoints_one, jobs_))
+    res = _each(keypoints_one, jobs_, jobs)
     written = sorted((r for r in res if "file" in r), key=lambda r: r["file"])
     (out_dir / "index.json").write_text(dumps(
         {"format": KP_FORMAT, "licence": LICENCE,
@@ -492,8 +498,7 @@ def build(src: Path, qa: Path, clips: Path, out_dir: Path, jobs: int = 8) -> dic
             continue
         label_file, eid = board[key]
         jobs_.append((key, src / e["hands2d"], label_file, clips / f"{eid}.mp4", out_dir, source))
-    with cf.ProcessPoolExecutor(max(1, jobs)) as ex:
-        res = list(ex.map(build_one, jobs_))
+    res = _each(build_one, jobs_, jobs)
     written = [r for r in res if "file" in r]
     skipped = [r for r in res if "skip" in r]
     done = {r["file"] for r in written}

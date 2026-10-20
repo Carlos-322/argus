@@ -29,6 +29,15 @@ def test_the_recorded_times_name_only_files_that_exist_and_split_evenly():
     assert max(loads) <= 1.2 * sum(loads) / 4, loads
 
 
+
+def test_every_test_file_has_a_recorded_time():
+    """A file missing from the recorded times is placed by the median time, and the even split above is measured only
+    over files that have a time, so a slow file left out could unbalance the shards without failing anything."""
+    import json
+    times = json.loads(TIMES.read_text())
+    files = sorted(p.as_posix() for p in Path('tests').glob('test_*.py'))
+    assert not [f for f in files if f not in times], [f for f in files if f not in times]
+
 @pytest.mark.parametrize('value', ['0/4', '5/4', '1/0', 'x/4', '2'])
 def test_a_shard_outside_its_count_is_refused(value):
     with pytest.raises(ValueError):

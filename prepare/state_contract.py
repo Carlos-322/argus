@@ -13,17 +13,20 @@ REBUILD = ('Rebuild this generic preparation from its original source before new
            'Existing readings and historical labels must remain unchanged.')
 
 
-def declared_contract(producer, kind, names, units, roles=None, action=None):
-    """A producer's checked role/unit facts in prepared column order."""
+def declared_contract(producer, kind, names, units, roles=None, action=None, unit_conversion=None):
+    """A producer's checked role/unit facts in prepared column order, with the record of any columns it converted from
+    degrees (prepare.formats.qualified_state), whose names may still say degrees."""
     from prepare.formats import physical_state_layout
     names, units = list(names), list(units)
     roles = list(roles) if roles else [None] * len(names)
-    actual, _ = physical_state_layout(len(names), 'teleop_arms', names,
-                                      metadata={'units': units}, value_roles=roles)
+    actual, _ = physical_state_layout(len(names), 'teleop_arms', names, metadata={'units': units},
+                                      value_roles=roles, conversion=unit_conversion)
     if producer not in GENERIC_PRODUCERS or actual != kind or kind == 'none':
         raise ValueError('Cannot stamp an unqualified physical state contract')
     contract = {'version': VERSION, 'producer': producer, 'kind': kind,
                 'names': names, 'units': units, 'value_roles': roles}
+    if unit_conversion is not None:
+        contract['unit_conversion'] = unit_conversion
     if action is not None:
         contract['action'] = action
     return contract
@@ -164,8 +167,8 @@ def _declared_problem(proof, kind, dims):
             or len(names) != len(units) or (dims is not None and len(names) != dims)
             or not isinstance(roles, list) or len(roles) != len(names)):
         return REBUILD
-    actual, _ = physical_state_layout(len(names), 'teleop_arms', names,
-                                      metadata={'units': units}, value_roles=roles)
+    actual, _ = physical_state_layout(len(names), 'teleop_arms', names, metadata={'units': units},
+                                      value_roles=roles, conversion=proof.get('unit_conversion'))
     return None if actual == kind and kind != 'none' else REBUILD
 
 

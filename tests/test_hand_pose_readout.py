@@ -5,9 +5,14 @@ import types
 
 import pytest
 
-torch = pytest.importorskip("torch")
+from board.hand_pose import core
 
-from board.hand_pose import core  # noqa: E402
+try:
+    import torch
+except ImportError:  # only the readout tests need torch; combine_readouts is numpy only and runs everywhere
+    torch = None
+
+needs_torch = pytest.mark.skipif(torch is None, reason="torch is not installed")
 
 H, W, J = 21, 26, 21
 
@@ -34,11 +39,13 @@ def cells(uv):
     return uv * torch.tensor([W - 1, H - 1], dtype=uv.dtype)
 
 
+@needs_torch
 def test_one_hand_per_slot_reads_as_the_model_does():
     a = maps(blob(5, 6), blob(12, 18))
     assert torch.allclose(core.mode_soft_argmax(a, H, W, 2, radius=3), plain_soft_argmax(a, H, W), atol=1e-4)
 
 
+@needs_torch
 def test_attention_split_between_two_hands_reads_the_stronger_hand():
     # slot 1 attends 60/40 to a hand at column 8 and another hand at column 20, both on row 12
     a = maps(blob(5, 6), 0.6 * blob(12, 8) + 0.4 * blob(12, 20))
@@ -50,6 +57,7 @@ def test_attention_split_between_two_hands_reads_the_stronger_hand():
     assert torch.allclose(core.mode_soft_argmax(a, H, W, 2, 3)[0, :J], plain_soft_argmax(a, H, W)[0, :J], atol=1e-4)
 
 
+@needs_torch
 def test_set_readout_installs_and_restores():
     class Enc:
         num_slots = 2

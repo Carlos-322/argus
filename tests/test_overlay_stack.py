@@ -159,7 +159,7 @@ assert.equal(overlay.classList.active,false,'ordinary contact does not add a red
     subprocess.run(['node', '-e', CARD_DOM + script, str(SOURCE)], check=True)
 
 
-def test_concurrent_recorded_findings_and_quality_warning_are_all_rendered_without_a_carousel():
+def test_concurrent_findings_and_a_quality_warning_share_the_video_without_a_carousel():
     script = r"""
 const fs=require('fs'),assert=require('assert');
 const src=fs.readFileSync(process.argv[1],'utf8');
@@ -194,7 +194,7 @@ assert(strip.innerHTML.includes(findings[0].headline),'the long hold gets its fu
 assert(!strip.innerHTML.includes(findings[0].detail),'full reasoning stays in the evidence panel');
 assert(strip.innerHTML.includes(findings[1].headline));
 assert(strip.innerHTML.includes('Touch and video clocks disagree')&&strip.innerHTML.includes('Measured offset exceeds the review threshold.'));
-assert.equal((strip.innerHTML.match(/data-sensor-finding=/g)||[]).length,3,'nearby findings each receive their minimum presentation time');
+assert.equal((strip.innerHTML.match(/data-sensor-finding=/g)||[]).length,3,'two findings and the quality warning share the video');
 assert(!strip.innerHTML.includes('data-overlay-finding')&&!strip.innerHTML.includes('gf-pager'),'no unseen finding is behind a selector');
 assert(!strip.innerHTML.includes('Rejected warning'));
 const paused=strip.innerHTML;wire.sync(2.46244);assert.equal(strip.innerHTML,paused,'paused playback has no independent presentation clock');
@@ -232,12 +232,11 @@ const timeline=api.sensorEvidence({grip_evidence:{version:1,findings:[
 const shownAt=t=>api.displayGripFindings(timeline,t).map(f=>f.headline);
 assert.deepEqual(shownAt(2.69),['Hold continues']);
 assert.deepEqual(shownAt(2.7),['Pressure increases','Hold continues']);
-assert.deepEqual(shownAt(3.1),['Contact shifts','State changes','Pressure increases','Hold continues']);
-assert.deepEqual(shownAt(3.5),['Contact shifts','State changes','Pressure increases']);
-assert.deepEqual(shownAt(3.7),['Contact shifts','State changes','Pressure increases']);
-assert.deepEqual(shownAt(3.85),['Brief release','Contact shifts','State changes','Pressure increases']);
-assert.deepEqual(shownAt(4.05),['Brief release','Contact shifts','State changes','Pressure increases']);
-assert.deepEqual(shownAt(4.7),['Brief release','Contact shifts','State changes']);
+assert.deepEqual(shownAt(3.1),['Contact shifts','State changes'],'at most two finding cards share the video');
+assert.deepEqual(shownAt(3.5),['Contact shifts','State changes']);
+assert.deepEqual(shownAt(3.85),['Brief release','Contact shifts'],'the newest onset takes a place on the video');
+assert.deepEqual(shownAt(4.05),['Brief release','Contact shifts']);
+assert.deepEqual(shownAt(4.7),['Brief release','Contact shifts'],'a displaced card does not come back');
 assert.deepEqual(shownAt(5.1),['Brief release']);
 assert.deepEqual(shownAt(5.8),[],'the subsecond finding also receives two seconds');
 assert.deepEqual(shownAt(7),[],'superseded long intervals never return');
@@ -247,7 +246,7 @@ wire.dispose();
     subprocess.run(['node', '-e', CARD_DOM + script, str(SOURCE), str(HERE / 'fixtures/overlapping_sensor_findings.json')], check=True)
 
 
-def test_sensor_overlays_end_with_encoded_media_before_declared_episode_end():
+def test_the_end_of_playback_keeps_the_cards_its_final_moment_calls_for():
     script = r"""
 const fs=require('fs'),assert=require('assert');
 const src=fs.readFileSync(process.argv[1],'utf8');
@@ -257,16 +256,19 @@ const doc={createElement,getElementById:id=>id==='grip-finding-overlay'?strip:nu
 const api=new Function('esc','fmtT','document',src.slice(begin,end)
  +'return {sensorEvidence,setupSensorEvidence};')(String,String,doc);
 const data={duration_s:4.2,sensor_evidence:{version:1,findings:[
+ {start_s:0.5,end_s:0.9,headline:'Early grip change',adds_beyond_video:true},
  {start_s:3.8,end_s:4.166001,headline:'Regional response falls',adds_beyond_video:true}]}};
 const original=JSON.stringify(data),media=new EventTarget();
 media.currentTime=4.182665;media.ended=false;
 const on=(el,type,fn)=>{if(el.addEventListener)el.addEventListener(type,fn);};
 const wire=api.setupSensorEvidence(api.sensorEvidence(data),()=>{},on,()=>{},data,null,()=>{},media);
-wire.sync(media.currentTime);assert(!strip.hidden,'the final short event receives its presentation minimum');
+const shown=()=>[...strip.querySelectorAll('[data-sensor-finding]')].map(c=>c.dataset.sensorFinding).sort();
+wire.sync(media.currentTime);assert.deepEqual(shown(),['1'],'the final short event receives its presentation minimum');
 media.ended=true;media.dispatchEvent(new Event('ended'));
-assert(strip.hidden,'encoded media end clears overlays even before the declared episode end');
-wire.sync(media.currentTime);assert(strip.hidden,'a late timeupdate cannot revive an ended overlay');
-media.ended=false;media.currentTime=0;wire.reset(0);assert(strip.hidden);
+assert.deepEqual(shown(),['1'],'the end of playback keeps the card the final frame shows');
+wire.sync(media.currentTime);assert.deepEqual(shown(),['1'],'a late timeupdate keeps the same card');
+assert.ok(!shown().includes('0'),'a card whose window closed long before the end stays gone');
+media.ended=false;media.currentTime=0;wire.reset(0);assert(strip.hidden,'replay starts from the timeline, not the last frame');
 wire.sync(3.9);assert(!strip.hidden,'replay and paused inspection still show their source event');
 assert.equal(JSON.stringify(data),original,'media state does not rewrite annotation timestamps');
 wire.dispose();
