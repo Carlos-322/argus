@@ -455,6 +455,13 @@ def _built_board(tmp: Path) -> Path:
     return board
 
 
+def test_a_built_board_scores_every_episode_in_its_record(tmp_path):
+    from board import scores
+    board = _built_board(tmp_path)
+    eps = sorted((board / "qa").glob("episode_*.json"))
+    assert eps and all(json.loads(p.read_text())["scores"]["version"] == scores.VERSION for p in eps)
+
+
 def test_comparison_lists_and_keypoint_downloads_are_served(tmp_path, monkeypatch):
     board = _built_board(tmp_path)
     httpd, url = _serve(monkeypatch, board, tmp_path / "clips")

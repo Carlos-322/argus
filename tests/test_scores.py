@@ -113,3 +113,10 @@ def test_with_subtasks_the_outcome_is_the_mean_of_the_settled_subtasks_and_an_un
     assert (s["inputs"]["tasks_total"], s["inputs"]["tasks_judged"], s["inputs"]["tasks_done"]) == (3, 2, 1)
     assert [(st["task"], st["goal"], st["reached"]) for st in s["subgoals"]] == [(1, False, True), (2, True, False),
                                                                                 (3, True, False)]
+
+
+def test_a_record_with_nothing_scoreable_or_malformed_steps_gets_empty_scores_never_an_error():
+    s = scores.score_board({"empty.json": {}, "odd.json": {"event_labels": ["not a step", None], "key_events": [None],
+                                                           "tasks": "none"}})
+    assert s["empty.json"]["subgoals"] == [] and s["empty.json"]["outcome"] is None
+    assert s["odd.json"]["subgoals"] == [] and s["odd.json"]["execution"] is not None
