@@ -70,6 +70,7 @@ from collections import Counter
 from fractions import Fraction
 from pathlib import Path
 
+from board.clips import clip_path
 from board.to_board import dumps
 from label.atomic import write_bytes_atomic
 
@@ -497,7 +498,7 @@ def build(src: Path, qa: Path, clips: Path, out_dir: Path, jobs: int = 8) -> dic
         if key not in board:
             continue
         label_file, eid = board[key]
-        jobs_.append((key, src / e["hands2d"], label_file, clips / f"{eid}.mp4", out_dir, source))
+        jobs_.append((key, src / e["hands2d"], label_file, clip_path(clips, eid, "exo"), out_dir, source))
     res = _each(build_one, jobs_, jobs)
     written = [r for r in res if "file" in r]
     skipped = [r for r in res if "skip" in r]

@@ -81,7 +81,9 @@ def find_ffmpeg() -> str:
 
 
 def clip_path(mp4_dir: Path, eid: str, cam: str) -> Path:
-    """One camera's clip: the scene camera at the top, the mounted ones and any others in their own folders."""
+    """One camera's clip, where this file writes it and board/serve.py, board/static.py and board/hands.py read it:
+    the fixed or head camera (exo) at the top, the mounted ones in wrist_left/ and wrist_right/, and every other
+    camera in a folder named after it (extra1/, unshown1/, depth_exo/, or any other name)."""
     if cam in ("left", "right"):
         return mp4_dir / f"wrist_{cam}" / f"{eid}.mp4"
     if cam == "exo":
@@ -89,9 +91,12 @@ def clip_path(mp4_dir: Path, eid: str, cam: str) -> Path:
     return mp4_dir / cam / f"{eid}.mp4"
 
 
+DEPTH = "depth_"     # a camera's depth clip is the clip of the camera depth_<camera> (depth_exo, depth_left, ...)
+
+
 def depth_clip(mp4_dir: Path, eid: str, cam: str) -> Path:
     """One camera's depth clip."""
-    return mp4_dir / f"depth_{cam}" / f"{eid}.mp4"
+    return clip_path(mp4_dir, eid, DEPTH + cam)
 
 
 def clip_paths(mp4_dir: Path, eid: str, cams=CAMS) -> dict:

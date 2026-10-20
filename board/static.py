@@ -106,8 +106,9 @@ clip_path = sa.clip_path   # the source clip board/serve.py's /api/video serves 
 
 
 def media_key(cam: str) -> str:
-    return cam if cam in ("left", "right") or sa.EXTRA_CAM.fullmatch(cam or "") or sa.DEPTH_CAM.fullmatch(cam or "") \
-        else "exo"
+    """The media key of a camera value: the value itself, since every camera has a clip of its own (clip_path), so
+    no two cameras share a key (the page's mediaKey)."""
+    return cam
 
 
 def shown_cams(d: dict) -> list:

@@ -817,8 +817,8 @@ def test_an_extra_camera_is_cut_served_and_put_in_the_video_download(tmp_path, m
     serve = _footage_board(tmp_path)
     assert clips.clip_path(tmp_path, "e", "extra1") == tmp_path / "extra1" / "e.mp4"
     assert serve.clip_path(tmp_path, "e", "extra2") == tmp_path / "extra2" / "e.mp4"
-    assert serve.clip_path(tmp_path, "e", "../x") == tmp_path / "e.mp4"          # anything else is the main camera
-    assert static.media_key("extra1") == "extra1" and static.media_key("x") == "exo"
+    assert not serve._under(tmp_path, serve.clip_path(tmp_path, "e", "../x"))     # a path out of the clips is refused
+    assert static.media_key("extra1") == "extra1" and static.media_key("x") == "x"
     assert clips.cams_of({"extra2": 1, "right": 1, "extra1": 1, "exo": 1}) == ["exo", "right", "extra1", "extra2"]
     (serve.MP4_DIR / "extra1").mkdir()
     _flash_clip(serve.MP4_DIR / "extra1" / "episode_a.mp4", 80, 60, 90, 75)         # white at 2.5 s
