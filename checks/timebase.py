@@ -263,7 +263,7 @@ def cmd_scan(args) -> int:
         for i, fu in enumerate(as_completed(futs), 1):
             try:
                 rows += fu.result()
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - a file that fails is printed and left out of the CSV, so a rerun scans it again
                 print(f"FAIL {futs[fu]}: {e}", file=sys.stderr, flush=True)
             if i % 25 == 0 or i == len(todo):
                 pd.DataFrame(rows).to_csv(args.out, index=False)

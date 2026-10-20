@@ -145,7 +145,7 @@ def commit() -> str:
     try:
         return subprocess.run(["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"], capture_output=True,
                               text=True, check=True).stdout.strip()
-    except Exception:
+    except (OSError, subprocess.CalledProcessError):     # no git, or not a checkout: the run still records itself
         return "unknown"
 
 

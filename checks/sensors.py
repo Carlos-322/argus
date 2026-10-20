@@ -301,7 +301,7 @@ def _constants(d: str) -> tuple[str, dict]:
     """(episode, its constant values); an episode that does not read has none."""
     try:
         return d, constant_values(Path(d))
-    except Exception:
+    except Exception:  # noqa: BLE001 - an episode that does not load has no constants; _safe records its checks as errored
         return d, {}
 
 
@@ -310,7 +310,7 @@ def _safe(d: str):
     every check errored and the error."""
     try:
         return d, run_episode(Path(d)), None
-    except Exception as e:  # recorded on every check, never silently skipped
+    except Exception as e:  # noqa: BLE001 - recorded on every check, never silently skipped
         return _errored(d, e)
 
 

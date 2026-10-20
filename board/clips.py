@@ -168,7 +168,7 @@ def decode_lead_s(packed: str, seek_s: float) -> float:
             source.seek(int(seek_s / stream.time_base), stream=stream, backward=True, any_frame=False)
             packet = next(p for p in source.demux(stream) if p.pts is not None)
             return max(0.0, seek_s - float(packet.pts * stream.time_base))
-    except Exception:
+    except Exception:  # noqa: BLE001 - PyAV raises many types; an unread index means the whole lead is decoded
         return seek_s
 
 
@@ -788,7 +788,7 @@ def clip_frames(mp4: Path) -> int:
         import av
         with av.open(str(mp4)) as c:
             return sum(1 for _ in presented(c, c.streams.video[0]))
-    except Exception:
+    except Exception:  # noqa: BLE001 - PyAV raises many types; a clip that does not read counts as not cut, so it is cut again
         return 0
 
 
@@ -1584,7 +1584,7 @@ def main() -> int:
                     ok += 1
                     unshown_cut.setdefault(ep, set()).add(cam)
                     made.setdefault(ep, []).append(o)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - one clip's failure is named in unshown_broken, the others are cut
                     fail += 1
                     if machine_stopped(e):
                         machine(ep, cam, o, e)
@@ -1601,7 +1601,7 @@ def main() -> int:
                     short.setdefault(ep, {})[cam] = counts
                     sys.stderr.write(f"clip SHORT {o}: {counts['clip_frames']} frames, episode has "
                                      f"{counts['episode_frames']}\n")
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - one clip's failure is named in broken, the others are cut
                 fail += 1
                 if machine_stopped(e):
                     machine(ep, cam, o, e)
@@ -1648,7 +1648,7 @@ def main() -> int:
                     again.add(cam)
                     if counts:
                         redo[cam] = counts
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - an unshown clip is named in u_broken, a shown one only printed
                     if machine_stopped(e):
                         # the clip from before the main camera went is timed on the old clock: removed, so the rerun
                         # cuts it on the episode as it is now
@@ -1677,7 +1677,7 @@ def main() -> int:
                 try:
                     record_depth(d, cam, f.result())
                     dok += 1
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - one depth clip's failure is recorded by record_depth, the others are cut
                     sys.stderr.write(f"depth clip FAIL {out}: {str(e)[:160]}\n")
                     record_depth(d, cam, [depth_failed(d, cam, e)])
         print(f"clips: depth ok={dok} fail={len(djobs) - dok}")

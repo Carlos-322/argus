@@ -1345,7 +1345,8 @@ def _run_footage(cmd: list) -> subprocess.CompletedProcess:
                     if any(value > previous for value, previous in zip(values, last_values)):
                         last_progress, last_values = time.monotonic(), values
                     if time.monotonic() - last_progress >= _FOOTAGE_STALL_TIMEOUT:
-                        raise subprocess.TimeoutExpired(cmd, _FOOTAGE_STALL_TIMEOUT)
+                        # the stall is the error; the poll's own timeout is how it was noticed
+                        raise subprocess.TimeoutExpired(cmd, _FOOTAGE_STALL_TIMEOUT) from None
         except BaseException:
             process.kill()
             process.communicate()
@@ -2007,7 +2008,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if start < 0 or start >= size or end >= size or start > end:
                     raise ValueError("range out of bounds")
                 partial = True
-            except Exception:
+            except ValueError:            # a range header that does not parse or is out of bounds
                 self.send_response(416)
                 self.send_header("Content-Range", f"bytes */{size}")
                 self.send_header("Content-Length", "0")
@@ -2887,7 +2888,7 @@ class BoardHTTPServer(socketserver.TCPServer):
             request = _HeldRequest(sock, _Reader(sock, held.data), held.client)
             self.RequestHandlerClass(request, held.address, self)
             keep = not request.close and not self._stopping.is_set()
-        except Exception:
+        except Exception:  # noqa: BLE001 - socketserver's pattern: handle_error logs the request's error, the server goes on
             self.handle_error(sock, held.address)
         if not keep:
             with self._lock:

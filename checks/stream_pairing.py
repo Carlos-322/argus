@@ -374,7 +374,7 @@ def _safe(mode: str, d: str) -> tuple[str, dict | None, str | None]:
     field false}, which the board shows as an error, never a missing result; the other checks run on as usual."""
     try:
         return d, MODES[mode][1](Path(d)), None
-    except Exception as e:  # recorded as the check's result, never silently skipped
+    except Exception as e:  # noqa: BLE001 - recorded as the check's result, never silently skipped
         return _errored(mode, d, e)
 
 

@@ -337,7 +337,7 @@ def decode_gray(ep: dict, v: str) -> dict:
                         break
     except FileNotFoundError:
         raise
-    except Exception as e:  # decoder failure on an existing file
+    except Exception as e:  # noqa: BLE001 - PyAV on an existing file raises many types; recorded in info error
         info["error"] = f"{type(e).__name__}: {e}"[:300]
     info["frames"] = frames
     info["got"] = got
@@ -1638,7 +1638,7 @@ def _one(d: str) -> tuple[str, dict, str | None, float]:
     t0 = time.time()
     try:
         return d, run_episode(Path(d)), None, time.time() - t0
-    except Exception as e:  # reported per episode and recorded on every check, never silently skipped
+    except Exception as e:  # noqa: BLE001 - reported per episode and recorded on every check, never silently skipped
         return d, errored_record(e), f"{type(e).__name__}: {e}"[:300], time.time() - t0
 
 
