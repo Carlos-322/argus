@@ -42,7 +42,8 @@ OUTCOME_CAPS = {"success": 1.0, "success_then_undone": 0.7, "partial": 0.9, "fai
 EXECUTION_WEIGHTS = {"cleanliness": 0.5, "efficiency": 0.25, "fluency": 0.25}
 # the record fields the scores read, so a board build can hold every episode at once without its whole record
 FIELDS = ("dataset", "episode_prompt", "task_label", "event_labels", "key_events", "operator_mistakes", "completion",
-          "goal_alignment", "tasks")
+          "goal_alignment", "tasks", "_meta", "_rig")
+SIMILAR = 0.5                     # two subgoal labels are the same kind of subgoal when they share this share of words
 STOP = {"the", "a", "an", "and", "then", "with", "its", "it", "of", "on", "to", "into", "in", "from", "onto", "by", "at",
         "for", "both", "each", "one", "that", "this", "is", "are", "be", "so", "as", "up", "down", "out", "back", "over"}
 
@@ -65,8 +66,18 @@ def _verdict(x: dict) -> str | None:
     return "partial" if word == "failure" and x.get("failure_kind") == "partial" else word
 
 
+def _dict(x) -> dict:
+    return x if isinstance(x, dict) else {}
+
+
+def _list(x) -> list:
+    return x if isinstance(x, list) else []
+
+
 def facts(d: dict) -> dict:
     """What one episode's labels measure, before any comparison: its work window, its time split, its attempts."""
+    d = {**d, **{k: _list(d.get(k)) for k in ("event_labels", "key_events", "operator_mistakes", "tasks")},
+         **{k: _dict(d.get(k)) for k in ("completion", "goal_alignment")}}
     steps = [e for e in d.get("event_labels") or [] if isinstance(e, dict) and _num(e.get("t_s")) is not None
              and _num(e.get("end_s")) is not None]
     spans = {c: [(e["t_s"], e["end_s"]) for e in steps if e.get("contribution") == c]
@@ -95,7 +106,7 @@ def facts(d: dict) -> dict:
                                for p in [_num(e.get("progress"))] if p is not None), default=None)}
              for t in d.get("tasks") or [] if isinstance(t, dict) and _num(t.get("start_s")) is not None
              and _num(t.get("end_s")) is not None]
-    return {"tasks": tasks, "start_s": start, "goal_s": goal, "end_s": end, "active_s": active, "wasteful_s": wasteful,
+    return {"tasks": tasks, "measured": bool(steps), "start_s": start, "goal_s": goal, "end_s": end, "active_s": active, "wasteful_s": wasteful,
             "hesitation_s": hesitation, "window_s": (end - start) if window else None,
             "actions": sum(1 for e in steps if e.get("contribution") == "advancing"), "progress_reached": reached,
             "outcome": _verdict(comp) if comp else None, "mistakes": mistakes, "failed_attempts": len(failed),
@@ -103,7 +114,12 @@ def facts(d: dict) -> dict:
 
 
 def task_key(d: dict) -> frozenset:
-    text = (d.get("episode_prompt") or "").strip() or " ".join(d.get("task_label") or [])
+    """The content words of the task an episode demonstrates: the instruction it was given, so the same recording
+    labelled twice is always the same task, and the model's own summary when there is no instruction or the work done
+    is a different task from it (a mislabelled episode is compared with what it actually shows)."""
+    given = _dict(d.get("_meta")).get("given_prompt")
+    mislabelled = _dict(d.get("goal_alignment")).get("relation") in ("different", "unrelated")
+    text = ("" if mislabelled or not isinstance(given, str) else given).strip() or str(d.get("episode_prompt") or "").strip()
     return frozenset(w for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in STOP)
 
 
@@ -181,6 +197,8 @@ def _outcome(f: dict):
 
 
 def _cleanliness(f: dict):
+    if not f["measured"]:
+        return None, {"wasteful_share": None, "penalties": [], "unexplained_failed_attempts": 0}
     penalties = [{"mistake": m.get("issue"), "severity": m.get("severity"), "recovered": bool(m.get("recovered")),
                   "points": SEVERITY_POINTS.get(m.get("severity"), 1.5) * (0.5 if m.get("recovered") else 1.0)}
                  for m in f["mistakes"]]
@@ -198,6 +216,7 @@ def subgoals(d: dict, f: dict) -> list:
     outcome is always success and is not scored; how cleanly, steadily and quickly its stretch went is. A subgoal is a
     lasting change the goal depends on, so the failed attempts between two subgoals are attempts at the later one. Each
     carries its duration, wasteful share, hesitation, and the mistakes and failed attempts inside it."""
+    d = {**d, **{k: _list(d.get(k)) for k in ("event_labels", "key_events", "tasks")}}
     events = sorted((k for k in d.get("key_events") or [] if isinstance(k, dict) and k.get("kind") == "subgoal_complete"
                      and _num(k.get("t_s")) is not None), key=lambda k: k["t_s"])
     if f["start_s"] is None or not events:
@@ -210,12 +229,12 @@ def subgoals(d: dict, f: dict) -> list:
                     and _num(t.get("end_s")) is not None), key=lambda t: t["start_s"])
     spans = ([(t["start_s"], _num(t.get("completed_at_s")) if _num(t.get("completed_at_s")) is not None else t["end_s"],
                t.get("task"), t.get("outcome"), t["end_s"], i + 1) for i, t in enumerate(tasks)] if tasks
-             else [(f["start_s"], f["end_s"], (d.get("completion") or {}).get("success_predicate"), f["outcome"], None,
-                    None)])
+             else [(f["start_s"], f["end_s"], _dict(d.get("completion")).get("success_predicate"), f["outcome"],
+                    f["goal_s"], None)])
     def owner(t):
-        for i, task in enumerate(tasks):
-            if task["start_s"] < t <= task["end_s"]:
-                return i + 1
+        holding = [(task["end_s"] - task["start_s"], i) for i, task in enumerate(tasks) if task["start_s"] < t <= task["end_s"]]
+        if holding:
+            return min(holding)[1] + 1
         for i, task in enumerate(tasks):
             nxt = tasks[i + 1]["start_s"] if i + 1 < len(tasks) else None
             if task["end_s"] < t <= task["end_s"] + 0.5 and (nxt is None or t < nxt):
@@ -225,7 +244,7 @@ def subgoals(d: dict, f: dict) -> list:
     bounds = []
     for a, end, goal_label, goal_outcome, last, task in spans:
         for k in events:
-            if k["t_s"] > a and (last is None or owned[id(k)] == task):
+            if k["t_s"] > a and ((last is None or k["t_s"] <= last + 0.5) if not tasks else owned[id(k)] == task):
                 bounds.append((a, k["t_s"], k.get("label"), k.get("outcome"), False, task))
                 a = k["t_s"]
         if end is not None and end > a + 0.5:
@@ -254,6 +273,43 @@ def subgoals(d: dict, f: dict) -> list:
     return out
 
 
+def _words(label) -> frozenset:
+    return frozenset(w for w in re.findall(r"[a-z]+", str(label or "").lower()) if w not in STOP and len(w) > 2)
+
+
+def _similar_pools(records: dict, subs_of: dict) -> dict:
+    """{(file, subgoal index): _Peers} of the durations of reached subgoals of the same kind on the same recording
+    setup anywhere on the board, the subgoal itself left out: labels sharing at least SIMILAR of their content words.
+    Labels are compared once per distinct word set, through the words they share, so the cost follows the distinct
+    labels, not every pair of subgoals."""
+    rows = {}                                   # (rig, words) -> durations
+    for f, subs in subs_of.items():
+        rig = records[f].get("_rig")
+        if not isinstance(rig, str):
+            continue
+        for st in subs:
+            words = _words(st["label"])
+            if words and not st["goal"] and st["reached"]:
+                rows.setdefault((rig, words), []).append(st["duration_s"])
+    index = {}
+    for rig, words in rows:
+        for w in words:
+            index.setdefault((rig, w), set()).add(words)
+    pools = {}
+    for rig, words in rows:
+        near = set().union(*(index[(rig, w)] for w in words))
+        pools[(rig, words)] = sorted(d for other in near if len(words & other) / len(words | other) >= SIMILAR
+                                     for d in rows[(rig, other)])
+    out = {}
+    for f, subs in subs_of.items():
+        rig = records[f].get("_rig")
+        for i, st in enumerate(subs):
+            key = (rig, _words(st["label"]))
+            if key in pools and not st["goal"] and st["reached"]:
+                out[(f, i)] = _Peers(pools[key], st["duration_s"])
+    return out
+
+
 def score_board(records: dict) -> dict:
     """{file: scores} for every episode of a board: each record's own measures, and the relative dimensions ranked
     within its task group among the episodes that reached the goal."""
@@ -263,6 +319,7 @@ def score_board(records: dict) -> dict:
                for f, x in fs.items()}
     pp_of = {f: x["actions"] / x["progress_reached"] if x["progress_reached"] else None for f, x in fs.items()}
     subs_of = {f: subgoals(d, fs[f]) for f, d in records.items()}
+    similar = _similar_pools(records, subs_of)
     # the successful demonstrations of each group, as sorted values, built once: time to goal, actions per progress,
     # and each subgoal's duration among those that split the task into the same number of subgoals
     count, took_in, pp_in, sub_in = {}, {}, {}, {}
@@ -307,17 +364,23 @@ def score_board(records: dict) -> dict:
         weight = sum(EXECUTION_WEIGHTS[k] for k in have)
         execution = round(sum(EXECUTION_WEIGHTS[k] * v for k, v in have.items()) / weight, 1) if weight else None
         subs = subs_of[f]
-        # a subgoal's speed is judged against the same subgoal of peers that split the task the same way
+        # a subgoal's speed is judged against the same subgoal of peers that split the task the same way, and without
+        # enough of them against the same kind of subgoal on the same recording setup anywhere on the board
         for i, st in enumerate(subs):
             same = peers_of(sub_in, (g, len(subs), i), f, st["duration_s"])
-            st["efficiency"] = _ratio_score(st["duration_s"], same)
+            basis = "task"
+            if len(same) < MIN_PEERS and (f, i) in similar:
+                same, basis = similar[(f, i)], "similar"
+            enough = len(same) >= MIN_PEERS
+            st["efficiency"] = _ratio_score(st["duration_s"], same) if enough else None
             st["peers"] = len(same)
-            st["peer_median_s"] = same.median() if len(same) >= MIN_PEERS else None
+            st["peer_basis"] = basis if enough else None
+            st["peer_median_s"] = same.median() if enough else None
             parts = [v for v in (st["cleanliness"], st["steady"], st["efficiency"]) if v is not None]
-            st["execution"] = round(statistics.mean(parts), 1)
+            st["execution"] = round(statistics.mean(parts), 1) if parts else None
         out[f] = {"version": VERSION, "execution": execution, "outcome": outcome, **dims, "relation": x["relation"],
                   "subgoals": subs,
-                  "peers": peers, "group": g,
+                  "peers": peers, "peer_basis": "task" if efficiency is not None else None, "group": g,
                   "inputs": {**o_in, **c_in, "time_to_goal_s": took, "peer_median_time_to_goal_s":
                              peer_took.median() if len(peer_took) else None,
                              "hesitation_share": round(hes, 3) if hes is not None else None,

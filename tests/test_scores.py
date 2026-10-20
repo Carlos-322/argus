@@ -119,7 +119,7 @@ def test_a_record_with_nothing_scoreable_or_malformed_steps_gets_empty_scores_ne
     s = scores.score_board({"empty.json": {}, "odd.json": {"event_labels": ["not a step", None], "key_events": [None],
                                                            "tasks": "none"}})
     assert s["empty.json"]["subgoals"] == [] and s["empty.json"]["outcome"] is None
-    assert s["odd.json"]["subgoals"] == [] and s["odd.json"]["execution"] is not None
+    assert s["odd.json"]["subgoals"] == [] and s["odd.json"]["execution"] is None      # nothing measured, no score
 
 
 def test_a_time_stored_as_text_or_not_finite_is_skipped_never_compared():
@@ -177,3 +177,66 @@ def test_a_board_of_two_thousand_demonstrations_of_one_task_scores_in_seconds():
     t = time.time()
     scores.score_board(recs)
     assert time.time() - t < 5
+
+
+def _given(rec, instruction, relation="aligned", rig="teleop_arms"):
+    return {**rec, "_meta": {"given_prompt": instruction}, "goal_alignment": {"relation": relation}, "_rig": rig}
+
+
+def test_the_task_is_the_given_instruction_so_one_recording_labelled_twice_is_one_task_whatever_the_summary():
+    a = _given(_record("Arrange the blocks into a row", 10.0, [(0, 10, "advancing", 1.0)]), "spell CORL with the blocks")
+    b = _given(_record("Line up four lettered cubes", 10.0, [(0, 10, "advancing", 1.0)]), "spell CORL with the blocks")
+    g = scores.task_groups({"a.json": a, "b.json": b})
+    assert g["a.json"] == g["b.json"]
+
+
+def test_a_mislabelled_episode_is_grouped_by_what_it_shows_not_by_its_instruction():
+    shoes = _given(_record("Pair the shoes on the rack", 10.0, [(0, 10, "advancing", 1.0)]), "organize scattered shoes")
+    shirt = _given(_record("Fold the gray shirt", 10.0, [(0, 10, "advancing", 1.0)]), "organize scattered shoes",
+                   relation="different")
+    g = scores.task_groups({"shoes.json": shoes, "shirt.json": shirt})
+    assert g["shoes.json"] != g["shirt.json"]
+
+
+def test_without_peers_of_its_task_a_subgoal_is_compared_with_similar_subgoals_on_the_same_setup():
+    recs = {}
+    for i in range(6):
+        recs[f"o{i}.json"] = _given(_record(f"task {i}", 10.0, [(0, 4, "advancing", 0.5), (4, 10, "advancing", 1.0)],
+                                            [(4, "red block added to the row")]), f"build tower number {i}")
+    recs["me.json"] = _given(_record("lone task", 20.0, [(0, 8, "advancing", 0.5), (8, 20, "advancing", 1.0)],
+                                     [(8, "blue block added to the row")]), "a task nobody else did")
+    st = scores.score_board(recs)["me.json"]["subgoals"][0]
+    assert st["peer_basis"] == "similar" and st["peers"] == 6 and st["peer_median_s"] == 4.0
+    assert st["efficiency"] == 5.0                                    # twice the median
+    assert scores.score_board(recs)["me.json"]["peer_basis"] is None   # an episode's speed needs its own task
+
+
+def test_an_episode_with_no_timeline_has_no_execution_score_never_a_perfect_one():
+    rec = _record("open the door", 10.0, [(0, 10, "advancing", 1.0)])
+    rec["event_labels"] = []
+    s = scores.score_board({"empty.json": rec})["empty.json"]
+    assert s["execution"] is None and s["cleanliness"] is None
+
+
+def test_a_subgoal_inside_overlapping_subtasks_belongs_to_the_innermost_and_is_scored_once():
+    rec = _record("tidy the bench", None, [(0, 33.5, "advancing", 1.0)], [(23.0, "screwdriver put away")])
+    rec["completion"] = {}
+    rec["tasks"] = [{"start_s": 0, "end_s": 33.5, "task": "tidy the bench", "outcome": "success", "completed_at_s": 33.5},
+                    {"start_s": 14.5, "end_s": 23.0, "task": "put the screwdriver away", "outcome": "success",
+                     "completed_at_s": 23.0}]
+    subs = scores.score_board({"ego.json": rec})["ego.json"]["subgoals"]
+    assert sum(st["end_s"] == 23.0 for st in subs) == 1 and [st["task"] for st in subs if st["end_s"] == 23.0] == [2]
+
+
+def test_nothing_after_a_single_goal_is_scored_as_a_subgoal_of_it():
+    rec = _record("set the table", 20.0, [(0, 20, "advancing", 1.0), (20, 30, "advancing", 1.0)],
+                  [(10, "plate set"), (20, "table set"), (27, "plate returned to the counter")])
+    rec["completion"].update({"task_completed": "success_then_undone", "completed_at_s": None, "goal_reached_at_s": 20.0})
+    subs = scores.score_board({"undo.json": rec})["undo.json"]["subgoals"]
+    assert all(st["end_s"] <= 20.0 for st in subs)
+
+
+def test_fields_of_the_wrong_type_are_read_as_absent_never_a_crash():
+    rec = _record("open the door", 10.0, [(0, 10, "advancing", 1.0)])
+    rec.update({"tasks": 3, "completion": ["x"], "goal_alignment": ["y"], "_meta": "z"})
+    assert scores.score_board({"odd.json": rec})["odd.json"]["version"] == scores.VERSION
