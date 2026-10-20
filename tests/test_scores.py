@@ -98,3 +98,18 @@ def test_with_subtasks_each_subgoal_stretch_starts_in_its_own_subtask_and_the_ga
     assert [(st["start_s"], st["end_s"], st["label"], st["goal"]) for st in subs] == [
         (0, 10, "bowl rinsed", False), (30, 40, "carrot half peeled", False), (40, 50, "peel the carrot", True)]
     assert all(st["steady"] == 10.0 for st in subs)                   # the 20s between the two never counts
+
+
+def test_with_subtasks_the_outcome_is_the_mean_of_the_settled_subtasks_and_an_unclear_one_counts_for_nothing():
+    rec = _record("wash the bowl, peel the carrot, wipe the board", None,
+                  [(0, 10, "advancing", 1.0), (12, 20, "advancing", 0.4), (22, 25, "advancing", 0.2)],
+                  [(10, "bowl rinsed")])
+    rec["completion"] = {}
+    rec["tasks"] = [{"start_s": 0, "end_s": 10, "task": "wash the bowl", "outcome": "success", "completed_at_s": 10},
+                    {"start_s": 12, "end_s": 20, "task": "peel the carrot", "outcome": "partial", "completed_at_s": None},
+                    {"start_s": 22, "end_s": 25, "task": "wipe the board", "outcome": "unclear", "completed_at_s": None}]
+    s = scores.score_board({"ego.json": rec})["ego.json"]
+    assert s["outcome"] == round(10 * (1.0 + 0.4) / 2, 1)
+    assert (s["inputs"]["tasks_total"], s["inputs"]["tasks_judged"], s["inputs"]["tasks_done"]) == (3, 2, 1)
+    assert [(st["task"], st["goal"], st["reached"]) for st in s["subgoals"]] == [(1, False, True), (2, True, False),
+                                                                                (3, True, False)]

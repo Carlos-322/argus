@@ -1658,9 +1658,15 @@ h3.section .count {
 .qual-table td { padding: 8px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; }
 .qual-table tr:last-child td { border-bottom: 0; }
 .qual-table .num { font-family: var(--mono); text-align: right; white-space: nowrap; }
-.qual-table .qt-name { width: 100%; }
+
 .qual-table .qt-score { display: grid; grid-template-columns: 34px 110px; gap: 10px; align-items: center; }
 .qual-table .qt-score b { font-family: var(--mono); text-align: right; }
+.qual-table { table-layout: fixed; }
+.qual-table .qt-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qual-box.folds .ck-all-in .qual-table tr:first-child td { border-top: 1px solid var(--line); }
+.qual-box.open .ck-all { grid-template-rows: 1fr; }
+.qual-box.open .ck-all-in { opacity: 1; }
+.qual-box .qual-more { margin: 0; padding: 10px 14px; border-top: 1px solid var(--line); width: 100%; text-align: left; }
 .qual-table tr[data-t] { cursor: pointer; }
 .qual-table tr[data-t]:hover td { background: var(--hover, rgba(0,0,0,0.03)); }
 @media (max-width: 900px) { .qual { grid-template-columns: 1fr; } }
@@ -1884,6 +1890,11 @@ h3.section { border-top: 1px solid var(--border-strong); }
 .ck-all { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 320ms cubic-bezier(.32,.72,0,1); }
 .ck-all-in { overflow: hidden; min-height: 0; opacity: 0; transition: opacity 240ms ease; }
 .ck-theirs.open .ck-all { grid-template-rows: 1fr; }
+.fold.open .ck-all { grid-template-rows: 1fr; }
+.fold.open .ck-all-in { opacity: 1; }
+.key-events .fold-in { display: flex; flex-direction: column; gap: 6px; }
+.key-events .fold.open .fold-in { padding-top: 0; }
+.tasks-panel .fold-in .task-row:first-child { border-top: 1px solid var(--row-divider); }
 .ck-theirs.open .ck-all-in { opacity: 1; }
 .ck-more { margin-top: 6px; padding: 4px 0; background: none; border: 0; font: 500 12px/1.3 var(--sans);
   color: #2f7f76; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
@@ -3218,7 +3229,27 @@ let ISSUE_FILTER = null;   // null = show all; else an issue-class string
 // mistake that changed the outcome at medium or high, or any at high), or everything the model reported, low severity
 // included. Remembered per viewer.
 let INCLUDE_MINOR = false;
-let CHECKS_OPEN = false;       // the full list of capture checks, kept open or closed across episodes
+let CHECKS_OPEN = false;
+let SUBS_OPEN = false;         // the Subgoals table past its first rows, kept open or closed across episodes
+const SUBS_FIRST = 5;          // subgoal rows shown before "Show all"
+const FOLD_FIRST = 5;          // rows of a list under the video shown before "Show all"
+const FOLD_OPEN = {};          // which of those lists are open, kept across episodes
+// a list that grows with the episode: its first rows, then the rest folded behind "Show all N <noun>"
+function foldRows(rows, noun, key) {
+  if (rows.length <= FOLD_FIRST) return rows.join('');
+  const open = !!FOLD_OPEN[key];
+  return rows.slice(0, FOLD_FIRST).join('') + `<div class="fold${open ? ' open' : ''}" data-fold="${key}">`
+    + `<div class="ck-all"><div class="ck-all-in fold-in">${rows.slice(FOLD_FIRST).join('')}</div></div>`
+    + `<button class="ck-more fold-more" type="button" data-n="${rows.length}" data-noun="${noun}" `
+    + `onclick="foldToggle(this)">${open ? `Show the first ${FOLD_FIRST}` : `Show all ${rows.length} ${noun}`}</button></div>`;
+}
+function foldToggle(btn) {
+  const f = btn.closest('.fold');
+  const open = !f.classList.contains('open');
+  FOLD_OPEN[f.dataset.fold] = open;
+  f.classList.toggle('open', open);
+  btn.textContent = open ? `Show the first ${FOLD_FIRST}` : `Show all ${btn.dataset.n} ${btn.dataset.noun}`;
+}       // the full list of capture checks, kept open or closed across episodes
 
 // Every check run on this episode, fired or not, in one section: ours (recording and label) and the capture checks
 // of public-dataset-adapter. A firing counted as a problem is also in the problem cards above; here each check
@@ -6346,9 +6377,33 @@ function renderEp(d, opts) {
   const cell = (k, v, sub, tip, bad, shown) => `<div class="qual-cell" title="${esc(tip)}"><div class="qc-k">${k}</div>`
     + (v == null ? `<div class="qc-v qc-word${bad ? ' qc-bad' : ''}">${esc(sub)}</div>`
        : `<div class="qc-v">${shown ?? qNum(v)}</div>${bar(v)}${sub ? `<div class="qc-sub">${esc(sub)}</div>` : ''}`) + '</div>';
-  const box = (title, v, body, wide) => `<div class="qual-box${wide ? ' wide' : ''}"><div class="qual-head">`
+  const box = (title, v, body, wide, folds) => `<div class="qual-box${wide ? ' wide' : ''}${folds ? ' folds' : ''}${folds
+    && SUBS_OPEN ? ' open' : ''}"><div class="qual-head">`
     + `<span class="qual-title">${title}</span>${v === undefined ? '' : `<span class="qual-score">${qNum(v)}<small>/10</small></span>`}</div>`
     + (v === undefined ? '' : `<div class="qual-headbar">${bar(v)}</div>`) + body + '</div>';
+  // the Subgoals table: one row per subgoal stretch, the first SUBS_FIRST shown and the rest folded; both parts are
+  // tables with the same fixed columns so the folded rows line up under the header
+  const subCols = `<colgroup>${qIn.tasks_total ? '<col style="width:64px">' : ''}<col style="width:48px"><col style="width:92px">`
+    + '<col><col style="width:64px"><col style="width:72px"><col style="width:88px"><col style="width:164px"></colgroup>';
+  let subRowN = 0;
+  const subRows = subs.map(st => `<tr data-t="${st.start_s}">${qIn.tasks_total ? `<td class="num">${st.task ?? '-'}</td>` : ''}
+        <td class="num">${st.goal ? (qIn.tasks_total ? 'End' : 'Goal') : ++subRowN}</td>
+        <td class="num${!st.reached && st.outcome !== 'unclear' ? ' qc-bad' : ''}">${st.reached ? fmtT(st.end_s)
+          : st.outcome === 'unclear' ? 'unclear' : 'not reached'}</td><td class="qt-name">${esc(st.label || '')}</td>
+        <td class="num">${qNum(st.duration_s)}s</td><td class="num">${st.peer_median_s != null ? qNum(st.peer_median_s) + 's' : '-'}</td>
+        <td class="num${(st.failed_attempts || []).length ? ' qc-bad' : ''}" title="${esc((st.failed_attempts || [])
+          .map(k => fmtT(k.t_s) + '  ' + (k.label || '')).join('\n'))}">${(st.failed_attempts || []).length}</td>
+        <td><span class="qt-score"><b>${qNum(st.execution)}</b>${bar(st.execution)}</span></td></tr>`);
+  const subsTable = `<table class="qual-table">${subCols}<thead><tr>${qIn.tasks_total ? '<th class="num">Subtask</th>' : ''}`
+    + `<th class="num">#</th><th class="num">Done at</th><th class="qt-name">Subgoal</th><th class="num">Took</th>`
+    + `<th class="num">Median</th><th class="num">Failed tries</th><th>Execution</th></tr></thead>`
+    + `<tbody>${subRows.slice(0, SUBS_FIRST).join('')}</tbody></table>`
+    + (subRows.length > SUBS_FIRST ? `<div class="ck-all"><div class="ck-all-in"><table class="qual-table">${subCols}`
+      + `<tbody>${subRows.slice(SUBS_FIRST).join('')}</tbody></table></div></div>`
+      + `<button class="ck-more qual-more" type="button" onclick="SUBS_OPEN = !SUBS_OPEN; `
+      + `this.closest('.qual-box').classList.toggle('open', SUBS_OPEN); this.textContent = SUBS_OPEN ? 'Show the first ${SUBS_FIRST}' `
+      + `: 'Show all ${subRows.length} subgoals'">${SUBS_OPEN ? `Show the first ${SUBS_FIRST}` : `Show all ${subRows.length} subgoals`}</button>`
+      : '');
   const nMistakes = (qIn.penalties || []).length;
   const goalT = comp.completed_at_s ?? comp.goal_reached_at_s;
   const qualityHtml = Q ? `<h3 class="section" id="quality">Quality</h3><div class="qual">
@@ -6356,7 +6411,8 @@ function renderEp(d, opts) {
       ${cell('Cleanliness', Q.cleanliness, `${Math.round(100 * (qIn.wasteful_share || 0))}% wasteful, ${nMistakes} mistake${nMistakes === 1 ? '' : 's'}`,
         (qIn.penalties || []).map(x => `${x.mistake} (${x.severity}${x.recovered ? ', recovered' : ''}, -${x.points})`).join('\n')
         || 'Share of the work marked wasteful, and points off per operator mistake')}
-      ${cell('Speed', Q.efficiency, Q.efficiency == null ? (qIn.outcome === 'success' ? 'no peers' : 'goal not reached')
+      ${cell('Speed', Q.efficiency, Q.efficiency == null ? (qIn.tasks_total ? 'several subtasks'
+          : qIn.outcome === 'success' ? 'no peers' : 'goal not reached')
         : `${qNum(qIn.time_to_goal_s)}s, median ${qNum(qIn.peer_median_time_to_goal_s)}s`,
         Q.peers >= 5 ? `Time from the first action to the goal, against ${Q.peers} other successful demos of this task`
           : 'Fewer than 5 other successful demos of this task to compare with')}
@@ -6364,20 +6420,16 @@ function renderEp(d, opts) {
         'Share of the work with every arm waiting')}
     </div>`)}
     ${box('Outcome', Q.outcome, `<div class="qual-cells">
-      ${cell('Goal', null, goalT != null ? `reached ${fmtT(goalT)}` : 'not reached', 'When the labelled goal was first met', goalT == null)}
+      ${qIn.tasks_total ? `${cell('Subtasks', null, `${qIn.tasks_done} of ${qIn.tasks_total} done`,
+          'Subtasks whose end state the footage shows reached', qIn.tasks_done < qIn.tasks_judged)}
+        ${cell('Unclear', null, `${qIn.tasks_total - qIn.tasks_judged} subtask${qIn.tasks_total - qIn.tasks_judged === 1 ? '' : 's'}`,
+          'Subtasks the footage does not settle, eg cut off by the end of the clip; they count for nothing either way')}`
+      : `${cell('Goal', null, goalT != null ? `reached ${fmtT(goalT)}` : 'not reached', 'When the labelled goal was first met', goalT == null)}
       ${cell('Progress', 10 * (qIn.progress_reached || 0), '', 'The furthest the work got toward the labelled goal',
-        false, `${Math.round(100 * (qIn.progress_reached || 0))}%`)}
+        false, `${Math.round(100 * (qIn.progress_reached || 0))}%`)}`}
       ${cell('Label', null, Q.relation || 'no label', 'How the work done relates to the labelled task', Q.relation && Q.relation !== 'aligned')}
     </div>`)}
-    ${subs.length ? box('Subgoals', undefined, `<table class="qual-table"><thead><tr><th>#</th><th>Done at</th>
-      <th class="qt-name">Subgoal</th><th class="num">Took</th><th class="num">Median</th><th class="num">Failed tries</th><th>Execution</th></tr></thead><tbody>
-      ${subs.map((st, i) => `<tr data-t="${st.start_s}"><td class="num">${st.goal ? 'Goal' : i + 1}</td>
-        <td class="num">${st.reached ? fmtT(st.end_s) : 'not reached'}</td><td class="qt-name">${esc(st.label || '')}</td>
-        <td class="num">${qNum(st.duration_s)}s</td><td class="num">${st.peer_median_s != null ? qNum(st.peer_median_s) + 's' : '-'}</td>
-        <td class="num${(st.failed_attempts || []).length ? ' qc-bad' : ''}" title="${esc((st.failed_attempts || [])
-          .map(k => fmtT(k.t_s) + '  ' + (k.label || '')).join('\n'))}">${(st.failed_attempts || []).length}</td>
-        <td><span class="qt-score"><b>${qNum(st.execution)}</b>${bar(st.execution)}</span></td></tr>`).join('')}
-      </tbody></table>`, true) : ''}
+    ${subs.length ? box('Subgoals', undefined, subsTable, true, SUBS_FIRST < subs.length) : ''}
   </div>` : '';
 
   // lanes under the timeline, on its time scale: when the wearer's hands leave a head camera (the model's
@@ -6540,7 +6592,7 @@ function renderEp(d, opts) {
       + `class="tip">${esc(fmtT(k.t_s))}   ${k.kind ? esc(kindName(k.kind)) + ': ' : ''}${esc(k.label || '')}${oc
       ? '  [' + esc(oc) + ']' : ''}</div></div>`;
   }
-  let keyPanelHtml = '';
+  const keyRows = [];
   const untimed = untimedRows(d, keyEvents.length + 1);
   // each key event names its kind, and the ones tagged subgoal_complete say which subgoal they end (Quality scores them)
   let subN = 0;
@@ -6549,7 +6601,7 @@ function renderEp(d, opts) {
     const goalish = k.kind === 'goal_reached' || k.kind === 'subgoal_complete';
     const kindChip = k.kind === 'subgoal_complete' ? `<span class="ke-kind sub">Subgoal ${++subN}</span>`
       : k.kind ? `<span class="ke-kind">${esc(kindName(k.kind))}</span>` : '';
-    keyPanelHtml += `<div class="key-ev ${esc(oc)}${goalish ? ' goal' : ''}" data-t="${esc(k.t_s)}">
+    keyRows.push(`<div class="key-ev ${esc(oc)}${goalish ? ' goal' : ''}" data-t="${esc(k.t_s)}">
       <span class="ke-num">${i + 1}</span>
       <span class="ke-time">${fmtT(k.t_s)}</span>
       <div class="ke-body">
@@ -6557,17 +6609,17 @@ function renderEp(d, opts) {
           ? `<span class="outcome ${esc(oc)}">${esc(oc)}</span>` : ''}</div>
         ${k.note ? `<div class="ke-note">${esc(k.note)}</div>` : ''}
       </div>
-    </div>`;
+    </div>`);
   });
-  keyPanelHtml += untimed.keys.join('');
+  const keyPanelHtml = foldRows([...keyRows, ...untimed.keys], 'key events', 'key');
 
   // the review of how the task was performed, and the state changes; the scene graph is a snapshot that follows the
   // playhead (renderSceneGraph)
   const perfHtml = d.performance_review
     ? `<div class="info-block"><div class="perf">${esc(d.performance_review)}</div></div>` : '';
-  const scHtml = (d.state_changes || []).map(x =>
+  const scHtml = foldRows((d.state_changes || []).map(x =>
     `<div class="line"><span class="t">${fmtT(x.t_s)}</span> <span class="v">${esc(x.object || '')}</span>: ${esc(x.from
-      || '')} <span style="color:var(--fg-3)">-&gt;</span> ${esc(x.to || '')}</div>`).join('');
+      || '')} <span style="color:var(--fg-3)">-&gt;</span> ${esc(x.to || '')}</div>`), 'changes', 'sc');
   // recoveries: each failed subevent paired with its recovery; a reply that leaves out "recovered" but gives a
   // recovery time is read as recovered
   const recoveries = (d.recovery || []).map(r => ({
@@ -6579,7 +6631,7 @@ function renderEp(d, opts) {
     howToFix: r.how_to_fix || '',
   })).filter(r => r.failureT != null).sort((a, b) => a.failureT - b.failureT);
 
-  let rcHtml = '';
+  const rcRows = [];
   for (const r of recoveries) {
     const recTag = r.recovered === true
       ? `<span class="rec-ok"${r.recoveredAt != null ? ` data-t="${esc(r.recoveredAt)}"`
@@ -6590,12 +6642,13 @@ function renderEp(d, opts) {
     const recDetail = r.recovered === true
       ? (r.correction ? `<div class="rec-line"><span class="rec-k">did</span> ${esc(r.correction)}</div>` : '')
       : (r.howToFix ? `<div class="rec-line"><span class="rec-k">how to fix</span> ${esc(r.howToFix)}</div>` : '');
-    rcHtml += `<div class="rec">
+    rcRows.push(`<div class="rec">
       <div class="rec-head"><span class="rec-t" data-t="${esc(r.failureT)}">${fmtT(r.failureT)}</span><span `
         + `class="rec-fail">${esc(r.failure)}</span>${recTag}</div>
       ${recDetail}
-    </div>`;
+    </div>`);
   }
+  const rcHtml = foldRows(rcRows, 'recoveries', 'rec');
   const ivHtml = (d.instruction_variants || []).map(v => `<li>${esc(v)}</li>`).join('');
   const verdict = (comp.task_completed || '').toLowerCase();
   // the verdict's colour: green when the task ends done, red when it does not (undone included), ink otherwise
@@ -6608,13 +6661,13 @@ function renderEp(d, opts) {
   const tcount = {success: 0, failure: 0};
   tasks.forEach(t => { const o = (t.outcome || '').toLowerCase(); if (o in tcount) tcount[o]++; });
   const tPartly = tasks.filter(t => t.failure_kind === 'partial').length;
-  let tasksHtml = '';
+  const taskRows = [];
   tasks.forEach((t, i) => {
     const oc = (t.outcome || '').toLowerCase();
     const span = (t.start_s != null && t.end_s != null) ? `${fmtT(t.start_s)}-${fmtT(t.end_s)}` : '';
     const done = t.completed_at_s != null ? ` &middot; done ${fmtT(t.completed_at_s)}` : '';
     const jump = t.completed_at_s != null ? t.completed_at_s : t.start_s;
-    tasksHtml += `<div class="task-row ${esc(oc)}"${jump != null ? ` data-t="${esc(jump)}"` : ''}>
+    taskRows.push(`<div class="task-row ${esc(oc)}"${jump != null ? ` data-t="${esc(jump)}"` : ''}>
       <span class="task-num ${esc(oc)}">${i + 1}</span>
       <div class="task-body">
         <div class="task-head"><span class="task-name">${esc(t.task || '?')}</span>${oc
@@ -6623,8 +6676,9 @@ function renderEp(d, opts) {
         ${t.success_predicate ? `<div class="task-pred">${esc(t.success_predicate)}</div>` : ''}
         ${t.note ? `<div class="task-note">${esc(t.note)}</div>` : ''}
       </div>
-    </div>`;
+    </div>`);
   });
+  const tasksHtml = foldRows(taskRows, 'tasks', 'task');
   // the problems: deterministic checks that fired, data issues and operator mistakes
   const dataIssues = (d.data_issues || []).filter(x => x && x.issue);
   const tb = (d.dataset_checks || {}).timebase || null;

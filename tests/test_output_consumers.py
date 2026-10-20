@@ -171,11 +171,11 @@ def test_invalid_supplied_booleans_cannot_trigger_missing_field_outcome_inferenc
 const fs=require('fs'),assert=require('assert');
 const s=fs.readFileSync('board/index.html','utf8'),cases=JSON.parse(process.argv[1]);
 const start=s.indexOf('  const recoveries ='),end=s.indexOf('  const ivHtml =',start);
-const recovery=new Function('d','esc','fmtT',s.slice(start,end)+'return {recoveries,rcHtml};');
+const recovery=new Function('d','esc','fmtT','foldRows',s.slice(start,end)+'return {recoveries,rcHtml};');
 const gaStart=s.indexOf('  const ga = d.goal_alignment'),gaEnd=s.indexOf('  const bannerBody =',gaStart);
 const alignment=new Function('d','givenMode','esc',s.slice(gaStart,gaEnd)+'return alignHtml;');
 for(const c of cases){
- const r=recovery(c.d,String,String),a=alignment(c.d,true,String);
+ const r=recovery(c.d,String,String,rows=>rows.join('')),a=alignment(c.d,true,String);
  assert.strictEqual(r.recoveries[0].recovered,c.recovered);
  assert.strictEqual(r.rcHtml.includes('class="rec-ok"'),c.recovered===true);
  assert.strictEqual(a.includes('align-chip match'),c.match===true);

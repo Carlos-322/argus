@@ -80,7 +80,13 @@ def facts(d: dict) -> dict:
     reached = max(progress, default=0.0)
     mistakes = [m for m in d.get("operator_mistakes") or [] if isinstance(m, dict) and m.get("deliberate") != "yes"]
     failed = [k for k in d.get("key_events") or [] if isinstance(k, dict) and k.get("outcome") == "failure"]
-    return {"start_s": start, "goal_s": goal, "end_s": end, "active_s": active, "wasteful_s": wasteful,
+    # progress restarts at each subtask, so a subtask's progress is the furthest its own steps got
+    tasks = [{"outcome": t.get("outcome"),
+              "progress": max((p for e in steps if t["start_s"] <= e["t_s"] <= t["end_s"]
+                               for p in [_num(e.get("progress"))] if p is not None), default=0.0)}
+             for t in d.get("tasks") or [] if isinstance(t, dict) and _num(t.get("start_s")) is not None
+             and _num(t.get("end_s")) is not None]
+    return {"tasks": tasks, "start_s": start, "goal_s": goal, "end_s": end, "active_s": active, "wasteful_s": wasteful,
             "hesitation_s": hesitation, "window_s": (end - start) if window else None,
             "actions": sum(1 for e in steps if e.get("contribution") == "advancing"), "progress_reached": reached,
             "outcome": comp.get("task_completed"), "mistakes": mistakes, "failed_attempts": len(failed),
@@ -123,6 +129,14 @@ def _ratio_score(value, peers):
 
 
 def _outcome(f: dict):
+    if f["tasks"]:
+        # several subtasks: the mean of the subtasks the footage settles; an unclear one (eg cut off by the end of the
+        # clip) counts for nothing either way
+        judged = [t for t in f["tasks"] if t["outcome"] in OUTCOME_CAPS]
+        values = [1.0 if t["outcome"] == "success" else min(OUTCOME_CAPS[t["outcome"]], t["progress"]) for t in judged]
+        return (round(10 * statistics.mean(values), 1) if values else None,
+                {"outcome": None, "tasks_total": len(f["tasks"]), "tasks_judged": len(judged),
+                 "tasks_done": sum(1 for t in judged if t["outcome"] == "success")})
     cap = OUTCOME_CAPS.get(f["outcome"])
     if cap is None:
         return None, {"outcome": f["outcome"]}
@@ -158,18 +172,19 @@ def subgoals(d: dict, f: dict) -> list:
     tasks = sorted((t for t in d.get("tasks") or [] if isinstance(t, dict) and _num(t.get("start_s")) is not None
                     and _num(t.get("end_s")) is not None), key=lambda t: t["start_s"])
     spans = ([(t["start_s"], _num(t.get("completed_at_s")) if _num(t.get("completed_at_s")) is not None else t["end_s"],
-               t.get("task"), t.get("outcome"), t["end_s"]) for t in tasks] if tasks
-             else [(f["start_s"], f["end_s"], (d.get("completion") or {}).get("success_predicate"), f["outcome"], None)])
+               t.get("task"), t.get("outcome"), t["end_s"], i + 1) for i, t in enumerate(tasks)] if tasks
+             else [(f["start_s"], f["end_s"], (d.get("completion") or {}).get("success_predicate"), f["outcome"], None,
+                    None)])
     bounds = []
-    for a, end, goal_label, goal_outcome, last in spans:
+    for a, end, goal_label, goal_outcome, last, task in spans:
         for k in events:
             if k["t_s"] > a and (last is None or k["t_s"] <= last + 0.5):
-                bounds.append((a, k["t_s"], k.get("label"), k.get("outcome"), False))
+                bounds.append((a, k["t_s"], k.get("label"), k.get("outcome"), False, task))
                 a = k["t_s"]
         if end is not None and end > a + 0.5:
-            bounds.append((a, end, goal_label, goal_outcome, True))
+            bounds.append((a, end, goal_label, goal_outcome, True, task))
     out = []
-    for a, b, label, outcome, goal in bounds:
+    for a, b, label, outcome, goal, task in bounds:
         clip = lambda spans: [(max(a, x), min(b, y)) for x, y in spans if min(b, y) > max(a, x)]
         work = clip([(e["t_s"], e["end_s"]) for e in steps if e.get("contribution") in ("advancing", "wasteful")])
         waste = clip([(e["t_s"], e["end_s"]) for e in steps if e.get("contribution") == "wasteful"])
@@ -182,7 +197,7 @@ def subgoals(d: dict, f: dict) -> list:
         clean = max(0.0, 10 * (1 - share) - sum(SEVERITY_POINTS.get(m.get("severity"), 1.5)
                                                * (0.5 if m.get("recovered") else 1.0) for m in ms)
                     - FAILED_ATTEMPT_POINTS * max(0, len(failed) - len(ms)))
-        out.append({"start_s": a, "end_s": b, "label": label, "outcome": outcome, "goal": goal,
+        out.append({"start_s": a, "end_s": b, "label": label, "outcome": outcome, "goal": goal, "task": task,
                     "reached": outcome == "success",
                     "duration_s": round(b - a, 2),
                     "cleanliness": round(clean, 1), "steady": round(10 * max(0.0, 1 - 2 * hes), 1),
