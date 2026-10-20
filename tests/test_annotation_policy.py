@@ -52,3 +52,24 @@ def test_inherited_provider_policy_is_checked_before_routing(tmp_path, monkeypat
         harness.label_episode(ep, tmp_path / 'label.json', model=None, reasoning=None,
                               api_key='sk-proj-test', max_tokens=100, timeout=10)
     assert not (tmp_path / 'label.json').exists()
+
+
+def test_the_paid_calls_beside_the_annotation_are_on_by_default_and_written_only_when_turned_off(tmp_path):
+    ctx = {'profile': 'teleop_arms'}
+    default = policy.resolve(ctx)
+    assert 'inspection_rounds' not in default and 'field_dictionary' not in default
+    assert policy.resolve(ctx, inspection_rounds=policy.INSPECTION_ROUNDS, field_dictionary=True) == default
+    off = policy.resolve(ctx, inspection_rounds=0, field_dictionary=False)
+    assert off == {**default, 'inspection_rounds': 0, 'field_dictionary': False}
+    assert policy.resolve({**ctx, 'annotation_policy': off}) == off             # a saved choice is kept on resume
+    assert policy.resolve({**ctx, 'annotation_policy': off}, inspection_rounds=2, field_dictionary=True) == default
+    for bad in (3, -1, 1.0, True, '0'):
+        with pytest.raises(ValueError):
+            policy.resolve(ctx, inspection_rounds=bad)
+    with pytest.raises(ValueError):
+        policy.resolve(ctx, field_dictionary='off')
+    ep, _ = _packed_episode(tmp_path)
+    kw = dict(model=policy.SOL61, reasoning='high', max_tokens=100, cell_w=128, example_dir=None)
+    same = harness.input_identity(ep, **kw, inspection_rounds=policy.INSPECTION_ROUNDS)
+    assert harness.same_input_identity(harness.input_identity(ep, **kw), same)
+    assert not harness.same_input_identity(same, harness.input_identity(ep, **kw, inspection_rounds=0))

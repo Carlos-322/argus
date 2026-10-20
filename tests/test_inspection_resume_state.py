@@ -96,3 +96,33 @@ def test_proven_unpaid_selection_remains_resumable_across_budget_refusal(tmp_pat
     assert completed['cost_usd'] == .01 and settlements == [(.2, .01)]
     row = completed['rounds'][0]
     assert row['state'] == 'received' and row['rejected_attempts'][0]['verified_unpaid'] is True
+
+
+def test_inspection_turned_off_sends_only_the_annotation_and_the_default_still_selects(tmp_path, monkeypatch):
+    sent = []
+    def provider(request, timeout):
+        if request.get_method() == 'GET':
+            return io.BytesIO(json.dumps({'data': {'id': 'custom/model', 'endpoints': [{
+                'context_length': 50000, 'pricing': {'prompt': '.000004', 'completion': '.00001'}}]}}).encode())
+        selection = 'FIELD INVENTORY' in json.dumps(json.loads(request.data)['messages'])
+        sent.append('selection' if selection else 'final')
+        return answer({'requests': []} if selection else {'task_summary': 'The hand reaches.'}, cost=.1)
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', provider)
+    args = dict(keys=['sk-or-test'], concurrency=1, force=False, model='custom/model',
+                reasoning='medium', max_tokens=100, timeout=1, cell_w=128, max_spend=1.)
+    (tmp_path / 'off').mkdir()
+    off = recording(tmp_path / 'off', np.arange(12) / 30)
+    assert harness.run_batch([off], tmp_path / 'off_out', inspection_rounds=0, **args) == 0
+    assert sent == ['final']
+    result = json.loads((tmp_path / 'off_out' / (off.name + '.json')).read_text())
+    assert result['annotation_policy']['inspection_rounds'] == 0
+    assert ea.INSPECTION_OFF in result['evidence_inspection']['limitations']
+    assert result['evidence_inspection']['cost_usd'] == 0 and harness.episode_cost(result) == pytest.approx(.1)
+    sent.clear()
+    (tmp_path / 'on').mkdir()
+    on = recording(tmp_path / 'on', np.arange(12) / 30)
+    assert harness.run_batch([on], tmp_path / 'on_out', **args) == 0
+    assert sent[0] == 'selection' and sent[-1] == 'final'
+    default = json.loads((tmp_path / 'on_out' / (on.name + '.json')).read_text())
+    assert 'inspection_rounds' not in default['annotation_policy']
+    assert ea.INSPECTION_OFF not in default['evidence_inspection']['limitations']

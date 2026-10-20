@@ -32,6 +32,9 @@ MAX_RESPONSE_BYTES = 48000
 # The selection's JSON answer; its output limit adds reasoning room (selection_tokens).
 SELECTION_ANSWER_TOKENS = 2000
 MAX_SELECTION_COST = 1.0
+# The annotation policy can turn the paid selection off (label/policy.py INSPECTION_ROUNDS); the coverage then says so,
+# so an empty inspection is never read as one that found nothing to select.
+INSPECTION_OFF = 'Evidence inspection is off in the annotation policy; no recorded fields were selected.'
 MAX_SCAN_BYTES = 256 * 1024 * 1024
 SOURCE_HASH_LIMIT = 16 * 1024 * 1024
 IMPLEMENTATION_SHA256 = hashlib.sha256(b''.join(path.read_bytes() for path in (
@@ -1891,6 +1894,8 @@ def discover(access, base_content, call, cache_path, *, rounds=2, reserve_cost=0
         doc['status'] = 'complete'
     count = 0
     skipped = {}
+    if rounds <= 0 and INSPECTION_OFF not in doc['limitations']:
+        doc['limitations'].append(INSPECTION_OFF)
     # Large inventories remain accessible through metadata inspection; do not silently drop their descriptors.
     for index in range(min(rounds, 2)):
         content = access.selection_content(base_content) + [{'type': 'text', 'text': SELECTION + '\nFIELD INVENTORY\n' + packed(access.page())}] + extra

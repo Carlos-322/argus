@@ -1148,3 +1148,14 @@ def test_resolved_annotation_policy_does_not_opt_rgb_into_inspection(tmp_path):
     assert fields['check_versions']['kind'] == 'context'
     assert fields['recorded_metadata']['kind'] == 'metadata'
     assert {'annotation_policy', 'task_mode', 'check_versions'} <= ea.PREPARED_CONTEXT
+
+
+def test_inspection_turned_off_makes_no_selection_and_its_coverage_says_so(tmp_path):
+    def forbidden(content):
+        pytest.fail('inspection turned off must not select')
+    for _ in range(2):                                                    # the second run reads the saved receipt
+        doc, extra = ea.discover(access(tmp_path, new_fact={'value': 7}), [], forbidden, tmp_path / 'receipt.json',
+                                 rounds=0)
+        assert extra == [] and doc['rounds'] == [] and doc['cost_usd'] == 0 and doc['status'] == 'complete'
+        assert doc['limitations'].count(ea.INSPECTION_OFF) == 1
+    assert ea.INSPECTION_OFF in json.dumps(ea.Access.coverage_summary(doc))

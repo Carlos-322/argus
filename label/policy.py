@@ -13,6 +13,11 @@ TASK_MODES = ('episode', 'session')
 # reasoning any call used in the October 2026 Astra runs (2,128 tokens, a sensor analysis;
 # evidence selection used at most 239), and each effort step doubles it.
 REASONING_TOKENS = {'none': 0, 'minimal': 1000, 'low': 2000, 'medium': 4000, 'high': 8000, 'xhigh': 16000}
+# The paid calls beside the annotation: evidence inspection asks the model up to this many times which recorded fields
+# to read before it annotates (label/evidence_access.py discover), and the field dictionary asks once per upload what
+# uncertain fields mean (label/dictionary_stage.py). Both are on by default; a setting at its default is not written
+# into the policy, so a default policy reads exactly as it did before these settings existed.
+INSPECTION_ROUNDS = 2
 
 
 def output_limit(answer_tokens: int, reasoning: str) -> int:
@@ -24,7 +29,8 @@ def output_limit(answer_tokens: int, reasoning: str) -> int:
 
 def resolve(ctx: dict, *, model: str | None = None, reasoning: str | None = None,
             sample_fps: float | None = None, task_mode: str | None = None,
-            dataset_note: str | None = None) -> dict:
+            dataset_note: str | None = None, inspection_rounds: int | None = None,
+            field_dictionary: bool | None = None) -> dict:
     """Source declarations and caller overrides, independent of dataset names or absent task text."""
     saved = ctx.get('annotation_policy') or {}
     if saved and (not isinstance(saved, dict) or saved.get('version') != VERSION):
@@ -71,10 +77,18 @@ def resolve(ctx: dict, *, model: str | None = None, reasoning: str | None = None
         if type(previous) not in (float, int) or not math.isfinite(previous) or not 0 < previous <= maximum:
             raise ValueError('saved part allowance is incompatible; rebuild with an explicit policy')
         maximum = previous
+    rounds = inspection_rounds if inspection_rounds is not None else saved.get('inspection_rounds', INSPECTION_ROUNDS)
+    if type(rounds) is not int or not 0 <= rounds <= INSPECTION_ROUNDS:
+        raise ValueError(f'inspection rounds must be a whole number from 0 to {INSPECTION_ROUNDS}')
+    dictionary = field_dictionary if field_dictionary is not None else saved.get('field_dictionary', True)
+    if type(dictionary) is not bool:
+        raise ValueError('field dictionary must be on or off')
     return {'version': VERSION, 'rig': rig, 'model': model, 'reasoning': reasoning,
             'sample_fps': float(sample_fps) if sample_fps is not None else None,
             'sample_every_s': period, 'part_max_s': maximum, 'task_mode': mode,
-            'dataset_note': note}
+            'dataset_note': note,
+            **({'inspection_rounds': rounds} if rounds != INSPECTION_ROUNDS else {}),
+            **({'field_dictionary': False} if not dictionary else {})}
 
 
 def effective(ctx: dict) -> dict:
@@ -90,6 +104,9 @@ def add_arguments(parser) -> None:
     parser.add_argument('--task-mode', choices=TASK_MODES, default=None,
                         help='optional task-scope override; source declarations otherwise apply')
     parser.add_argument('--dataset-note', default=None, help='dataset description supplied as recording context')
+    parser.add_argument('--inspection-rounds', type=int, choices=range(INSPECTION_ROUNDS + 1), default=None,
+                        help=f'paid evidence selections before each annotation (default {INSPECTION_ROUNDS}; 0 sends '
+                             'the annotation with the recorded signals it already carries and makes no selection call)')
 
 
 def persist(episodes, **overrides) -> dict:

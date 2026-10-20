@@ -126,7 +126,7 @@ def _same_grid_inputs(saved: dict, current: dict) -> bool:
 
 
 def _one(record: dict, ep_dir: Path) -> list[dict]:
-    from label import episode as me, harness
+    from label import episode as me, harness, policy
     saved = (record.get('config') or {}).get('request_images') or {}
     if not isinstance(saved, dict) or not isinstance(saved.get('recipe'), dict):
         raise GridError('this label has no verified frame-grid input receipt')
@@ -152,7 +152,8 @@ def _one(record: dict, ep_dir: Path) -> list[dict]:
         current = harness.input_identity(ep_dir, model=recipe['model'], reasoning=recipe['reasoning'],
             max_tokens=settings['max_tokens'], cell_w=settings['cell_w'], example_dir=examples,
             sample_fps=selected.get('sample_fps'), task_mode=selected['task_mode'],
-            dataset_note=selected.get('dataset_note'))
+            dataset_note=selected.get('dataset_note'),
+            inspection_rounds=selected.get('inspection_rounds', policy.INSPECTION_ROUNDS))
         if not _same_grid_inputs(identity, current):
             raise GridError('the source, dictionary or request settings differ from the recorded request')
         req = me.build_request(ep_dir, cell_w=recipe['cell'][0], grid_cols=recipe['grid_cols'],
