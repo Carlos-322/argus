@@ -919,6 +919,50 @@ def _last_task(task):
     return (task.get("joined_from") or [task])[-1]
 
 
+def join_scene_objects(objects: list, tasks: list) -> list:
+    """The recording's scene objects from its parts' [(part number, part object)], each part object carrying its own
+    source_piece. Parts are labelled by separate requests, so a name proves nothing across them: two parts' "cup" can be
+    two cups, and one cup can be named differently in each. Objects are joined only where the parts show they are one:
+    a task joined across a cut (join_across_cuts, which already requires its halves to share an object) names the
+    object in both halves, and in each half's part exactly one listed object answers to that name. A joined object
+    keeps its first part's record, with every later part's own record under "continues"; every other object stays
+    its own entry."""
+    parent = list(range(len(objects)))
+
+    def root(k):
+        while parent[k] != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
+
+    def listed(part, name_tokens):
+        hits = [k for k, (n, obj) in enumerate(objects) if n == part
+                and any(a <= name_tokens or name_tokens <= a for a in _object_tokens([obj]))]
+        return hits[0] if len(hits) == 1 else None
+
+    for task in tasks:
+        halves = task.get("joined_from") or []
+        for left, right in zip(halves, halves[1:]):
+            a_part, b_part = (left.get("source_piece") or {}).get("index"), (right.get("source_piece") or {}).get("index")
+            if not isinstance(a_part, int) or b_part != a_part + 1:
+                continue
+            for a in _object_tokens(left.get("objects")):
+                for b in _object_tokens(right.get("objects")):
+                    if a <= b or b <= a:
+                        x, y = listed(a_part, a), listed(b_part, b)
+                        if x is not None and y is not None:
+                            parent[root(y)] = root(x)
+    out, entry = [], {}
+    for k, (_, obj) in enumerate(objects):
+        r = root(k)
+        if r not in entry:
+            entry[r] = copy.deepcopy(obj)
+            out.append(entry[r])
+        else:
+            entry[r].setdefault("continues", []).append(copy.deepcopy(obj))
+    return out
+
+
 def join_across_cuts(tasks: list, cuts_s: list[float]) -> list:
     """Join unambiguous adjacent-part continuations, keeping every source judgment and its outcome evidence."""
     from label.episode import number
@@ -1125,7 +1169,7 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
          "scene_graph": [], "recovery": [], "instruction_variants": [], "data_issues": [], "operator_mistakes": [],
          "tasks": [], "part_assessments": [], "progress_scope": "request_parts"}
     contacts_model, contacts_missing, views, strip_part = {}, [], {"shown": [], "strips": {}}, {}
-    excluded, summaries, reviews, seen_obj = [], [], [], set()
+    excluded, summaries, reviews, scene_objects = [], [], [], []
     usage = {"prompt_tokens": 0, "completion_tokens": 0, "reasoning_tokens": 0, "est_cost_usd": 0.0,
              "cached_tokens": 0, "cache_write_tokens": 0, "latency_s": 0.0}
     still, part_info, dropped, outside = [], [], [], []
@@ -1149,11 +1193,8 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
         off = outside_part(lab, t0, t1)
         if off:
             outside.append({"part": i, "t0_s": t0, "t1_s": t1, **off})
-        for o in (lab.get("scene") or {}).get("objects") or []:
-            key = str(o.get("name", "")).strip().lower()
-            if key and key not in seen_obj:
-                seen_obj.add(key)
-                L["scene"]["objects"].append(o)
+        scene_objects += [(i, {**o, "source_piece": dict(owner)})
+                          for o in (lab.get("scene") or {}).get("objects") or [] if isinstance(o, dict)]
         L["scene"]["setting"] = L["scene"]["setting"] or (lab.get("scene") or {}).get("setting") or ""
         for k in ("timeline", "key_events", "state_changes", "scene_graph", "recovery"):
             L[k] += lab.get(k) or []
@@ -1233,6 +1274,7 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
     for k in ("timeline",):
         L[k].sort(key=lambda s: (s.get("start_s") is None, s.get("start_s") or 0))      # an untimed step last
     L["tasks"] = mark_cut_tasks(join_across_cuts(L["tasks"], cuts_s), cuts_s, L)
+    L["scene"]["objects"] = join_scene_objects(scene_objects, L["tasks"])
     events = []
     for event in L["key_events"]:
         if is_cut_key_event(event, cuts_s):
