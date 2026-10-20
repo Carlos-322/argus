@@ -239,25 +239,27 @@ def start_offsets(ep_dir: Path, sources: dict, fps: float = 30.0) -> dict:
     return out
 
 
-def clip_times(ep_dir: Path, sources: dict, fps: float = 30.0) -> dict:
-    """{camera: its frames' capture times on the episode's clock} for each camera times.npz holds one per frame of
-    (sources.json n_frames): the times label/episode.py chooses the model's frames by (frame_time, and each paired
-    camera's kmap, nearest in time). The clock starts where start_offsets puts it."""
+def clip_times(ep_dir: Path, sources: dict, fps: float = 30.0, ctx: dict | None = None) -> dict:
+    """{camera: its frames' capture times on the episode's clock} for each camera the real-times file (context.json
+    real_times, else times.npz) holds one per frame of (sources.json n_frames): the times label/episode.py chooses
+    the model's frames by (frame_time, and each paired camera's kmap, nearest in time). The clock starts where
+    start_offsets puts it. The clips play on these times (retime) and the sensor strips are drawn on the main
+    camera's (board/sensors.py strip_times), so the video and the strips keep one clock. ctx is the episode's
+    context.json, read from ep_dir when not given."""
     import numpy as np
-    ctx = _context(ep_dir)
+    ctx = _context(ep_dir) if ctx is None else ctx
     tp = ep_dir / (ctx.get("real_times") or "times.npz")
     cams = cams_of(sources)
     if not tp.exists() or not cams:
         return {}
     from prepare.camera_clock import load_times
-    z = load_times(ep_dir, _context(ep_dir))
+    z = load_times(ep_dir, ctx)
     t = {c: np.asarray(z[c], dtype=np.float64) for c in cams if c in z
          and len(z[c]) == int(sources[c].get("n_frames") or -1)}
     main = main_cam(sources)
     if main not in t:
         return {}
-    zero = _context(ep_dir).get("clock_zero_s")
-    ref = float(zero or 0.0)
+    ref = float(ctx.get("clock_zero_s") or 0.0)
     return {c: tc - ref for c, tc in t.items()}
 
 

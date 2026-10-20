@@ -131,7 +131,7 @@ def test_parts_place_every_typed_contributor_on_their_own_capture_clock(tmp_path
         assert ctx["reader_issues"][0]["extra"] == {"t0_s": 37}
         assert ctx["unshown_cameras"][0]["start_s"] == pytest.approx(0.6 - t0, abs=0.001)
         assert ctx["arbitrary"] == raw["arbitrary"]
-        assert sensors.clip_times(part, ctx, len(loaded["state"]))[0] == 0
+        assert sensors.strip_times(part, ctx, len(loaded["state"]))[0] == 0
         if ctx["contacts"][0]["dips_s"]:
             assert ctx["contacts"][0]["dips_s"] == pytest.approx([1.6 - t0], abs=0.001)
 
@@ -158,7 +158,7 @@ def test_parts_keep_parent_join_offsets_when_its_first_capture_is_after_zero(tmp
         assert ctx["reader_issues"][0]["t0_s"] == pytest.approx(1.7 - start, abs=0.001)
         assert ctx["reader_issues"][0]["t1_s"] == pytest.approx(1.8 - start, abs=0.001)
         assert ctx["unshown_cameras"][0]["start_s"] == pytest.approx(1.1 - start, abs=0.001)
-        assert sensors.clip_times(part, ctx, n)[0] == 0
+        assert sensors.strip_times(part, ctx, n)[0] == 0
         stitched.append((ctx, {"episode_dir": str(part), "parse_ok": True, "model": "m", "usage": {},
                               "config": {"timesteps_s": [0]}, "labels": {"task_summary": "move"},
                               "contacts": ctx["contacts"], "contact_views": {"shown": ["c1"], "strips": {}}}))
