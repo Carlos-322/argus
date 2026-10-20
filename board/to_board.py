@@ -19,6 +19,7 @@ import json
 import math
 from pathlib import Path
 
+from label import sensor_display
 from label.grids import public_receipt
 
 
@@ -272,7 +273,8 @@ def convert(result: dict, dataset: str | None = None) -> dict:
         **({"evidence_inspection": finite(copy.deepcopy(result["evidence_inspection"]))}
            if isinstance(result.get("evidence_inspection"), dict) and result["evidence_inspection"].get("version") == 1 else {}),
         # Supplementary sensor analysis keeps its own model and source provenance.
-        **({"sensor_evidence": finite(copy.deepcopy(result["sensor_evidence"]))}
+        # Each finding also carries its card rows, derived from its own citations (label/sensor_display.py).
+        **({"sensor_evidence": finite(sensor_display.attach(copy.deepcopy(result["sensor_evidence"])))}
            if isinstance(result.get("sensor_evidence"), dict) and result["sensor_evidence"].get("version") == 1 else {}),
         **({"grip_evidence": finite(copy.deepcopy(result["grip_evidence"]))}
            if isinstance(result.get("grip_evidence"), dict) and result["grip_evidence"].get("version") == 1 else {}),

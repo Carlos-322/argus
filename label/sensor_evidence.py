@@ -813,7 +813,7 @@ def bound_finding_fields(finding, copy_contract_version=None):
     row = finding_fields(finding)
     if sensor_copy.shared(copy_contract_version):
         row.pop('overlay_detail', None)
-        row['copy_contract_version'] = sensor_copy.VERSION
+        row['copy_contract_version'] = copy_contract_version
     return row
 
 
@@ -1143,7 +1143,7 @@ def merge(parts, ctx, ep_dir=None):
             annotation_provenance = copy.deepcopy(finding.get('annotation_provenance'))
             finding = finding_fields(finding)
             if sensor_copy.shared(trusted_copy_version):
-                finding['copy_contract_version'] = sensor_copy.VERSION
+                finding['copy_contract_version'] = trusted_copy_version
             if isinstance(annotation_provenance, dict):
                 finding['annotation_provenance'] = annotation_provenance
             if offset:

@@ -9,6 +9,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from label import sensor_copy
+
 from label import evidence_access as ea, harness, reparse, sensor_evidence as se
 from tests.test_tactile_contract import episode
 
@@ -167,12 +169,12 @@ def test_requested_prompt_contract_reaches_both_outputs_and_legacy_stays_legacy(
     legacy = copy.deepcopy(doc)
     legacy.pop('copy_contract_version', None)
     assert 'overlay_detail' in se.prompt(legacy)
-    for version in (None, 2, 999):
+    for version in (None, 2, 3, 999):
         access = ea.Access(ep, plan={'n': 5}, copy_contract_version=version)
         parts, _, _ = ea.final_content([], 0, access, access.record(), [],
             image_limit=100, image_bytes_limit=100000, image_inflation=1)
         text = '\n'.join(p['text'] for p in parts)
-        assert ('overlay_detail' not in text) is (version == 2)
+        assert ('overlay_detail' not in text) is (version in (2, 3))
 
 
 @pytest.mark.parametrize('version', [None, 999])
@@ -193,8 +195,9 @@ def test_new_request_saves_the_copy_contract_it_actually_supplies(tmp_path):
     np.savez(folder / 'signals.npz', pressure=np.arange(n * 4).reshape(n, 4))
     result = harness.label_episode(folder, tmp_path / 'dry.json', model='openai/gpt-6.1-sol',
         reasoning='high', api_key='offline', max_tokens=128, timeout=1, cell_w=128, dry_run=True)
-    assert result['config']['sensor_copy_contract_version'] == 2
-    assert result['sensor_evidence']['copy_contract_version'] == 2
+    assert result['config']['sensor_copy_contract_version'] == sensor_copy.VERSION
+    assert result['sensor_evidence']['copy_contract_version'] == sensor_copy.VERSION
+    assert sensor_copy.SHARED_RULE_V3 in result['prompt_text']
     assert '"sensor_findings"' in result['prompt_text']
     assert 'overlay_detail' not in result['prompt_text']
 

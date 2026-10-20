@@ -1039,7 +1039,7 @@ aside.left .grip-strip .sensor-overlay { position: static; order: 2; max-width: 
 .sensor-overlay-stack .gf-phase { padding: 3px 5px; font-size: 9px; }
 .sensor-overlay-stack .gf-pressure { padding-top: 5px; }
 .sensor-overlay-stack .gf-pressure-head { font-size: 10px; }
-.sensor-overlay-stack .gf-pressure-row { grid-template-columns: 78px minmax(0,1fr); font-size: 10px; }
+.sensor-overlay-stack .gf-pressure-row { grid-template-columns: 112px minmax(0,1fr); font-size: 10px; }
 .sensor-overlay-stack .gf-pressure-label { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sensor-overlay-stack .gf-pressure-row svg { height: 20px; }
 .sensor-overlay-stack .gf-pressure-range, .sensor-overlay-stack .gf-pressure-value { display: none; }
@@ -4599,8 +4599,26 @@ function genericSensorSamplesHtml(G, f) {
   return `<div class="sensor-samples" role="group" aria-label="Recorded evidence samples"><span>Samples</span>${times.map(t =>
     `<button type="button" data-sensor-sample-t="${t}" title="Inspect recorded sample paused">${esc(String(Number(t.toFixed(6))))}s</button>`).join('')}</div>`;
 }
+// The card's rows: the finding's own display rows (label/sensor_display.py), named for what they measure and pointing
+// the way the recording declares a stronger response. The expanded panel (limit Infinity) keeps every cited series.
+function displaySensorSeries(f, limit) {
+  const rows = (Array.isArray(f.display) ? f.display : []).filter(r => r && typeof r.label === 'string' && r.label
+    && Array.isArray(r.times) && Array.isArray(r.values) && r.times.length === r.values.length && r.times.length > 1
+    && r.times.every((t, i) => Number.isFinite(t) && (!i || t > r.times[i - 1])) && r.values.some(Number.isFinite));
+  return rows.slice(0, limit).map(r => {
+    const valid = r.values.filter(Number.isFinite), low = Math.min(0, ...valid), high = Math.max(0, ...valid);
+    const padding = Math.max(1, high - low) * .12;
+    return {label: r.label + (typeof r.unit === 'string' ? ' (' + r.unit + ')' : ''), times: r.times,
+      values: r.values.map(v => Number.isFinite(v) ? v : null), nativePlot: true, sample_period_s: r.sample_period_s,
+      low: low - padding, high: high + padding, hideValue: true, displayRow: true};
+  });
+}
 function genericSensorSeries(G, f, limit = 3) {
   if (!G || !G.generic || !f) return [];
+  if (limit !== Infinity) {
+    const display = displaySensorSeries(f, limit);
+    if (display.length) return display;
+  }
   const ids = new Set((f.evidence || []).map(e => e.series_id).filter(Boolean));
   const selected = (G.series || []).filter(r => ids.has(r.id) && genericSensorAvailable(G, r.sensor_id) && r.review_status !== 'rejected'
     && !r.withheld_from_final && (f.evidence || []).some(e => e.series_id === r.id && e.sensor_id === r.sensor_id) && Array.isArray(r.values) && Array.isArray(r.times)
@@ -4773,9 +4791,10 @@ function sensorEvidence(d) {
       t: finite(f.inspect_s) && f.inspect_s >= f.start_s && f.inspect_s <= f.end_s ? f.inspect_s : f.start_s,
       timing: '', alternative: copy(f.alternative), observation: copy(f.observation), claim: copy(f.claim),
       overlayDetail: typeof f.overlay_detail === 'string' ? copy(f.overlay_detail)
-        : f.copy_contract_version === 2 ? copy(f.detail) : null,
+        : [2, 3].includes(f.copy_contract_version) ? copy(f.detail) : null,
       quotedTimeOffset: finite(f.quoted_time_offset_s) ? f.quoted_time_offset_s : 0,
       generic: !!grip.generic, evidence: grip.generic && Array.isArray(f.evidence) ? f.evidence : [],
+      display: grip.generic && f.display && f.display.version === 1 && Array.isArray(f.display.rows) ? f.display.rows : null,
       addsBeyond: f.adds_beyond_video === true || f.adds_beyond_rgb_pose === true, cellGroups: Array.isArray(f.cell_groups) ? f.cell_groups : []});
   }
   for (const [i, c] of (d.contacts || []).entries()) {
@@ -4895,7 +4914,7 @@ function gripOverlayPressureHtml(G, f, limit = 3) {
         path += `${pen ? 'L' : 'M'}${x(times[i]).toFixed(2)},${y(value).toFixed(2)} `;
         pen = true;
       });
-      return `<span class="gf-pressure-row"><span><span class="gf-pressure-label" title="${esc(v.label)}">${esc(v.label)}</span>${v.depthRegion ? `<span class="gf-pressure-range">${esc(v.recordedLow)} to ${esc(v.recordedHigh)}</span>` : ''}${G.generic ? `<span class="gf-pressure-value" data-grip-mini-value="${k}"></span>` : ''}</span>
+      return `<span class="gf-pressure-row"><span><span class="gf-pressure-label" title="${esc(v.label)}">${esc(v.label)}</span>${v.depthRegion ? `<span class="gf-pressure-range">${esc(v.recordedLow)} to ${esc(v.recordedHigh)}</span>` : ''}${G.generic && !v.hideValue ? `<span class="gf-pressure-value" data-grip-mini-value="${k}"></span>` : ''}</span>
         <span class="gf-pressure-chart"><svg viewBox="0 0 180 32" preserveAspectRatio="none" role="img" aria-label="${esc(v.label)} ${G.generic ? 'supplied measurements' : 'relative sensor response over this clip'}">
           <rect x="${x(f.start)}" y="2" width="${x(f.end) - x(f.start)}" height="28" fill="currentColor" opacity=".08"/>
           ${v.depthRegion ? '' : `<line x1="0" x2="180" y1="${y(0)}" y2="${y(0)}" stroke="currentColor" opacity=".3" stroke-dasharray="2 3"/>`}
