@@ -1428,6 +1428,25 @@ def labels_license(board: Path) -> dict | None:
     return lic if isinstance(lic, dict) and lic.get("name") else None
 
 
+def targets(board: Path) -> dict:
+    """{dataset: {"episodes", "hours"}}: how much of each dataset a run in progress is meant to label, as its manifest
+    entry gives it ("target": {"episodes": 2682, "hours": 101.9}). The page shows what is labelled against it; a
+    dataset with no target, or a target that is not two positive numbers, shows only what is labelled."""
+    try:
+        entries = json.loads((board / "manifest.json").read_text()).get("datasets")
+    except (OSError, ValueError, AttributeError):
+        return {}
+    out = {}
+    for entry in entries if isinstance(entries, list) else []:
+        target = entry.get("target") if isinstance(entry, dict) else None
+        if not isinstance(target, dict) or not isinstance(entry.get("dataset"), str):
+            continue
+        values = [target.get(k) for k in ("episodes", "hours")]
+        if all(type(v) in (int, float) and math.isfinite(v) and v > 0 for v in values):
+            out[entry["dataset"]] = {"episodes": int(values[0]), "hours": float(values[1])}
+    return out
+
+
 def _label_identity(path):
     return _trusted_version(path, _footage_version(path))
 
@@ -2194,7 +2213,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                    "sensors": (SENSORS_DIR / "index.json").is_file(),
                    "grids": (HERE.parent / "grids").is_dir(),
                    "footage": FFMPEG is not None, "dictionary_url": "api/dictionary",
-                   "keypoints": (KEYPOINTS_DIR / "index.json").is_file(), "labels_license": labels_license(HERE.parent)}
+                   "keypoints": (KEYPOINTS_DIR / "index.json").is_file(), "labels_license": labels_license(HERE.parent),
+                   "targets": targets(HERE.parent)}
             self._send(200, render_index(PAGE_TITLE, cfg, BOARD_NAME, HEADER), "text/html; charset=utf-8")
             return
         if parsed.path == '/api/dictionary':

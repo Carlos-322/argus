@@ -31,8 +31,10 @@ dataset's newest finished run that is not a dry run (run ids start with their st
         "episodes": "../../episodes/molmo/quickstart",        the prepared episodes the run labelled
         "rules": [...],                                       optional: definitions applied after labelling
         "file_prefix": "...",                                 optional: a prefix for its board file names
-        "labels_every_episode": true},                        optional: the run labels every episode of the folder,
+        "labels_every_episode": true,                         optional: the run labels every episode of the folder,
                                                               so one it has no reply for is listed (own_data_entry)
+        "target": {"episodes": 2682, "hours": 101.9}},        optional: what a run in progress is meant to label;
+                                                              the page shows what is labelled against it
        ...],
      "comparisons": [...],                                    optional: other models' runs (compare/metrics.py)
      "hands": {"src": KEYPOINT_RUN, "clips": CLIPS},          optional: hand pose overlay (board/hands.py)
