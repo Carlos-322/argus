@@ -75,7 +75,7 @@ uv run python -m review --data path/to/dataset --rig teleop_arms \
   --dataset-note "Two arms arrange blocks on a tray." --out data/review/mine --free
 ```
 
-Annotate the same job under a spending cap, then open its board.
+Annotate the same data into the same `--out` folder under a spending cap, then open its board.
 
 ```console
 uv run python -m review --data path/to/dataset --rig teleop_arms \
@@ -95,46 +95,16 @@ uv run python -m board serve --board data/review/mine --clips data/review/mine/c
 | [`--task-mode`](label/policy.py) | From source metadata, otherwise `episode` | `session` labels the recording as a sequence of tasks, each with its own outcome, which suits freeform recordings and repeated cycles; human ego uses the activities schema |
 | [`--inspection`](label/policy.py) | `auto`, for recordings with depth or a touch sensor | `all` also inspects force/torque, arm signals, actions and source metadata; `off` makes no inspection call |
 | [`--field-dictionary`](review/__main__.py) | `on` | `off` skips the once-per-upload call that interprets uncertain recorded fields, and labels them as recorded |
-| [`--cap`](review/__main__.py) | $20 | The most the job may spend, counting every call and outstanding reservation |
-| [`--max-minutes`](review/__main__.py) | All footage | Reads at most this much footage |
+| [`--cap`](review/__main__.py) | $20 | Total USD for every model call a review makes into its `--out` folder (field interpretation, routing, inspection, labelling and sensor cards), summed over every rerun of that folder; a call whose bill has not arrived counts at its upper bound |
+| [`--max-minutes`](review/__main__.py) | All footage | Reads at most this many minutes of footage |
 
-Each recording produces one episode. A recording longer than one request allows (450s at default sampling, less at denser sampling) is cut at still moments, labelled in parts and rejoined on the original timeline. In episode mode its whole-recording outcome stays unclear, because no part sees both its start and its end, so use `session` for recordings of repeated or separate tasks. Rerunning a job with the same [`--out`](review/__main__.py) resumes it and reuses every output whose inputs still match. [`--free`](review/__main__.py) previews the base requests only, without field interpretation, routing, inspection or sensor cards.
+Each recording produces one episode. A recording longer than one request allows (450s at default sampling, less at denser sampling) is cut at still moments, labelled in parts and rejoined on the original timeline. In episode mode its whole-recording outcome stays unclear, because no part sees both its start and its end, so use `session` for recordings of repeated or separate tasks. Rerunning a review with the same [`--out`](review/__main__.py) folder resumes it and reuses every output whose inputs still match. [`--free`](review/__main__.py) previews the base requests only, without field interpretation, routing, inspection or sensor cards.
 
 ## Results and further use
 
 Live and static boards share one [viewer](board/index.html), which overlays behavioral and sensor annotations on the footage with the supporting measurements beside it. After annotation, one text-only call to the same model picks the sensor findings worth overlaying on the video, at most two at once, and rewrites every finding in plain English; every finding stays in the list and the JSON export, and if the call fails, every finding plays on the video. The same findings export as episode JSON, filtered JSON Lines and static sites. Issues with missing or invalid severity remain visible as unrated and are excluded from severity totals.
 
-This is an excerpt from a pressure glove episode's downloadable JSON. In the list and on the video, a finding shows its `video_card` words when it has one, otherwise its `list_copy`, otherwise its own headline and detail. Evidence IDs resolve to recorded streams and samples in the full export:
-
-```json
-{
-  "sensor_evidence": {
-    "findings": [
-      {
-        "start_s": 2.63,
-        "end_s": 3.03,
-        "headline": "Thumb loading likely eases more than index finger loading",
-        "detail": "As the cup moves away, the thumb response weakens substantially while the index finger response remains elevated.",
-        "confidence": "medium",
-        "video_card": {
-          "version": 1,
-          "headline": "The thumb likely presses less.",
-          "detail": "The index finger keeps pressing as the cup moves away."
-        },
-        "evidence": [
-          {
-            "sensor_id": "mechanics:signal:right_pressure",
-            "series_id": "mechanics:signal:right_pressure:derivation:regional_response:0",
-            "time_s": [2.63, 2.83, 2.93]
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-A free review job stops after prepared [`episodes/`](review/__main__.py) and base requests in [`dry/`](review/__main__.py). Paid annotation adds model inputs and receipts in [`run/`](review/__main__.py), rejoined labels in [`run_final/`](review/__main__.py), and the board; `review` exits 1 when any unit failed, and the board is still built. Action phases distinguish advancing, wasteful and idle behavior. When the board is built, [`board/scores.py`](board/scores.py) combines them with the completion judgment, operator mistakes and failed attempts into execution and outcome scores for each episode and an execution score for each subgoal. Sensor findings include evidence, confidence and alternative explanations; inconclusive evidence need not produce a finding.
+Action phases distinguish advancing, wasteful and idle behavior. When the board is built, [`board/scores.py`](board/scores.py) combines them with the completion judgment, operator mistakes and failed attempts into execution and outcome scores for each episode and an execution score for each subgoal. Sensor findings include evidence, confidence and alternative explanations; inconclusive evidence need not produce a finding.
 
 Public exports, meaning the static site, downloads and [`/api/export`](board/serve.py), name the uploader's own metadata (file attributes, sidecar fields, publisher fields) but leave out its values, because no filter can recognize every secret a person writes there. A board served on 127.0.0.1 without `--allow-host` shows those values in its pages, and its downloads still leave them out. Add [`--publish-uploader-values`](board/serve.py) to `board serve` or `board static site` to publish them. Exports also redact access attributes, recognizable credential values and private access locations in every field.
 
@@ -169,7 +139,7 @@ The adapter retrieves the source files needed for that episode, including shared
 
 For a custom board, create [`data/boards/mine/manifest.json`](configs/quickstart/board.json) with the dataset, prepared episodes and run paths. [configs/quickstart/board.json](configs/quickstart/board.json) shows the structure with published-dataset severity rules. Use [`python -m board build`](board/build.py), [`clips`](board/clips.py), [`serve`](board/serve.py), and [`static media`](board/static.py)/[`static site`](board/static.py); each takes [`--help`](board/__main__.py). Refresh the board after changing field definitions. To edit them in the local viewer, add [`--dictionary-job JOB`](board/serve.py) to [`board serve`](board/serve.py). The board answers only to `localhost`, and when [`--host`](board/serve.py) is a network address, also to IP addresses and the machine's own names. A reverse proxy that keeps the visitor's Host header, such as `tailscale serve` or Caddy, therefore gets 403 until you pass that name with [`--allow-host NAME`](board/serve.py).
 
-Export the same review job as a static viewer by preparing the media first, then building the site:
+Export the same review as a static viewer by preparing the media first, then building the site:
 
 ```console
 uv run python -m board static media --board data/review/mine --clips data/review/mine/clips
@@ -178,7 +148,39 @@ uv run python -m board static site --board data/review/mine --clips data/review/
 
 The site is written to [`data/review/mine/static/<build_id>/`](board/static.py), with shared media in [`data/review/mine/static/media/`](board/static.py).
 
-A resumed review job keeps its settings, refuses changed ones, and reuses its verified preparation, so use a fresh `--out` to change source data, prepared inputs or annotation settings, or to apply newer reader fixes. After a code change, a recording labelled in one request is verified offline against its saved receipt, exact prompt and image order included, and its retained reply is rebound without another call; when that proof is missing or has changed, [`--force`](label/harness.py) relabels the episode with new paid calls. Unresolved charges stay reserved, and inspection blocked by the cap resumes when the allowance increases, before final annotation is dispatched.
+A resumed review keeps its settings, refuses changed ones, and reuses its verified preparation, so use a fresh `--out` to change source data, prepared inputs or annotation settings, or to apply newer reader fixes. After a code change, a recording labelled in one request is verified offline against its saved receipt, exact prompt and image order included, and its retained reply is rebound without another call; when that proof is missing or has changed, [`--force`](label/harness.py) relabels the episode with new paid calls. Unresolved charges stay reserved, and inspection blocked by the cap resumes when the allowance increases, before final annotation is dispatched.
+
+A free review stops after prepared [`episodes/`](review/__main__.py) and base requests in [`dry/`](review/__main__.py). Paid annotation adds model inputs and receipts in [`run/`](review/__main__.py), rejoined labels in [`run_final/`](review/__main__.py), and the board; `review` exits 1 when any unit failed, and the board is still built.
+
+This is an excerpt from a pressure glove episode's downloadable JSON. In the list and on the video, a finding shows its `video_card` words when it has one, otherwise its `list_copy`, otherwise its own headline and detail. Evidence IDs resolve to recorded streams and samples in the full export:
+
+```json
+{
+  "sensor_evidence": {
+    "findings": [
+      {
+        "start_s": 2.63,
+        "end_s": 3.03,
+        "headline": "Thumb loading likely eases more than index finger loading",
+        "detail": "As the cup moves away, the thumb response weakens substantially while the index finger response remains elevated.",
+        "confidence": "medium",
+        "video_card": {
+          "version": 1,
+          "headline": "The thumb likely presses less.",
+          "detail": "The index finger keeps pressing as the cup moves away."
+        },
+        "evidence": [
+          {
+            "sensor_id": "mechanics:signal:right_pressure",
+            "series_id": "mechanics:signal:right_pressure:derivation:regional_response:0",
+            "time_s": [2.63, 2.83, 2.93]
+          }
+        ]
+      }
+    ]
+  }
+}
+```
 
 Paid staged runs require a clean tracked checkout. [`--resume RUN --why "reason"`](label/run.py) retains the run and remaining budget, using the same commit, dataset, prepared episodes and run kind; add [`--cap`](label/run.py) to set a new cap, for example to finish a run its cap stopped. Pass [`--dataset`](label/run.py), [`--episodes`](label/run.py) and [`--kind`](label/run.py) again, and the original harness options after [`--`](label/run.py). Cross-host writers require working shared filesystem locks.
 
