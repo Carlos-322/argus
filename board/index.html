@@ -7437,19 +7437,20 @@ function renderEp(d, opts) {
   // (it is first called while the page is still being wired, so it looks up what it needs itself)
   let _scSig = null, _subByT = null;
   // the chip stands as tall as the caption beside it, following the caption as it gains or loses a row
-  if (window._scoreChipObserver) window._scoreChipObserver.disconnect();
-  window._scoreChipObserver = null;
+  if (globalThis._scoreChipObserver) globalThis._scoreChipObserver.disconnect();
+  globalThis._scoreChipObserver = null;
   const capEl = document.getElementById('video-overlay');
-  if (capEl && window.ResizeObserver) {
-    window._scoreChipObserver = new ResizeObserver(() => fitCaptionBesideChip());
-    window._scoreChipObserver.observe(capEl);
-    if (capEl.offsetParent) window._scoreChipObserver.observe(capEl.offsetParent);
+  if (capEl && typeof ResizeObserver !== 'undefined') {
+    globalThis._scoreChipObserver = new ResizeObserver(() => fitCaptionBesideChip());
+    globalThis._scoreChipObserver.observe(capEl);
+    if (capEl.offsetParent) globalThis._scoreChipObserver.observe(capEl.offsetParent);
   }
   // while the chip shows, the centred caption narrows so it clears the chip on the left (and keeps the same margin on
   // the right); when the video is too narrow for both, the chip stands above the caption instead
   function fitCaptionBesideChip() {
     const chip = document.getElementById('score-chip');
-    if (!chip || !capEl) return;
+    // layout is the browser's: without one (a page function run on its own) there is nothing to fit
+    if (!chip || !capEl || !chip.style || !capEl.style || typeof getComputedStyle === 'undefined') return;
     // on a narrow screen the caption sits under the video, not over it: the chip keeps its own size in the corner
     if (getComputedStyle(capEl).position !== 'absolute') {
       chip.style.height = ''; capEl.style.maxWidth = ''; chip.classList.remove('above'); chip.classList.add('corner');
