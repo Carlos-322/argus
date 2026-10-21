@@ -223,6 +223,49 @@ def _retry_after(headers, attempt: int) -> float:
     return min(60.0, 4.0 * 2 ** attempt)
 
 
+# A request the provider failed on its side (the reply never came or was cut off, or the provider reported an error
+# inside the reply) is sent again automatically, up to AUTO_RESENDS more times per unit, after AUTO_RESEND_DELAYS_S.
+# Each attempt that may have been billed keeps its charge in the unit's billing history and against the cap, as an
+# explicit --retry-received does; past the bound only --retry-received sends it again. A reply the model wrote that
+# does not parse, a reply cut at the output limit and a complete annotation are never resent automatically.
+AUTO_RESENDS = 2
+AUTO_RESEND_DELAYS_S = (30.0, 120.0)
+
+
+def provider_failure(record: dict) -> str | None:
+    """Why a unit's last attempt failed on the provider's side, or None: no verified response (a request cut off or
+    whose machine stopped), or the provider's own error inside a reply it delivered."""
+    if not isinstance(record, dict) or record.get('dry_run') or record.get('parse_ok') is True:
+        return None
+    resp = record.get('response')
+    if resp is None and record.get('final_dispatch_outcome') in ('claimed', 'unverified'):
+        return str(record.get('no_reply') or 'the request has no verified response')[:200]
+    if isinstance(resp, dict) and record.get('finish_reason') != 'length':
+        failure = reply_error(resp)
+        if failure is not None:
+            return f'the provider returned an error in the reply ({failure})'
+    return None
+
+
+def dispatched_attempts(record: dict) -> int:
+    """How many times this unit's final request was sent: the attempts in its billing history and the last one,
+    never counting an attempt that was not dispatched."""
+    # an attempt was sent when its request was claimed for dispatch or anything came back (a completed record names no
+    # dispatch outcome, but holds the response); one refused before dispatch or built in a dry run was not
+    sent = lambda r: (isinstance(r, dict) and not r.get('dry_run')
+                      and r.get('final_dispatch_outcome') != 'not dispatched'
+                      and (r.get('final_dispatch_outcome') in ('claimed', 'unverified', 'received')
+                           or r.get('response') is not None or r.get('finish_reason') is not None))
+    history = record.get('final_cost_history') if isinstance(record, dict) else None
+    return sum(1 for r in history or [] if sent(r)) + (1 if sent(record) else 0)
+
+
+def auto_resend(record: dict) -> str | None:
+    """The provider failure to send this unit again for, while it has been sent at most AUTO_RESENDS times, or None."""
+    why = provider_failure(record)
+    return why if why and dispatched_attempts(record) <= AUTO_RESENDS else None
+
+
 def reply_error(resp: dict) -> str | None:
     """The provider's own failure carried inside a reply it delivered with HTTP 200 (finish_reason error, or an error
     on the choice, eg an overloaded upstream), or None. Such a reply's text is a fragment, never an answer to parse."""
@@ -1803,6 +1846,10 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                 stale[ep.name] = f"saved output {q.name} has changed or missing input; use --force to refresh{hint}"
                 return True
         if any(record.get('final_dispatch_outcome') in ('claimed', 'unverified') for _, record in records):
+            why = None if dry or annotation_complete(records[0][1]) else auto_resend(records[0][1])
+            if why and ep.name not in retry_received:
+                auto_resent[ep.name] = (why, dispatched_attempts(records[0][1]))
+                return False
             if ep.name in retry_received and not dry:
                 # The caller named this unit, accepting that its unknown charge may have been real. The unresolved
                 # attempt stays in the billing history with its reservation (_final_cost_history), so the cap still
@@ -1810,8 +1857,10 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                 return False
             saved_failures.add(ep.name)
             retryable_received.add(ep.name)
-            unverified[ep.name] = ('saved dispatch has an unresolved charge (it may have been billed); no automatic '
-                                   f'paid retry. --retry-received {ep.name} sends this unit alone again')
+            unverified[ep.name] = ('saved dispatch has an unresolved charge (it may have been billed)'
+                                   + (f' after {dispatched_attempts(records[0][1])} attempts'
+                                      if provider_failure(records[0][1]) else '')
+                                   + f'; --retry-received {ep.name} sends this unit alone again')
             if not dry and any(record.get('parse_ok') is True and not annotation_complete(record) for _, record in records):
                 stale[ep.name] = 'saved annotation is unusable and its charge is unresolved; use --force to refresh explicitly'
             return True
@@ -1826,10 +1875,16 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                     return True
                 if ep.name in retry_received:
                     return False
+                why = auto_resend(record)
+                if why:
+                    auto_resent[ep.name] = (why, dispatched_attempts(record))
+                    return False
                 saved_failures.add(ep.name)
                 retryable_received.add(ep.name)
                 unverified[ep.name] = ('saved paid reply needs reparse or explicit '
-                                       f'--retry-received {ep.name}; no automatic paid retry')
+                                       f'--retry-received {ep.name}'
+                                       + (f'; sent {dispatched_attempts(record)} times' if provider_failure(record)
+                                          else '; a reply the model wrote is never resent automatically'))
                 return True
         record = records[0][1]
         if dry:
@@ -1862,7 +1917,11 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
         return complete
 
     stale, unverified, saved_failures, retryable_received = {}, {}, set(), set()
+    auto_resent = {}       # unit -> (the provider failure it is sent again for, how many times it was sent)
     todo = [ep for ep in episodes if not is_done(ep)]
+    for name, (why, sent) in sorted(auto_resent.items()):
+        print(f'RESEND {name}: sent {sent} time{"s" if sent != 1 else ""}, {why}; sending it again '
+              f'(automatic, at most {AUTO_RESENDS + 1} sends)', file=sys.stderr, flush=True)
     # a marker says what this run found; one left by an earlier run for a unit now current would say it twice
     for name in {ep.name for ep in episodes} - set(stale) - set(unverified):
         (out_dir / f"stale_{name}.json").unlink(missing_ok=True)
@@ -2017,7 +2076,23 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
         try:
             if stopping.is_set():
                 return ('cancelled', ep, 'Label execution interrupted before work started')
-            return work_claimed(ep)
+            result = work_claimed(ep)
+            for delay in AUTO_RESEND_DELAYS_S[:AUTO_RESENDS]:
+                if dry or result[0] not in ('fail', 'invalid'):
+                    break
+                saved = billing_record(out_dir, out_for(ep).name)
+                why = auto_resend(saved[1]) if saved is not None and not annotation_complete(saved[1]) else None
+                if not why:
+                    break
+                print(f'RESEND {ep.name}: sent {dispatched_attempts(saved[1])} times, {why}; sending it again in '
+                      f'{delay:g}s (automatic, at most {AUTO_RESENDS + 1} sends)', file=sys.stderr, flush=True)
+                if stopping.wait(delay):
+                    break
+                with spend_lock:
+                    pending[ep] = 0.0
+                    spend_lock.notify_all()
+                result = work_claimed(ep)
+            return result
         finally:
             with spend_lock:
                 pending.pop(ep, None)

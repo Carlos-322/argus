@@ -160,7 +160,7 @@ def test_review_unknown_retry_names_fail_before_attempt_metadata(tmp_path, monke
     assert (job / 'run' / 'run.json').read_bytes() == before
 
 
-def test_review_force_recovers_unknown_dispatch_with_original_hold(tmp_path, monkeypatch):
+def test_review_force_recovers_unknown_dispatch_with_original_hold(resends_used_up, tmp_path, monkeypatch):
     job, run = review_fixture(tmp_path, monkeypatch)
     calls = []; funded_provider(monkeypatch, calls)
     provider = harness.urllib.request.urlopen

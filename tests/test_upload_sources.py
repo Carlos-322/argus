@@ -190,7 +190,7 @@ def test_every_private_name_is_valid_and_its_own(tmp_path, length):
 
 
 @pytest.mark.parametrize('name', ['episode_short', 'episode_' + 'a' * 187])
-def test_a_dispatch_left_unresolved_blocks_a_plain_resume_at_any_name_length(tmp_path, monkeypatch, name):
+def test_a_dispatch_left_unresolved_blocks_a_plain_resume_at_any_name_length(resends_used_up, tmp_path, monkeypatch, name):
     """Review of 2514ce5: for a 195-byte output name the claim of a dispatch whose reply was lost was written under a
     shortened name its readers never looked for, so a plain resume paid again and its reservation left the ledger. The
     claim's name is the base format exactly, so the resume finds it, sends nothing and the ledger keeps it."""

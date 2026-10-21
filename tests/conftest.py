@@ -13,6 +13,22 @@ def _uploads_read_in_this_process(monkeypatch):
     monkeypatch.setenv('ARGUS_READER_ISOLATION', '0')
 
 
+@pytest.fixture(autouse=True)
+def _automatic_resends_without_waiting(monkeypatch):
+    """A unit the provider failed is sent again after a backoff (label/harness.py AUTO_RESEND_DELAYS_S); tests send it
+    again at once."""
+    from label import harness
+    monkeypatch.setattr(harness, 'AUTO_RESEND_DELAYS_S', (0.0,) * len(harness.AUTO_RESEND_DELAYS_S))
+
+
+@pytest.fixture
+def resends_used_up(monkeypatch):
+    """A unit past its automatic resends (label/harness.py AUTO_RESENDS): what Argus does once none is left, which is
+    to keep every hold and send nothing more without --retry-received or --force."""
+    from label import harness
+    monkeypatch.setattr(harness, 'AUTO_RESENDS', 0)
+
+
 _SHARD = {}
 
 

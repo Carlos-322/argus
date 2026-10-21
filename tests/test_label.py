@@ -841,7 +841,7 @@ def _assert_verified_selection_charge(record):
     assert inspection['rounds'][0]['response']['usage']['cost'] == pytest.approx(.004)
 
 
-def test_final_timeout_claim_survives_resume_without_second_dispatch(inspect_every_field, tmp_path, monkeypatch):
+def test_final_timeout_claim_survives_resume_without_second_dispatch(resends_used_up, inspect_every_field, tmp_path, monkeypatch):
     ep, _ = _packed_episode(tmp_path)
     out = tmp_path / 'out'
     calls = []
@@ -944,7 +944,7 @@ def test_run_batch_does_not_replay_successful_reply_with_missing_usage(inspect_e
     assert label_spend(tmp_path / 'job') == pytest.approx(receipt['final_reserved_usd'] + .004)
 
 
-def test_final_claim_survives_worker_crash_and_budget_refusal_has_no_dispatch(inspect_every_field, tmp_path, monkeypatch):
+def test_final_claim_survives_worker_crash_and_budget_refusal_has_no_dispatch(resends_used_up, inspect_every_field, tmp_path, monkeypatch):
     ep, _ = _packed_episode(tmp_path)
     calls = []
     def crash(content, *args, **options):

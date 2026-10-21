@@ -332,8 +332,9 @@ def test_run_resume_before_primary_output_keeps_claim_and_finishes_untouched_wor
     monkeypatch.setenv('OPENROUTER_API_KEYS', 'sk-or-fixture')
     def finish(run_dir, info, command, slice_dir, mode):
         monkeypatch.setattr(sys, 'argv', command[2:])
-        # An untouched sibling can finish while the interrupted charge remains unresolved.
-        assert harness.main() == (0 if force else 1)
+        # The untouched sibling finishes, and the interrupted request (killed after dispatch, its charge unknown) is
+        # sent again automatically with its first reservation still counted, or refreshed by --force.
+        assert harness.main() == 0
     monkeypatch.setattr(run, 'finish', finish)
     args = SimpleNamespace(resume=folder, dataset='fixture', kind='full', why='killed child', concurrency=1,
         harness_args=['--cell-w', '128', '--max-tokens', '100'] + (['--force'] if force else []))
@@ -343,9 +344,12 @@ def test_run_resume_before_primary_output_keeps_claim_and_finishes_untouched_wor
         assert (folder / 'out' / 'episode_0.json').exists()
         assert output_spend(folder / 'out') == pytest.approx(spent + .012)
     else:
-        assert claim.read_bytes() == before and not (folder / 'out' / 'episode_0.json').exists()
-        assert sent == ['selection', 'final']
-        assert output_spend(folder / 'out') == pytest.approx(spent + .006)
+        saved = json.loads((folder / 'out' / 'episode_0.json').read_text())
+        assert saved['parse_ok'] is True and harness.dispatched_attempts(saved) == 2
+        assert any(h.get('final_dispatch_outcome') == 'claimed' for h in saved['final_cost_history'])
+        # the resend reuses the saved inspection and pays only the final request again; --force redoes both
+        assert sent == ['final', 'selection', 'final']
+        assert output_spend(folder / 'out') == pytest.approx(spent + .009)
 
 
 def test_inspection_replay_recomputes_failure_notes_without_rebilling(tmp_path, monkeypatch):

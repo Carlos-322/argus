@@ -129,7 +129,7 @@ def test_inspection_turned_off_sends_only_the_annotation_and_a_touch_sensor_is_s
 
 
 @pytest.mark.parametrize('cost', [0, .02])
-def test_a_provider_error_inside_a_200_reply_is_retried_when_unbilled_and_named_when_billed(tmp_path, monkeypatch,
+def test_a_provider_error_inside_a_200_reply_is_retried_at_once_when_unbilled_and_sent_again_when_billed(tmp_path, monkeypatch,
                                                                                            capsys, cost):
     # OpenAI overloaded behind OpenRouter: HTTP 200, finish_reason error, an error on the choice and a fragment of JSON
     sent = []
@@ -156,11 +156,15 @@ def test_a_provider_error_inside_a_200_reply_is_retried_when_unbilled_and_named_
         assert harness.run_batch([ep], out, **args) == 0                   # retried at once, nothing paid twice
         assert sent == ['final', 'final'] and json.loads(result.read_text())['parse_ok'] is True
         return
-    assert harness.run_batch([ep], out, **args) == 1                       # billed: kept, never resent silently
+    # billed: kept as received and named as the provider's error, then sent again automatically (AUTO_RESENDS), with
+    # the failed attempt's charge still counted beside the one that worked
+    assert harness.run_batch([ep], out, **args) == 0 and sent == ['final', 'final']
     record = json.loads(result.read_text())
-    assert record['parse_ok'] is False and 'provider returned an error in the reply (502 Our servers are currently overloaded)' in record['labels']['_parse_error']
-    assert harness.run_batch([ep], out, **args) == 1 and sent == ['final']
-    assert harness.run_batch([ep], out, retry_received=[ep.name], **args) == 0 and sent == ['final', 'final']
+    assert record['parse_ok'] is True and harness.dispatched_attempts(record) == 2
+    first = record['final_cost_history'][-1]
+    assert 'provider returned an error in the reply (502 Our servers are currently overloaded)' in first['labels']['_parse_error']
+    assert harness.episode_cost(record) >= cost + .1 - 1e-9
+    assert harness.run_batch([ep], out, **args) == 0 and sent == ['final', 'final']     # done: nothing more is sent
 
 
 def test_a_run_labelled_before_inspection_could_be_set_is_told_how_to_resume_it_as_paid(tmp_path, monkeypatch, capsys):

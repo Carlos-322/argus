@@ -142,7 +142,7 @@ def test_module_cli_retires_rejected_key_without_losing_paid_inspection_or_route
 
 
 @pytest.mark.parametrize('response_kind', ['body_error', 'timeout', 'unproven_key_error'])
-def test_unverified_final_key_error_never_releases_hold_or_fails_over(tmp_path, monkeypatch, response_kind):
+def test_unverified_final_key_error_never_releases_hold_or_fails_over(resends_used_up, tmp_path, monkeypatch, response_kind):
     import io
     ep = observed_packed_episode(tmp_path)
     out = tmp_path / 'job' / 'run' / 'out'
@@ -854,7 +854,7 @@ def test_cache_only_inspection_does_not_consume_remaining_cap_again(tmp_path, mo
 
 
 @pytest.mark.parametrize('unknown', [False, True])
-def test_dry_run_preserves_prior_paid_invoices(tmp_path, monkeypatch, unknown):
+def test_dry_run_preserves_prior_paid_invoices(resends_used_up, tmp_path, monkeypatch, unknown):
     ep = observed_packed_episode(tmp_path)
     job = tmp_path / 'job'
     out = job / 'run' / 'out'
