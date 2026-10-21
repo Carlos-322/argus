@@ -206,34 +206,46 @@ def task_key(d: dict) -> frozenset:
 
 
 class _Near:
-    """Word sets of one scope, found again by any later set sharing at least `share` of its words (Jaccard), through
-    each set's rarest words only (two sets that share that much must share one of each other's rarest few), so a word
-    common to every set costs nothing."""
+    """Word sets of one scope, found again by any later set sharing at least `share` of its words (Jaccard). A set is
+    indexed only under its rarest words (two sets that share that much must share one of each other's rarest few), and
+    each entry keeps the set's size and the word's place in it, so a whole run of entries that cannot reach `share`
+    (too long or short, or the shared word too late in both) is skipped without a look. The answer is exact."""
 
     def __init__(self, share: float, all_sets):
         self.share, self.freq, self.index = share, collections.Counter(), {}
         for words in all_sets:
             self.freq.update(words)
 
-    def _prefix(self, words):
-        ordered = sorted(words, key=lambda w: (self.freq[w], w))
-        return ordered[:len(ordered) - math.ceil(self.share * len(ordered)) + 1]
+    def _ordered(self, words):
+        return sorted(words, key=lambda w: (self.freq[w], w))
+
+    def _prefix_len(self, n):
+        return n - math.ceil(self.share * n) + 1
 
     def add(self, words, value):
-        for w in self._prefix(words):
-            self.index.setdefault(w, []).append((words, value))
+        ordered = self._ordered(words)
+        for pos, w in enumerate(ordered[:self._prefix_len(len(ordered))]):
+            self.index.setdefault(w, {}).setdefault((len(ordered), pos), []).append((words, value))
 
     def near(self, words):
         """[(Jaccard, other words, value)] for every added set within share of words."""
-        out, seen = [], set()
-        for w in self._prefix(words):
-            for other, value in self.index.get(w, []):
-                if (other, value) in seen:
+        t, out, seen = self.share, [], set()
+        ordered = self._ordered(words)
+        n = len(ordered)
+        for pa, w in enumerate(ordered[:self._prefix_len(n)]):
+            for (size, pb), entries in self.index.get(w, {}).items():
+                if size < t * n - 1e-9 or size > n / t + 1e-9:
                     continue
-                seen.add((other, value))
-                j = len(words & other) / len(words | other)
-                if j >= self.share:
-                    out.append((j, other, value))
+                need = math.ceil(t / (1 + t) * (n + size) - 1e-9)
+                if 1 + min(n - pa - 1, size - pb - 1) < need:
+                    continue
+                for other, value in entries:
+                    if (other, value) in seen:
+                        continue
+                    seen.add((other, value))
+                    j = len(words & other) / len(words | other)
+                    if j >= t:
+                        out.append((j, other, value))
         return out
 
 

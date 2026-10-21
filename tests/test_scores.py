@@ -371,3 +371,14 @@ def test_similar_subgoals_never_include_the_episodes_own_other_subgoals():
     recs["me.json"] = _given(_record("factory", 50.0, [(0, 50, "advancing", 1.0)], units), "fit the units")
     st = scores.score_board(recs)["me.json"]["subgoals"][0]
     assert st["peer_basis"] is None and st["peers"] == 0
+
+
+def test_labels_that_all_share_their_common_words_stay_fast_to_compare():
+    import time
+    recs = {}
+    for i in range(3000):
+        recs[f"e{i}.json"] = _given(_record(f"t{i}", 10.0, [(0, 4, "advancing", 0.5), (4, 10, "advancing", 1.0)],
+                                            [(4, f"grasp widget alpha{i} beta{i * 7919}")]), f"task {i}")
+    t = time.time()
+    scores.score_board(recs)
+    assert time.time() - t < 10
