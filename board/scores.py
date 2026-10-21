@@ -11,7 +11,7 @@ Four dimensions, each 0 to 10, each with the numbers it came from (inputs), so t
 | Dimension | Question | Built from | Compared |
 |---|---|---|---|
 | outcome | How much of the labelled goal was achieved | completion, the progress reached | absolute |
-| cleanliness | How free the work is of mistakes and wasted motion | wasteful time, the operator mistakes the board counts (by severity, half when recovered), failed attempts no mistake explains | absolute |
+| cleanliness | How free the work is of mistakes and wasted motion | wasteful time, the operator mistakes the board counts (by severity, half when recovered), failed attempts no mistake explains (tries in a row with no success between them count once) | absolute |
 | efficiency | How quickly the goal was reached, for this task | time from the first action to the goal | within the task group |
 | fluency | How steadily the work went | hesitation inside the work (absolute), and actions per unit of progress | hesitation absolute, actions within the task group |
 
@@ -49,7 +49,7 @@ def _num(x):
 VERSION = 2
 MIN_PEERS = 5                     # a relative dimension needs this many other demonstrations of the same task
 SEVERITY_POINTS = {"low": 0.5, "medium": 1.5, "high": 3.0}
-FAILED_ATTEMPT_POINTS = 1.0       # a key event that failed, beyond the mistake that may describe it
+FAILED_ATTEMPT_POINTS = 1.0       # a failed incident (_incidents), beyond the mistake that may describe it
 RECOVERY_WINDOW_S = 1.5           # a recovery belongs to a mistake when its failure is this close to the mistake's time
 OUTCOME_CAPS = {"success": 1.0, "success_then_undone": 0.7, "partial": 0.9, "failure": 0.4}
 EXECUTION_WEIGHTS = {"cleanliness": 0.5, "efficiency": 0.25, "fluency": 0.25}
@@ -177,7 +177,7 @@ def facts(d: dict) -> dict:
     reached = max(progress) if progress else None
     mistakes, explaining = _mistakes(d)
     any_mistakes = len(explaining)
-    failed = [k for k in _list(d.get("key_events")) if isinstance(k, dict) and k.get("outcome") == "failure"]
+    incident = _incidents(d)
     # progress restarts at each subtask, so a subtask's progress is the furthest its own steps got
     tasks = []
     for t in _list(d.get("tasks")):
@@ -190,7 +190,28 @@ def facts(d: dict) -> dict:
             "wasteful_s": wasteful, "hesitation_s": hesitation, "window_s": (end - start) if window else None,
             "actions": sum(1 for e in steps if e.get("contribution") == "advancing"), "progress_reached": reached,
             "outcome": _verdict(comp) if comp else None, "mistakes": mistakes, "any_mistakes": any_mistakes,
-            "failed_attempts": len(failed), "relation": _str(_dict(d.get("goal_alignment")).get("relation"))}
+            "failed_attempts": len(set(incident.values())),
+            "relation": _str(_dict(d.get("goal_alignment")).get("relation"))}
+
+
+def _incidents(d: dict) -> dict:
+    """{id(failed key event): its incident}. Failed tries in a row with no success between them are one incident, the
+    way the prompt makes them one operator mistake ("the failed tries at one aim"), so a peel retried ten times costs
+    as one failed attempt, not ten. A failed key event with no time is an incident of its own."""
+    events = [k for k in _list(d.get("key_events")) if isinstance(k, dict)]
+    timed = sorted((k for k in events if _num(k.get("t_s")) is not None), key=lambda k: k["t_s"])
+    out, current, count = {}, None, 0
+    for k in timed:
+        if k.get("outcome") == "failure":
+            if current is None:
+                current, count = count, count + 1
+            out[id(k)] = current
+        elif k.get("outcome") == "success":
+            current = None
+    for k in events:
+        if k.get("outcome") == "failure" and id(k) not in out:
+            out[id(k)], count = count, count + 1
+    return out
 
 
 def _content_words(text) -> frozenset:
@@ -403,6 +424,7 @@ def subgoals(d: dict, f: dict) -> list:
     failed_all = sorted((k for k in _list(d.get("key_events")) if isinstance(k, dict) and k.get("outcome") == "failure"
                          and _num(k.get("t_s")) is not None), key=lambda k: k["t_s"])
     failed_t = [k["t_s"] for k in failed_all]
+    incident = _incidents(d)
     mistakes = sorted((m for m in f["mistakes"] if m["t_s"] is not None), key=lambda m: m["t_s"])
     mistake_t = [m["t_s"] for m in mistakes]
     any_mistake_t = sorted(t for t in _mistakes(d)[1] if t is not None)
@@ -445,7 +467,8 @@ def subgoals(d: dict, f: dict) -> list:
         ms = mistakes[bisect.bisect_left(mistake_t, a):bisect.bisect_left(mistake_t, b)]
         failed = failed_all[bisect.bisect_left(failed_t, a):bisect.bisect_left(failed_t, b)]
         explained = bisect.bisect_left(any_mistake_t, b) - bisect.bisect_left(any_mistake_t, a)
-        clean = 10 * (1 - share) - sum(_points(m) for m in ms) - FAILED_ATTEMPT_POINTS * max(0, len(failed) - explained)
+        tried = len({incident[id(k)] for k in failed})
+        clean = 10 * (1 - share) - sum(_points(m) for m in ms) - FAILED_ATTEMPT_POINTS * max(0, tried - explained)
         out.append({"start_s": a, "end_s": b, "label": label, "outcome": outcome, "goal": goal, "task": task,
                     "reached": outcome in ("success", "success_then_undone"),
                     "duration_s": round(b - a, 2),

@@ -359,9 +359,24 @@ def test_a_mistake_listed_twice_explains_one_failed_attempt_not_two():
     rec["operator_mistakes"] = [{"issue": "missed the handle", "severity": "high", "category": "missed_grasp",
                                  "t_s": 5.0}] * 2
     rec["key_events"] = [{"t_s": 4.0, "kind": "grasp", "outcome": "failure", "label": "grasp handle"},
+                         {"t_s": 6.0, "kind": "grasp", "outcome": "success", "label": "handle held"},
                          {"t_s": 8.0, "kind": "grasp", "outcome": "failure", "label": "grasp handle"}]
     s = scores.score_board({"m.json": rec})["m.json"]
     assert s["inputs"]["unexplained_failed_attempts"] == scores.FAILED_ATTEMPT_POINTS and s["cleanliness"] == 6.0
+
+
+def test_tries_in_a_row_with_no_success_between_them_cost_as_one_failed_attempt():
+    # a sticker peel retried ten times is one incident, as the prompt makes it one mistake; a success starts a new one
+    rec = _record("peel the stickers", 30.0, [(0, 30, "advancing", 1.0)])
+    rec["key_events"] = ([{"t_s": 1.0 + i, "kind": "peel", "outcome": "failure", "label": "sticker stays"}
+                          for i in range(10)]
+                         + [{"t_s": 12.0, "kind": "peel", "outcome": "success", "label": "sticker off"},
+                            {"t_s": 14.0, "kind": "peel", "outcome": "failure", "label": "next sticker stays"},
+                            {"t_s": 15.0, "kind": "peel", "outcome": "failure", "label": "next sticker stays"},
+                            {"kind": "peel", "outcome": "failure", "label": "a try with no time"}])
+    s = scores.score_board({"p.json": rec})["p.json"]
+    assert s["inputs"]["unexplained_failed_attempts"] == 3 * scores.FAILED_ATTEMPT_POINTS     # two runs and the untimed
+    assert s["cleanliness"] == 7.0
 
 
 def test_a_staged_mistake_is_charged_like_the_board_counts_it_and_one_without_text_is_not_read():
