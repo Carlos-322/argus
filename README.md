@@ -11,6 +11,8 @@
   </tr>
 </table>
 
+<p align="center"><ins><strong>Argus has many tunable settings, and their defaults decide both what a run costs and what it labels. Read <a href="#settings">Settings</a> in full before a paid run.</strong></ins></p>
+
 ### \* DiverseUMI (October 2026)
 
 We released [DiverseUMI](https://huggingface.co/datasets/Pantheon-inc/DiverseUMI-sample100), 99.6 hours of bimanual UMI annotated by Argus at Sol 6.1 High. It spans 12,219 episodes across 179 skills, each with dense action, outcome and progress labels, key events, object state changes, scene graphs and operator recoveries, alongside SLAM-tracked wrist poses and gripper actions.
@@ -82,6 +84,8 @@ uv run python -m board serve --board data/review/mine --clips data/review/mine/c
 ```
 
 [`--data`](review/__main__.py) accepts a folder, file, archive or HTTP(S) URL. Set [`--rig`](review/__main__.py) to [`teleop_arms`](review/__main__.py), [`handheld_gripper`](review/__main__.py) or [`ego_head`](review/__main__.py) for teleop, UMI or human ego, respectively. Argus detects the format and the evidence available, and RGB-only data runs through the same pipeline. [Data Review](https://data.pantheon.inc/review) uses the same default policy, though its deployed version and upload limits can differ.
+
+### Settings
 
 | Setting | Default | Options |
 |---|---|---|
