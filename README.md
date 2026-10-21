@@ -24,8 +24,8 @@ Recently, [Midcentury AI](https://www.midcentury.xyz/blog/optimizing-argus) push
 
 ### \* Argus improvements (October 2026)
 
-Argus now annotates depth, tactile and other sensor data jointly with video, state and actions. By default the model inspects depth and tactile data at full rate, while force/torque, arm signals and other recorded fields reach it as sampled readings and are inspected only with [`--inspection all`](#settings).
-Argus also scores each episode out of 10 for execution and outcome, and each subgoal for execution, deterministically from the annotations. Outcome is whether the goal was reached and how far progress got; execution is a weighted mean of cleanliness, steadiness and speed, each defined in [`board/scores.py`](board/scores.py). A subgoal is a lasting state change the goal depends on, such as a block placed in the row, never a pick or a grasp.
+Argus now annotates depth, tactile and other sensor data jointly with video, state and actions. By default the model inspects any recording with depth or a touch sensor, reading any of its fields at full rate; a recording with neither, such as one with only arm signals and a wrist force/torque sensor, is inspected only with [`--inspection all`](#settings), and its fields still reach the model as sampled readings.
+Argus also scores each episode out of 10 for execution and outcome, and each subgoal for execution, deterministically from the annotations. Outcome is whether the goal was reached and how far progress got; execution is a weighted mean of cleanliness, steadiness and speed, which [`board/scores.py`](board/scores.py) defines as cleanliness, fluency and efficiency. A subgoal is a lasting state change the goal depends on, such as a block placed in the row, never a pick or a grasp.
 
 ## Overview
 
@@ -53,7 +53,7 @@ It is the only harness to combine native multi-format ingestion (rather than res
 | Tactile, inspected by default | Pressure, normal/shear force, contact arrays and optical tactile images support analysis of grip, contact distribution and surface motion. Full-array patterns, individual-cell and regional responses, and hand geometry are compared with video and gripper state. Optical tactile images are compared at the moments they change most, and arrays with regional evidence get a separate regional pass. Array shape alone does not establish anatomy or force, and response changes alone do not establish slip. |
 | Depth, inspected by default | Metric depth supports camera-relative distance and separation when units, calibration and temporal alignment are known. Relative depth remains relative. |
 | Proprioception and actions | Joint states, end-effector poses, gripper states and action trajectories provide motion context. Training targets retain their declared semantics rather than being assumed to be executed commands. |
-| Other episode fields | Force/torque, numeric channels, event flags, waveform packets and structured metadata reach the prompt as range lines, with a reading at each sampled instant only for channels the sampling rate resolves and that no other channel already carries. [`--inspection all`](label/policy.py) also inspects them. |
+| Other episode fields | Force/torque, numeric channels, event flags, waveform packets and structured metadata reach the prompt as range lines, with a reading at each sampled instant only for channels the sampling rate resolves and that no other channel already carries. [`--inspection all`](label/policy.py) also inspects a recording whose only extra fields are these. |
 | Task context | Instructions, annotations and calibration metadata provide context. The VLM checks publisher claims against the recording rather than assuming their correctness. |
 
 ## Install and review
@@ -84,9 +84,9 @@ uv run python -m board serve --board data/review/mine --clips data/review/mine/c
 |---|---|---|
 | [`--model`](label/policy.py) | `openai/gpt-6-astra` | `openai/gpt-6.1-sol` (Sol 6.1), or `google/gemini-4-argon` (Gemini 4 Argon) with an OpenRouter key, priced from OpenRouter's published rates ([`label/pricing.py`](label/pricing.py)) |
 | [`--reasoning`](label/policy.py) | Medium for Astra, high for every other model | `none`, `minimal`, `low`, `medium`, `high` or `xhigh` |
-| [`--sample-fps`](label/policy.py) | A frame every 1.5s for teleop, 1s for UMI and 0.5s for human ego, plus the edges of still spans and the first and last frames; Sol samples at least 1 FPS everywhere | `2` catches subsecond fumbles and rapid recoveries, at the cost of more images and shorter request windows |
+| [`--sample-fps`](label/policy.py) | A frame every 1.5s for teleop, 1s for UMI and 0.5s for human ego, plus the edges of still spans and the first and last frames; Sol samples every 1s on every rig, human ego included, and refuses sparser sampling | `2` catches subsecond fumbles and rapid recoveries, at the cost of more images and, on teleop and UMI, shorter request windows |
 | [`--task-mode`](label/policy.py) | From source metadata, otherwise `episode` | `session` labels the recording as a sequence of tasks, each with its own outcome, which suits freeform recordings and repeated cycles; human ego uses the activities schema |
-| [`--inspection`](label/policy.py) | `auto`, for recordings with depth or a touch sensor | `all` also inspects force/torque, arm signals, actions and source metadata; `off` makes no inspection call |
+| [`--inspection`](label/policy.py) | `auto`, for recordings with depth or a touch sensor | `all` also inspects recordings with no depth or touch sensor, such as one with only force/torque, arm signals, actions or source metadata; `off` makes no evidence selection call, though a tactile array still gets its separate regional pass |
 | [`--field-dictionary`](review/__main__.py) | `on` | `off` skips the one call per upload (at most $3) that asks a model what unclear recorded fields mean; fields are then labelled as recorded |
 | [`--cap`](review/__main__.py) | $20 | The most the job may spend, counting every call and outstanding reservation |
 | [`--max-minutes`](review/__main__.py) | All footage | Reads at most this many minutes of footage |
@@ -205,7 +205,7 @@ Comparison caps apply per model run and gate caps per recording setup. Sampling 
 
 Comparisons distinguish missing responses from replies that failed to parse. Cost reports separate verified charges from unresolved reservations, and a gate cost rate is reported only when every invoice is verified. Cold-cost estimates require the default model and a single paid attempt per unit.
 
-[`uv run --frozen --offline pytest -q -ra`](.github/workflows/ci.yml) runs offline tests; viewer tests also require Node.js. CI runs the same command as eight shards side by side, each a set of whole test files balanced by the times in [`tests/shard_times.json`](tests/shard_times.json); set [`ARGUS_TEST_SHARD=1/4`](tests/sharding.py) to run one shard locally. CI uses the locked environment, Node, ffmpeg and ffprobe without provider credentials or dataset access. Secret scans cover the committed tree and reachable history.
+[`uv run --frozen --offline pytest -q -ra`](.github/workflows/ci.yml) runs offline tests; viewer tests also require Node.js. CI runs the same command as eight shards side by side, each a set of whole test files balanced by the times in [`tests/shard_times.json`](tests/shard_times.json); set [`ARGUS_TEST_SHARD=1/8`](tests/sharding.py) to run CI's first shard locally. CI uses the locked environment, Node, ffmpeg and ffprobe without provider credentials or dataset access. Secret scans cover the committed tree and reachable history.
 
 </details>
 
