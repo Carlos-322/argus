@@ -308,6 +308,9 @@ def test_a_machine_role_never_turns_a_camera_the_reader_placed_into_a_touch_sens
     placed_gelsight = {'key': 'left_gripper_cam', 'name': 'left', 'role_provenance': 'recorded_name',
                        'mounting': 'actor', 'desc': 'GelSight Mini on the left gripper pad'}
     assert camera_role({**ctx, 'cameras': {'left': placed_gelsight}}, 'left', machine) == 'tactile_image'
+    from prepare.formats import is_sensing
+    assert all(is_sensing(n) for n in ('GelSight Mini', 'GelSightLeft', 'gel_sight_right', 'gelsight', 'digit_0'))
+    assert not any(is_sensing(n) for n in ('left_gripper_cam', 'digital_cam', 'right_wrist_cam', 'sight_gel'))
     read = lambda c, view, kind: machine if view == 'right' else {}
     monkeypatch.setattr(dictionary_context, 'prepared_interpretation', read)
     monkeypatch.setattr(tactile_capture, 'prepared_interpretation', read)
