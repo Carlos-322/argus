@@ -1004,7 +1004,7 @@ emit them as a top-level "tasks" list, in time order:
   timeline. A new task begins when the demonstrator turns to a different objective, or starts the same unit of work
   again after its end-state was reached: in a cycle, where the objects are reset and the same work repeats, each
   repeat is its own task, judged on its own. Stages toward one end state are one task with subgoals, never separate
-  tasks: nesting the left bowls and then adding the right ones builds one stack. Name each task as the most
+  tasks: building a stack in two halves, or packing a box item by item, is one task. Name each task as the most
   specific end state its actions converge on, never as a description any motion satisfies (moving, repositioning
   or rearranging the objects). Stretches with no evident objective (idling, looking around, tidying between
   activities) belong to no task; tasks need not cover the whole recording.

@@ -985,5 +985,5 @@ def test_in_a_session_each_repeat_of_a_cycle_is_its_own_task(rig):
     rules = ' '.join(prompts.session_rules(rig).split())
     assert ('starts the same unit of work again after its end-state was reached: in a cycle, where the objects are '
             'reset and the same work repeats, each repeat is its own task, judged on its own.') in rules
-    assert ('Stages toward one end state are one task with subgoals, never separate tasks: nesting the left bowls and '
-            'then adding the right ones builds one stack.') in rules
+    assert ('Stages toward one end state are one task with subgoals, never separate tasks: building a stack in two '
+            'halves, or packing a box item by item, is one task.') in rules
