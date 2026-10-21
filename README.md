@@ -25,7 +25,7 @@ Recently, [Midcentury AI](https://www.midcentury.xyz/blog/optimizing-argus) push
 ### \* Argus improvements (October 2026)
 
 Argus now annotates depth, tactile and other sensor data jointly with video, state and actions. By default the model inspects depth and tactile data at full rate, while force/torque, arm signals and other recorded fields reach it as sampled readings and are inspected only with [`--inspection all`](#settings).
-Argus also scores each episode out of 10 for execution and outcome, and each subgoal for execution, deterministically from the annotations. Outcome is whether the goal was reached and how far progress got. Execution is a weighted mean of cleanliness (wasted motion, operator mistakes and failed attempts), steadiness (time with every arm waiting, and actions per unit of progress against other demonstrations of the same instruction) and speed (time to the goal against the median of those demonstrations, or of similar subgoals in the same dataset when a subgoal has too few). A subgoal is a lasting state change the goal depends on, such as a block placed in the row, never a pick or a grasp.
+Argus also scores each episode out of 10 for execution and outcome, and each subgoal for execution, deterministically from the annotations. Outcome is whether the goal was reached and how far progress got; execution is a weighted mean of cleanliness, steadiness and speed, each defined in [`board/scores.py`](board/scores.py). A subgoal is a lasting state change the goal depends on, such as a block placed in the row, never a pick or a grasp.
 
 ## Overview
 
