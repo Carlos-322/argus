@@ -305,6 +305,9 @@ def test_a_machine_role_never_turns_a_camera_the_reader_placed_into_a_touch_sens
     assert camera_role({'profile': 'ego_head', 'cameras': {'extra1': glove}}, 'extra1', machine) == 'tactile_image'
     older = {'key': 'finger_cam', 'name': 'finger_cam', 'desc': 'GelSight image of the left finger pad'}
     assert camera_role({**ctx, 'cameras': {'extra1': older}}, 'extra1', machine) == 'tactile_image'
+    placed_gelsight = {'key': 'left_gripper_cam', 'name': 'left', 'role_provenance': 'recorded_name',
+                       'mounting': 'actor', 'desc': 'GelSight Mini on the left gripper pad'}
+    assert camera_role({**ctx, 'cameras': {'left': placed_gelsight}}, 'left', machine) == 'tactile_image'
     read = lambda c, view, kind: machine if view == 'right' else {}
     monkeypatch.setattr(dictionary_context, 'prepared_interpretation', read)
     monkeypatch.setattr(tactile_capture, 'prepared_interpretation', read)
