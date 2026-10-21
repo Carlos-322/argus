@@ -1046,7 +1046,8 @@ same task repeated, or several tasks.
   instruction_mismatch data issue whose severity is its training impact, and say so in goal_alignment. Work added
   beside the asked work, which keeps its result and breaks no constraint the instruction states, is not a mismatch.
 """ + _INSTRUCTION_CLAUSES + """
-Also emit a top-level "goal_alignment" object comparing the instruction to the tasks you observed, as a whole:
+Always emit a top-level "goal_alignment" object comparing the instruction to the tasks you observed, as a whole,
+also when the work does not match the instruction (then the relation is "different" or "unrelated"):
   "goal_alignment": {
     "matches_given": true | false,  // does the footage actually depict the asked work at all
     "relation": "aligned" | "narrower" | "broader" | "different" | "unrelated",
