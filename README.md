@@ -24,8 +24,7 @@ Recently, [Midcentury AI](https://www.midcentury.xyz/blog/optimizing-argus) push
 
 ### \* Argus improvements (October 2026)
 
-Argus now annotates depth, tactile and other sensor data jointly with video, state and actions. By default the model inspects depth and tactile data at full rate, while force/torque, arm signals and other recorded fields reach it as sampled readings and are inspected only with [`--inspection all`](#settings). The most informative sensor findings are overlaid on the video as they occur, and every finding is exported with its evidence and uncertainty.
-
+Argus now annotates depth, tactile and other sensor data jointly with video, state and actions. By default the model inspects depth and tactile data at full rate, while force/torque, arm signals and other recorded fields reach it as sampled readings and are inspected only with [`--inspection all`](#settings).
 Argus also scores each episode out of 10 for execution and outcome, and each subgoal for execution, deterministically from the annotations. Outcome is whether the goal was reached and how far progress got. Execution is a weighted mean of cleanliness (wasted motion, operator mistakes and failed attempts), steadiness (time with every arm waiting, and actions per unit of progress against other demonstrations of the same instruction) and speed (time to the goal against the median of those demonstrations, or of similar subgoals in the same dataset when a subgoal has too few). A subgoal is a lasting state change the goal depends on, such as a block placed in the row, never a pick or a grasp.
 
 ## Overview
@@ -88,7 +87,7 @@ uv run python -m board serve --board data/review/mine --clips data/review/mine/c
 | [`--sample-fps`](label/policy.py) | A frame every 1.5s for teleop, 1s for UMI and 0.5s for human ego, plus the edges of still spans and the first and last frames; Sol samples at least 1 FPS everywhere | `2` catches subsecond fumbles and rapid recoveries, at the cost of more images and shorter request windows |
 | [`--task-mode`](label/policy.py) | From source metadata, otherwise `episode` | `session` labels the recording as a sequence of tasks, each with its own outcome, which suits freeform recordings and repeated cycles; human ego uses the activities schema |
 | [`--inspection`](label/policy.py) | `auto`, for recordings with depth or a touch sensor | `all` also inspects force/torque, arm signals, actions and source metadata; `off` makes no inspection call |
-| [`--field-dictionary`](review/__main__.py) | `on` | `off` skips the once-per-upload call that interprets uncertain recorded fields, and labels them as recorded |
+| [`--field-dictionary`](review/__main__.py) | `on` | `off` skips the one call per upload (at most $3) that asks a model what unclear recorded fields mean; fields are then labelled as recorded |
 | [`--cap`](review/__main__.py) | $20 | The most the job may spend, counting every call and outstanding reservation |
 | [`--max-minutes`](review/__main__.py) | All footage | Reads at most this many minutes of footage |
 
