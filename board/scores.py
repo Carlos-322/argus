@@ -195,18 +195,19 @@ def facts(d: dict) -> dict:
 
 
 def _incidents(d: dict) -> dict:
-    """{id(failed key event): its incident}. Failed tries in a row with no success between them are one incident, the
-    way the prompt makes them one operator mistake ("the failed tries at one aim"), so a peel retried ten times costs
-    as one failed attempt, not ten. A failed key event with no time is an incident of its own."""
+    """{id(failed key event): its incident}. Failed tries at one aim in a row are one incident, the way the prompt makes
+    them one operator mistake ("the failed tries at one aim"), so a peel retried ten times costs as one failed attempt,
+    not ten. The aim is the key event's kind: a failure of another kind, or any key event that did not fail (a success,
+    a partial), between two failures starts a new incident. A failed key event with no time is an incident of its own."""
     events = [k for k in _list(d.get("key_events")) if isinstance(k, dict)]
     timed = sorted((k for k in events if _num(k.get("t_s")) is not None), key=lambda k: k["t_s"])
-    out, current, count = {}, None, 0
+    out, current, aim, count = {}, None, None, 0
     for k in timed:
         if k.get("outcome") == "failure":
-            if current is None:
-                current, count = count, count + 1
+            if current is None or _str(k.get("kind")) != aim:
+                current, aim, count = count, _str(k.get("kind")), count + 1
             out[id(k)] = current
-        elif k.get("outcome") == "success":
+        else:
             current = None
     for k in events:
         if k.get("outcome") == "failure" and id(k) not in out:

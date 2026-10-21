@@ -377,6 +377,13 @@ def test_tries_in_a_row_with_no_success_between_them_cost_as_one_failed_attempt(
     s = scores.score_board({"p.json": rec})["p.json"]
     assert s["inputs"]["unexplained_failed_attempts"] == 3 * scores.FAILED_ATTEMPT_POINTS     # two runs and the untimed
     assert s["cleanliness"] == 7.0
+    # tries at different aims are different incidents, and a partial between two tries splits them as a success does
+    rec["key_events"] = [{"t_s": 1.0, "kind": "grasp", "outcome": "failure", "label": "lid slips"},
+                         {"t_s": 2.0, "kind": "open", "outcome": "failure", "label": "lid stays shut"},
+                         {"t_s": 3.0, "kind": "insert", "outcome": "failure", "label": "peg misses"},
+                         {"t_s": 4.0, "kind": "insert", "outcome": "partial", "label": "peg half in"},
+                         {"t_s": 5.0, "kind": "insert", "outcome": "failure", "label": "peg misses"}]
+    assert scores.score_board({"p.json": rec})["p.json"]["inputs"]["unexplained_failed_attempts"] == 4.0
 
 
 def test_a_staged_mistake_is_charged_like_the_board_counts_it_and_one_without_text_is_not_read():
