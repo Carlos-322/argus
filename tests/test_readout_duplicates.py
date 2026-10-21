@@ -89,3 +89,44 @@ def test_a_pair_that_comes_apart_halfway_keeps_both_rows():
 def test_few_instants_never_track():
     x = _path(6)
     assert sg.tracking(x, x, list(range(0, 30 * (sg.RESOLVED_MIN_INSTANTS - 1), 30)), FPS) == (False, 0)
+
+
+def _stalled(secs: int, seed: int = 4):
+    """A command and the measured joint that follows it 0.1 s later, except that the joint stalls for `secs` seconds
+    from 20 s while the command keeps moving (a tracking fault)."""
+    cmd = _path(seed)
+    arm = _later(cmd, 3)
+    s0 = 20 * FPS
+    arm[s0:s0 + secs * FPS] = arm[s0]
+    return cmd, arm
+
+
+def test_a_two_second_stall_keeps_both_rows():
+    cmd, arm = _stalled(2)
+    assert np.ptp(cmd[20 * FPS:22 * FPS]) > 0.1 * np.ptp(cmd)
+    shown, left, _, _ = _readout(*_case({"cmd": cmd, "arm": arm}))
+    assert sorted(shown) == ["arm", "cmd"] and not left
+
+
+def test_a_six_second_stall_keeps_both_rows():
+    cmd, arm = _stalled(6, seed=13)
+    shown, left, _, _ = _readout(*_case({"cmd": cmd, "arm": arm}))
+    assert sorted(shown) == ["arm", "cmd"] and not left
+
+
+def test_an_offset_that_opens_late_keeps_both_rows():
+    """The measured joint follows its command but drifts 0.2 sd away from it after 40 s of 60 (a calibration slip)."""
+    cmd = _path(7)
+    t = np.arange(N) / FPS
+    arm = _later(cmd, 3) + 0.2 * cmd.std() * np.clip((t - 40) / 10, 0, 1)
+    shown, left, _, _ = _readout(*_case({"cmd": cmd, "arm": arm}))
+    assert sorted(shown) == ["arm", "cmd"] and not left
+
+
+def test_a_stall_between_instants_is_seen_on_the_frames():
+    """A one second stall that starts on an instant and ends before the next one changes no reading at the instants,
+    yet the command moved 12% of its range meanwhile: the frames show it, so both rows are sent."""
+    cmd, arm = _stalled(1)
+    ks = list(range(0, N, FPS))
+    assert np.allclose(arm[ks], _later(cmd, 3)[ks])
+    assert sg.tracking(cmd, arm, ks, FPS) == (False, 0)

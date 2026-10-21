@@ -760,6 +760,16 @@ def resolved(a: np.ndarray, ks: list[int]) -> np.ndarray:
 TRACK_LAG_S = 0.5
 TRACK_LEVEL = 0.95
 TRACK_CHANGE = 0.9
+# A good fit on average is not a copy: a measured joint that stalls for a second or two while its command moves, or
+# opens a steady offset late in the request, still fits the whole window closely, and only its range line would remain.
+# So a row is a copy only if the line through its partner holds at every frame: no TRACK_HOLD_S stretch of frames where
+# the mean |residual| is more than TRACK_APART of the row's range. In synthetic 60 s requests, a stall of 1 s while the
+# partner moves 10% of its range leaves at least 0.04 of the range, and a 0.2 sd offset that opens after 40 s at least
+# 0.03; on the 16 spot check episodes the median teleoperated joint against its command leaves 0.049. At 0.02, 73 of
+# the 264 commanded and measured joint pairs that pass the tests above still merge (the measured joint moving later in
+# all 73), no other row merges with anything, and the other pairs differ by more than that somewhere and are both sent.
+TRACK_HOLD_S = 1.0
+TRACK_APART = 0.02
 
 
 def _r2_rows(xs: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -800,7 +810,30 @@ def tracking(x: np.ndarray, y: np.ndarray, ks: list[int], fps: float) -> tuple[b
              for L in range(-2 * reach, 2 * reach + 1) if abs(L) < m}
     # a mirrored copy lines up with the opposite sign, so the size of the agreement decides
     best = max(sorted(score, key=abs), key=lambda L: abs(score[L]))
-    return (True, best) if abs(best) <= reach else (False, 0)
+    if abs(best) > reach or _held_apart(x, y, lo, hi, best, fps):
+        return False, 0
+    return True, best
+
+
+def _held_apart(x: np.ndarray, y: np.ndarray, lo: int, hi: int, lag: int, fps: float) -> bool:
+    """Whether, over the frames lo to hi with x read lag frames later, either value stays away from the straight line
+    through the other for TRACK_HOLD_S: the mean |residual| over some TRACK_HOLD_S stretch is more than TRACK_APART of
+    the value's own range there. Every frame is read, not only the instants: one reading a second can fall either side
+    of a one second stall."""
+    idx = np.arange(lo, hi)
+    xa, ya = x[np.clip(idx + lag, 0, len(x) - 1)], y[idx]
+    ok = np.isfinite(xa) & np.isfinite(ya)
+    win = max(1, int(round(TRACK_HOLD_S * fps)))
+    for a, b in ((xa[ok], ya[ok]), (ya[ok], xa[ok])):
+        span = float(np.ptp(b)) if len(b) else 0.0
+        if len(b) < 3 or span == 0 or a.std() == 0:
+            return True
+        coef = np.polyfit(a, b, 1)
+        r = np.abs(b - np.polyval(coef, a))
+        held = np.convolve(r, np.ones(win) / win, mode="valid").max() if len(r) >= win else r.max()
+        if held > TRACK_APART * span:
+            return True
+    return False
 
 
 def quiet_spans(arrs: dict, need: int) -> list[tuple[int, int]]:
