@@ -615,6 +615,32 @@ def _packed_episode(tmp_path):
     return ep, T
 
 
+def test_grid_rebuild_checks_the_inputs_under_the_saved_inspection_mode(tmp_path, monkeypatch):
+    ep, _ = _packed_episode(tmp_path)
+    result = harness.label_episode(ep, tmp_path / 'label.json', model='openai/gpt-6.1-sol',
+        reasoning='high', api_key='dry-run', max_tokens=2000, timeout=60, cell_w=224,
+        dry_run=True, sample_fps=2)
+    from label import grids
+    seen = []
+    original_identity = harness.input_identity
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get('inspection'))
+        return original_identity(*args, **kwargs)
+    monkeypatch.setattr(harness, 'input_identity', spy)
+    for saved, expected in [('off', 'off'), ('all', 'all'), (None, 'all')]:
+        changed = json.loads(json.dumps(result))
+        selected = changed['config']['request_images']['recipe']['annotation_policy']
+        selected.pop('inspection', None)
+        if saved:
+            selected['inspection'] = saved
+        seen.clear()
+        try:
+            grids.rebuild(changed, ep)
+        except grids.GridError:
+            pass                                    # a different mode may change the identity; the mode passed is the point
+        assert seen == [expected], (saved, seen)
+
+
 def test_request_grid_receipt_rebuilds_actual_dense_inputs(tmp_path, monkeypatch):
     ep, _ = _packed_episode(tmp_path)
     result = harness.label_episode(ep, tmp_path / 'label.json', model='openai/gpt-6.1-sol',
