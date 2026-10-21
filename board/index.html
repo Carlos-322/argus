@@ -427,6 +427,12 @@ aside.rail {
   font-variant-numeric: tabular-nums; }
 .cv-cell.on .cv-num { color: var(--fg-2); }
 .cv-num em { font-style: normal; color: var(--accent); }
+/* a run in progress: labelled footage against the manifest's target, as a bar under the numbers */
+.cv-bar { display: block; height: 3px; min-width: 96px; border-radius: var(--r-pill); background: var(--border);
+  overflow: hidden; }
+.cv-bar i { display: block; height: 100%; background: var(--accent); transition: width 400ms ease; }
+.cv-cell.none .cv-bar i { background: var(--fg-disabled); }
+.cv-all .cv-bar { width: 100%; }
 /* a dataset the chosen model did not label: dimmed and not clickable */
 .cv-cell.none { cursor: default; }
 .cv-cell.none .cv-name, .cv-cell.none .cv-num, .cv-cell.none:hover .cv-name { color: var(--fg-disabled); }
@@ -2146,8 +2152,9 @@ table.et a.et-o { font: 600 11px/1.2 var(--mono); text-decoration: none; white-s
    narrower, its timeline rows ran the arm name into the contribution chip. */
 @media (max-width: 1229px) {
   .coverage { position: relative; top: 0; height: auto; grid-template-columns: 1fr; }
-  .cv-all { flex-direction: row; align-items: baseline; justify-content: space-between; gap: 12px; padding: 12px 16px;
-    border-right: 0; border-bottom: 1px solid var(--border-strong); }
+  .cv-all { flex-direction: row; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 12px;
+    padding: 12px 16px; border-right: 0; border-bottom: 1px solid var(--border-strong); }
+  .cv-all .cv-bar { flex-basis: 100%; }
   .cv-cells { grid-auto-columns: max-content; overflow-x: auto; scrollbar-width: thin; }
   .cv-cell { padding: 11px 16px; }
   .cv-name, .cv-num { overflow: visible; text-overflow: clip; }
@@ -3705,6 +3712,22 @@ function fmtSpan(sec, long) {
   return sec < 3600 ? [(sec / 60).toFixed(1), long ? 'minutes' : 'min'] : [fmtHours(sec), long ? 'hours' : 'h'];
 }
 function sumDur(list) { return list.reduce((a, e) => a + (e.duration_s || 0), 0); }
+// a dataset's target from the manifest (board/serve.py targets): episodes and hours a run in progress is meant to label
+const TARGETS = (BOARD.targets && typeof BOARD.targets === 'object') ? BOARD.targets : {};
+// labelled seconds against a target in hours, both in the target's unit: [labelled, target, unit]
+function fmtOf(sec, hours, long) {
+  return hours >= 1 ? [(sec / 3600).toFixed(1), hours.toFixed(1), long ? 'hours' : 'h']
+    : [(sec / 60).toFixed(1), (hours * 60).toFixed(1), long ? 'minutes' : 'min'];
+}
+// the bar starts from where it was drawn last, so a rebuild that labels more grows it instead of redrawing it
+const coverageWas = {};
+function coverageBar(key, sec, hours) {
+  const now = Math.min(1, sec / 3600 / hours), was = coverageWas[key] ?? now;
+  coverageWas[key] = now;
+  return `<span class="cv-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" `
+    + `aria-valuenow="${Math.round(now * 100)}" aria-label="Share of the target labelled">`
+    + `<i style="width:${(was * 100).toFixed(2)}%" data-to="${(now * 100).toFixed(2)}%"></i></span>`;
+}
 function renderCoverage(ds, shown) {
   if (!ALL_EPS.length) { coverageEl.innerHTML = ''; return; }
   // every dataset of the board keeps its tab; the numbers are the labeller's (a model that labelled none of a
@@ -3712,7 +3735,8 @@ function renderCoverage(ds, shown) {
   const src = railEps();
   const per = presentDatasets(ALL_EPS).map(d => {
     const eps = src.filter(e => datasetOf(e) === d);
-    return { d, n: eps.length, sec: sumDur(eps) };
+    const t = TARGETS[d];
+    return { d, n: eps.length, sec: sumDur(eps), t: t && t.episodes > 0 && t.hours > 0 ? t : null };
   });
   const shownSec = sumDur(shown);
   const cur = per.find(p => p.d === ds) || { n: 0, sec: 0 };
@@ -3723,16 +3747,33 @@ function renderCoverage(ds, shown) {
     const num = on && narrowed
       ? `<em>${shown.length.toLocaleString()}</em> of ${p.n.toLocaleString()} &middot; <em>${fmtSpan(shownSec)[0]}`
         + `</em> ${fmtSpan(shownSec)[1]}`
+      : p.t ? `${p.n.toLocaleString()} of ${p.t.episodes.toLocaleString()}<span class="u"> eps</span> &middot; `
+        + `${fmtOf(p.sec, p.t.hours)[0]} of ${fmtOf(p.sec, p.t.hours)[1]} ${fmtOf(p.sec, p.t.hours)[2]}`
       : `${p.n.toLocaleString()}<span class="u"> ${p.n === 1 ? 'ep' : 'eps'}</span> &middot; ${fmtSpan(p.sec)[0]} ${fmtSpan(p.sec)[1]}`;
     return `<div class="cv-cell${on ? ' on' : ''}${p.n ? '' : ' none'}" role="tab" aria-selected="${on}" `
       + `aria-disabled="${!p.n}" aria-label="${esc(dsLabel(p.d))}" data-ds="${esc(p.d)}">`
       + `<span class="cv-name">${esc(DS_SHORT[p.d] || dsLabel(p.d))}</span><span class="cv-num">${num}</span>`
+      + (p.t ? coverageBar(p.d, p.sec, p.t.hours) : '')
       + '</div>';
   }).join('');
+  // the totals count against a target only when every dataset on the board has one
+  const whole = per.length && per.every(p => p.t)
+    ? { episodes: per.reduce((a, p) => a + p.t.episodes, 0), hours: per.reduce((a, p) => a + p.t.hours, 0) } : null;
+  const allSec = sumDur(src);
+  const figs = whole
+    // short units, as on the tabs: the totals sit over the rail, which is too narrow for "of 2,682 episodes"
+    ? `<span><b>${src.length.toLocaleString()}</b><small>of ${whole.episodes.toLocaleString()} eps</small></span>`
+      + `<span><b>${fmtOf(allSec, whole.hours)[0]}</b><small>of ${fmtOf(allSec, whole.hours)[1]} `
+      + `${fmtOf(allSec, whole.hours)[2]}</small></span>`
+    : `<span><b>${src.length.toLocaleString()}</b><small>${src.length === 1 ? 'episode' : 'episodes'}</small></span>`
+      + `<span><b>${fmtSpan(allSec, true)[0]}</b><small>${fmtSpan(allSec, true)[1]}</small></span>`;
   coverageEl.innerHTML = `<div class="cv-all"><span class="cv-k">All datasets</span>`
-    + `<span class="cv-fig"><span><b>${src.length.toLocaleString()}</b><small>${src.length === 1 ? 'episode' : 'episodes'}</small></span>`
-    + `<span><b>${fmtSpan(sumDur(src), true)[0]}</b><small>${fmtSpan(sumDur(src), true)[1]}</small></span></span>`
+    + `<span class="cv-fig">${figs}</span>${whole ? coverageBar('', allSec, whole.hours) : ''}`
     + `</div><div class="cv-cells" role="tablist">${tabs}</div>`;
+  // grow each bar from where it was to where it is now
+  requestAnimationFrame(() => coverageEl.querySelectorAll('.cv-bar i[data-to]').forEach(i => {
+    i.style.width = i.dataset.to;
+  }));
   coverageEl.querySelectorAll('.cv-cell').forEach(el => {
     el.addEventListener('click', () => {
       if (el.classList.contains('none')) return;

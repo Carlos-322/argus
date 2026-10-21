@@ -738,7 +738,7 @@ def cmd_site(a):
     # Page settings, board metadata and the publication policy also change the exported site. Every option enters
     # unless it is known not to change what is published, so an option added later cannot reuse an old build id.
     options = {k: v for k, v in vars(a).items() if k not in _UNPUBLISHED_OPTIONS}
-    presentation = dumps([options, sa.board_name(a.board), sa.labels_license(a.board),
+    presentation = dumps([options, sa.board_name(a.board), sa.labels_license(a.board), sa.targets(a.board),
                           sa.read_header(getattr(a, 'header', None)), publication_policy()], sort_keys=True, default=str)
     bid = a.build_id or identity + '-' + _h(presentation, 8)
     if not bid or Path(bid).name != bid or bid.startswith('.'):
@@ -884,7 +884,8 @@ def cmd_site(a):
     # has them (no request that can only fail)
     has = {"compare": compare is not None, "hands": bool(hands_res and hands_res["files"]),
            "keypoints": bool(kp_res and kp_res["files"]), "sensors": bool(sn_res and sn_res["files"]),
-           "labels_license": sa.labels_license(a.board), "grids": grid_count > 0}
+           "labels_license": sa.labels_license(a.board), "targets": sa.targets(a.board),
+           "grids": grid_count > 0}
     name = sa.board_name(a.board)
     header = sa.read_header(getattr(a, "header", None))
     (stage / "index.html").write_text(sa.render_index(
