@@ -468,8 +468,11 @@ def test_constant_row_language_preserves_declared_instruction_priority(tmp_path,
     assert not report['failed'], report
     ctx = json.loads((output / report['episodes'][0]['episode_id'] / 'context.json').read_text())
     assert ctx['instruction'] == (declared or 'recorded language')
-    language = [s for s in ctx['annotation_subtasks'] if s['column'] == 'language_instruction']
+    # constant language over every row is a claim about the whole episode, never a step of it: the instruction when
+    # none is declared, else a claim beside the declared goal (label/task_claims.py)
+    language = [s for s in ctx['annotation_task_claims'] if s['column'] == 'language_instruction']
     assert language[0]['value'] == 'recorded language' and language[0]['source'] == str(path)
+    assert not [s for s in ctx.get('annotation_subtasks', []) if s.get('label') == ctx['instruction']]
     assert path.read_bytes() == raw
 
 
@@ -526,11 +529,16 @@ def test_empty_malformed_and_competing_frame_text_remains_source_attributed(tmp_
     report = f.convert(root, 'teleop_arms', output, 'test', 900)
     assert not report['failed'], report
     ctx = json.loads((output / report['episodes'][0]['episode_id'] / 'context.json').read_text())
-    assert 'instruction' not in ctx
+    # the language that changes is timed claims; the column that holds one text over every row is the episode's claim
+    # about the whole recording, its instruction, never a step (label/task_claims.py)
+    assert [(s['column'], s['label']) for s in ctx['annotation_subtasks'] if s['column'] == 'language_instruction'] == [
+        ('language_instruction', 'pick'), ('language_instruction', 'place')]
+    assert [(s['column'], s['label']) for s in ctx['annotation_task_claims']] == [('instruction', 'other goal')]
+    assert ctx['instruction'] == 'other goal'
     missing = [x for x in ctx['annotation_unresolved'] if x['column'] == 'language_instruction']
     assert [x['value'] for x in missing] == ['', None]
     assert all(x['source'] == str(path) and x['why'] for x in missing)
-    assert 'other goal' in ctx['uploader_annotation'] and 'language_instruction' in ctx['uploader_annotation']
+    assert 'language_instruction' in ctx['uploader_annotation']
 
 
 def test_unassigned_episode_claims_never_attach_valid_neighbors(tmp_path):
@@ -663,23 +671,26 @@ def test_explicit_source_scope_reaches_local_preparation_and_request(tmp_path, n
     assert ctx['task_mode'] == 'session'
     assert policy.resolve(ctx) == policy.resolve(annotations().source_context(root, 'teleop_arms'))
     assert policy.resolve(ctx)['dataset_note'] == info['description']
+    # the declaration is provenance: the policy names no task mode and the request is the one tasks format
+    assert 'task_mode' not in policy.resolve(ctx)
     request = episode.build_request(directory)
-    assert 'This recording is a session:' in request['prompt']
+    assert 'This recording is a session:' not in request['prompt']
+    assert '\nTASKS. Segment the recording' in request['prompt']
     assert info['description'] in request['prompt']
     assert ctx['state_kind'] == 'none'
 
 
-def test_source_scope_rejects_conflicting_claims_without_text_inference(tmp_path):
+def test_source_scope_is_provenance_without_text_inference_and_a_conflict_refuses_nothing(tmp_path):
+    """A declared task mode never changes how a recording is labelled (every recording is a list of tasks), so it is
+    kept only when the declarations agree, and declarations that disagree or name no mode refuse nothing."""
     (tmp_path / 'info.json').write_text(json.dumps({'description': 'A session with several tasks.'}))
     assert annotations().source_context(tmp_path, 'ego_head').get('task_mode') is None
     (tmp_path / 'metadata.json').write_text(json.dumps({'sessions': True}))
     assert annotations().source_context(tmp_path, 'ego_head')['task_mode'] == 'session'
-    (tmp_path / 'dataset.json').write_text(json.dumps({'task_mode': 'episode'}))
-    with pytest.raises(ValueError, match='conflicting'):
-        annotations().source_context(tmp_path, 'ego_head')
-    (tmp_path / 'dataset.json').write_text(json.dumps({'task_mode': ['session']}))
-    with pytest.raises(ValueError, match='task_mode'):
-        annotations().source_context(tmp_path, 'ego_head')
+    for declared in ({'task_mode': 'episode'}, {'task_mode': ['session']}, {'task_mode': 'cycles'}):
+        (tmp_path / 'dataset.json').write_text(json.dumps(declared))
+        context = annotations().source_context(tmp_path, 'ego_head')
+        assert 'task_mode' not in context and context['collection_note'] == 'A session with several tasks.'
 
 
 def test_consumed_source_scope_does_not_opt_rgb_into_extra_evidence(tmp_path):
@@ -737,23 +748,22 @@ def test_hdf_scope_uses_only_explicit_recording_owners(tmp_path, declaration, ri
     out = tmp_path / 'prepared'
     report = f.convert(upload, rig, out, 'scope', 900)
     assert raw.read_bytes() == original_bytes
-    if declaration in ('root_conflict', 'json_conflict', 'invalid'):
-        assert not report['episodes']
-        assert 'task_mode' in report['failed'][0]['why'] or 'conflicting' in report['failed'][0]['why']
-        return
     assert not report['failed'], report
     directory = out / report['episodes'][0]['episode_id']
     ctx = json.loads((directory / 'context.json').read_text())
+    if declaration in ('root_conflict', 'json_conflict', 'invalid'):
+        # declarations that disagree or name no mode are kept out of the context and refuse nothing
+        assert 'task_mode' not in ctx and 'task_mode' not in policy.resolve(ctx)
+        return
     selected = policy.resolve(ctx)
-    assert selected['task_mode'] == ('episode' if declaration in ('actor', 'description') else 'session')
+    assert 'task_mode' not in selected      # a declaration is provenance only
     expected_note = 'Upload collection\n' + note if declaration == 'json_agree' else note
     assert selected['dataset_note'] == ('' if declaration == 'actor' else expected_note)
     assert ctx['recorded_hdf5_metadata']['source_path'] == str(raw)
     request = episode.build_request(directory)
     if declaration in ('root', 'recording', 'sessions'):
         assert note in request['prompt']
-        if rig == 'teleop_arms':
-            assert 'This recording is a session:' in request['prompt']
+        assert 'This recording is a session:' not in request['prompt']
         assert not needs_extra_evidence(ctx)
     if declaration == 'actor':
         assert needs_extra_evidence(ctx)

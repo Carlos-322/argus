@@ -270,8 +270,8 @@ def test_recorded_and_video_only_instructions_keep_the_same_output_contract(rig,
         assert offered == columns
         for field in ("scene", "timeline", "key_events", "data_issues", "operator_mistakes", "recovery"):
             assert f'"{field}":' in text
-        assert ('"tasks":' in text) is (rig == "ego_head")
-        assert ('"completion":' in text) is (rig != "ego_head")
+        # every rig asks for a list of tasks; a robot episode with an instruction also for its completion against it
+        assert '"tasks": [' in text and ('"completion":' in text) is (has_instruction and rig != "ego_head")
     assert "recorded motion" in recorded
     assert "recorded motion" not in video and "what is recorded" not in video
     assert "state_video_mismatch" not in video
@@ -279,12 +279,14 @@ def test_recorded_and_video_only_instructions_keep_the_same_output_contract(rig,
         assert "state_video_mismatch" in recorded
 
 
-def test_an_episode_without_instruction_gets_the_task_rule_and_head_cameras_never_do():
+def test_an_episode_without_instruction_gets_the_task_rule_and_head_cameras_without_a_goal_do_too():
     for r in ("teleop_arms", "handheld_gripper"):
         without, given = prompts.fixed_instructions(r, has_instruction=False), prompts.fixed_instructions(r)
-        assert "ABOUT THE TASK. This episode comes with no instruction" in without
-        assert "ABOUT THE EPISODE'S INSTRUCTION" not in without and "ABOUT THE TASK." not in given
-    assert "ABOUT THE TASK." not in prompts.fixed_instructions("ego_head", has_instruction=False)
+        assert "ABOUT THE TASKS. This episode comes with no instruction" in without
+        assert "ABOUT THE EPISODE'S INSTRUCTION" not in without and "ABOUT THE TASKS." not in given
+    bare_clip = prompts.fixed_instructions("ego_head", has_instruction=False)
+    assert "ABOUT THE TASKS. This clip comes with no annotated goal" in bare_clip
+    assert "ABOUT THE TASKS." not in prompts.fixed_instructions("ego_head")
 
 
 # ---------------------------------------------------------------- resolution routing and contact views
@@ -1044,7 +1046,10 @@ def test_episode_end_to_end_offline(tmp_path, monkeypatch):
     def fake_call(content, model, reasoning, api_key, max_tokens, timeout, **options):
         sent["content"] = content
         sent['attempts'] = options.get('attempts')
+        # the episode has an instruction, so the reply judges it against it and lists its tasks beside
         labels = {"completion": {"task_completed": "success", "completed_at_s": 3.0, "goal_reached_at_s": 3.0},
+                  "tasks": [{"start_s": 0.0, "end_s": 3.967, "task": "place the block", "outcome": "success",
+                             "judged_against": "instruction", "completed_at_s": 3.0, "goal_reached_at_s": 3.0}],
                   "timeline_columns": harness.TIMELINE_COLUMNS,
                   "timeline": [[0.0, 3.0, "left", "reach", "block", None, None, "advancing", 0.5, None],
                                [3.0, 3.967, "left", "release", "block", None, None, "advancing", 1.0, None]],

@@ -106,13 +106,21 @@ def judge(case: dict, labels: dict) -> tuple[bool, list[str]]:
     comp = labels.get("completion") or {}
     outcome = effective_outcome(comp.get("task_completed"))
     if labels.get("tasks") and not outcome:
-        outcome = "tasks:" + ",".join(sorted({str(effective_outcome(t.get("outcome"))) for t in labels["tasks"]}))
+        # a recording with no verdict of its own (several tasks): the one task judged against the instruction stands
+        # for the asked work when there is exactly one; otherwise the set of the tasks' outcomes
+        asked = [t for t in labels["tasks"] if isinstance(t, dict) and t.get("judged_against") == "instruction"]
+        outcome = (effective_outcome(asked[0].get("outcome")) if len(asked) == 1 else
+                   "tasks:" + ",".join(sorted({str(effective_outcome(t.get("outcome"))) for t in labels["tasks"]})))
     if "outcome" in case:
         ok.append(outcome in case["outcome"])
         ok[-1] or why.append(f"outcome {outcome}")
     if "not_outcome" in case:
-        ok.append(outcome not in case["not_outcome"])
-        ok[-1] or why.append(f"outcome {outcome}")
+        # no verdict and no one task judged against the instruction: nothing says the asked work was not done, so a
+        # fact about what the outcome must not be is unmet, never passed by default
+        # (a label in the tasks format only: an older session label is judged as it always was)
+        unjudged = isinstance(outcome, str) and outcome.startswith("tasks:") and "basis" in comp
+        ok.append(not unjudged and outcome not in case["not_outcome"])
+        ok[-1] or why.append(f"outcome {outcome}" + (" (no task judged against the instruction)" if unjudged else ""))
     if "align" in case:
         rel = (labels.get("goal_alignment") or {}).get("relation")
         ok.append(rel in case["align"])

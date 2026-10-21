@@ -33,8 +33,10 @@ from pathlib import Path
 
 import numpy as np
 
+from board.label_projection import LABEL_SCHEMA, recording_completion
 from label.atomic import write_atomic
 from label import policy
+from label.task_claims import claims as task_claims
 from prepare.frame_rate import episode_seconds
 
 # Not read here: the part limit is piece_max (policy part_max_s). Kept because Data Review's vendor check
@@ -201,6 +203,7 @@ def write_pieces(ep_dir: Path, pieces_root: Path) -> list[Path]:
     stored = json.loads((ep_dir / "context.json").read_text())
     ep = me.load(ep_dir)
     ctx = ep["context"]
+    read = task_claims(ctx)
     t, m = motion(ep)
     n = len(t)
     # Cut the same actual source span that request admission validates, including the last frame interval.
@@ -313,7 +316,7 @@ def write_pieces(ep_dir: Path, pieces_root: Path) -> list[Path]:
                 "frame boundaries, preferring moments of little motion, to label it; activity across a cut is expected, and a part "
                 "that starts or ends in the middle of an activity is how we cut it, not a truncated or cut-off "
                 "recording.")
-        if ctx.get("instruction"):
+        if read["instruction"]:
             # the part is checked against the recording's instruction, on what the part shows
             note += (" The instruction given with this part describes the whole recording, not this part: check this "
                      "part against it only on what this part shows. Asked work that falls outside this part is not a "
@@ -370,17 +373,24 @@ def write_pieces(ep_dir: Path, pieces_root: Path) -> list[Path]:
                               **({"touch_role": "touch"} if sg.touch_permission(
                                   s["name"], field_interpretation(ctx, s["name"]).get("role")) is True else {})}
                              if s["name"] in touch else s for s in ctx["signals"]]
+        # the recording's task texts as label/task_claims.py reads them: a text held over the whole recording is the
+        # instruction (when it has none) or the dataset's task for the whole episode in every part, never a step
+        if read["instruction_from"] == "claim":
+            c2["instruction"] = read["instruction"]
+        if read["whole"]:
+            c2["dataset_task_claims"] = read["whole"]
         if ctx.get("annotation_subtasks"):
             # Keep the publisher's full claim, even when its interval crosses a request boundary.
             # Its shifted interval may start before zero or end after this request. The separate
-            # visible window describes what this request can check, never a new publisher deadline.
+            # visible window describes what this request can check, never a new publisher deadline. Each step keeps
+            # its number in the whole recording (step), the number a task judged against it names.
             subs = [(x, me.number(x.get("t0")),
                      me.number(x["t1"]) if x.get("t1") is not None else me.number(x.get("t0")))
-                    for x in ctx["annotation_subtasks"] if isinstance(x, dict)]
+                    for x in read["steps"]]
             c2["annotation_subtasks"] = [
-                {**x, 'source_annotation': copy.deepcopy(x), "t0": None,
+                {**x, 'source_annotation': {k: copy.deepcopy(v) for k, v in x.items() if k not in ('step', 'joined_rows')}, "t0": None,
                  **({"t1": None} if "t1" in x else {})} if a is None else
-                {**x, 'source_annotation': copy.deepcopy(x), "t0": round(a - t0, 3),
+                {**x, 'source_annotation': {k: copy.deepcopy(v) for k, v in x.items() if k not in ('step', 'joined_rows')}, "t0": round(a - t0, 3),
                  **({"t1": round(b - t0, 3) if b is not None else None} if "t1" in x else {}),
                  'request_window': {'source_start_s': a, 'source_end_s': b,
                     'visible_start_s': round(max(a, t0) - t0, 3),
@@ -715,6 +725,7 @@ def unlabelled(ep_dir: Path, failed: list[tuple[dict, dict | None]], missing: li
     with the first part's reply that came back, every part's undecodable stretches and cost, and the parts it was cut
     into."""
     first = next((r for _, r in failed if r), {}) or {}
+    asked = {r.get('label_schema') for _, r in failed if r}
     raw = (first.get("labels") or {}).get("_raw") if isinstance(first.get("labels"), dict) else None
     raw = raw if raw is not None else first.get("content_tail") or ""
     whys = "; ".join(f"part {g['part']}: {g['why']}" for g in missing)
@@ -747,8 +758,9 @@ def unlabelled(ep_dir: Path, failed: list[tuple[dict, dict | None]], missing: li
     _combine_request_config(cfg)
     result = {"episode_dir": str(ep_dir), "model": first.get("model"), "reasoning_effort": first.get("reasoning_effort"),
             'annotation_policy': selected,
-            'prompt_mode': ('session' if selected['task_mode'] == 'session'
-                            else 'given' if (ctx.get('instruction') or '').strip() else 'inferred'),
+            'prompt_mode': ('session' if selected.get('task_mode') == 'session' and not asked & {LABEL_SCHEMA}
+                            else 'given' if task_claims(ctx)['instruction'] else 'inferred'),
+            **({'label_schema': LABEL_SCHEMA} if asked == {LABEL_SCHEMA} else {}),
             **({'jaw_evidence': jaw_evidence} if jaw_evidence else {}),
             **({'evidence_inspection': inspection} if inspection['parts'] else {}),
             **({'sensor_evidence': sensor} if sensor['sensors'] else {}),
@@ -827,7 +839,8 @@ def outside_part(lab: dict, t0: float, t1: float) -> dict:
 
 JOIN_GUARD_S = 2.0
 KEY_CUT_GUARD_S = 1.0
-OUTCOME_FIELDS = ("outcome", "success_predicate", "completed_at_s", "goal_reached_at_s", "undone_at_s", "undone_by")
+OUTCOME_FIELDS = ("outcome", "success_predicate", "completed_at_s", "goal_reached_at_s", "undone_at_s", "undone_by",
+                  "judged_against", "subtask")
 
 
 def _cut_sides(entry: dict) -> set[str]:
@@ -1300,19 +1313,49 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
     uniq = list(dict.fromkeys(summaries))
     L["task_summary"] = uniq[0] if len(uniq) == 1 else " ".join(f"({i}) {s}" for i, s in enumerate(uniq, 1))
     L["performance_review"] = " ".join(reviews)
-    # a session has no recording-wide goal in one request or in many (label/prompts.py SESSION_RULES): its outcome is
-    # its tasks', joined across the cuts above; only an episode labelled in parts lacks a whole-recording verdict
+    # the output format each part was asked in (label_schema): in the tasks format the recording's completion follows
+    # what the recording gives (board/label_projection.py derive_completion), from its tasks joined across the cuts
+    # below; a part asked before it was asked in the episode or session mode of its policy, and a mix of the two has
+    # no single reading
+    formats = {r.get('label_schema') for _, r in parts}
+    tasks_format = formats == {LABEL_SCHEMA}
     session = any((r.get('annotation_policy') or {}).get('task_mode') == 'session' for _, r in parts)
     gaps = ("; " + "; ".join(f"part {g['part']} has no labels, as {g['why']}" for g in missing)) if missing else ""
-    L["completion"] = {"task_completed": None if session else "unclear", "success_predicate": None,
-                       "completed_at_s": None, "goal_reached_at_s": None, "undone_at_s": None, "undone_by": None,
-                       "reason": ("a session of several tasks; each task's outcome is under tasks" if session else
-                                  f"Labelled in {count} requests with independently inferred goals. "
-                                  "Local outcomes and progress are under part_assessments; "
-                                  "they do not establish a whole-recording outcome.") + gaps}
+    empty = {"task_completed": None, "success_predicate": None, "completed_at_s": None, "goal_reached_at_s": None,
+             "undone_at_s": None, "undone_by": None}
+    parted = (f"Labelled in {count} requests with independently inferred goals. Local outcomes and progress are under "
+              "part_assessments; they do not establish a whole-recording outcome.")
+    rig = me.rig(ep)
+    instruction = bool(task_claims(ep["context"])["instruction"])
+    if len(formats) > 1:
+        L["completion"] = {**empty, "reason": "parts labelled with different output formats" + gaps}
+    elif not tasks_format:
+        # a session has no recording-wide goal in one request or in many: its outcome is its tasks', joined across the
+        # cuts below; an episode labelled in parts lacks a whole-recording verdict
+        L["completion"] = {**empty, "task_completed": None if session else "unclear",
+                           "reason": ("a session of several tasks; each task's outcome is under tasks" if session
+                                      else parted) + gaps}
+    elif rig != "ego_head" and instruction:
+        # no part sees the whole recording, so none can judge it against the instruction: unclear, as an episode
+        # labelled in parts always was, and every reader reads that verdict as main does; its tasks joined across the
+        # cuts are listed beside it (basis "parts", board/label_projection.py shown_tasks)
+        L["completion"] = {**empty, "task_completed": "unclear", "reason": parted + gaps, "basis": "parts"}
     for k in ("timeline",):
         L[k].sort(key=lambda s: (s.get("start_s") is None, s.get("start_s") or 0))      # an untimed step last
     L["tasks"] = mark_cut_tasks(join_across_cuts(L["tasks"], cuts_s), cuts_s, L)
+    if tasks_format and not (rig != "ego_head" and instruction):
+        # the tasks joined across the cuts give the completion as one request's would; a part with no labels may hold
+        # more of the work, so then there is no verdict
+        steps = len(me.annotation_lines(ep["context"]))
+        n = len(L["tasks"])
+        if rig == "ego_head" and (n != 1 or (steps and not instruction) or missing):
+            L["completion"] = {**empty, "reason": f"a head-camera clip labelled in {count} requests; each task's "
+                                                  "outcome is under tasks" + gaps}
+        elif missing:
+            L["completion"] = {**empty, "judged_against": None, "from_tasks": n, "basis": "tasks",
+                               "reason": f"{n} task{'' if n == 1 else 's'} in the parts with labels" + gaps}
+        else:
+            L["completion"] = recording_completion(L["tasks"], task_prompts=0 if instruction else steps)
     L["scene"]["objects"] = join_scene_objects(scene_objects, L["tasks"])
     events = []
     for event in L["key_events"]:
@@ -1370,9 +1413,10 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
             **({"evidence_inspection": evidence_inspection} if evidence_inspection['parts'] else {}),
             # each part was checked against the recording's instruction on what it shows (write_pieces); the parts'
             # comparisons are under part_assessments, since no part sees the whole asked work
-            "given_prompt": (ctx.get("instruction") or "").strip() or None,
-            "prompt_mode": ("session" if selected['task_mode'] == 'session'
-                            else "given" if (ctx.get("instruction") or "").strip() else "inferred"),
+            "given_prompt": task_claims(ctx)["instruction"],
+            "prompt_mode": ("session" if selected.get('task_mode') == 'session' and not formats & {LABEL_SCHEMA}
+                            else "given" if task_claims(ctx)["instruction"] else "inferred"),
+            **({"label_schema": LABEL_SCHEMA} if tasks_format else {}),
             "task_label": ctx.get("task_label"), "sampling": first.get("sampling"),
             "arm_still_spans": still, "dataset_checks": pl["checks"], "config": cfg,
             "provider": first.get("provider"), "parse_ok": True, "labels": L, "usage": usage,

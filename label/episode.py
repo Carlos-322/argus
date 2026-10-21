@@ -54,6 +54,7 @@ from checks import timebase
 from label import frames as mf
 from label import lens
 from label import prompts, policy
+from label.task_claims import claims as task_claims
 from label import sensor_evidence as se
 from label import state as ms
 from prepare.signal_alignment import (ALIGNED_CAMERA, ALIGNED_ASSUMED, recorder_arrival,
@@ -2144,7 +2145,7 @@ def _motion_table(ep: dict, pl: dict) -> str:
 
 
 def annotation_lines(ctx: dict) -> list[str]:
-    """Every dataset step with its declared time and success flag."""
+    """Every timed step of the dataset (label/task_claims.py claims) with its declared time and success flag."""
     def when(x):            # a step with no end time is a moment, one with no time is listed without one
         t0, t1 = number(x.get("t0")), number(x.get("t1"))
         return ("no time" if t0 is None else tenths(t0) if t1 is None or t1 == t0
@@ -2171,21 +2172,33 @@ def annotation_lines(ctx: dict) -> list[str]:
                 + (', '.join(edges) + '. ' if edges else '')
                 + 'Only the visible portion can be checked; an internal request boundary does not change '
                   'the annotation deadline or establish that its goal failed.')
-    lines = [f"  {when(x)}  {label(x)}" + ("" if x.get("ok", True) else "  (marked unsuccessful)") + window(x)
-             for x in (ctx.get("annotation_subtasks") or []) if isinstance(x, dict)]
+    # steps from more than one source (a dataset's two step columns, a task topic and its step topic) each name it
+    subs = task_claims(ctx)["steps"]
+    columns = {x["column"] for x in subs if isinstance(x.get("column"), str) and x["column"]}
+    def source(x):
+        return f"[{x['column']}] " if len(columns) > 1 and x.get("column") in columns else ""
+    lines = [f"  {when(x)}  {source(x)}{label(x)}" + ("" if x.get("ok", True) else "  (marked unsuccessful)")
+             + window(x) for x in subs]
     return lines
 
 
+def whole_claim_lines(ctx: dict) -> str:
+    """The dataset's other tasks for the whole recording (label/task_claims.py): a text it holds over the whole
+    recording that differs from the instruction, a claim to check like it, never a timed step."""
+    return "".join(f"  the dataset's task for the whole episode{f' ({c})' if (c := claim.get('column')) else ''}: "
+                   f"\"{claim['text']}\"\n" for claim in task_claims(ctx)["whole"])
+
+
 def ego_annotation_block(ctx: dict) -> str:
-    goal = (ctx.get("instruction") or "").strip()
-    subs = ctx.get("annotation_subtasks") or []
+    read = task_claims(ctx)
+    goal = read["instruction"] or ""
+    subs = read["steps"]
     if not goal and not subs:
         return ("\nTHE DATASET'S ANNOTATION FOR THIS EPISODE: none; the dataset ships no task description for this "
                 "clip. Infer the activities from the footage alone and leave goal_alignment out.\n")
     lines = annotation_lines(ctx)
-    goal_label = "recording context goal" if policy.effective(ctx)["task_mode"] == "session" else "goal"
     return ("\nTHE DATASET'S ANNOTATION FOR THIS EPISODE (claims to check, see ABOUT THE DATASET'S ANNOTATION above):\n"
-            + (f"  {goal_label}: \"{goal}\"\n" if goal else "")
+            + (f"  goal: \"{goal}\"\n" if goal else "") + whole_claim_lines(ctx)
             + ("  subtasks, with the times the dataset gives:\n" + "\n".join(lines) + "\n" if lines else "")
             + (f"  about these annotations: {ctx['annotation_note'].strip()}\n" if ctx.get("annotation_note") else ""))
 
@@ -2815,15 +2828,24 @@ def _instants_line(ep: dict, pl: dict | None = None) -> str:
             f"{last}." + extra)
 
 
+def has_steps(ctx: dict) -> bool:
+    """Whether the dataset times its own steps of this recording (annotation_subtasks), each a prompt a robot task it
+    covers is judged against (label/prompts.py STEP_RULES)."""
+    return bool(task_claims(ctx)["steps"])
+
+
 def robot_annotation_block(ctx: dict) -> str:
-    """Dataset step claims, independent of the episode instruction."""
-    if not ctx.get("annotation_subtasks"):
-        return ""
+    """Dataset step claims, numbered as a task's subtask names them (each step's number in the whole recording, also
+    in a part of it), apart from the episode instruction."""
     lines = annotation_lines(ctx)
-    return ("\nTHE DATASET'S STEP ANNOTATIONS FOR THIS EPISODE (claims to check against the footage):\n"
-            + "These are the dataset's claims, not observed actions or an instruction. Check them against the footage; "
-              "an unsuccessful flag is the dataset's claim about the outcome.\n"
-            + ("  subtasks, with the times the dataset gives:\n" + "\n".join(lines) + "\n" if lines else "")
+    numbers = [row["step"] for row in task_claims(ctx)["steps"]]
+    if not lines:
+        return ""
+    return ("\nTHE DATASET'S TIMED STEPS FOR THIS EPISODE (claims to check against the footage; how to use them is set "
+            "out under ABOUT THE DATASET'S TIMED STEPS above):\n"
+            + "These are the dataset's claims, not observed actions. An unsuccessful flag is the dataset's claim about "
+              "the outcome.\n"
+            + "".join(f"  {i}. {line.strip()}\n" for i, line in zip(numbers, lines))
             + (f"  about these annotations: {ctx['annotation_note'].strip()}\n" if ctx.get("annotation_note") else ""))
 
 
@@ -2833,20 +2855,25 @@ def task_block(ep: dict) -> str:
     ctx = ep["context"]
     if rig(ep) == "ego_head":
         return ego_annotation_block(ctx)
-    given = (ctx.get("instruction") or "").strip()
+    read = task_claims(ctx)
+    given = read["instruction"] or ""
     annotations = robot_annotation_block(ctx)
     if not given:
         return annotations
     label = "; ".join(ctx.get("task_label") or [])
     # the rules for using the instruction are the same for every episode and live in the cached
-    # instructions (instruction_rules); only the instruction itself belongs to the episode
-    if policy.effective(ctx)["task_mode"] == "session":
-        return ("\nTHE INSTRUCTION FOR THIS RECORDING, as the dataset gives it:\n"
-                f"  \"{given}\"\nHow to check it is set out under ABOUT THE RECORDING'S INSTRUCTION above.\n"
-                + annotations)
+    # instructions (INSTRUCTION_RULES); only the instruction itself belongs to the episode, whatever task mode a
+    # saved policy names
     s = ("\nTHE TASK FOR THIS EPISODE WAS GIVEN TO YOU as the dataset's per-episode instruction:\n"
          f"  \"{given}\"\nHow to use it is set out under ABOUT THE EPISODE'S INSTRUCTION above.\n")
-    if ctx.get("instruction_note"):
+    if read["whole"]:
+        # a second text the dataset holds over the whole recording, a claim like the instruction, never a step
+        s += ("The dataset also names a task for the whole episode, a claim to check like the instruction and never "
+              "a timed step:\n" + whole_claim_lines(ctx))
+    if read["instruction_from"] == "claim":
+        # the instruction is the text the dataset holds over the whole recording; its note and label describe none
+        s += "It is the one text the dataset's timed task annotation holds over the whole episode.\n"
+    elif ctx.get("instruction_note"):
         s += ctx["instruction_note"].strip() + "\n"
     elif label:
         s += (f"The dataset's coarse task label for this episode is \"{label}\"; the "
@@ -2885,10 +2912,10 @@ def build_prompt(ep: dict, pl: dict, *, cell_w: int, cell_h: int, example_dir=No
     r = rig(ep)
     c0 = (ctx.get("cameras") or {}).get(anchor(ep), {})
     native = (c0.get("width") or "native", c0.get("height") or "resolution")
-    given = (ctx.get("instruction") or "").strip()
+    given = task_claims(ctx)["instruction"] or ""
     blocks = present_blocks(ep, pl) if blocks is None else blocks
     fixed = prompts.fixed_instructions(r, has_instruction=bool(given), recorded=is_recorded(ep, pl, blocks),
-                                      sessions=policy.effective(ctx)["task_mode"] == "session")
+                                      has_steps=has_steps(ctx))
     fixed += prompts.example_block(r, example_dir)
     if any(block.name == 'sensor_evidence' for block in blocks):
         fixed = (prompts.EVIDENCE_CONTRACT + '\nVISUAL ANNOTATION CONTRACT\n' + fixed
@@ -2906,7 +2933,8 @@ def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int 
                   sample_fps=None, task_mode=None, dataset_note=None, derived_dir=None, read_only=False,
                   inspection=None) -> dict:
     """Everything the harness sends for one episode (content parts), and what it records about it. cell_w fixes
-    the cell width; max_cell_w (the routed width, label/route.py) replaces the rig's default widest cell."""
+    the cell width; max_cell_w (the routed width, label/route.py) replaces the rig's default widest cell. task_mode
+    only reproduces a saved policy (label/policy.py resolve); it never changes the request."""
     ep = load(ep_dir)
     ep['context']['annotation_policy'] = policy.resolve(ep['context'], model=model, reasoning=reasoning,
         sample_fps=sample_fps, task_mode=task_mode, dataset_note=dataset_note, inspection=inspection)
@@ -3037,7 +3065,10 @@ def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int 
             "n_images": n_grids + len(views_sent) + len(depth_sent) + len(contacts_sent) + len(array_parts) // 2 + len(native_parts) // 2 + len(scene_parts) // 2,
             "image_bytes": grid_bytes + extra_bytes,
             "contact_s": [round(frame_time(ep, k), 3) for k in pl["contact"]],
-            "given_prompt": (ep["context"].get("instruction") or "").strip() or None,
+            # the recording's instruction, its own or the text the dataset holds over the whole recording, and its
+            # own timed steps, each a prompt for the work in its span (label/task_claims.py)
+            "given_prompt": task_claims(ep["context"])["instruction"],
+            "task_prompts": len(task_claims(ep["context"])["steps"]),
             "task_label": ep["context"].get("task_label"), "cam_labels": cam_labels,
             "cell": [cell_w, cell_h], "timesteps": [round(frame_time(ep, k), 3) for k in pl["ks"]], "lens": ep["lens"],
             "grid_cols": grid_cols, "decode_failed": decode_failures(ep),

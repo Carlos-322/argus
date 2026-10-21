@@ -77,6 +77,7 @@ from board import clips as bc
 from board import hands as hands_overlay
 from board import serve as sa
 from board.to_board import dumps
+from board.label_projection import verdict_or_tasks
 from board.public_export import project as public_json, public_build_manifest, publication_policy
 from label import content_identity
 from label.atomic import temporary_path, write_atomic, write_bytes_atomic
@@ -129,7 +130,9 @@ def shown_cams(d: dict) -> list:
 def goal_times(d: dict) -> list:
     """Times the page shows a goal frame for (renderEp's goal-frame panels)."""
     comp = d.get("completion") or {}
-    tasks = [t for t in (d.get("tasks") or []) if t and (t.get("task") or t.get("start_s") is not None)]
+    # the recording's verdict first: its tasks carry the goal frames only when it has none
+    # (board/label_projection.py verdict_or_tasks), each task the frame it is done at, as the page shows them
+    tasks = [t for t in verdict_or_tasks(d)[1] if t.get("task") or t.get("start_s") is not None]
     out = []
     if tasks:
         out = [t.get("completed_at_s") for t in tasks if t.get("completed_at_s") is not None]

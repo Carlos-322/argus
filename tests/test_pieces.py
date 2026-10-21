@@ -1153,7 +1153,7 @@ def test_independent_request_goals_do_not_become_episode_tasks_or_progress(tmp_p
     original = copy.deepcopy(records)
     stitched = pieces.stitch(src, list(zip(contexts, records)))
     labels = stitched['labels']
-    assert stitched['annotation_policy']['task_mode'] == 'episode'
+    assert 'task_mode' not in stitched['annotation_policy']
     assert stitched['given_prompt'] == json.loads((src / 'context.json').read_text())['instruction']
     assert labels['tasks'] == [] and labels['completion']['task_completed'] == 'unclear'
     assert labels['progress_scope'] == 'request_parts'
@@ -1192,8 +1192,8 @@ def test_stitch_preserves_session_policy_and_segmented_jaw_receipts(tmp_path, mo
     _, src, parts = _three_parts(tmp_path, monkeypatch)
     path = src / 'context.json'
     parent = json.loads(path.read_text())
-    parent['task_mode'] = 'session'
-    parent['annotation_policy'] = policy.resolve(parent, dataset_note='Assembly session.')
+    # a job saved in the session mode, before every recording was labelled as a list of tasks, resumed
+    parent['annotation_policy'] = policy.resolve(parent, task_mode='session', dataset_note='Assembly session.')
     path.write_text(json.dumps(parent))
     contexts = [json.loads((part / 'context.json').read_text()) for part in parts]
     measured = jaws.analyse_frames(marker_frames, np.arange(18) * .04, DECLARATION)
@@ -1398,3 +1398,88 @@ def test_the_board_names_the_parts_a_stitched_object_came_from():
     assert to_board.convert(result, 'demo')['objects'] == [
         {'name': 'blanket', 'color': None, 'parts': [1, 2]}, {'name': 'cup', 'color': 'red', 'parts': [2]},
         {'name': 'plate', 'color': None}]
+
+
+def _tasks_part(p: Path, ctx: dict, tasks: list) -> dict:
+    """A part's record as the harness writes it in the tasks format: label_schema, and the part's completion derived
+    from its own tasks."""
+    from board.label_projection import recording_completion
+    record = _part_result(p, 'stack the cups')
+    record['label_schema'] = 'tasks'
+    record['labels'].update(tasks=tasks, completion=recording_completion(tasks))
+    return record
+
+
+def _cup_task(ctx, *, start=False, end=False, **fields):
+    """A task over the whole part on its own clock; start and end say it continues across that cut."""
+    span = round(ctx['piece']['t1_s'] - ctx['piece']['t0_s'], 3)
+    note = ' '.join([*(['Continues the task from the previous part.'] if start else []),
+                     *(['The clip ends while the task is still under way.'] if end else [])])
+    return {'start_s': 0.0, 'end_s': span, 'task': 'stack the cups', 'objects': ['cup'],
+            'judged_against': 'instruction', 'success_predicate': 'three cups stacked', 'note': note,
+            'outcome': 'partial' if end else 'success', 'completed_at_s': None if end else span - .05, **fields}
+
+
+def _without_instruction(src: Path) -> None:
+    """The recording as a dataset that ships no instruction gives it."""
+    ctx = json.loads((src / 'context.json').read_text())
+    ctx['instruction'] = ''
+    (src / 'context.json').write_text(json.dumps(ctx))
+
+
+def test_in_the_tasks_format_one_task_joined_across_the_cuts_is_the_recordings_verdict(tmp_path, monkeypatch):
+    """With no instruction a recording of one task takes that task's verdict, also when the task is joined across the
+    cuts; with an instruction no part sees the whole asked work, so the recording stays unclear, as an episode labelled
+    in parts always was, and its joined task is listed beside that verdict."""
+    _, src, parts = _three_parts(tmp_path, monkeypatch)
+    contexts = [json.loads((part / 'context.json').read_text()) for part in parts]
+    tasks = [[_cup_task(contexts[0], end=True)], [_cup_task(contexts[1], start=True, end=True)],
+             [_cup_task(contexts[2], start=True)]]
+    records = [_tasks_part(p, c, t) for p, c, t in zip(parts, contexts, tasks)]
+    given = pieces.stitch(src, list(zip(contexts, records)))
+    (task,) = given['labels']['tasks']
+    assert task['outcome'] == 'success' and task['judged_against'] == 'instruction' and len(task['joined_from']) == 3
+    completion = given['labels']['completion']
+    assert (completion['task_completed'], completion['basis']) == ('unclear', 'parts')
+    assert 'do not establish a whole-recording outcome' in completion['reason']
+    assert given['label_schema'] == 'tasks' and given['prompt_mode'] == 'given'
+    from board.label_projection import shown_tasks, verdict_or_tasks
+    assert verdict_or_tasks(given['labels']) == ('unclear', []) and shown_tasks(given['labels']) == [task]
+    _without_instruction(src)
+    own = [[{**t, 'judged_against': 'own_end_state'} for t in part] for part in tasks]
+    records = [_tasks_part(p, c, t) for p, c, t in zip(parts, contexts, own)]
+    stitched = pieces.stitch(src, list(zip(contexts, records)))
+    (task,) = stitched['labels']['tasks']
+    completion = stitched['labels']['completion']
+    assert task['outcome'] == 'success' and task['judged_against'] == 'own_end_state'
+    assert (completion['task_completed'], completion['from_tasks'], completion['judged_against'],
+            completion['basis']) == ('success', 1, 'own_end_state', 'one_task')
+    assert completion['completed_at_s'] == task['completed_at_s']
+    assert stitched['label_schema'] == 'tasks' and stitched['prompt_mode'] == 'inferred'
+    # a part with no labels may hold more of the work: no verdict, and the reason names the part
+    missing = [{'part': 3, 't0_s': contexts[2]['piece']['t0_s'], 't1_s': contexts[2]['piece']['t1_s'],
+                'why': 'no reply'}]
+    open_end = pieces.stitch(src, list(zip(contexts[:2], records[:2])), missing)
+    completion = open_end['labels']['completion']
+    assert completion['task_completed'] is None and completion['from_tasks'] == 1
+    assert completion['reason'] == '1 task in the parts with labels; part 3 has no labels, as no reply'
+
+
+def test_in_the_tasks_format_a_task_open_at_the_last_cut_or_parts_of_two_formats_give_no_verdict(tmp_path, monkeypatch):
+    _, src, parts = _three_parts(tmp_path, monkeypatch)
+    _without_instruction(src)
+    contexts = [json.loads((part / 'context.json').read_text()) for part in parts]
+    tasks = [[_cup_task(contexts[0], end=True, judged_against='own_end_state')],
+             [_cup_task(contexts[1], start=True, end=True, judged_against='own_end_state')], []]
+    records = [_tasks_part(p, c, t) for p, c, t in zip(parts, contexts, tasks)]
+    stitched = pieces.stitch(src, list(zip(contexts, records)))
+    (task,) = stitched['labels']['tasks']
+    completion = stitched['labels']['completion']
+    assert task['outcome'] == 'continues_past_cut'
+    assert completion['task_completed'] is None and completion['from_tasks'] == 1 and 'cut' in completion['reason']
+    # one part asked before the tasks format: the parts give no single reading
+    older = _part_result(parts[2], 'stack the cups')
+    mixed = pieces.stitch(src, list(zip(contexts, records[:2] + [older])))
+    assert mixed['labels']['completion']['task_completed'] is None
+    assert mixed['labels']['completion']['reason'] == 'parts labelled with different output formats'
+    assert 'label_schema' not in mixed and mixed['prompt_mode'] == 'inferred'

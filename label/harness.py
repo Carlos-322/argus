@@ -57,6 +57,7 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from board.label_projection import LABEL_SCHEMA, derive_completion
 from label import episode as me, policy
 from label.atomic import write_atomic
 from label.errors import DispatchError, KeyExhausted, SpendCap, Truncated
@@ -470,7 +471,11 @@ def label_episode(ep_dir: Path, out_path: Path, *, model: str, reasoning: str, a
         **billing,
         **({"sensor_evidence": req["sensor_evidence"]} if req.get("sensor_evidence", {}).get("sensors") else {}),
         "given_prompt": req["given_prompt"],
-        "prompt_mode": "session" if resolved["task_mode"] == "session" else "given" if req["given_prompt"] else "inferred",
+        # graded against the instruction it was given, or against tasks it inferred; every request asks for a list of
+        # tasks (label_schema), so the recording's completion is derived from them (read_reply)
+        "prompt_mode": "given" if req["given_prompt"] else "inferred",
+        "label_schema": LABEL_SCHEMA,
+        "task_prompts": req["task_prompts"],
         "task_label": req["task_label"],
         "sampling": req["sampling"],
         "arm_still_spans": req["still_spans"],
@@ -967,7 +972,7 @@ def parse_response(text: str) -> tuple[dict, bool]:
 
 def derive_instruction_mismatch(labels: dict) -> None:
     """The prompt's rule that a reply whose goal_alignment says the work is not the asked work also reports it as an
-    instruction_mismatch data issue (label/prompts.py INSTRUCTION_RULES and SESSION_INSTRUCTION_RULES), held in code.
+    instruction_mismatch data issue (label/prompts.py INSTRUCTION_RULES), held in code.
     When goal_alignment has relation different or unrelated, or matches_given false, and no data issue has the
     category instruction_mismatch, one is added from the goal_alignment note, marked derived_from goal_alignment. A
     reply that already reports one keeps it as it is. Running this again on its output changes nothing."""
@@ -1183,6 +1188,14 @@ def read_reply(text: str, request: dict) -> tuple[dict, bool]:
     labels, with what it lacks under _incomplete, and is not a usable annotation (False). request is the record or
     the request fields it is built from."""
     labels, ok = parse_response(text)
+    if ok and request.get('label_schema') == LABEL_SCHEMA:
+        # a reply asked for a list of tasks: the recording's completion is the reply's own, against the instruction,
+        # when the request gave one to a robot rig, and otherwise derived from the tasks
+        selected = request.get('annotation_policy') if isinstance(request.get('annotation_policy'), dict) else {}
+        given = request.get('given_prompt')
+        labels = derive_completion(labels, rig=selected.get('rig') or 'teleop_arms',
+                                   instruction=isinstance(given, str) and bool(given.strip()),
+                                   task_prompts=request.get('task_prompts') or 0)
     if ok:
         from label.completeness import annotation_gaps
         gaps = annotation_gaps(labels, request)
@@ -1376,7 +1389,7 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
             selected = settings['annotation_policy']
             current = input_identity(ep_dir, model=model, reasoning=reasoning, max_tokens=max_tokens,
                 cell_w=settings['cell_w'], example_dir=fields.get('example_dir'),
-                sample_fps=selected.get('sample_fps'), task_mode=selected['task_mode'],
+                sample_fps=selected.get('sample_fps'), task_mode=selected.get('task_mode'),
                 dataset_note=selected.get('dataset_note'),
                 inspection=policy.inspection_mode(selected))
             valid = same_input_identity(saved, current) and not any(item.get('missing') for item in current['source_proof'])
@@ -1976,6 +1989,11 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                     # labelled before inspection could be set, when every recorded field was inspected
                     hint = (f'; it was labelled before inspection could be set, so add --inspection '
                             f'{policy.LEGACY_INSPECTION} to resume it as it was paid for')
+                mode = saved_policy.get('task_mode') if isinstance(saved_policy, dict) else None
+                if mode in policy.TASK_MODES:
+                    # labelled in the episode or session mode, before every recording became a list of tasks
+                    hint += (f'; it was labelled in the {mode} mode, before every recording was labelled as a list '
+                             'of tasks, so --force relabels it as one')
                 stale[ep.name] = f"saved output {q.name} has changed or missing input; use --force to refresh{hint}"
                 return True
         if any(record.get('final_dispatch_outcome') in ('claimed', 'unverified') for _, record in records):
@@ -2367,7 +2385,7 @@ def main() -> int:
         print(f"routing answers seeded for {n} task texts from {args.route_seeds}", flush=True)
     label_kw = dict(model=args.model, reasoning=args.reasoning, max_tokens=args.max_tokens, timeout=args.timeout,
                     cell_w=args.cell_w, example_dir=args.example_dir, dry_run=args.dry_run,
-                    sample_fps=args.sample_fps, task_mode=args.task_mode, dataset_note=args.dataset_note,
+                    sample_fps=args.sample_fps, dataset_note=args.dataset_note,
                     inspection=args.inspection)
     if args.episode_dir:
         target = args.out or (args.episode_dir / 'labels.json')

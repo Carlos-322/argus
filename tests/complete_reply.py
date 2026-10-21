@@ -1,7 +1,8 @@
 """A model reply that holds the work any request asks for (label/completeness.py), for fixtures whose subject is
-something else: a timeline step over the footage, the one task's outcome, and the one activity with its outcome that
-a session or the head camera asks for instead. A fixture that sends only a task summary sends a hollow reply, which
-is never a finished annotation."""
+something else: a timeline step over the footage, the recording's completion and its one task with its outcome, as
+a robot request with an instruction asks (label/prompts.py). A request with no instruction asks for no completion, and
+the harness then derives it from the task and notes the one sent. A fixture that sends only a task summary sends a
+hollow reply, which is never a finished annotation."""
 import json
 import re
 
@@ -27,6 +28,14 @@ def labels(summary='The hand reaches.', *, request=None, **fields):
             'completion': {'task_completed': 'success'},
             'tasks': [{'start_s': lo, 'end_s': hi, 'task': summary, 'objects': [], 'outcome': 'success'}],
             **fields}
+
+
+def uninstructed(summary='The hand reaches.', **kw) -> dict:
+    """The reply a request with no instruction asks for: the same, with no completion of its own (the harness derives
+    it from the one task)."""
+    out = labels(summary, **kw)
+    out.pop('completion')
+    return out
 
 
 def text(summary='The hand reaches.', **kw) -> str:
