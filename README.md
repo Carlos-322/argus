@@ -23,7 +23,7 @@ Recently, [Midcentury AI](https://www.midcentury.xyz/blog/optimizing-argus) push
 
 Argus now annotates depth, tactile and other sensor data jointly with video, state and actions. The most informative sensor findings are overlaid on the video as they occur, and every finding is exported with its evidence and uncertainty.
 
-It also scores each episode's execution and outcome out of 10, along with the execution of the work toward each subgoal. The scores are computed from the annotations rather than asked of the model as a number. Speed is scored only for work that reached its goal, against the median of at least five other demonstrations of the same instruction, so a 10 means typical rather than fast. A subgoal with too few of those is compared with similar subgoals in other episodes of the same dataset. A subgoal is a lasting change the goal depends on, such as a block placed in the row, so a pick or a grasp is a key event but never a subgoal.
+Argus also scores every episode out of 10 for execution and outcome, and scores the execution of each subgoal. The scores are computed deterministically from the annotations rather than asked of the model, so the same labels always give the same numbers. Execution combines cleanliness, steadiness and speed, and speed is judged against other demonstrations of the same instruction, falling back to similar subgoals in the same dataset. A subgoal is a lasting change the goal depends on, such as a block placed in the row, so a pick or a grasp is never one.
 
 ## Overview
 
