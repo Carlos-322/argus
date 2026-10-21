@@ -1811,17 +1811,24 @@ h3.section .count {
 .timeline .marker.goal:hover { width: 5px; z-index: 8; }
 
 /* the score chip (board/scores.py): bottom left of the video, beside the caption, only while the caption shows a
-   subgoal or the goal reached (the caption's own key-event window), just the scores */
+   subgoal or the goal reached (the caption's own key-event window), just the scores. It stands on the caption's
+   bottom line and as tall as the caption (scoreChipHeight), so the two read as one row */
 .score-chip {
-  position: absolute; left: calc(var(--fx-left, 0px) + 12px); bottom: calc(var(--fx-bottom, 0px) + 70px); z-index: 4;
-  display: grid; grid-template-columns: auto auto; column-gap: 8px; row-gap: 1px; align-items: baseline;
-  padding: 5px 9px; border-radius: var(--r-md); background: rgba(0,0,0,0.6); border: 1px solid rgba(255,255,255,0.14);
+  position: absolute; left: calc(var(--fx-left, 0px) + 12px); bottom: calc(var(--fx-bottom, 0px) + 44px); z-index: 4;
+  box-sizing: border-box; display: grid; grid-template-columns: auto auto; column-gap: 14px; row-gap: 2px;
+  align-items: baseline; align-content: center;
+  padding: 9px 14px; border-radius: var(--r-md); background: rgba(0,0,0,0.6); border: 1px solid rgba(255,255,255,0.14);
   backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
-  opacity: 0; transform: translateY(6px); transition: opacity 150ms ease, transform 150ms ease; pointer-events: none;
+  opacity: 0; transform: translateY(6px); pointer-events: none;
+  transition: opacity 150ms ease, transform 150ms ease, height 130ms ease;
 }
 .score-chip.active { opacity: 1; transform: translateY(0); }
-.score-chip .sc-k { font-size: 10px; color: rgba(255,255,255,0.7); }
-.score-chip .sc-v { font-family: var(--mono); font-size: 13px; font-weight: 700; color: #f3f2ec; text-align: right; }
+/* a caption under the video (narrow screens): the chip keeps its own size in the corner, clear of the controls */
+.score-chip.corner { bottom: calc(var(--fx-bottom, 0px) + 70px); }
+/* a video too narrow for the chip beside the caption: the chip stands above the caption at its own size */
+.score-chip.above { bottom: calc(var(--fx-bottom, 0px) + 50px + var(--cap-h, 0px)); height: auto !important; }
+.score-chip .sc-k { font-size: 12.5px; color: rgba(255,255,255,0.72); }
+.score-chip .sc-v { font-family: var(--mono); font-size: 20px; font-weight: 700; color: #f3f2ec; text-align: right; }
 .section .ke-what { font-size: 12px; font-weight: 400; color: var(--fg-2); margin-left: 6px; }
 /* key-event flag module inside the bottom segment overlay */
 .video-overlay .vo-key { display: block; margin-bottom: 6px; }
@@ -7429,6 +7436,38 @@ function renderEp(d, opts) {
   // about anything else (a contact, a grasp) it stays hidden
   // (it is first called while the page is still being wired, so it looks up what it needs itself)
   let _scSig = null, _subByT = null;
+  // the chip stands as tall as the caption beside it, following the caption as it gains or loses a row
+  if (globalThis._scoreChipObserver) globalThis._scoreChipObserver.disconnect();
+  globalThis._scoreChipObserver = null;
+  const capEl = document.getElementById('video-overlay');
+  if (capEl && typeof ResizeObserver !== 'undefined') {
+    globalThis._scoreChipObserver = new ResizeObserver(() => fitCaptionBesideChip());
+    globalThis._scoreChipObserver.observe(capEl);
+    if (capEl.offsetParent) globalThis._scoreChipObserver.observe(capEl.offsetParent);
+  }
+  // while the chip shows, the centred caption narrows so it clears the chip on the left (and keeps the same margin on
+  // the right); when the video is too narrow for both, the chip stands above the caption instead
+  function fitCaptionBesideChip() {
+    const chip = document.getElementById('score-chip');
+    // layout is the browser's: without one (a page function run on its own) there is nothing to fit
+    if (!chip || !capEl || !chip.style || !capEl.style || typeof getComputedStyle === 'undefined') return;
+    // on a narrow screen the caption sits under the video, not over it: the chip keeps its own size in the corner
+    if (getComputedStyle(capEl).position !== 'absolute') {
+      chip.style.height = ''; capEl.style.maxWidth = ''; chip.classList.remove('above'); chip.classList.add('corner');
+      return;
+    }
+    chip.classList.remove('corner');
+    if (capEl.offsetHeight) {
+      chip.style.height = capEl.offsetHeight + 'px';
+      chip.style.setProperty('--cap-h', capEl.offsetHeight + 'px');
+    }
+    const on = chip.classList.contains('active');
+    const width = capEl.offsetParent ? capEl.offsetParent.clientWidth : 0;
+    const room = width - 2 * (chip.offsetLeft + chip.offsetWidth + 10);
+    const beside = on && room >= 200;
+    capEl.style.maxWidth = beside ? room + 'px' : '';
+    chip.classList.toggle('above', on && !beside);
+  }
   function renderScoreChip(t) {
     const scoreChip = document.getElementById('score-chip');
     if (!scoreChip) return;
@@ -7440,7 +7479,7 @@ function renderEp(d, opts) {
     const sig = atGoal ? 'goal' : st ? String(st.end_s) : '';
     if (sig === _scSig) return;
     _scSig = sig;
-    if (!sig) { scoreChip.classList.remove('active'); return; }
+    if (!sig) { scoreChip.classList.remove('active'); fitCaptionBesideChip(); return; }
     // the chip names what it scores: the episode at its goal, else the numbered subgoal the caption is on
     scoreChip.innerHTML = atGoal
       ? `<span class="sc-k">Episode</span><span class="sc-v">${qNum(Q.execution)}</span>`
@@ -7448,6 +7487,7 @@ function renderEp(d, opts) {
       : `<span class="sc-k">Subgoal${subNo.get(Math.round(st.end_s * 100)) ? ' ' + subNo.get(Math.round(st.end_s * 100)) : ''}</span>`
         + `<span class="sc-v">${qNum(st.execution)}</span>`;
     scoreChip.classList.add('active');
+    fitCaptionBesideChip();
   }
 
   document.querySelectorAll('.qual-table tr[data-t]').forEach(r => r.addEventListener('click', () => seek(Number(r.dataset.t))));
