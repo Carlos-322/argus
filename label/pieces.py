@@ -272,7 +272,7 @@ def write_pieces(ep_dir: Path, pieces_root: Path) -> list[Path]:
             new_src[v] = s2
         c2 = {kk: vv for kk, vv in ctx.items() if kk not in (
             "stream_pairing", "recorded_jumps", "gripper_channels", "capture_qc", "stream_checks", "pieces",
-            "instruction", "instruction_note", "real_times", "timebase_neighbour_lag_frames",
+            "real_times", "timebase_neighbour_lag_frames",
             "clock_zero_s")}  # a part's times start at its own first frame, never on the recording's clock zero
         held = {v: r for v, r in ((v, me.runs_within(r, k0, k1))
                                   for v, r in (ctx.get("placeholder_frames") or {}).items()) if r}
@@ -313,8 +313,11 @@ def write_pieces(ep_dir: Path, pieces_root: Path) -> list[Path]:
                 "that starts or ends in the middle of an activity is how we cut it, not a truncated or cut-off "
                 "recording.")
         if ctx.get("instruction"):
-            note += (f" The recording's task text, which describes the whole recording rather than this part, is: "
-                     f"\"{ctx['instruction'].strip()}\". This part may show only some of it.")
+            # the part is checked against the recording's instruction, on what the part shows
+            note += (" The instruction given with this part describes the whole recording, not this part: check this "
+                     "part against it only on what this part shows. Asked work that falls outside this part is not a "
+                     "failure, a partial outcome or an instruction mismatch here, and when this part ends before the "
+                     "asked end state could be reached, its outcome is unclear.")
         if ctx.get("collection_note"):
             note += " " + ctx["collection_note"].strip()
         if parent_notes:
@@ -729,7 +732,9 @@ def unlabelled(ep_dir: Path, failed: list[tuple[dict, dict | None]], missing: li
                      for pc, r in failed]
     _combine_request_config(cfg)
     result = {"episode_dir": str(ep_dir), "model": first.get("model"), "reasoning_effort": first.get("reasoning_effort"),
-            'annotation_policy': selected, 'prompt_mode': 'session' if selected['task_mode'] == 'session' else 'inferred',
+            'annotation_policy': selected,
+            'prompt_mode': ('session' if selected['task_mode'] == 'session'
+                            else 'given' if (ctx.get('instruction') or '').strip() else 'inferred'),
             **({'jaw_evidence': jaw_evidence} if jaw_evidence else {}),
             **({'evidence_inspection': inspection} if inspection['parts'] else {}),
             **({'sensor_evidence': sensor} if sensor['sensors'] else {}),
@@ -1349,10 +1354,11 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
             **({'jaw_evidence': jaw_evidence} if jaw_evidence else {}),
             **({"sensor_evidence": sensor_evidence} if sensor_evidence["sensors"] else {}),
             **({"evidence_inspection": evidence_inspection} if evidence_inspection['parts'] else {}),
-            # each part inferred its own task, with the recording's task text given only as context (write_pieces), so
-            # no part was graded against that text and the recording is not either
+            # each part was checked against the recording's instruction on what it shows (write_pieces); the parts'
+            # comparisons are under part_assessments, since no part sees the whole asked work
             "given_prompt": (ctx.get("instruction") or "").strip() or None,
-            "prompt_mode": "session" if selected['task_mode'] == 'session' else "inferred",
+            "prompt_mode": ("session" if selected['task_mode'] == 'session'
+                            else "given" if (ctx.get("instruction") or "").strip() else "inferred"),
             "task_label": ctx.get("task_label"), "sampling": first.get("sampling"),
             "arm_still_spans": still, "dataset_checks": pl["checks"], "config": cfg,
             "provider": first.get("provider"), "parse_ok": True, "labels": L, "usage": usage,

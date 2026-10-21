@@ -980,6 +980,21 @@ def test_every_prompt_defines_a_subgoal_once_as_a_lasting_change_and_keeps_failu
 
 
 @pytest.mark.parametrize('rig', ['teleop_arms', 'handheld_gripper'])
+@pytest.mark.parametrize('recorded', [True, False])
+def test_a_session_with_an_instruction_is_checked_against_it(rig, recorded):
+    # whether the recording is checked against its instruction follows from having one, never from the task mode
+    with_one = prompts.fixed_instructions(rig, has_instruction=True, recorded=recorded, sessions=True)
+    without = prompts.fixed_instructions(rig, has_instruction=False, recorded=recorded, sessions=True)
+    assert "ABOUT THE RECORDING'S INSTRUCTION" in with_one and '"goal_alignment"' in with_one
+    assert 'instruction_mismatch data issue' in with_one and 'Each repeat of a cyclical instruction' in with_one
+    # the clauses about manner, initial state, quantity and object identity are the episode's own, word for word
+    assert prompts._INSTRUCTION_CLAUSES in with_one and prompts._INSTRUCTION_CLAUSES in prompts.INSTRUCTION_RULES
+    assert "ABOUT THE RECORDING'S INSTRUCTION" not in without
+    episode = prompts.fixed_instructions(rig, has_instruction=True, recorded=recorded)
+    assert prompts.INSTRUCTION_RULES in episode and "ABOUT THE RECORDING'S INSTRUCTION" not in episode
+
+
+@pytest.mark.parametrize('rig', ['teleop_arms', 'handheld_gripper'])
 def test_in_a_session_each_repeat_of_a_cycle_is_its_own_task(rig):
     from label import prompts
     rules = ' '.join(prompts.session_rules(rig).split())
