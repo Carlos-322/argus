@@ -965,7 +965,8 @@ def fixed_instructions(r: str, *, has_instruction: bool = True, recorded: bool =
     if r == "ego_head":
         rules = EGO_SESSION_ANNOTATION_RULES if sessions else EGO_ANNOTATION_RULES
         return head + what_this_is(r) + EGO_SCHEMA + data_contract(r) + rules + lean(r)
-    rules = session_rules(r) if sessions else INSTRUCTION_RULES if has_instruction else NO_INSTRUCTION_RULES
+    rules = (session_rules(r) + (SESSION_INSTRUCTION_RULES if has_instruction else '') if sessions
+             else INSTRUCTION_RULES if has_instruction else NO_INSTRUCTION_RULES)
     head = FIXED_HEADER if recorded else _replace_once(FIXED_HEADER, *VIDEO_ONLY_HEADER)
     return head + what_this_is(r) + schema(r, recorded) + data_contract(r, recorded) + rules + lean(r)
 
@@ -1026,6 +1027,40 @@ emit them as a top-level "tasks" list, in time order:
   goal_reached_at_s, undone_at_s and undone_by to null, and reason to "a session of several tasks; each task's
   outcome is under tasks".
 """
+
+# A session whose source gives an instruction is checked against it, as an episode is: the clauses about manner,
+# initial state, quantity and object identity are the episode's own (INSTRUCTION_RULES), taken from it unchanged, and
+# goal_alignment compares the instruction with the tasks as a whole.
+_INSTRUCTION_CLAUSES = INSTRUCTION_RULES[INSTRUCTION_RULES.index('- An instruction can say HOW as well as WHAT:'):INSTRUCTION_RULES.index('  object (a mug for a cup) is not.\n') + len('  object (a mug for a cup) is not.\n')]
+SESSION_INSTRUCTION_RULES = """
+ABOUT THE RECORDING'S INSTRUCTION (the instruction itself is given below with the recording).
+This instruction is metadata whose correctness is NOT guaranteed; treat it as a claim to check, not as the truth
+about the video. In a session it states the work the whole recording was meant to hold: one task, a cycle of the
+same task repeated, or several tasks.
+- Segment the tasks from what the operator actually does, as set out above; the instruction never creates, splits
+  or merges a task. Each repeat of a cyclical instruction is its own task.
+- A task that does work the instruction asks for is judged against the instruction: its success_predicate is the
+  end state the instruction asks of that task, and its outcome says whether that end state was reached. Other
+  tasks are judged on their own end state.
+- CRITICAL: if the operator clearly does coherent work in place of what the instruction asks, record it as an
+  instruction_mismatch data issue whose severity is its training impact, and say so in goal_alignment. Work added
+  beside the asked work, which keeps its result and breaks no constraint the instruction states, is not a mismatch.
+""" + _INSTRUCTION_CLAUSES + """
+Also emit a top-level "goal_alignment" object comparing the instruction to the tasks you observed, as a whole:
+  "goal_alignment": {
+    "matches_given": true | false,  // does the footage actually depict the asked work at all
+    "relation": "aligned" | "narrower" | "broader" | "different" | "unrelated",
+      // aligned: the tasks are the asked work (for a cyclical instruction, any number of repeats of it).
+      // narrower: the asked work AND meaningfully more.
+      // broader: only part of the asked work actually happened.
+      // different: coherent purposeful work, but not the asked work.
+      // unrelated: the footage does not match the instruction (likely mislabeled).
+    "note": "<one line: if the instruction and the tasks diverge, why; empty if aligned>"
+  }
+Decide goal_alignment before the tasks' outcomes, and keep them consistent: a task doing the asked work with
+outcome success cannot sit beside a "different" or "unrelated" relation.
+"""
+
 
 def session_rules(r: str) -> str:
     """Reuse session intent and outcomes with the rig's acting parts."""

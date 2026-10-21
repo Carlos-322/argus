@@ -2744,8 +2744,9 @@ def task_block(ep: dict) -> str:
     # the rules for using the instruction are the same for every episode and live in the cached
     # instructions (instruction_rules); only the instruction itself belongs to the episode
     if policy.effective(ctx)["task_mode"] == "session":
-        return ("\nINSTRUCTION FOR THE RECORDING (context for its activities):\n"
-                f"  \"{given}\"\n" + annotations)
+        return ("\nTHE INSTRUCTION FOR THIS RECORDING, as the dataset gives it:\n"
+                f"  \"{given}\"\nHow to check it is set out under ABOUT THE RECORDING'S INSTRUCTION above.\n"
+                + annotations)
     s = ("\nTHE TASK FOR THIS EPISODE WAS GIVEN TO YOU as the dataset's per-episode instruction:\n"
          f"  \"{given}\"\nHow to use it is set out under ABOUT THE EPISODE'S INSTRUCTION above.\n")
     if ctx.get("instruction_note"):

@@ -219,7 +219,9 @@ def test_each_part_reads_the_recording_at_its_own_span(monkeypatch):
             assert ctx["duration_s"] <= 1.0
             assert ctx["piece"]["t1_s"] - ctx["piece"]["t0_s"] <= 1.0
             assert ctx["piece"]["index"] == i and ctx["piece"]["count"] == 3 and ctx["piece"]["of"] == src.name
-            assert "instruction" not in ctx and "Pick up the cube" in ctx["collection_note"]
+            # each part keeps the recording's instruction to check against, on what that part shows
+            assert ctx["instruction"] == "Pick up the cube"
+            assert "check this part against it only on what this part shows" in ctx["collection_note"]
             assert ctx["collection_note"].startswith(f"this clip is part {i} of 3 of one continuous")
             request = me.build_request(parts[i - 1])
             assert "nothing was trimmed" not in request["prompt"]
@@ -269,9 +271,9 @@ def test_stitching_puts_the_parts_back_on_the_recordings_clock(monkeypatch):
         assert [x["part"] for x in lab["data_issues"]] == [2]                  # the recording's own end stays
         assert [x["excluded_by"] for x in lab["_excluded"]] == ["piece_cut"]   # the cut after part 1 is ours
         assert out["stitched"]["parts"] == 2 and out["usage"]["est_cost_usd"] == 1.0
-        # every part's routing call is billed, and no part was graded against the recording's task text
+        # every part's routing call is billed, and every part was checked against the recording's instruction
         assert out["config"]["resolution_route"]["cost_usd"] == 0.03 and len(out["config"]["resolution_route"]["parts"]) == 2
-        assert harness.episode_cost(out) == 1.03 and out["prompt_mode"] == "inferred"
+        assert harness.episode_cost(out) == 1.03 and out["prompt_mode"] == "given"
 
 
 

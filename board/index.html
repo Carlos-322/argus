@@ -6454,7 +6454,7 @@ function renderEp(d, opts) {
   // alignment chip: whether the model's independent assessment matches the given goal
   const ga = d.goal_alignment || null;
   let alignHtml = '';
-  if (givenMode && ga && ga.relation) {
+  if ((givenMode || givenSession) && ga && ga.relation) {
     const rel = String(ga.relation).toLowerCase();
     // green when the footage shows the given goal done (alone, or with more besides), red when it shows only part of
     // it or something else
@@ -6473,7 +6473,7 @@ function renderEp(d, opts) {
     ? `<div class="goal-given"><span class="gg-badge">given task</span>`
         + `<span class="gg-text">${esc(meta.given_prompt)}</span></div>`
       + `<div class="goal-read"><span class="gr-badge">session summary</span>`
-        + `<span class="gr-text">${esc(d.episode_prompt || '(empty)')}</span></div>` : givenMode
+        + `<span class="gr-text">${esc(d.episode_prompt || '(empty)')}</span></div>` + alignHtml : givenMode
     ? `<div class="goal-given"><span class="gg-badge">given goal</span>`
         + `<span class="gg-text">${esc(meta.given_prompt)}</span></div>`
       + `<div class="goal-read"><span class="gr-badge">${whoOwn(who, 'independent assessment')}</span>`
