@@ -228,7 +228,7 @@ def test_reparse_received_history_retains_newer_financial_receipt(tmp_path, monk
     assert harness.run_batch([ep], out, **options()) == 0
 
 
-def test_actual_stitch_after_cap_refused_refresh_keeps_all_charges(tmp_path, monkeypatch):
+def test_actual_stitch_after_cap_refused_refresh_keeps_all_charges(inspect_every_field, tmp_path, monkeypatch):
     from test_pieces import _three_parts
     from label import pieces
     job, ep, parts = _three_parts(tmp_path, monkeypatch)

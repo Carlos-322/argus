@@ -390,11 +390,14 @@ def build(ep, pl, *, shown=None, images=None, native_images=None, capture_select
     from label import semantic_evidence
     semantic_evidence.append(ep, pl, doc, times)
     shown = shown if shown is not None else {}
-    from label.dictionary_context import camera_content_role, TACTILE_CONTENT_ROLES
+    from label.dictionary_context import camera_content_role, camera_role, TACTILE_CONTENT_ROLES
     for view, meta in (ctx.get('cameras') or {}).items():
         name = str(meta.get('name') or view)
         entry = prepared_interpretation(ctx, view, 'camera')
-        role = sg._role(entry.get('role'))
+        role = camera_role(ctx, view, entry, meta)
+        if role is None and entry.get('role'):
+            doc['limitations'].append(f'{name}: the field dictionary called this camera {entry["role"]}, but the reader '
+                                      'placed it from its recorded name, so it is kept as a camera.')
         content = camera_content_role(ctx, view)
         if content and content['role'] in ('scene', 'other'):
             continue

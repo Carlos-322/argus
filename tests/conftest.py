@@ -58,3 +58,12 @@ def pytest_collection_modifyitems(config, items):
     if dropped:
         config.hook.pytest_deselected(items=dropped)
         items[:] = keep
+
+
+@pytest.fixture
+def inspect_every_field(monkeypatch):
+    """Evidence inspection of every recorded field beyond the cameras (policy inspection all), which a test of the
+    inspection machinery on arm signals, commands or metadata exercises; by default only depth and touch sensors are
+    inspected (label/policy.py INSPECTION)."""
+    from label import policy
+    monkeypatch.setattr(policy, 'INSPECTION', 'all')

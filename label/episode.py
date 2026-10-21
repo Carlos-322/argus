@@ -2631,12 +2631,13 @@ EPISODE_HEADER = "\n\nTHE EPISODE TO LABEL.\n\n"
 def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int | None = None,
                   max_cell_w: int | None = None, grid_cols: int = 4, grid_quality: int = 80,
                   example_dir=None, inspect_evidence=False, model=None, reasoning=None,
-                  sample_fps=None, task_mode=None, dataset_note=None, derived_dir=None, read_only=False) -> dict:
+                  sample_fps=None, task_mode=None, dataset_note=None, derived_dir=None, read_only=False,
+                  inspection=None) -> dict:
     """Everything the harness sends for one episode (content parts), and what it records about it. cell_w fixes
     the cell width; max_cell_w (the routed width, label/route.py) replaces the rig's default widest cell."""
     ep = load(ep_dir)
     ep['context']['annotation_policy'] = policy.resolve(ep['context'], model=model, reasoning=reasoning,
-        sample_fps=sample_fps, task_mode=task_mode, dataset_note=dataset_note)
+        sample_fps=sample_fps, task_mode=task_mode, dataset_note=dataset_note, inspection=inspection)
     policy.require_request_window(ep['context'], request_duration(ep))
     from prepare import jaws
     ep['jaw_evidence'] = (jaws.for_episode(ep, derived_dir, read_only=True) if read_only
@@ -2753,7 +2754,8 @@ def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int 
         content.append({"type": "image_url", "image_url": {
             "url": "data:image/jpeg;base64," + base64.b64encode(cjpg).decode("ascii"), "detail": detail}})
     from label.evidence_access import Access, needs_inspection
-    access = Access(ep, pl['sensor_evidence'], plan=pl, copy_contract_version=sensor_copy.VERSION) if inspect_evidence and needs_inspection(ep, pl['sensor_evidence']) else None
+    mode = policy.effective(ep['context']).get('inspection', policy.INSPECTION)
+    access = Access(ep, pl['sensor_evidence'], plan=pl, copy_contract_version=sensor_copy.VERSION) if inspect_evidence and needs_inspection(ep, pl['sensor_evidence'], mode) else None
     return {**({"evidence_access": access} if inspect_evidence else {}), "sensor_evidence": pl["sensor_evidence"],
             "content": content, "prompt": prompt, "plan": pl, "n_grids": n_grids + len(native_parts) // 2,
             'native_tactile_frames': sum(len(frames) for frames in native_images.values()),

@@ -98,7 +98,7 @@ def test_proven_unpaid_selection_remains_resumable_across_budget_refusal(tmp_pat
     assert row['state'] == 'received' and row['rejected_attempts'][0]['verified_unpaid'] is True
 
 
-def test_inspection_turned_off_sends_only_the_annotation_and_the_default_still_selects(tmp_path, monkeypatch):
+def test_inspection_turned_off_sends_only_the_annotation_and_a_touch_sensor_is_still_inspected_by_default(tmp_path, monkeypatch):
     sent = []
     def provider(request, timeout):
         if request.get_method() == 'GET':
@@ -112,10 +112,10 @@ def test_inspection_turned_off_sends_only_the_annotation_and_the_default_still_s
                 reasoning='medium', max_tokens=100, timeout=1, cell_w=128, max_spend=1.)
     (tmp_path / 'off').mkdir()
     off = recording(tmp_path / 'off', np.arange(12) / 30)
-    assert harness.run_batch([off], tmp_path / 'off_out', inspection_rounds=0, **args) == 0
+    assert harness.run_batch([off], tmp_path / 'off_out', inspection='off', **args) == 0
     assert sent == ['final']
     result = json.loads((tmp_path / 'off_out' / (off.name + '.json')).read_text())
-    assert result['annotation_policy']['inspection_rounds'] == 0
+    assert result['annotation_policy']['inspection'] == 'off'
     assert ea.INSPECTION_OFF in result['evidence_inspection']['limitations']
     assert result['evidence_inspection']['cost_usd'] == 0 and harness.episode_cost(result) == pytest.approx(.1)
     sent.clear()
@@ -124,5 +124,5 @@ def test_inspection_turned_off_sends_only_the_annotation_and_the_default_still_s
     assert harness.run_batch([on], tmp_path / 'on_out', **args) == 0
     assert sent[0] == 'selection' and sent[-1] == 'final'
     default = json.loads((tmp_path / 'on_out' / (on.name + '.json')).read_text())
-    assert 'inspection_rounds' not in default['annotation_policy']
+    assert 'inspection' not in default['annotation_policy']
     assert ea.INSPECTION_OFF not in default['evidence_inspection']['limitations']

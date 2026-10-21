@@ -38,7 +38,7 @@ def args(**changes):
 
 
 @pytest.mark.parametrize('received_first', [False, True])
-def test_http_rejected_selection_fails_over_without_replaying_received_rounds(tmp_path, monkeypatch, received_first):
+def test_http_rejected_selection_fails_over_without_replaying_received_rounds(inspect_every_field, tmp_path, monkeypatch, received_first):
     import io
     import urllib.error
     from label import evidence_access as ea
@@ -82,7 +82,7 @@ def test_http_rejected_selection_fails_over_without_replaying_received_rounds(tm
 
 
 @pytest.mark.parametrize('stage,status', [('inspection', 402), ('routing', 401)])
-def test_module_cli_retires_rejected_key_without_losing_paid_inspection_or_route(tmp_path, monkeypatch, stage, status):
+def test_module_cli_retires_rejected_key_without_losing_paid_inspection_or_route(inspect_every_field, tmp_path, monkeypatch, stage, status):
     import io
     import runpy
     import sys
@@ -242,12 +242,12 @@ def observed_packed_episode(root):
     np.savez(ep / 'state.npz', state=observed)
     loaded = me.load(ep)
     assert loaded['action'] is None
-    assert not evidence_access.needs_inspection(loaded, {})
+    assert not evidence_access.needs_inspection(loaded, {}, 'all')
     return ep
 
 
 @pytest.mark.parametrize('stage', ['build', 'inspection'])
-def test_changed_source_during_request_assembly_cannot_dispatch_stale_annotation(tmp_path, monkeypatch, stage):
+def test_changed_source_during_request_assembly_cannot_dispatch_stale_annotation(inspect_every_field, tmp_path, monkeypatch, stage):
     from test_label import _packed_episode, _accounted_evidence_selection
     ep = observed_packed_episode(tmp_path) if stage == 'build' else _packed_episode(tmp_path)[0]
     out = tmp_path / 'out' / f'{ep.name}.json'

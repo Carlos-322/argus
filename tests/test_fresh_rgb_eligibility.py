@@ -55,13 +55,13 @@ def _prepared(tmp_path, kind, extra, *, json_rate=False, json_attr_kind='scalar'
 
 @pytest.mark.parametrize('kind', ['hdf5', 'lerobot'])
 @pytest.mark.parametrize('extra', [False, True])
-def test_reader_coverage_controls_discovery_and_paid_dictionary(tmp_path, kind, extra):
+def test_reader_coverage_controls_discovery_and_paid_dictionary(inspect_every_field, tmp_path, kind, extra):
     path = _prepared(tmp_path, kind, extra)
     loaded = episode.load(path)
     assert loaded['context']['state_kind'] == 'joints'
     request = episode.build_request(path, inspect_evidence=True)
     assert bool(request['evidence_access']) == extra
-    assert bool(evidence_access.needs_inspection(loaded, request['sensor_evidence'])) == extra
+    assert bool(evidence_access.needs_inspection(loaded, request['sensor_evidence'], 'all')) == extra
     assert not loaded['signals']
     if kind == 'lerobot' and not extra:
         assert 'info.json' not in request['prompt']
@@ -82,7 +82,7 @@ def test_reader_coverage_controls_discovery_and_paid_dictionary(tmp_path, kind, 
 @pytest.mark.parametrize('json_rate,expected,attr_kind', [
     ('rate_only', False, 'scalar'), ('rate_only', False, 'vlen'), ('rate_only', False, 'fixed'),
     ('sibling', True, 'vlen'), ('sibling', True, 'fixed')])
-def test_json_rate_covers_only_selected_hdf_attribute_member(tmp_path, json_rate, expected, attr_kind):
+def test_json_rate_covers_only_selected_hdf_attribute_member(inspect_every_field, tmp_path, json_rate, expected, attr_kind):
     path = _prepared(tmp_path, 'hdf5', False, json_rate=json_rate, json_attr_kind=attr_kind)
     request = episode.build_request(path, inspect_evidence=True)
     assert bool(request['evidence_access']) == expected
@@ -92,7 +92,7 @@ def test_json_rate_covers_only_selected_hdf_attribute_member(tmp_path, json_rate
         assert 'sensor_config' in request['prompt']
 
 
-def test_unrecognized_hdf_numeric_array_opts_in(tmp_path):
+def test_unrecognized_hdf_numeric_array_opts_in(inspect_every_field, tmp_path):
     path = _prepared(tmp_path, 'hdf5', False, numeric_unknown=True)
     request = episode.build_request(path, inspect_evidence=True)
     assert request['evidence_access'] is not None
@@ -101,7 +101,7 @@ def test_unrecognized_hdf_numeric_array_opts_in(tmp_path):
     assert any(field['name'] == 'HDF5 recording calibration/response_table' for field in fields)
 
 
-def test_same_named_sidecar_clock_is_still_unknown(tmp_path):
+def test_same_named_sidecar_clock_is_still_unknown(inspect_every_field, tmp_path):
     path = _prepared(tmp_path, 'hdf5', False, sidecar=True)
     loaded = episode.load(path)
     assert loaded['context'].get('recorded_sensor_fields')
@@ -110,7 +110,7 @@ def test_same_named_sidecar_clock_is_still_unknown(tmp_path):
     assert dictionary.needs_interpretation([path])
 
 
-def test_legacy_hdf_coverage_without_source_identity_is_unknown(tmp_path):
+def test_legacy_hdf_coverage_without_source_identity_is_unknown(inspect_every_field, tmp_path):
     path = _prepared(tmp_path, 'hdf5', False)
     context_path = path / 'context.json'
     context = json.loads(context_path.read_text())

@@ -278,3 +278,29 @@ def test_saved_contact_veto_filters_named_signals_without_removing_unattributed_
     assert kept[1]['evidence_kind'] == 'response_activity'
     assert kept[1]['reference_kind'] == 'inferred'
     assert reviewed['context'] == before
+
+
+def test_a_machine_role_never_turns_a_camera_the_reader_placed_into_a_touch_sensor(monkeypatch):
+    # YAM teleop, Oct 20 2026: the dictionary model called right_wrist_cam "tactile_image" while its own meaning said
+    # "Right wrist RGB camera images", and the board filed it under Tactile cameras
+    from board import dictionary_projection
+    from label import dictionary_context, tactile_capture
+    from label.dictionary_context import camera_role
+    wrist = lambda side: {'key': f'{side}_wrist_cam-images-rgb', 'name': side, 'role_provenance': 'recorded_name',
+                          'mounting': 'actor'}
+    ctx = {'profile': 'teleop_arms', 'cameras': {
+        'exo': {'key': 'exo_cam-images-rgb', 'name': 'exo_cam', 'role_provenance': 'presentation',
+                'mounting': 'unspecified'}, 'left': wrist('left'), 'right': wrist('right')}}
+    machine = {'role': 'tactile_image', 'provenance': 'machine', 'meaning': 'Right wrist RGB camera images.'}
+    assert camera_role(ctx, 'right', machine) is None
+    assert camera_role(ctx, 'right', {**machine, 'provenance': 'human'}) == 'tactile_image'
+    gelsight = {'key': 'left_gripper_gelsight', 'name': 'left', 'role_provenance': 'recorded_name', 'mounting': 'actor'}
+    assert camera_role({**ctx, 'cameras': {'left': gelsight}}, 'left', machine) == 'tactile_image'
+    unnamed = {'key': 'cam3', 'name': 'cam3', 'role_provenance': 'presentation', 'mounting': 'unspecified'}
+    assert camera_role({**ctx, 'cameras': {'exo': unnamed}}, 'exo', machine) == 'tactile_image'
+    read = lambda c, view, kind: machine if view == 'right' else {}
+    monkeypatch.setattr(dictionary_context, 'prepared_interpretation', read)
+    monkeypatch.setattr(tactile_capture, 'prepared_interpretation', read)
+    shown = dictionary_projection.camera_presentation(ctx)
+    assert all((shown.get(view) or {}).get('role') not in ('tactile', 'sensor') for view in ('exo', 'left', 'right'))
+    assert not any(tactile_capture.eligible(ctx, view) for view in ('exo', 'left', 'right'))

@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from label.dictionary_context import camera_content_role, prepared_interpretation, TACTILE_CONTENT_ROLES
+from label.dictionary_context import camera_content_role, camera_role, prepared_interpretation, TACTILE_CONTENT_ROLES
 from prepare.formats import is_sensing
 
 MAX_SCAN_FRAMES = 36000
@@ -20,7 +20,7 @@ CHUNK = 256
 def eligible(ctx, view):
     from label import signals as sg
     meta = (ctx.get('cameras') or {}).get(view) or {}
-    role = sg._role(prepared_interpretation(ctx, view, 'camera').get('role'))
+    role = camera_role(ctx, view, prepared_interpretation(ctx, view, 'camera'), meta)
     content = camera_content_role(ctx, view)
     if content and content['role'] in ('scene', 'other'):
         return False

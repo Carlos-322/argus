@@ -2130,7 +2130,7 @@ def test_lerobot_native_measurements_reach_inspection_with_source_presence_and_u
         (native_ep / 'context.json').write_text(json.dumps(native_ctx))
         native_loaded = me.load(native_ep)
         assert not native_loaded['signals'] and not needs_extra_evidence(native_loaded['context'])
-        assert needs_inspection(native_loaded, {})
+        assert needs_inspection(native_loaded, {}, 'all')
         assert dictionary.needs_interpretation([native_ep])
         native_inventory = dictionary.inventory([native_ep])
         field = next(row for row in native_inventory['fields'] if row['name'] == 'contact_flags' and row['kind'] == 'native')
@@ -2210,7 +2210,7 @@ def test_lerobot_bookkeeping_alone_keeps_rgb_default_but_unknown_ramps_remain_me
             (ep / 'context.json').write_text(json.dumps(ctx))
             loaded = me.load(ep)
             assert not needs_extra_evidence(loaded['context'])
-            assert needs_inspection(loaded, {}) == (name == 'untyped_reading'), name
+            assert needs_inspection(loaded, {}, 'all') == (name == 'untyped_reading'), name
             assert dictionary.needs_interpretation([ep]) == (name == 'untyped_reading'), name
             assert (name in loaded['signals']) == (name == 'untyped_reading'), name
 

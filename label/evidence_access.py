@@ -32,7 +32,7 @@ MAX_RESPONSE_BYTES = 48000
 # The selection's JSON answer; its output limit adds reasoning room (selection_tokens).
 SELECTION_ANSWER_TOKENS = 2000
 MAX_SELECTION_COST = 1.0
-# The annotation policy can turn the paid selection off (label/policy.py INSPECTION_ROUNDS); the coverage then says so,
+# The annotation policy can turn the paid selection off (label/policy.py INSPECTION_MODES); the coverage then says so,
 # so an empty inspection is never read as one that found nothing to select.
 INSPECTION_OFF = 'Evidence inspection is off in the annotation policy; no recorded fields were selected.'
 MAX_SCAN_BYTES = 256 * 1024 * 1024
@@ -78,8 +78,16 @@ def reader_projection_identity(ctx):
     return hashlib.sha256(packed(projected).encode()).hexdigest()
 
 
-def needs_inspection(ep, sensor_evidence):
-    """Additional measurements or retained original metadata opt in; ordinary RGB stays on its path."""
+def needs_inspection(ep, sensor_evidence, mode='auto'):
+    """Whether a request carries an inspection, by the annotation policy's mode (label/policy.py INSPECTION_MODES).
+    auto and off: a recording with depth or a touch sensor (sensor_evidence's sensors: tactile arrays and cameras,
+    force, pressure and contact signals), which inspection was built for; off keeps the record with no selection.
+    all: also any other recorded field beyond the cameras (arm signals, actions, original metadata). Ordinary RGB stays
+    on its path in every mode."""
+    if bool(ep.get('depth') or ep.get('additional_depth') or sensor_evidence.get('sensors')):
+        return True
+    if mode != 'all':
+        return False
     ctx = ep['context']
     archives = [ctx, *(ctx.get('recorded_sensor_fields') or [])]
     native = any(not detail.get('already_supplied') for archive in archives
