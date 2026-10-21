@@ -1863,6 +1863,12 @@ def _drop_tracking(ep: dict, rows: list, series: dict, ks: list[int]) -> tuple[l
             kept.append(r)
             continue
         q, lag, apart = hit
+        # the row left out must follow its partner along a line outside the instants where they come apart; when the
+        # readings there carry none (the partner never moves outside them), the pair is not a copy and both are sent
+        left, partner = (q, r) if lag < 0 else (r, q)
+        if _relation_fit(ep, ks, left, partner, series, apart) is None:
+            kept.append(r)
+            continue
         if lag < 0:
             # the new row's values come later: it is the measured side, so it takes the kept row's place
             kept[kept.index(q)] = r
@@ -1887,20 +1893,29 @@ def _apart_line(ep: dict, ks: list[int], row: tuple, other: tuple, apart: list[i
             f", except {stretches}, where its readings are given: {readings}.")
 
 
+def _relation_fit(ep: dict, ks: list[int], row: tuple, other: tuple, series: dict, apart=()):
+    """(lag, the sent row's readings, the left out row's readings, (slope, intercept)) of the line the left out row
+    follows at the instants outside its apart instants, the sent row read lag frames later, or None when those readings
+    carry no line (label/signals.py line_through): then the row does not follow the sent row and is sent whole."""
+    from label import signals as sg
+    x, y = series[other[1], other[2]], series[row[1], row[2]]
+    _, lag = sg.tracking(x, y, ks, ep_fps(ep))
+    k = np.asarray(ks, dtype=int)
+    keep = np.ones(len(k), dtype=bool)
+    keep[list(apart)] = False
+    xa, ya = x[np.clip(k + lag, 0, len(x) - 1)][keep], y[k][keep]
+    line = sg.line_through(xa, ya)
+    return None if line is None else (lag, xa, ya, line)
+
+
 def _relation_words(ep: dict, ks: list[int], row: tuple, other: tuple, series: dict, apart=()) -> str:
     """"row ≈ a + b x other, 0.10 s later (within 2.1%)": the straight line through the sent row that the left out row
     follows at the instants (outside its apart instants), in the left out row's own units, the lag at which it holds best,
     and its largest miss at any of those instants as a share of the row's range."""
     from label import signals as sg
     fps = ep_fps(ep)
-    x, y = series[other[1], other[2]], series[row[1], row[2]]
-    _, lag = sg.tracking(x, y, ks, fps)
-    k = np.asarray(ks, dtype=int)
-    keep = np.ones(len(k), dtype=bool)
-    keep[list(apart)] = False
-    xa, ya = x[np.clip(k + lag, 0, len(x) - 1)][keep], y[k][keep]
+    lag, xa, ya, (b, a) = _relation_fit(ep, ks, row, other, series, apart)
     good = np.isfinite(xa) & np.isfinite(ya)
-    b, a = np.polyfit(xa[good], ya[good], 1)
     span = float(np.ptp(ya[good])) or 1.0
     miss = float(np.max(np.abs(ya[good] - (a + b * xa[good])))) / span
     # the offset is said to the nearest 1% of the row's range (the fit is no closer than that), the scale to three
