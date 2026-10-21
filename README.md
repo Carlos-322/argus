@@ -11,7 +11,7 @@
   </tr>
 </table>
 
-<p align="center"><ins><strong>Argus has many tunable settings, and their defaults decide both what a run costs and what it labels. Read <a href="#settings">Settings</a> in full before a paid run.</strong></ins></p>
+*Argus has many tunable settings, and their defaults decide both what a run costs and what it labels. Read [Settings](#settings) in full before a paid run.*
 
 ### \* DiverseUMI (October 2026)
 
