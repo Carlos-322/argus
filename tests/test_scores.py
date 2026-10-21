@@ -365,6 +365,16 @@ def test_a_mistake_listed_twice_explains_one_failed_attempt_not_two():
     assert s["inputs"]["unexplained_failed_attempts"] == scores.FAILED_ATTEMPT_POINTS and s["cleanliness"] == 6.0
 
 
+def test_a_recording_with_a_part_that_has_no_labels_gets_no_whole_recording_score():
+    # 185622: part 1 of 2 got no reply, and the labelled half scored 10 for the whole recording
+    rec = _record("sort the blocks", None, [(372, 680, "idle", None)])
+    rec["_stitched"] = {"parts": 2, "cuts_s": [371.7], "missing": [{"part": 1, "t0_s": 0.0, "t1_s": 371.7,
+                                                                     "why": "the model gave no reply"}]}
+    s = scores.score_board({"m.json": rec})["m.json"]
+    assert s["execution"] is None and s["outcome"] is None and s["cleanliness"] is None
+    assert s["inputs"]["unlabelled_parts"] == [{"part": 1, "t0_s": 0.0, "t1_s": 371.7}]
+
+
 def test_failed_tries_inside_one_mistakes_span_are_one_incident_and_any_other_failure_counts_alone():
     # a sticker peel retried ten times inside the one mistake the labels describe is one incident, which that mistake
     # explains; the failures outside every mistake span, and one with no time, count one each, as on main

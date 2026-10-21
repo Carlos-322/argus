@@ -55,7 +55,7 @@ OUTCOME_CAPS = {"success": 1.0, "success_then_undone": 0.7, "partial": 0.9, "fai
 EXECUTION_WEIGHTS = {"cleanliness": 0.5, "efficiency": 0.25, "fluency": 0.25}
 # the record fields the scores read, so a board build can hold every episode at once without its whole record
 FIELDS = ("dataset", "episode_prompt", "task_label", "event_labels", "key_events", "operator_mistakes", "recovery",
-          "completion", "goal_alignment", "tasks", "_meta", "_rig")
+          "completion", "goal_alignment", "tasks", "_meta", "_rig", "_stitched")
 SIMILAR = 0.5                     # two subgoal labels are the same kind of subgoal when they share this share of words
 SAME_TASK = 0.6                   # a one-off wording joins a task whose instruction shares this share of its words
 STOP = {"the", "a", "an", "and", "then", "with", "its", "it", "of", "on", "to", "into", "in", "from", "onto", "by", "at",
@@ -610,6 +610,13 @@ def score_board(records: dict) -> dict:
             st["peer_median_s"] = same.median() if enough else None
             st["execution"] = (_weighted({"cleanliness": st["cleanliness"], "efficiency": st["efficiency"],
                                           "fluency": st["steady"]}) if st["reached"] else None)
+        # a recording labelled in parts with a part that has no labels: the labelled parts say nothing of the rest, so
+        # it gets no whole-recording execution or outcome, only its subgoals' and the parts that are missing
+        missing = [g for g in _list(_dict(records[f].get("_stitched")).get("missing")) if isinstance(g, dict)]
+        if missing:
+            dims = {key: None for key in dims}
+            outcome = None
+            o_in = {**o_in, "unlabelled_parts": [{key: g.get(key) for key in ("part", "t0_s", "t1_s")} for g in missing]}
         out[f] = {"version": VERSION, "execution": _weighted(dims), "outcome": outcome, **dims, "relation": x["relation"],
                   "subgoals": subs,
                   "peers": peers, "peer_basis": "task" if efficiency is not None else None, "group": g,
