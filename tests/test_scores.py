@@ -365,25 +365,25 @@ def test_a_mistake_listed_twice_explains_one_failed_attempt_not_two():
     assert s["inputs"]["unexplained_failed_attempts"] == scores.FAILED_ATTEMPT_POINTS and s["cleanliness"] == 6.0
 
 
-def test_tries_in_a_row_with_no_success_between_them_cost_as_one_failed_attempt():
-    # a sticker peel retried ten times is one incident, as the prompt makes it one mistake; a success starts a new one
+def test_failed_tries_inside_one_mistakes_span_are_one_incident_and_any_other_failure_counts_alone():
+    # a sticker peel retried ten times inside the one mistake the labels describe is one incident, which that mistake
+    # explains; the failures outside every mistake span, and one with no time, count one each, as on main
     rec = _record("peel the stickers", 30.0, [(0, 30, "advancing", 1.0)])
+    rec["operator_mistakes"] = [{"issue": "struggles to peel the first sticker", "severity": "low",
+                                 "category": "slow_progress", "t_s": 0.5, "end_s": 11.0}]
     rec["key_events"] = ([{"t_s": 1.0 + i, "kind": "peel", "outcome": "failure", "label": "sticker stays"}
                           for i in range(10)]
-                         + [{"t_s": 12.0, "kind": "peel", "outcome": "success", "label": "sticker off"},
-                            {"t_s": 14.0, "kind": "peel", "outcome": "failure", "label": "next sticker stays"},
+                         + [{"t_s": 14.0, "kind": "peel", "outcome": "failure", "label": "next sticker stays"},
                             {"t_s": 15.0, "kind": "peel", "outcome": "failure", "label": "next sticker stays"},
                             {"kind": "peel", "outcome": "failure", "label": "a try with no time"}])
     s = scores.score_board({"p.json": rec})["p.json"]
-    assert s["inputs"]["unexplained_failed_attempts"] == 3 * scores.FAILED_ATTEMPT_POINTS     # two runs and the untimed
+    assert s["inputs"]["unexplained_failed_attempts"] == 3 * scores.FAILED_ATTEMPT_POINTS
     assert s["cleanliness"] == 7.0
-    # tries at different aims are different incidents, and a partial between two tries splits them as a success does
-    rec["key_events"] = [{"t_s": 1.0, "kind": "grasp", "outcome": "failure", "label": "lid slips"},
-                         {"t_s": 2.0, "kind": "open", "outcome": "failure", "label": "lid stays shut"},
-                         {"t_s": 3.0, "kind": "insert", "outcome": "failure", "label": "peg misses"},
-                         {"t_s": 4.0, "kind": "insert", "outcome": "partial", "label": "peg half in"},
-                         {"t_s": 5.0, "kind": "insert", "outcome": "failure", "label": "peg misses"}]
-    assert scores.score_board({"p.json": rec})["p.json"]["inputs"]["unexplained_failed_attempts"] == 4.0
+    # two unrelated failures with no mistake around them, a grasp at 1s and a collision at 500s, are two incidents
+    rec = _record("tidy the kitchen", 600.0, [(0, 600, "advancing", 1.0)])
+    rec["key_events"] = [{"t_s": 1.0, "kind": "grasp", "outcome": "failure", "label": "left hand misses the cup"},
+                         {"t_s": 500.0, "kind": "contact", "outcome": "failure", "label": "right hand hits the drawer"}]
+    assert scores.score_board({"k.json": rec})["k.json"]["inputs"]["unexplained_failed_attempts"] == 2.0
 
 
 def test_a_staged_mistake_is_charged_like_the_board_counts_it_and_one_without_text_is_not_read():

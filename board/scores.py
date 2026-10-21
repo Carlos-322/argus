@@ -195,23 +195,22 @@ def facts(d: dict) -> dict:
 
 
 def _incidents(d: dict) -> dict:
-    """{id(failed key event): its incident}. Failed tries at one aim in a row are one incident, the way the prompt makes
-    them one operator mistake ("the failed tries at one aim"), so a peel retried ten times costs as one failed attempt,
-    not ten. The aim is the key event's kind: a failure of another kind, or any key event that did not fail (a success,
-    a partial), between two failures starts a new incident. A failed key event with no time is an incident of its own."""
-    events = [k for k in _list(d.get("key_events")) if isinstance(k, dict)]
-    timed = sorted((k for k in events if _num(k.get("t_s")) is not None), key=lambda k: k["t_s"])
-    out, current, aim, count = {}, None, None, 0
-    for k in timed:
-        if k.get("outcome") == "failure":
-            if current is None or _str(k.get("kind")) != aim:
-                current, aim, count = count, _str(k.get("kind")), count + 1
-            out[id(k)] = current
-        else:
-            current = None
-    for k in events:
-        if k.get("outcome") == "failure" and id(k) not in out:
-            out[id(k)], count = count, count + 1
+    """{id(failed key event): its incident}. The labels already say which failed tries share an aim: the prompt makes
+    one operator mistake "the failed tries at one aim and the motion between them", with t_s and end_s spanning the
+    incident. So the failed tries inside one mistake's span are one incident (a peel retried ten times inside one
+    mistake costs one failed attempt, not ten), and a failed try outside every mistake span, or with no time, is an
+    incident of its own, never grouped by a guess about its aim from its kind or timing."""
+    spans = sorted((t, e) for m in _list(d.get("operator_mistakes")) if isinstance(m, dict) and m.get("issue")
+                   for t, e in [(_num(m.get("t_s")), _num(m.get("end_s")))] if t is not None and e is not None and e >= t)
+    out, count = {}, len(spans)
+    for k in _list(d.get("key_events")):
+        if not isinstance(k, dict) or k.get("outcome") != "failure":
+            continue
+        t = _num(k.get("t_s"))
+        within = next((i for i, (a, b) in enumerate(spans) if t is not None and a <= t <= b), None)
+        if within is None:
+            within, count = count, count + 1
+        out[id(k)] = within
     return out
 
 
