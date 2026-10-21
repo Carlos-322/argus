@@ -223,6 +223,19 @@ def _retry_after(headers, attempt: int) -> float:
     return min(60.0, 4.0 * 2 ** attempt)
 
 
+def reply_error(resp: dict) -> str | None:
+    """The provider's own failure carried inside a reply it delivered with HTTP 200 (finish_reason error, or an error
+    on the choice, eg an overloaded upstream), or None. Such a reply's text is a fragment, never an answer to parse."""
+    choices = resp.get('choices') if isinstance(resp, dict) else None
+    choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    error = choice.get('error')
+    if choice.get('finish_reason') != 'error' and not error:
+        return None
+    if isinstance(error, dict):
+        return ' '.join(str(error.get(key)) for key in ('code', 'message') if error.get(key) is not None)[:300] or 'error'
+    return str(error)[:300] if error else 'finish_reason error'
+
+
 def _post(url: str, body: dict, api_key: str, timeout: int, *, attempts: int = 6) -> dict:
     """POST one request. attempts bounds retries of failures whose billing is unknown, so a paid call passes 1 and
     is never replayed after it may have been billed. A failure that provably cost nothing (the request never fully
@@ -247,6 +260,19 @@ def _post(url: str, body: dict, api_key: str, timeout: int, *, attempts: int = 6
                 # HTTP 200 carrying an error body and no completion: fail loudly, never record an empty parse
                 err = json.dumps(resp.get("error") or resp)[:300]
                 raise DispatchError(f"200 response with no choices: {err}", http_status=200, stage='unknown')
+            failure = reply_error(resp)
+            cost = (resp.get('usage') or {}).get('cost') if isinstance(resp.get('usage'), dict) else None
+            if failure is not None and type(cost) in (int, float) and cost == 0:
+                # the provider failed inside a 200 reply (an overloaded upstream) and billed nothing: it cost nothing,
+                # so it is retried like an error status; a billed or unpriced one is kept as received, and only
+                # --retry-received sends it again
+                last = f"provider error in the reply: {failure}"
+                unpaid_left -= 1
+                if unpaid_left > 0:
+                    time.sleep(min(30.0, 2.0 ** (tries - 1)))
+                    continue
+                raise DispatchError(f"model call failed after {tries} HTTP attempts: {last}", http_status=200,
+                                    verified_unpaid=clean, stage='rejected')
             return resp
         except urllib.error.HTTPError as e:
             # Read a bounded complete envelope before shortening its display message.
@@ -1445,6 +1471,12 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
         raise Truncated(f"response truncated (finish_reason=length) at max_tokens={max_tokens}", episode_cost(failed))
     # an unparseable reply is recorded as it came, never repaired or retried
     labels, parse_ok = parse_response(text)
+    failure = reply_error(resp)
+    if failure is not None:
+        # the provider failed partway (billed or unpriced, or _post would have retried it): its text is a fragment,
+        # so it is named as the provider's error, never as a reply that did not parse; --retry-received resends it
+        labels, parse_ok = {'_raw': text, '_parse_error': f'the provider returned an error in the reply ({failure}); '
+                                                          'resend it with --retry-received'}, False
 
     raw_usage = resp.get("usage")
     usage = raw_usage if isinstance(raw_usage, dict) else {}
