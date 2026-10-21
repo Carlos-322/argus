@@ -30,7 +30,7 @@ let currentDataset = 'yam';
 `;
 const page = require('fs').readFileSync(require('path').join(process.argv[3], 'board', 'index.html'), 'utf8');
 const line = name => page.slice(page.indexOf(name), page.indexOf('\n', page.indexOf(name)) + 1);
-const code = stub + line('const TARGETS =') + line('const coverageWas =')
+const code = stub + line('let TARGETS =') + line('const coverageWas =')
   + ['fmtHours', 'fmtSpan', 'sumDur', 'fmtOf', 'coverageBar', 'renderCoverage'].map(piece).join('')
   + 'renderCoverage("yam", ALL_EPS.filter(e => e.dataset === "yam")); coverageEl.innerHTML';
 console.log(JSON.stringify(eval(code)));

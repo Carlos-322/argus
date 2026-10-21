@@ -3607,6 +3607,8 @@ function firstDataset(want) {
   return want && datasets.includes(want) && has(want) ? want : (datasets.find(has) || null);
 }
 async function loadEpisodes() {
+  // the build this list comes from, read first so a rebuild while the list loads is still seen
+  await liveVersion(true);
   const [eps, cmp, kp, sn] = await Promise.all([loadAllEpisodes(), BOARD.compare ? fetchJson(compareUrl('index'))
     : null, BOARD.keypoints ? fetchJson(kpIndexUrl()) : null, BOARD.sensors ? fetchJson(snIndexUrl()) : null]);
   ALL_EPS = eps;
@@ -3634,6 +3636,46 @@ async function loadEpisodes() {
   else if (ds) await setDataset(ds, undefined, nav);
   else renderRail(null, undefined, false, nav);
   prefetchWhenIdle();
+}
+
+// ---- a live board follows a run in progress ----
+// While the tab is visible the page asks every 30s which build of the board it is (board/serve.py board_version, two
+// stats on the server). After a rebuild it reloads the episode list and the targets in place: the coverage strip,
+// its bars, the issue filter's counts and the list follow, and the open episode, the filter, the search and the
+// list's scroll stay as they were. A static site is a fixed build and never asks.
+const LIVE_EVERY_MS = 30000;
+let _liveVersion = null, _liveBusy = false;
+async function liveVersion(first) {
+  if (STATIC) return null;
+  try {
+    const v = await okJson(await fetch('api/version', {cache: 'no-store'}), 'api/version');
+    if (first) _liveVersion = v.version;
+    return v;
+  } catch (e) { return null; }       // a board server from before api/version, or a dropped request: try again later
+}
+async function liveCheck() {
+  if (STATIC || _liveBusy || document.hidden || !currentDataset || BY
+      || document.body.classList.contains('view-cmp')) return;
+  _liveBusy = true;
+  try {
+    const v = await liveVersion(false);
+    if (!v || v.version === _liveVersion) return;
+    const eps = await loadAllEpisodes();
+    _liveVersion = v.version;
+    TARGETS = v.targets && typeof v.targets === 'object' ? v.targets : {};
+    ALL_EPS = eps;
+    const scroll = epListEl.scrollTop;
+    // an open filter menu is left as the reader has it; its counts follow on the next rebuild after it closes
+    if (!issueFilterEl.classList.contains('open')) buildIssueFilter(currentDataset);
+    renderRail(currentDataset, _activeFile, true);
+    epListEl.scrollTop = scroll;
+  } catch (e) {
+    // a list that failed to load leaves the page as it was
+  } finally { _liveBusy = false; }
+}
+if (!STATIC) {
+  setInterval(liveCheck, LIVE_EVERY_MS);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) liveCheck(); });
 }
 
 // ---- a dataset tab opens at once: its first episode is fetched ahead ----
@@ -3713,7 +3755,7 @@ function fmtSpan(sec, long) {
 }
 function sumDur(list) { return list.reduce((a, e) => a + (e.duration_s || 0), 0); }
 // a dataset's target from the manifest (board/serve.py targets): episodes and hours a run in progress is meant to label
-const TARGETS = (BOARD.targets && typeof BOARD.targets === 'object') ? BOARD.targets : {};
+let TARGETS = (BOARD.targets && typeof BOARD.targets === 'object') ? BOARD.targets : {};
 // labelled seconds against a target in hours, both in the target's unit: [labelled, target, unit]
 function fmtOf(sec, hours, long) {
   return hours >= 1 ? [(sec / 3600).toFixed(1), hours.toFixed(1), long ? 'hours' : 'h']
