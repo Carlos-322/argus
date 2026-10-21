@@ -293,3 +293,26 @@ def test_thirteen_instants_keep_every_row_as_it_is():
     assert len(pl["ks"]) == 13
     shown, _, _, lines = _readout(ep, pl)
     assert "noisy" in shown and not any("does not resolve" in l for l in lines)
+
+
+def _stepped(trend: float, seed: int = 9) -> np.ndarray:
+    """A joint a policy moves in random half-second steps of 1 around a slow wave of amplitude `trend`."""
+    t = np.arange(N) / FPS
+    steps = np.repeat(np.random.default_rng(seed).choice([-1.0, 1.0], size=N // 16 + 1), 16)[:N]
+    return trend * np.sin(2 * np.pi * t / 20) + steps
+
+
+def test_window_mean_rows_come_after_resolved_rows_and_by_the_variance_their_means_keep(monkeypatch):
+    """With room for one window-mean row, the one whose means keep more of its variance is sent, whatever the order of
+    the signals; the other is named with when it peaked, and every resolved row is sent first."""
+    low, high = _stepped(0.3), _stepped(1.0, seed=11)
+    ep, pl = _case({"a_low": low, "b_high": high, "j": _path(1)})
+    assert not sg.resolved(np.stack([low, high], axis=1), pl["ks"]).any()
+    kept = sg.window_means(np.stack([low, high], axis=1), pl["ks"])[1]
+    assert kept[1] > kept[0]
+    room = len(next(l for l in _readout(ep, pl)[3] if l.startswith("    b_high (window mean): ")))
+    monkeypatch.setattr(sg, "WINDOW_SHARE", 1.5 * room / me.signal_readout_budget(len(pl["ks"])))
+    shown, _, _, lines = _readout(ep, pl)
+    assert shown == ["b_high (window mean)", "j"]
+    cut = next(l for l in lines if "rows given as window means take at most" in l)
+    assert "a_low (max " in cut and " s, min " in cut and "b_high" not in cut

@@ -112,3 +112,19 @@ def test_with_mixed_frame_rates_the_shorter_frame_interval_decides():
     frame though less than half its own, so it is listed."""
     mapping = _capture(np.arange(45) / 15.0 + 0.025, np.arange(90) // 2)
     assert [row[3] for row in mapping["left"]] == [0.025] * 4
+
+
+def test_window_mean_rows_take_at_most_three_percent_of_the_budget():
+    """A 60 s case has 61 instants and a 24400 character budget, so window-mean rows get 732 characters: a window-mean
+    row of exactly 732 characters is sent, and one of 733 is left out and named with when it peaked (WINDOW_SHARE
+    0.03)."""
+    from tests.test_readout_duplicates import _case, _readout, _stepped
+    sig = {"j": _path(1)}
+    ep, pl = _case({**sig, "w": _stepped(1.0)})
+    assert me.signal_readout_budget(len(pl["ks"])) == 24400
+    base = len(next(l for l in _readout(ep, pl)[3] if l.startswith("    w (window mean): ")))
+    for size, sent in ((732, True), (733, False)):
+        name = "w" + "x" * (size - base)
+        shown, _, _, lines = _readout(*_case({**sig, name: _stepped(1.0)}))
+        assert (f"{name} (window mean)" in shown) is sent
+        assert any(f"{name} (max " in l and "window means take at most 732 of the 24400" in l for l in lines) is not sent

@@ -752,6 +752,13 @@ def resolution(a: np.ndarray, ks: list[int]) -> tuple[np.ndarray, np.ndarray]:
 # velocities mostly 0.03 to 0.05; on the YAM spot check velocities and efforts keep 0.19 to 0.74 against 0.033, so they
 # are sent as window means too: the mean velocity over a second is real motion.
 WINDOW_SIGNAL = 4.0
+# Window-mean rows rank after every row whose own readings resolve it, among themselves by the share of variance their
+# means keep (so a gripper effort that steps during grasps comes before a joint velocity that mostly mirrors its
+# position), and together use at most WINDOW_SHARE of the readout budget; those that do not fit are named with when
+# they peaked. Set by cost: on the 21 spot requests, sending every window-mean row adds 0.41M characters per footage
+# hour (1.61M to 2.03M); at this share the prompts come to 1.656M per hour (1.661M at 0.035, 1.682M at 0.05), under
+# the 1.665M per hour of the build the 100 h run was priced on.
+WINDOW_SHARE = 0.03
 
 
 def window_means(a: np.ndarray, ks: list[int]) -> tuple[np.ndarray, np.ndarray, float]:

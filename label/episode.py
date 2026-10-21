@@ -1696,7 +1696,7 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
     unread = {}           # signal: the error that kept its rows out, named below
     aliased = {}          # signal: [(label, readings at every frame) of rows the instants do not resolve]
     counts = {}           # signal: how many rows it has
-    windowed = False      # whether a row is sent as its means over each instant's frames
+    wcols = {}            # (signal's place, row's place): readings at every frame of a row sent as window means
     series = {}           # (signal's place, row's place): the value's readings at every frame, for rows of one value
     for i, (name, a) in enumerate(arrs.items()):
         try:
@@ -1724,9 +1724,9 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
             if not ok[j] and wkept is not None and wkept[j] >= sg.WINDOW_SIGNAL * wnoise:
                 # the readings do not stand for their instants, but the means over each instant's frames keep the
                 # row's trend: those are sent, marked, and the row takes no part in tracking
-                rows.append(((round(float(wkept[j]), 2), float(mv[j])), i, j, name, f"{lb} (window mean)",
+                rows.append(((float(wkept[j]), float(mv[j])), i, j, name, f"{lb} (window mean)",
                              [sg.reading_text(m) if np.isfinite(m) else "-" for m in wmeans[:, j]]))
-                windowed = True
+                wcols[i, j] = cols[:, j]
                 continue
             if not ok[j]:
                 aliased.setdefault(name, []).append((lb, cols[:, j] if by_value else None))
@@ -1761,9 +1761,9 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
     # a row read only where it comes apart is charged to the same budget as the rows, ranked with them
     apart_head = ("  These rows follow a sent row as fitted here except where they come apart, so they are given "
                   "only there, with the time of each reading:")
-    unresolved = unresolved + repeated + (
-        ["  A row marked (window mean) gives, at each instant, the mean of the frames that instant stands for, because "
-         "its single readings at the instants do not resolve it."] if windowed else [])
+    unresolved = unresolved + repeated
+    win_note = ("  A row marked (window mean) gives, at each instant, the mean of the frames that instant stands for, "
+                "because its single readings at the instants do not resolve it.")
     partial = [r for r, _, _ in partly]
     if not rows and not partial:
         return unresolved + not_read, frozenset()
@@ -1773,22 +1773,28 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
     text.update({(r[1], r[2]): _apart_line(ep, ks, r, s, a, series) for r, s, a in partly})
     budget = signal_readout_budget(len(ks))
     # what is said about the rows left out (when their extremes fell, the relation a copy follows) is paid first
-    room, chosen = budget - sum(len(x) + 1 for x in unresolved), set()
+    room, chosen = budget - sum(len(x) + 1 for x in unresolved) - (len(win_note) + 1 if wcols else 0), set()
+    # rows sent as window means come after every other row and share a room of their own within the budget
+    wroom = int(sg.WINDOW_SHARE * budget)
     skipped, kept_after_skip = False, False
     is_partial = {(r[1], r[2]) for r in partial}
     # a sent row that other rows are read from (their relation names it) comes first: without it they say nothing
     partners = {(s[1], s[2]) for _, s, _ in tracked}
-    for r in sorted(rows + partial, key=lambda r: ((r[1], r[2]) not in partners, -r[0][0], -r[0][1], r[1], r[2])):
+    for r in sorted(rows + partial, key=lambda r: ((r[1], r[2]) not in partners, (r[1], r[2]) in wcols, -r[0][0],
+                                                   -r[0][1], r[1], r[2])):
         key = (r[1], r[2])
         # the times row and the heading of the lines read only where apart are paid once, by the first of each
         extra = (len(apart_head) if not any(k in is_partial for k in chosen) else 0) if key in is_partial else \
             (len(head) if not any(k not in is_partial for k in chosen) else 0)
+        if key in wcols and len(text[key]) + extra > min(room, wroom):
+            continue
         if len(text[key]) + extra > room:
             skipped = True
             continue
         kept_after_skip |= skipped
         chosen.add(key)
         room -= len(text[key]) + extra
+        wroom -= len(text[key]) + extra if key in wcols else 0
     table = [r for r in rows if (r[1], r[2]) in chosen]
     if table:
         lines.append("  Each signal that changes, at every instant you receive (seconds in the first row; \"-\" is "
@@ -1797,9 +1803,20 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
     shown_apart = [text[r[1], r[2]] for r in partial if (r[1], r[2]) in chosen]
     if shown_apart:
         unresolved = unresolved + [apart_head] + shown_apart
+    if any(k in wcols for k in chosen):
+        unresolved = unresolved + [win_note]
+    cut = [r for r in rows if (r[1], r[2]) in wcols and (r[1], r[2]) not in chosen]
+    if cut:
+        unresolved = unresolved + [
+            "  The values at each instant leave out "
+            + _and_list([r[4].removesuffix(" (window mean)") + _extremes_words(ep, ks, wcols[r[1], r[2]]) for r in cut])
+            + f", because one instant every {_seconds_number(step, 2)} s does not resolve their readings and rows given "
+              f"as window means take at most {int(sg.WINDOW_SHARE * budget)} of the {budget} character budget, kept by "
+              "how much of their variance the means keep. Their ranges are given above, and when each reached its "
+              "largest and smallest reading."]
     left = {}
     for r in rows + partial:
-        if (r[1], r[2]) not in chosen:
+        if (r[1], r[2]) not in chosen and (r[1], r[2]) not in wcols:
             left.setdefault(r[3], []).append(r)
     if left:
         named = _and_list([_left_out(nm, arrs[nm], meta.get(nm) or {}, len(left[nm]), counts[nm])
