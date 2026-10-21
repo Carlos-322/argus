@@ -1680,6 +1680,8 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
     touch_verdicts), nor has a signal that never changes or has no reading. The rows are ranked by how much their
     values move over the episode (label/signals.py movements) and kept when they fit the allowance for the selected
     instants, then printed in the signals' own order. An oversized row does not prevent smaller rows being shown.
+    A row whose readings at the instants do not resolve its value (label/signals.py resolved), or track a row already
+    sent (_drop_tracking), is left out and named with why.
     Every signal left out, whole or in part, is named with its size and rate; original value names remain in metadata.
     """
     from label import signals as sg
@@ -1694,6 +1696,7 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
     unread = {}           # signal: the error that kept its rows out, named below
     aliased = {}          # signal: [labels of its rows whose readings at the instants do not resolve it]
     counts = {}           # signal: how many rows it has
+    series = {}           # (signal's place, row's place): the value's readings at every frame, for rows of one value
     for i, (name, a) in enumerate(arrs.items()):
         try:
             if name in touch or not len(a) or not np.isfinite(a).any() or _constant(a):
@@ -1714,10 +1717,13 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
             unread[name] = type(e).__name__
             continue
         counts[name] = len(got)
+        cols = sg.columns(a) if by_value else None
         for j, (lb, v) in enumerate(got):
             if not ok[j]:
                 aliased.setdefault(name, []).append(lb)
                 continue
+            if by_value:
+                series[i, j] = cols[:, j]
             # ranked for the budget by how well each reading stands for its instant, then by movement: movement alone
             # ranks a gripper that opens and closes a few times (a few large steps) below a noisy effort, so a budget
             # cut the gripper first. A summary row's numbers are made at each instant, so they stand for it.
@@ -1734,6 +1740,13 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
                    + f", because one instant every {_seconds_number(step, 2)} s does not resolve their readings: they "
                      "swing faster than that or only jitter by their noise, so a reading at one instant does not stand "
                      "for the time around it. Their ranges are given above."] if aliased else [])
+    # a row whose readings track a row already sent is sent once (label/signals.py tracking)
+    rows, tracked = _drop_tracking(ep, rows, series, ks)
+    repeated = ([f"  The values at each instant leave out " + _tracking_words(tracked)
+                 + f", because their readings at the instants follow that row's (up to sign, scale and a lag of at "
+                   f"most {_seconds_number(sg.TRACK_LAG_S, 1)} s), so each is sent once. Their ranges are given above, "
+                   "where values that come apart still show."] if tracked else [])
+    unresolved = unresolved + repeated
     if not rows:
         return unresolved + not_read, frozenset()
     lines = []
@@ -1758,7 +1771,7 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
         if (r[1], r[2]) not in chosen:
             left.setdefault(r[3], []).append(r)
     if left:
-        named = _and_list([_left_out(nm, arrs[nm], meta.get(nm) or {}, len(left[nm]), sum(r[3] == nm for r in rows))
+        named = _and_list([_left_out(nm, arrs[nm], meta.get(nm) or {}, len(left[nm]), counts[nm])
                            for nm in left])
         reason = (", because these rank lowest and there is no more room." if chosen else
                   ", because not even one row fits.")
@@ -1767,7 +1780,60 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
                       f"and kept when they fit the {budget} character budget."
                       if chosen else f", because no row fits the {budget} character budget after the times row.")
         lines.append("  The values at each instant leave out " + named + reason)
-    return lines + unresolved + not_read, frozenset(r[3] for r in rows if r[3] not in left and r[3] not in aliased)
+    return lines + unresolved + not_read, frozenset(r[3] for r in rows if r[3] not in left and r[3] not in aliased
+                                                    and not any(t[0][3] == r[3] for t in tracked))
+
+
+def _drop_tracking(ep: dict, rows: list, series: dict, ks: list[int]) -> tuple[list, list]:
+    """(rows to send, [(row left out, the sent row it tracks)]). Rows of one value's readings are taken in the budget's
+    rank order; one whose readings track a row already kept (label/signals.py tracking) is sent once. Of such a pair the
+    row whose values come later is kept, read from the lag of the best fit: a robot's measured joints follow the
+    command that moves them, so the measured side is kept whatever either is named. With no lag either way the
+    higher ranked row is kept."""
+    from label import signals as sg
+    order = sorted(rows, key=lambda r: (-r[0][0], -r[0][1], r[1], r[2]))
+    kept, tracked, fps = [], [], ep_fps(ep)
+    for r in order:
+        key = (r[1], r[2])
+        if key not in series:
+            kept.append(r)
+            continue
+        hit = None
+        for q in kept:
+            if (q[1], q[2]) not in series:
+                continue
+            same, lag = sg.tracking(series[q[1], q[2]], series[key], ks, fps)
+            if same:
+                hit = (q, lag)
+                break
+        if hit is None:
+            kept.append(r)
+            continue
+        q, lag = hit
+        if lag < 0:
+            # the new row's values come later: it is the measured side, so it takes the kept row's place
+            kept[kept.index(q)] = r
+            tracked = [(t, r if s is q else s) for t, s in tracked] + [(q, r)]
+        else:
+            tracked.append((r, q))
+    sent = {id(r) for r in kept}
+    return [r for r in rows if id(r) in sent], tracked
+
+
+def _tracking_words(tracked: list) -> str:
+    """The rows left out as tracking another, grouped by their signal and the signal they track: "S [0], [1] and [2]
+    (tracking T [0], [1] and [2])"."""
+    groups = {}
+    for r, s in tracked:
+        groups.setdefault((r[3], s[3]), []).append((r, s))
+    words = []
+    for (name, other), pairs in groups.items():
+        pairs.sort(key=lambda p: (p[0][2], p[1][2]))
+        own = [r[4][len(name):].strip() for r, _ in pairs]
+        theirs = [s[4][len(other):].strip() for _, s in pairs]
+        mine = name + (" " + _and_list(own) if any(own) else "")
+        words.append(f"{mine} (tracking {other}" + (" " + _and_list(theirs) if any(theirs) else "") + ")")
+    return _and_list(words)
 
 
 def _readout_of(ep: dict, pl: dict) -> tuple[list[str], frozenset]:

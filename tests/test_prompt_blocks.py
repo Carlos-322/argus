@@ -865,7 +865,10 @@ def _humanoid_overflow(state_w, vel_w):
     return episode, left, shown
 
 
-def test_over_the_budget_the_state_line_names_the_joint_readings_only_when_every_row_of_them_is_shown():
+def test_over_the_budget_the_state_line_names_the_joint_readings_only_when_every_row_of_them_is_shown(monkeypatch):
+    # the fixture's waves are one wave at shifted phases, some within a lag of each other, so the readout would
+    # send them once (label/signals.py tracking); this test is about the budget, so no row is taken as a copy
+    monkeypatch.setattr(sg, "TRACK_LEVEL", 2.0)
     named = ("The signal whose name says joints or a state (observation.state) is given value by value under their own "
              "names among the other recorded signals below.")
     episode, left, shown = _humanoid_overflow(0.4, 0.8)
@@ -898,6 +901,9 @@ def test_signal_readout_skips_an_oversized_row_without_discarding_smaller_eviden
     """The captured 60 s fixture fits 42 moving signals, then smaller flags at 12k.
     At 13k the previously oversized row and the remaining flag fit as well.
     """
+    # the fixture's waves are one wave at shifted phases, some within a lag of each other, so the readout would
+    # send them once (label/signals.py tracking); this test is about the budget, so no row is taken as a copy
+    monkeypatch.setattr(sg, "TRACK_LEVEL", 2.0)
     monkeypatch.setattr(me, "SIGNAL_TABLE_MAX_CHARS", budget)
     ep, pl = _sweeps_wide_and_flags()
     lines, whole = me._signal_readout(ep, pl)
@@ -918,6 +924,9 @@ def test_signal_readout_skips_an_oversized_row_without_discarding_smaller_eviden
 
 def test_with_no_row_that_fits_each_signal_with_rows_is_named_as_left_out_because_none_fits(monkeypatch):
     """A budget smaller than the times row or any value row names every omitted signal with the actual reason."""
+    # the fixture's waves are one wave at shifted phases, some within a lag of each other, so the readout would
+    # send them once (label/signals.py tracking); this test is about the budget, so no row is taken as a copy
+    monkeypatch.setattr(sg, "TRACK_LEVEL", 2.0)
     ep, pl = _sweeps_wide_and_flags()
     head = len("    at: " + " ".join(f"{me.frame_time(ep, k):.2f}" for k in pl["ks"]))
     shortest = min(len("    " + name + ": " + " ".join(sg.reading_text(x) for x in a[pl["ks"], 0]))

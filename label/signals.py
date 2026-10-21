@@ -748,6 +748,61 @@ def resolved(a: np.ndarray, ks: list[int]) -> np.ndarray:
     return is_resolved(*resolution(a, ks))
 
 
+# One value tracks another when its readings at the sampled instants are a straight-line function of the other's
+# (either sign, any scale and offset, so degrees against radians or a mirrored joint count), read up to TRACK_LAG_S
+# apart, both in level (r squared at least TRACK_LEVEL) and in how they change from one instant to the next (r squared
+# at least TRACK_CHANGE), and their frame-to-frame changes line up best within TRACK_LAG_S. The change test keeps apart
+# two values that make one big move together and nothing else alike; the lag test keeps apart two slow values that
+# make the same moves a second or more apart. Set from 16 bimanual teleop episodes (21 requests, 767 sent value
+# rows): each teleoperated joint against the same joint of the arm that commands it passes in 264 of 279 pairs, and in
+# all 264 the measured joint moves later; 18 of the 767 rows would merge with some other row, all in three requests
+# (a joint's position with its own effort, or two joints of one arm that moved together).
+TRACK_LAG_S = 0.5
+TRACK_LEVEL = 0.95
+TRACK_CHANGE = 0.9
+
+
+def _r2_rows(xs: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """r squared of y against each row of xs, on the instants where both have a reading (0 where either is flat)."""
+    ok = np.isfinite(xs) & np.isfinite(y)[None, :]
+    out = np.zeros(len(xs))
+    for i in range(len(xs)):
+        a, b = xs[i][ok[i]], y[ok[i]]
+        if len(a) >= 3 and a.std() > 0 and b.std() > 0:
+            out[i] = np.corrcoef(a, b)[0, 1] ** 2
+    return out
+
+
+def tracking(x: np.ndarray, y: np.ndarray, ks: list[int], fps: float) -> tuple[bool, int]:
+    """(whether y's readings at the instants ks track x's, how many frames later x moves than y). Whether they track
+    is judged on the readings at ks, x read at ks shifted by every lag up to TRACK_LAG_S. Which one moves later is read
+    from every frame between the first and last instant (the lag that best lines up their frame-to-frame changes, the
+    shortest of equal ones), since one reading a second cannot place a 0.1 s lag: positive means x follows y. Two
+    columns of frames by one value; fewer than RESOLVED_MIN_INSTANTS instants never track."""
+    ks = np.asarray(ks, dtype=int)
+    if len(ks) < RESOLVED_MIN_INSTANTS:
+        return False, 0
+    x, y = np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)
+    reach = int(round(TRACK_LAG_S * fps))
+    lags = np.arange(-reach, reach + 1)
+    xs = np.stack([x[np.clip(ks + lag, 0, len(x) - 1)] for lag in lags])
+    yk = y[ks]
+    same = _r2_rows(xs, yk).max() >= TRACK_LEVEL and _r2_rows(np.diff(xs, axis=1), np.diff(yk)).max() >= TRACK_CHANGE
+    if not same:
+        return False, 0
+    lo, hi = int(ks[0]), int(ks[-1]) + 1
+    dx = np.nan_to_num(np.diff(x[lo:hi]))
+    dy = np.nan_to_num(np.diff(y[lo:hi]))
+    m = len(dy)
+    # searched to twice the allowed lag: a slow copy shifted by more than TRACK_LAG_S can still fit closely at the
+    # window's edge, and lining up best outside the window is what tells it apart from a value that follows
+    score = {int(L): float(np.dot(dx[max(L, 0):m + min(L, 0)], dy[max(-L, 0):m - max(L, 0)]))
+             for L in range(-2 * reach, 2 * reach + 1) if abs(L) < m}
+    # a mirrored copy lines up with the opposite sign, so the size of the agreement decides
+    best = max(sorted(score, key=abs), key=lambda L: abs(score[L]))
+    return (True, best) if abs(best) <= reach else (False, 0)
+
+
 def quiet_spans(arrs: dict, need: int) -> list[tuple[int, int]]:
     """[(a, b)] frame spans of at least need frames over which every moving value of every signal (movements at least
     MOVING_MIN) stays within MOVING_MIN of its own typical steps: where a recording with no arm state shows nothing
