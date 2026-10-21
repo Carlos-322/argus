@@ -1128,9 +1128,9 @@ SIDE_WORDS = {"l": "left", "left": "left", "r": "right", "right": "right"}
 # words that appear in camera, topic and field names glued to the words the matchers look for (jointpos, depthmap,
 # wristview, cmdvel, leaderarm, zedmini, thirdperson, shoulderpan) without being looked for themselves; with every
 # matcher's own words they are the vocabulary a glued run of letters is split into (name_vocabulary)
-NAME_WORDS = ("state", "states", "observation", "robot", "base", "follower", "operator", "joint", "qpos", "pos",
-              "vel", "flex", "pan", "lift", "width", "map", "img", "view", "eye", "mini", "person", "body", "odom",
-              "info", "meta", "step", "ego")
+NAME_WORDS = ("state", "states", "observation", "robot", "base", "follower", "operator", "qpos", "flex", "pan",
+              "lift", "width", "map", "img", "view", "eye", "mini", "person", "body", "odom", "info", "meta", "step",
+              "ego")
 
 
 def tokens(name: str) -> list[str]:

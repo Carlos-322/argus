@@ -5027,16 +5027,16 @@ def test_a_joint_state_topic_that_says_action_inside_a_word_is_a_state_not_a_com
 # read as a command. Matching whole words fixed that, but at first it also stopped reading names whose words are
 # glued (leftwrist, jointcmd, observation.images.depthmap) and started reading letters cut off digits (l515 as left,
 # cam_3ee4f as an end effector). These tests hold the rule that settles both, and compare it with main on real names.
-import importlib.util
-import re
-import subprocess
-import sys
+import json
 from pathlib import Path
 
 import pytest
 
 
 MAIN_BEFORE_WHOLE_WORDS = "c916262"     # main before the whole-word matchers (PR 60)
+# main's reading of every corpus name by every matcher below, written once from main's prepare/formats.py at that
+# commit by tests/fixtures/make_name_readings.py, so the comparison needs no git history (CI checks out one commit)
+MAIN_READINGS = Path(__file__).resolve().parent / "fixtures" / f"name_readings_{MAIN_BEFORE_WHOLE_WORDS}.json"
 
 # every camera, topic and field name of the LeRobot datasets in robot-data-audit/data/raw, the subgoal_ab slice's
 # context.json and sources.json, the test fixtures, and the review of PR 61
@@ -5149,38 +5149,34 @@ def test_command_depth_joint_and_gripper_names_read_glued_words():
     assert f.state_words("eefPosX_m") == ["eef", "pos", "x"]
 
 
-def name_matchers(old, new):
-    """{matcher: (main's reading, this branch's reading)} for every place a name's words are matched. Main matched
-    some of them with its own patterns (ACTION_TOPIC, DEPTH_TOPIC, the joint and gripper patterns, TEXT_TOPIC and the
-    patterns written inline at their call sites), which this branch reads through word_tokens."""
-    sides = lambda f: lambda n: sorted(filter(None, [f.recorded_state_identity(n)["side"]]))
+def name_matchers(new):
+    """{matcher: this branch's reading} for every place a name's words are matched. The fixture holds main's reading by
+    each (tests/fixtures/make_name_readings.py main_matchers): main matched some of them with its own patterns
+    (ACTION_TOPIC, DEPTH_TOPIC, the joint and gripper patterns, TEXT_TOPIC and the patterns written inline at their
+    call sites), which this branch reads through word_tokens."""
     return {
-        "side_of": (old.side_of, new.side_of),
-        "recorded_side": (sides(old), sides(new)),
-        "is_mount_named": (old.is_mount_named, new.is_mount_named),
-        "mounted_side": (old.mounted_side, new.mounted_side),
-        "scene_rank": (old.scene_rank, new.scene_rank),
-        "action": (lambda s: bool(old.ACTION_TOPIC.search(s)), new.names_action),
-        "depth": (lambda s: bool(old.DEPTH_TOPIC.search(s)), new.names_depth),
-        "joint": (lambda s: bool(old.STATE_JOINT_NAME.search(s)), new.names_joint),
-        "gripper": (lambda s: bool(old.STATE_GRIPPER_NAME.search(s)), new.names_gripper),
-        "text": (lambda s: bool(old.TEXT_TOPIC.search(s)), new.names_text),
-        "instruction_task": (lambda s: bool(re.search("instruction|task", s, re.I)),
-                             lambda s: new._names_word(s, ("instruction", "task"))),
-        "disparity": (lambda s: bool(re.search(r"disparit|inverse", s, re.I)),
-                      lambda s: new._names_word(s, ("disparity", "disparities", "inverse"))),
-        "has_side": (lambda s: bool(re.search(r"left|right", s, re.I)), lambda s: new.side_of(s) is not None),
-        "arm_topic": (lambda s: bool(re.search(r"(^|[/_.-])arm([/_.-]|$)", s, re.I)),
-                      lambda s: new._names_word(s, ("arm",))),
-        "ee_topic": (lambda s: bool(re.search(r"(^|[/_.-])(ee|gripper)([/_.-]|$)", s, re.I)),
-                     lambda s: new._names_word(s, ("ee", "gripper"))),
-        "frame_times": (lambda s: any(t.startswith(("time", "stamp")) for t in old.tokens(s)), new.says_frame_times),
-        "command": (lambda s: old._names_word(s, old.COMMAND_WORDS), lambda s: new._names_word(s, new.COMMAND_WORDS)),
-        "touch": (old.names_touch, new.names_touch),
-        "sensing": (old.is_sensing, new.is_sensing),
-        "not_rgb": (old.not_rgb, new.not_rgb),
-        "camera_named": (old.camera_named, new.camera_named),
-        "state_words": (old.state_words, new.state_words),
+        "side_of": new.side_of,
+        "recorded_side": lambda n: sorted(filter(None, [new.recorded_state_identity(n)["side"]])),
+        "is_mount_named": new.is_mount_named,
+        "mounted_side": new.mounted_side,
+        "scene_rank": new.scene_rank,
+        "action": new.names_action,
+        "depth": new.names_depth,
+        "joint": new.names_joint,
+        "gripper": new.names_gripper,
+        "text": new.names_text,
+        "instruction_task": lambda s: new._names_word(s, ("instruction", "task")),
+        "disparity": lambda s: new._names_word(s, ("disparity", "disparities", "inverse")),
+        "has_side": lambda s: new.side_of(s) is not None,
+        "arm_topic": lambda s: new._names_word(s, ("arm",)),
+        "ee_topic": lambda s: new._names_word(s, ("ee", "gripper")),
+        "frame_times": new.says_frame_times,
+        "command": lambda s: new._names_word(s, new.COMMAND_WORDS),
+        "touch": new.names_touch,
+        "sensing": new.is_sensing,
+        "not_rgb": new.not_rgb,
+        "camera_named": new.camera_named,
+        "state_words": new.state_words,
     }
 
 
@@ -5272,27 +5268,33 @@ GLUED_WORDS = {
 }
 
 
-def _main_formats():
-    root = Path(__file__).resolve().parents[1]
-    try:
-        source = subprocess.run(["git", "-C", str(root), "show", f"{MAIN_BEFORE_WHOLE_WORDS}:prepare/formats.py"],
-                                capture_output=True, check=True, timeout=60).stdout
-    except (OSError, subprocess.SubprocessError):
-        pytest.skip(f"main's prepare/formats.py at {MAIN_BEFORE_WHOLE_WORDS} is not in this checkout's history")
-    name = f"formats_main_{MAIN_BEFORE_WHOLE_WORDS}"
-    if name not in sys.modules:
-        spec = importlib.util.spec_from_loader(name, loader=None)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[name] = module
-        exec(compile(source, f"{MAIN_BEFORE_WHOLE_WORDS}:prepare/formats.py", "exec"), module.__dict__)
-    return sys.modules[name]
-
-
 def test_on_real_names_the_matchers_differ_from_main_only_where_main_was_wrong():
-    old = _main_formats()
+    main = json.loads(MAIN_READINGS.read_text())
+    readers = name_matchers(f)
+    assert main["commit"] == MAIN_BEFORE_WHOLE_WORDS
+    assert sorted(main["readings"]) == sorted(readers) and all(
+        sorted(r) == sorted(set(NAME_CORPUS)) for r in main["readings"].values()), (
+        "the corpus or the matchers changed: rerun python tests/fixtures/make_name_readings.py")
     got = {}
-    for name in NAME_CORPUS:
-        for m, (a, b) in name_matchers(old, f).items():
-            if a(name) != b(name):
-                got[(m, name)] = (a(name), b(name))
+    for m, read in readers.items():
+        for name in NAME_CORPUS:
+            if main["readings"][m][name] != read(name):
+                got[(m, name)] = (main["readings"][m][name], read(name))
     assert got == {**IN_A_LONGER_WORD, **A_SIDE_LETTER_ALONE, **GLUED_WORDS}
+
+
+def test_two_letter_words_never_split_out_of_a_glued_run():
+    # ts, ir and the axes rx, ry, rz are words only standing alone: posts is not pos and ts, rgbir not rgb and ir
+    assert f.word_tokens("posts") == ["posts"] and f.word_tokens("rgbir") == ["rgbir"]
+    assert f.word_tokens("toprx") == ["toprx"] and not f.says_frame_times("posts")
+    assert f.word_tokens("pos_ts") == ["pos", "ts"] and f.word_tokens("cam_ir") == ["cam", "ir"]
+
+
+def test_a_frame_times_file_is_any_word_beginning_time_or_stamp():
+    # frame_times keeps a file only when its numbers fit the video, so the name test is wide: a word that begins time
+    # or stamp, inside a longer word too (StampedString, timeline), never one that only contains it (lifetime)
+    for stem in ("exo_cam-rgb-timestamp", "timesteps", "StampedString", "timeline", "frame_times", "stamps_ns"):
+        assert f.says_frame_times(stem), stem
+    for stem in ("lifetime", "untimed", "postmark", "exo_cam-rgb"):
+        assert not f.says_frame_times(stem), stem
+
