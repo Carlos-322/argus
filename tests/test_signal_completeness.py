@@ -180,6 +180,35 @@ def test_unrelated_or_command_scalars_do_not_disprove_absent_state(name):
         {"n": 3, "ks": [0, 1, 2], "spans": [], "touch": frozenset()})
 
 
+@pytest.mark.parametrize("name, width", [(n, 6) for n in ("observation.robotstate", "observation.followerstate",
+    "/arm/armstate", "observation.leaderstate", "eefstate", "observation.robotStates")] + [(n, 1) for n in (
+    "observation.robotstate", "observation.followerstate", "/arm/armstate", "observation.leaderstate", "arm0_state")])
+def test_a_state_glued_to_the_word_before_it_is_a_recorded_state(name, width):
+    """The state words were split at separators only, so observation.robotstate (six values, the robot and its state
+    glued) read as no state: the prompt and the capture checks both said the recording holds only video. Its words are
+    read as every name matcher reads them (word_tokens)."""
+    from checks import capture_qc as qc
+    rows = np.tile([[1.], [3.], [2.]], (1, width))
+    ep = _episode(rows)
+    ep["signals"] = {name: rows}
+    ep["context"]["state_why"] = "not_recorded"
+    assert "no arm state in the layout our checks read" in me._no_state_text(ep,
+        {"n": 3, "ks": [0, 1, 2], "spans": [], "touch": frozenset()})
+    assert qc._no_state_reason(ep) != "the recording has no robot state, only video"
+
+
+@pytest.mark.parametrize("name", ["/jointcmd/state", "observation.statevec", "leadercmdstate"])
+def test_a_glued_command_or_a_longer_word_is_still_no_recorded_state(name):
+    from checks import capture_qc as qc
+    rows = np.tile([[1.], [3.], [2.]], (1, 6))
+    ep = _episode(rows)
+    ep["signals"] = {name: rows}
+    ep["context"]["state_why"] = "not_recorded"
+    assert "as the recording holds none" in me._no_state_text(ep,
+        {"n": 3, "ks": [0, 1, 2], "spans": [], "touch": frozenset()})
+    assert qc._no_state_reason(ep) == "the recording has no robot state, only video"
+
+
 @pytest.mark.parametrize("rows,n", [(np.array([[np.nan], [np.inf], [-np.inf]]), 3),
                                    (np.array([[np.nan], [np.nan], [2.]]), 2)])
 def test_scalar_joint_must_have_a_finite_value_within_the_episode(rows, n):

@@ -37,7 +37,6 @@ A signal is read by how its numbers behave, and only whether it measures touch a
 from __future__ import annotations
 
 import json
-import re
 import warnings
 
 import numpy as np
@@ -61,8 +60,9 @@ DESCRIBE_ROW_MAX_CHARS = 768
 # names, or whose own name says it holds joints or a state: one row per value under its own name. A humanoid's 26
 # joints and a base's x, y, yaw, vx, wz reached that readout as one "largest change" or "total activity" row while
 # it went value by value only up to SMALL. A map (a 2 D shape, whose strongest cell says more than its cells one by
-# one) and a long unnamed vector (audio samples) keep their summary rows.
-JOINT_LIKE = re.compile(r"joint|qpos|state", re.I)
+# one) and a long unnamed vector (audio samples) keep their summary rows. The name's words are matched whole
+# (prepare/formats.py _names_word, as every name word is), so jointly and statevec are not joints or a state.
+JOINT_LIKE = ("joint", "qpos", "state")
 # A signal recorded below this share of the frame rate says its rate: a 6 Hz glove otherwise reads as if it were
 # sampled every frame.
 RATE_SLOWER = 0.9
@@ -189,18 +189,20 @@ def per_value(name: str, d: int, shape=None, names=None, role=None) -> bool:
         return True
     if names and len(names) == d:
         return True
-    return d <= JOINT_NAME_MAX and bool(JOINT_LIKE.search(name))
+    from prepare.formats import _names_word
+    return d <= JOINT_NAME_MAX and _names_word(name, JOINT_LIKE)
 
 
 def names_joints_or_state(name: str) -> bool:
     """Whether a signal's name says it holds joints or a state, as the no state line names it (label/episode.py): a word
     of it is joint or qpos (left_joint1, /left/joint_states, observations/qpos), or its last word is state or states
     (observation.state, observation.leader_state), and no word of it says a command (prepare/formats.py
-    COMMAND_WORDS, so /left/joint_command and leader_cmd_state are not). Words are split as prepare/formats.py tokens
-    splits them (separators and camelCase). A one value battery_state or estop_state is left out by the line's own
-    rule that a named signal has more than one value."""
-    from prepare.formats import COMMAND_WORDS, _names_word, tokens
-    words = tokens(name)
+    COMMAND_WORDS, so /left/joint_command and leader_cmd_state are not). Words are split as every name matcher splits
+    them (prepare/formats.py word_tokens: separators, camelCase and glued known words, so observation.robotstate ends
+    in state). A one value battery_state or estop_state is left out by the line's own rule that a named signal has
+    more than one value."""
+    from prepare.formats import COMMAND_WORDS, _names_word, word_tokens
+    words = word_tokens(name)
     return ((_names_word(name, ("joint", "qpos")) or bool(words) and words[-1] in ("state", "states"))
             and not _names_word(name, COMMAND_WORDS))
 
@@ -208,13 +210,13 @@ def names_joints_or_state(name: str) -> bool:
 def names_scalar_observed_state(name: str) -> bool:
     """A scalar can disprove absent arm state only when its name identifies a joint or observed arm state.
     Sensor readings, bookkeeping and commands do not establish that state, even under observation.*."""
-    from prepare.formats import TOUCH_WORDS, _names_word, tokens
+    from prepare.formats import TOUCH_WORDS, _names_word, word_tokens
     if not names_joints_or_state(name) or _names_word(name, TOUCH_WORDS + (
             "torque", "clock", "time", "timestamp",
             "battery", "estop", "emergency", "health", "status", "mode", "power", "temperature", "voltage",
             "current")):
         return False
-    words = tokens(name)
+    words = [w for w in word_tokens(name) if not w.isdigit()]      # arm0_state's word before state is arm
     return (_names_word(name, ("joint", "qpos")) or len(words) > 1 and words[-1] in ("state", "states")
             and _names_word(words[-2], ("observation", "arm", "robot", "gripper", "leader", "follower")))
 

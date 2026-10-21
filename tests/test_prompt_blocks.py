@@ -771,6 +771,9 @@ def test_per_value_gives_rows_to_named_and_joint_named_flat_vectors_only():
     assert sg.per_value("observation.state", 26)
     assert sg.per_value("hand_joints", sg.JOINT_NAME_MAX)
     assert not sg.per_value("hand_joints", 63)
+    # the name's words are matched whole, as every name word is: a glued robotstate is a state, a statevec is not
+    assert sg.per_value("observation.robotstate", 26) and sg.per_value("left_jointpos", 26)
+    assert not sg.per_value("observation.statevec", 26) and not sg.per_value("jointly", 26)
 
 
 def test_a_rate_is_stated_only_below_nine_tenths_of_the_frame_rate():
