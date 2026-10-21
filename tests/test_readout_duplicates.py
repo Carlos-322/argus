@@ -101,32 +101,78 @@ def _stalled(secs: int, seed: int = 4):
     return cmd, arm
 
 
-def test_a_two_second_stall_keeps_both_rows():
+
+def _apart_lines(lines):
+    """The lines of rows that track another except where they come apart: (row, partner, [reading times])."""
+    out = []
+    for l in lines:
+        if " tracks " in l and " except " in l:
+            row, rest = l.strip().split(" tracks ", 1)
+            other = rest.split(" except ", 1)[0]
+            times = [float(p.split()[0]) for p in rest.split("given: ", 1)[1].rstrip(".").split(", ")]
+            out.append((row, other, times))
+    return out
+
+
+def test_a_two_second_stall_sends_the_command_only_around_the_stall():
+    """The joint stalls from 20 to 22 s while its command moves 12% of its range: the joint's row is sent, and the
+    command's readings are given only at the instants around the stall, on a line naming the row it tracks."""
     cmd, arm = _stalled(2)
     assert np.ptp(cmd[20 * FPS:22 * FPS]) > 0.1 * np.ptp(cmd)
-    shown, left, _, _ = _readout(*_case({"cmd": cmd, "arm": arm}))
-    assert sorted(shown) == ["arm", "cmd"] and not left
+    shown, left, _, lines = _readout(*_case({"cmd": cmd, "arm": arm}))
+    assert shown == ["arm"] and not left
+    (row, other, times), = _apart_lines(lines)
+    assert (row, other) == ("cmd", "arm")
+    assert 20.0 in times and 21.0 in times and min(times) >= 18.0 and max(times) <= 24.0
+    assert any(l.strip().startswith("These rows follow another row") for l in lines)
 
 
-def test_a_six_second_stall_keeps_both_rows():
+def test_a_six_second_stall_sends_the_command_only_around_the_stall():
     cmd, arm = _stalled(6, seed=13)
-    shown, left, _, _ = _readout(*_case({"cmd": cmd, "arm": arm}))
-    assert sorted(shown) == ["arm", "cmd"] and not left
+    shown, _, _, lines = _readout(*_case({"cmd": cmd, "arm": arm}))
+    assert shown == ["arm"]
+    (row, other, times), = _apart_lines(lines)
+    assert (row, other) == ("cmd", "arm")
+    assert {21.0, 23.0, 25.0} <= set(times) and min(times) >= 18.0 and max(times) <= 28.0
 
 
-def test_an_offset_that_opens_late_keeps_both_rows():
-    """The measured joint follows its command but drifts 0.2 sd away from it after 40 s of 60 (a calibration slip)."""
+def test_an_offset_that_opens_late_is_read_where_it_is_open():
+    """The measured joint drifts 0.2 sd away from its command from 40 s to 50 s of 60 and stays there (a calibration
+    slip): the command is read only over the late stretch where the two have come apart."""
     cmd = _path(7)
     t = np.arange(N) / FPS
     arm = _later(cmd, 3) + 0.2 * cmd.std() * np.clip((t - 40) / 10, 0, 1)
-    shown, left, _, _ = _readout(*_case({"cmd": cmd, "arm": arm}))
-    assert sorted(shown) == ["arm", "cmd"] and not left
+    shown, _, _, lines = _readout(*_case({"cmd": cmd, "arm": arm}))
+    assert shown == ["arm"]
+    (row, other, times), = _apart_lines(lines)
+    assert row == "cmd" and min(times) >= 35.0 and max(times) >= 55.0
+
+
+def test_a_pair_apart_most_of_the_time_keeps_both_full_rows():
+    """An offset of 0.3 sd that opens at 20 s and stays: the two still fit closely over the whole request, but they are
+    apart at more than half the instants, so both full rows are sent."""
+    cmd = _path(7)
+    t = np.arange(N) / FPS
+    arm = _later(cmd, 3) + 0.3 * cmd.std() * (t >= 20)
+    ks = list(range(0, N, FPS))
+    same, lag = sg.tracking(cmd, arm, ks, FPS)
+    assert same and len(sg.apart_instants(cmd, arm, ks, lag, FPS)) > sg.TRACK_APART_MOST * len(ks)
+    shown, left, _, lines = _readout(*_case({"cmd": cmd, "arm": arm}))
+    assert sorted(shown) == ["arm", "cmd"] and not left and not _apart_lines(lines)
+
+
+def test_a_clean_copy_gives_no_readings():
+    x = _path(3)
+    shown, left, _, lines = _readout(*_case({"rad": x, "deg": 57.2958 * x}))
+    assert len(shown) == 1 and len(left) == 1 and not _apart_lines(lines)
 
 
 def test_a_stall_between_instants_is_seen_on_the_frames():
     """A one second stall that starts on an instant and ends before the next one changes no reading at the instants,
-    yet the command moved 12% of its range meanwhile: the frames show it, so both rows are sent."""
+    yet the command moved 12% of its range meanwhile: the frames show it, so the instants on both sides are read."""
     cmd, arm = _stalled(1)
     ks = list(range(0, N, FPS))
     assert np.allclose(arm[ks], _later(cmd, 3)[ks])
-    assert sg.tracking(cmd, arm, ks, FPS) == (False, 0)
+    same, lag = sg.tracking(cmd, arm, ks, FPS)
+    apart = sg.apart_instants(cmd, arm, ks, lag, FPS)
+    assert same and {20, 21} <= set(apart) and len(apart) <= 5

@@ -1742,10 +1742,17 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
                      "for the time around it. Their ranges are given above."] if aliased else [])
     # a row whose readings track a row already sent is sent once (label/signals.py tracking)
     rows, tracked = _drop_tracking(ep, rows, series, ks)
-    repeated = ([f"  The values at each instant leave out " + _tracking_words(tracked)
+    whole_copies = [(r, s) for r, s, a in tracked if not a]
+    partly = [(r, s, a) for r, s, a in tracked if a]
+    repeated = ([f"  The values at each instant leave out " + _tracking_words(whole_copies)
                  + f", because their readings at the instants follow that row's (up to sign, scale and a lag of at "
                    f"most {_seconds_number(sg.TRACK_LAG_S, 1)} s), so each is sent once. Their ranges are given above, "
-                   "where values that come apart still show."] if tracked else [])
+                   "where values that come apart still show."] if whole_copies else [])
+    if partly:
+        repeated.append(f"  These rows follow another row the same way (up to sign, scale and a lag of at most "
+                        f"{_seconds_number(sg.TRACK_LAG_S, 1)} s) except where they come apart, so they are given only "
+                        "there, with the time of each reading:")
+        repeated += [_apart_line(ep, ks, r, s, a) for r, s, a in partly]
     unresolved = unresolved + repeated
     if not rows:
         return unresolved + not_read, frozenset()
@@ -1803,21 +1810,39 @@ def _drop_tracking(ep: dict, rows: list, series: dict, ks: list[int]) -> tuple[l
             if (q[1], q[2]) not in series:
                 continue
             same, lag = sg.tracking(series[q[1], q[2]], series[key], ks, fps)
-            if same:
-                hit = (q, lag)
-                break
+            if not same:
+                continue
+            # where the two come apart (a stall, a slip, a grasp the gripper did not reach) the row is still read
+            apart = sg.apart_instants(series[q[1], q[2]], series[key], ks, lag, fps)
+            if len(apart) > sg.TRACK_APART_MOST * len(ks):
+                continue
+            hit = (q, lag, apart)
+            break
         if hit is None:
             kept.append(r)
             continue
-        q, lag = hit
+        q, lag, apart = hit
         if lag < 0:
             # the new row's values come later: it is the measured side, so it takes the kept row's place
             kept[kept.index(q)] = r
-            tracked = [(t, r if s is q else s) for t, s in tracked] + [(q, r)]
+            tracked = [(t, r if s is q else s, a) for t, s, a in tracked] + [(q, r, apart)]
         else:
-            tracked.append((r, q))
+            tracked.append((r, q, apart))
     sent = {id(r) for r in kept}
     return [r for r in rows if id(r) in sent], tracked
+
+
+def _apart_line(ep: dict, ks: list[int], row: tuple, other: tuple, apart: list[int]) -> str:
+    """One row that tracks another except at some instants: the stretches, and its readings at those instants."""
+    runs, start = [], apart[0]
+    for a, b in zip(apart, apart[1:] + [None]):
+        if b != a + 1:
+            runs.append((start, a))
+            start = b
+    stretches = _and_list([f"{_seconds_number(frame_time(ep, ks[a]), 1)} to "
+                           f"{_seconds_number(frame_time(ep, ks[b]), 1)} s" for a, b in runs])
+    readings = ", ".join(f"{frame_time(ep, ks[i]):.2f} {row[5][i]}" for i in apart)
+    return f"  {row[4]} tracks {other[4]} except {stretches}, where its readings are given: {readings}."
 
 
 def _tracking_words(tracked: list) -> str:

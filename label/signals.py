@@ -760,16 +760,17 @@ def resolved(a: np.ndarray, ks: list[int]) -> np.ndarray:
 TRACK_LAG_S = 0.5
 TRACK_LEVEL = 0.95
 TRACK_CHANGE = 0.9
-# A good fit on average is not a copy: a measured joint that stalls for a second or two while its command moves, or
-# opens a steady offset late in the request, still fits the whole window closely, and only its range line would remain.
-# So a row is a copy only if the line through its partner holds at every frame: no TRACK_HOLD_S stretch of frames where
-# the mean |residual| is more than TRACK_APART of the row's range. In synthetic 60 s requests, a stall of 1 s while the
-# partner moves 10% of its range leaves at least 0.04 of the range, and a 0.2 sd offset that opens after 40 s at least
-# 0.03; on the 16 spot check episodes the median teleoperated joint against its command leaves 0.049. At 0.02, 73 of
-# the 264 commanded and measured joint pairs that pass the tests above still merge (the measured joint moving later in
-# all 73), no other row merges with anything, and the other pairs differ by more than that somewhere and are both sent.
+# A good fit on average is not a copy everywhere: a measured joint that stalls for a second or two while its command
+# moves, or opens a steady offset late in the request, still fits the whole window closely. So a tracking row is a copy
+# only where the line through its partner holds: frames whose mean |residual| over the TRACK_HOLD_S around them is more
+# than TRACK_APART of the row's range are apart (apart_instants), and the row's readings are still sent at the instants
+# there; a row apart at more than TRACK_APART_MOST of the instants is sent whole. In synthetic 60 s requests, a stall
+# of 1 s while the partner moves 10% of its range leaves at least 0.04 of the range, and a 0.2 sd offset that opens
+# after 40 s at least 0.03; on the 16 spot check episodes the median teleoperated joint against its command leaves
+# 0.049 at its worst second, and a commanded close the gripper does not reach (a grasp) comes apart the same way.
 TRACK_HOLD_S = 1.0
 TRACK_APART = 0.02
+TRACK_APART_MOST = 0.5
 
 
 def _r2_rows(xs: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -810,30 +811,46 @@ def tracking(x: np.ndarray, y: np.ndarray, ks: list[int], fps: float) -> tuple[b
              for L in range(-2 * reach, 2 * reach + 1) if abs(L) < m}
     # a mirrored copy lines up with the opposite sign, so the size of the agreement decides
     best = max(sorted(score, key=abs), key=lambda L: abs(score[L]))
-    if abs(best) > reach or _held_apart(x, y, lo, hi, best, fps):
-        return False, 0
-    return True, best
+    return (True, best) if abs(best) <= reach else (False, 0)
 
 
-def _held_apart(x: np.ndarray, y: np.ndarray, lo: int, hi: int, lag: int, fps: float) -> bool:
-    """Whether, over the frames lo to hi with x read lag frames later, either value stays away from the straight line
-    through the other for TRACK_HOLD_S: the mean |residual| over some TRACK_HOLD_S stretch is more than TRACK_APART of
-    the value's own range there. Every frame is read, not only the instants: one reading a second can fall either side
-    of a one second stall."""
+def apart_instants(x: np.ndarray, y: np.ndarray, ks: list[int], lag: int, fps: float) -> list[int]:
+    """The places in ks of the instants where two values that track each other (tracking, x read lag frames later)
+    come apart: every frame from the first to the last instant is read, since one reading a second can fall either
+    side of a one second stall, and a frame is apart where the mean |residual| from the straight line through the
+    other value, over the TRACK_HOLD_S around it, is more than TRACK_APART of the value's own range, either way round.
+    Each run of such frames gives the instants inside it and one more on each side, so a stall between two instants
+    still shows at both. Every instant when either value is flat or has too few readings."""
+    ks = np.asarray(ks, dtype=int)
+    lo, hi = int(ks[0]), int(ks[-1]) + 1
     idx = np.arange(lo, hi)
     xa, ya = x[np.clip(idx + lag, 0, len(x) - 1)], y[idx]
     ok = np.isfinite(xa) & np.isfinite(ya)
     win = max(1, int(round(TRACK_HOLD_S * fps)))
-    for a, b in ((xa[ok], ya[ok]), (ya[ok], xa[ok])):
-        span = float(np.ptp(b)) if len(b) else 0.0
-        if len(b) < 3 or span == 0 or a.std() == 0:
-            return True
-        coef = np.polyfit(a, b, 1)
-        r = np.abs(b - np.polyval(coef, a))
-        held = np.convolve(r, np.ones(win) / win, mode="valid").max() if len(r) >= win else r.max()
-        if held > TRACK_APART * span:
-            return True
-    return False
+    flagged = np.zeros(len(idx), dtype=bool)
+    count = np.maximum(np.convolve(ok.astype(float), np.ones(win), mode="same"), 1)
+    for a, b in ((xa, ya), (ya, xa)):
+        span = float(np.ptp(b[ok])) if ok.sum() >= 3 else 0.0
+        if span == 0 or a[ok].std() == 0:
+            return list(range(len(ks)))
+        # fitted on the frames where they agree: a long stall would otherwise tilt the line and spread the gap
+        # beyond it, so the line is fitted again without the frames the first fit found apart
+        use, here = ok, np.zeros(len(idx), dtype=bool)
+        for _ in range(2):
+            coef = np.polyfit(a[use], b[use], 1)
+            r = np.where(ok, np.abs(b - np.polyval(coef, np.where(ok, a, 0.0))), 0.0)
+            here = np.convolve(r, np.ones(win), mode="same") / count > TRACK_APART * span
+            if (ok & ~here).sum() < max(3, ok.sum() // 2):
+                break
+            use = ok & ~here
+        flagged |= here
+    out = set()
+    edges = np.flatnonzero(np.diff(np.concatenate([[0], flagged.astype(int), [0]])))
+    for a0, b0 in zip(edges[::2], edges[1::2]):
+        first = max(int(np.searchsorted(ks, lo + a0, side="left")) - 1, 0)
+        last = min(int(np.searchsorted(ks, lo + b0 - 1, side="right")), len(ks) - 1)
+        out.update(range(first, last + 1))
+    return sorted(out)
 
 
 def quiet_spans(arrs: dict, need: int) -> list[tuple[int, int]]:
