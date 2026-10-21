@@ -1,115 +1,97 @@
-# Argus 本机开发与运行指南
+# Argus 本机使用说明
 
-配置日期：2026-10-16。整理目标：以本目录作为 Argus 的统一开发工作区。
+## 1. 只查看过去的结果：双击这个文件
 
-## 1. 日常从哪里开始
+在项目根目录双击 **[查看已有结果.cmd](查看已有结果.cmd)**。
 
-工作区：
+1. 窗口会列出已经可以查看的结果，例如“炒菜任务”和“rollout 任务”。
+2. 输入前面的数字，按回车，浏览器会自动打开对应的结果网页。
+3. 查看期间保持终端窗口打开。看完后，在终端按 `Ctrl+C` 停止服务。
+
+**这个入口只读取已有标注和视频，不重新分段、不重新标注、不调用模型，也不需要 API Key。**
+
+如果浏览器没有自动打开，把窗口显示的 `http://localhost:端口号` 复制到浏览器。重启电脑后，需要重新双击入口；旧网址本身不会启动服务。已有端口被占用时，入口会自动换一个端口，以窗口显示的地址为准。
+
+完整项目位置：
 
 ```text
 D:\code\元节智能\ai_Quality_Inspection_Division\argus
 ```
 
-双击项目根目录的 [启动Argus.cmd](启动Argus.cmd)。它会进入已有的 WSL2 Ubuntu-22.04，激活专用 Linux 环境，并将当前目录切到本项目。
+## 2. 已有结果保存在哪里
 
-在该终端中执行：
+以下目录都在项目的 `data/review/` 下：
 
-```bash
-pwd
-python --version
-uv run --frozen python -m review --help
-```
+| 结果 | 目录名 |
+| --- | --- |
+| 炒菜任务 | `realman_cooking_20261009_180214_deepseek_live` |
+| rollout 任务 | `realman_rollout_01_deepseek_live` |
 
-`pwd` 应显示 `/mnt/d/code/元节智能/ai_Quality_Inspection_Division/argus`，Python 应为 3.11.15。
+网页需要同时读取标注数据和视频，并不是双击一个 HTML 文件就能完整查看。请保留整个结果目录，尤其是 `manifest.json`、`qa/` 和 `clips/`。
 
-项目的 [README.md](README.md) 是上游功能与安装文档；本文是本机路径和操作指南，两份文档用途不同。
+### 新的 API 标注结果会自动出现在列表里吗？
 
-## 2. 源码在 D 盘，程序在 Linux 中运行
+**会。列表每次打开都重新读取文件夹，不是写死的两条记录，不需要手动登记。**
 
-本地 Argus 的 `label/route.py` 导入 Unix 的 `fcntl` 模块，完整运行需要 Linux 环境。本机使用已有 WSL2 Ubuntu，没有重新安装 Ubuntu。
-
-Windows 的 `D:\...` 在 WSL 中对应 `/mnt/d/...`，两者访问同一批文件。
-
-本项目中的 `.venv` 是此前创建的 Windows 环境，保留但不用于完整运行 Argus。当前专用 Linux 环境放在项目外部；源码和虚拟环境不要求在同一目录。
-
-## 3. 工作区如何组织
-
-```text
-argus/
-├─ README.md                  上游文档
-├─ Argus环境使用说明.md        本机开发与运行指南
-├─ 启动Argus.cmd               日常启动入口
-├─ local-dev/
-│  ├─ argus-env.sh             本机环境配置
-│  └─ check-environment.sh     合成视频免费检查脚本
-├─ data/
-│  ├─ input/                  建议存放测试用 MCAP 等输入
-│  ├─ review/                 建议存放正式分析结果
-│  └─ environment-checks/     检查脚本生成的测试数据与结果
-├─ prepare/、label/、board/    项目源码
-└─ .venv/                     已保留的 Windows 环境
-```
-
-`data` 中的建议目录按实际需要建立。项目已有规则忽略 `data/`，原始数据和模型输出不应当作为源码提交。本文和启动脚本是本机定制文件；本次没有提交或推送 Git。
-
-若使用 VS Code 开发，建议通过 WSL 打开本工作区，选择解释器：
-`/mnt/d/applications/uv/environments/argus-linux/bin/python`。
-新终端运行前可执行：
+以后正式标注时，把 `--out` 指向 `data/review/` 下面的新目录，例如：
 
 ```bash
-source local-dev/argus-env.sh
+--out ./data/review/加热工位_20261022_第1次
 ```
 
-只选择编辑器解释器并不保证终端已获得全部环境变量；启动入口或上面的 source 命令会同时配置 uv、虚拟环境和 ffmpeg。
+标注流程生成可查看的网页数据后：
 
-## 4. 通用工具与环境仍放在哪里
+- 再次双击 `查看已有结果.cmd`，新结果会自动列出，最近生成的排在前面。
+- 如果已经停留在选择菜单，输入 **`r`** 并回车，就会重新扫描并显示新结果。
+- 也可以按日期或工位分子文件夹，例如 `data/review/加热工位/第1次/`，入口会一起查找。
+- 新结果默认显示输出文件夹的名字，所以建议目录名包含工位、日期或批次，方便选择。
 
-| 内容                            | Windows 路径                                                |
-| ------------------------------- | ----------------------------------------------------------- |
-| Windows uv 0.13.1               | `D:\applications\uv\uv.exe`                               |
-| Linux uv 0.13.1                 | `D:\applications\uv\linux\uv`                             |
-| Linux Python 3.11.15            | `D:\applications\uv\python-linux`                         |
-| Argus 实际使用的 Linux 虚拟环境 | `D:\applications\uv\environments\argus-linux`             |
-| Linux 下载缓存                  | `D:\applications\uv\cache-linux`                          |
-| Linux ffmpeg/ffprobe            | `D:\applications\uv\tools\ffmpeg-linux\bin`               |
-| 已保留的 Windows Python／缓存   | `D:\applications\uv\python`、`D:\applications\uv\cache` |
+自动查找范围是本项目的 `data/review/`。保存到其他位置的结果不会自动列出。只有 `dry/` 的免费检查，以及还没有生成网页数据的任务，也不会列入。列表表示“有结果页面可看”，不代表所有片段都已成功标注，具体状态仍要看页面。
 
-保留这些目录可以避免重新下载以及虚拟环境路径失效。它们提供运行能力，开发、查看文档和管理本项目数据都从 Argus 工作区开始。
+## 3. 几个入口有什么区别
 
-环境配置的唯一维护位置是 [local-dev/argus-env.sh](local-dev/argus-env.sh)。它设置 Python、缓存、专用虚拟环境及工具搜索路径，并进入项目目录。项目根目录的启动入口负责加载它。
+| 操作 | 会做什么 | 会不会调用模型 |
+| --- | --- | --- |
+| 双击 `查看已有结果.cmd` | 选择并查看已有结果 | 不会 |
+| 双击 `启动Argus.cmd` | 打开运行环境，等待你输入命令 | 不会 |
+| 执行 `review-deepseek.sh ... --free` | 读取数据、检查并构建请求 | 不会，也不生成正式标注 |
+| 执行 `review-deepseek.sh ...`，不加 `--free` | 运行包含模型标注的流程 | 会，需要 Key 和余额 |
 
-uv 目录中的旧启动入口和旧环境脚本只是兼容转接，避免已有使用方式失效；旧说明文档也仅指向本文。无需在两处维护相同内容。
+**双击 CMD 不会自动把文件夹里的所有文件重新标注。** 处理范围取决于正式运行命令的 `--data`：指定单个文件就处理该文件；指定文件夹才按文件夹内容读取。现有炒菜和 rollout 脚本各自指定一个 MCAP。
 
-## 5. 后续安装依赖与检查
+重新执行标注流程时，程序会检查旧结果是否可复用；不能把它当作单纯的查看入口。只想看结果时，用第一节的入口即可。
 
-在项目启动入口打开的终端中同步已有锁定依赖：
+## 4. 想开始新的标注
+
+先双击 `启动Argus.cmd`，再按 **[DeepSeek 使用说明](local-dev/DeepSeek使用说明.md)** 操作。那里有免费检查和正式标注的完整命令。
+
+新任务使用新的 `--out` 目录。不要覆盖需要保留的旧结果。
+
+## 5. 不用双击入口，怎样手动打开网页
+
+双击 `启动Argus.cmd` 后，粘贴下面一条命令即可查看炒菜结果：
 
 ```bash
-uv sync --frozen
+python -m board serve --board data/review/realman_cooking_20261009_180214_deepseek_live --clips data/review/realman_cooking_20261009_180214_deepseek_live/clips --port 8896
 ```
 
-查看实际解释器：
+然后在浏览器打开 <http://localhost:8896>。保持终端打开，按 `Ctrl+C` 停止。
+
+查看 rollout 结果则使用：
 
 ```bash
-python -c "import sys; print(sys.executable)"
+python -m board serve --board data/review/realman_rollout_01_deepseek_live --clips data/review/realman_rollout_01_deepseek_live/clips --port 8897
 ```
 
-需要重新验证免费处理链路时：
+对应地址是 <http://localhost:8897>。若提示端口被占用，可以改 `--port`，或直接使用第一节的选择入口。
 
-```bash
-bash local-dev/check-environment.sh
-```
+## 6. 环境维护时才需要看
 
-该脚本创建一段三秒合成视频，再运行免费预处理；不读取公司数据，不调用模型。每次结果保存在 `data/environment-checks` 下的独立目录，避免覆盖旧结果。
+程序在 WSL Ubuntu-22.04 中运行；源码和数据仍在 Windows 的项目目录。`D:\` 在 WSL 中对应 `/mnt/d/`。
 
-最初环境安装时的历史验证材料仍在：
-`D:\applications\uv\checks\review-smoke-20261016`。
-其中的记录含原有路径，因此本次没有直接搬动。之后的验证统一写入项目 `data` 目录。
-
-## 6. 开始处理 MCAP 前
-
-先使用 `--free` 检查实际相机、时间轴和数据字段，再按需要配置模型 API。输入路径使用 Linux 形式，例如 `D:\data\example.mcap` 对应 `/mnt/d/data/example.mcap`。
-
-已有验证：Linux Python 3.11.15、35 个依赖的一致性检查、查看器入口、ffmpeg/ffprobe 及三秒合成视频免费流程通过。尚未据此证明真实 MCAP 自定义字段兼容或 API 可用。
-
-API 密钥只在使用时单独配置，不写入本机指南、启动脚本或源码。WSL 若显示 localhost 代理未映射提示，应单独检查 API 连通性；本次整理不修改代理或 Ubuntu 全局配置。
+- 环境配置：[local-dev/argus-env.sh](local-dev/argus-env.sh)。
+- Linux Python 环境：`/mnt/d/applications/uv/environments/argus-linux`。项目里的 Windows `.venv` 不用于完整运行。
+- 在已有 WSL 终端进入项目后，用 `source local-dev/argus-env.sh` 加载环境。
+- 需要同步依赖时，在该环境执行 `uv sync --frozen`。
+- `bash local-dev/check-environment.sh` 会生成测试视频并运行免费检查；不是查看旧结果的命令。
+- `data/` 不进入 Git。备份源码不会自动备份原始数据和标注结果。

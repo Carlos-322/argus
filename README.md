@@ -1,5 +1,7 @@
 <h1 align="center">Argus</h1>
 
+**本机查看旧结果：双击 [查看已有结果.cmd](查看已有结果.cmd)。完整操作见 [Argus 本机使用说明](Argus环境使用说明.md)。查看不会调用模型或重新标注。**
+
 <p align="center">
   <a href="pyproject.toml"><img src="https://img.shields.io/badge/python-3.11-455468" alt="Python 3.11"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-455468" alt="Apache-2.0"></a>
