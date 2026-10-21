@@ -11,7 +11,8 @@
   </tr>
 </table>
 
-*Argus has many tunable settings. Please read [Settings](#settings) in full.*
+> [!IMPORTANT]
+> Argus has many tunable settings. Please read [Settings](#settings) in full.
 
 ### \* DiverseUMI (October 2026)
 
