@@ -12,6 +12,9 @@ from label.dictionary_stage import output_spend
 from test_dispatch_integrity_v5 import options, provider_kind, response
 from test_label import _packed_episode
 
+# every request here inspects a recorded signal of the packed fixture, which only inspection all reaches
+pytestmark = pytest.mark.usefixtures('inspect_every_field')
+
 
 def paid_episode(tmp_path, monkeypatch):
     ep, _ = _packed_episode(tmp_path)

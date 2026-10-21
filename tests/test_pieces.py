@@ -24,7 +24,7 @@ def test_only_a_recording_longer_than_the_limit_is_cut(tmp_path):
 
 
 @pytest.mark.parametrize('variable', [False, True])
-def test_fallback_camera_parts_keep_full_footage_and_unaligned_source_rows(tmp_path, variable):
+def test_fallback_camera_parts_keep_full_footage_and_unaligned_source_rows(inspect_every_field, tmp_path, variable):
     """Losing the short anchor must not omit the longer camera's tail or invent sensor alignment."""
     import base64
     import io

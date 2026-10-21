@@ -16,7 +16,7 @@ def _reader_in_process(monkeypatch):
 
 
 @pytest.mark.parametrize('effort', ['medium', 'high'])
-def test_selection_and_card_calls_send_and_reserve_room_to_reason_at_the_episode_effort(tmp_path, monkeypatch, effort):
+def test_selection_and_card_calls_send_and_reserve_room_to_reason_at_the_episode_effort(inspect_every_field, tmp_path, monkeypatch, effort):
     # Evidence selection sent 2,000 tokens at the episode's effort. A medium or high
     # selection could spend them reasoning and be cut off before its JSON.
     ep, _ = _packed_episode(tmp_path)
