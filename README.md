@@ -34,8 +34,8 @@ To my knowledge, Argus is the most advanced open-source robot learning annotatio
 It is the only harness to combine native multi-format ingestion (rather than restricting inputs eg to LeRobot, as [LeRobot's annotation pipeline](https://huggingface.co/docs/lerobot/main/annotation_pipeline) does), joint visual/sensor reasoning, dense annotations of **actions, subgoals, outcomes, operator mistakes, recoveries and object-state changes**, and execution and outcome scores for each episode and subgoal. It reads multi-view RGB alongside state/action trajectories, depth, tactile and other recorded fields, preserving their timing and measurement semantics. For depth and tactile data the VLM can inspect additional samples or image regions to support a finding; evidence, confidence and limitations remain available in the viewer and JSON exports.
 
 <p align="center">
-  <a href="https://raw.githubusercontent.com/Pantheon-Industries-Inc/argus/refs/heads/main/media/architecture.svg?v=e0add7e70818">
-    <img src="media/architecture.svg?v=e0add7e70818" width="1900" alt="Annotation pipeline: format ingestion, field interpretation, visual, state and sensor evidence, optional evidence inspection, VLM annotation of behavior, state changes and sensor findings with a separate regional pass for tactile arrays, issue detection, temporal stitching, and a viewer with chosen sensor cards, quality scores and JSON exports.">
+  <a href="https://raw.githubusercontent.com/Pantheon-Industries-Inc/argus/refs/heads/main/media/architecture.svg?v=a4ebb130d873">
+    <img src="media/architecture.svg?v=a4ebb130d873" width="1900" alt="Annotation pipeline: format ingestion, field interpretation (on by default), visual, state and sensor evidence, evidence inspection (automatic for depth and touch recordings), VLM annotation of behavior, state changes and sensor findings with a separate regional pass for tactile arrays, issue detection, temporal stitching of request parts and session tasks, and a viewer with chosen sensor cards, quality scores and JSON exports.">
   </a>
 </p>
 
