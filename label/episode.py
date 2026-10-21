@@ -1696,6 +1696,7 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
     unread = {}           # signal: the error that kept its rows out, named below
     aliased = {}          # signal: [(label, readings at every frame) of rows the instants do not resolve]
     counts = {}           # signal: how many rows it has
+    windowed = False      # whether a row is sent as its means over each instant's frames
     series = {}           # (signal's place, row's place): the value's readings at every frame, for rows of one value
     for i, (name, a) in enumerate(arrs.items()):
         try:
@@ -1718,7 +1719,15 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
             continue
         counts[name] = len(got)
         cols = sg.columns(a) if by_value else None
+        wmeans, wkept, wnoise = sg.window_means(a, ks) if by_value and not ok.all() else (None, None, None)
         for j, (lb, v) in enumerate(got):
+            if not ok[j] and wkept is not None and wkept[j] >= sg.WINDOW_SIGNAL * wnoise:
+                # the readings do not stand for their instants, but the means over each instant's frames keep the
+                # row's trend: those are sent, marked, and the row takes no part in tracking
+                rows.append(((round(float(wkept[j]), 2), float(mv[j])), i, j, name, f"{lb} (window mean)",
+                             [sg.reading_text(m) if np.isfinite(m) else "-" for m in wmeans[:, j]]))
+                windowed = True
+                continue
             if not ok[j]:
                 aliased.setdefault(name, []).append((lb, cols[:, j] if by_value else None))
                 continue
@@ -1752,7 +1761,9 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
     # a row read only where it comes apart is charged to the same budget as the rows, ranked with them
     apart_head = ("  These rows follow a sent row as fitted here except where they come apart, so they are given "
                   "only there, with the time of each reading:")
-    unresolved = unresolved + repeated
+    unresolved = unresolved + repeated + (
+        ["  A row marked (window mean) gives, at each instant, the mean of the frames that instant stands for, because "
+         "its single readings at the instants do not resolve it."] if windowed else [])
     partial = [r for r, _, _ in partly]
     if not rows and not partial:
         return unresolved + not_read, frozenset()
@@ -1800,8 +1811,8 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
                       f"and kept when they fit the {budget} character budget."
                       if chosen else f", because no row fits the {budget} character budget after the times row.")
         lines.append("  The values at each instant leave out " + named + reason)
-    return lines + unresolved + not_read, frozenset(r[3] for r in rows if r[3] not in left and r[3] not in aliased
-                                                    and not any(t[0][3] == r[3] for t in tracked))
+    # a signal any of whose rows is sent: its other rows are said above as copies, window means or unresolved
+    return lines + unresolved + not_read, frozenset(r[3] for r in rows if r[3] not in left)
 
 
 def _drop_tracking(ep: dict, rows: list, series: dict, ks: list[int]) -> tuple[list, list]:
@@ -1822,13 +1833,13 @@ def _drop_tracking(ep: dict, rows: list, series: dict, ks: list[int]) -> tuple[l
         for q in kept:
             if (q[1], q[2]) not in series:
                 continue
+            if q[3] == r[3]:
+                continue    # values of one signal (cells of one sensor, joints of one state) are distinct readings
             same, lag = sg.tracking(series[q[1], q[2]], series[key], ks, fps)
             if not same:
                 continue
             # where the two come apart (a stall, a slip, a grasp the gripper did not reach) the row is still read
             apart = sg.apart_instants(series[q[1], q[2]], series[key], ks, lag, fps)
-            if len(apart) > sg.TRACK_APART_MOST * len(ks):
-                continue
             hit = (q, lag, apart)
             break
         if hit is None:

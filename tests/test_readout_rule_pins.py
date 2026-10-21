@@ -31,10 +31,10 @@ def test_a_reading_that_half_stands_for_its_second_is_not_resolved():
         assert bool(sg.is_resolved(follow, stand)[0]) is kept
 
 
-def test_twenty_instants_are_enough_to_drop_an_unresolved_row():
-    """Noise read at 20 instants (more than RESOLVED_MIN_INSTANTS, fewer than 40) is judged, and dropped."""
-    noise = np.random.default_rng(3).normal(size=(20 * FPS, 1))
-    assert sg.resolved(noise, list(range(0, 20 * FPS, FPS))).tolist() == [False]
+def test_thirty_five_instants_are_enough_to_drop_an_unresolved_row():
+    """Noise read at 35 instants (more than RESOLVED_MIN_INSTANTS, fewer than 40) is judged, and dropped."""
+    noise = np.random.default_rng(3).normal(size=(35 * FPS, 1))
+    assert sg.resolved(noise, list(range(0, 35 * FPS, FPS))).tolist() == [False]
 
 
 def test_the_level_threshold_sits_between_these_two_pairs():

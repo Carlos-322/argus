@@ -702,8 +702,9 @@ def movements(a: np.ndarray) -> np.ndarray:
 RESOLVED_FOLLOW = 0.5
 RESOLVED_STAND = 0.85
 # Below this many instants neither score is estimated well enough to drop a row (a lag-1 autocorrelation of n readings
-# has a standard error near 1 / sqrt(n)), and a row of so few readings costs little: every row is kept.
-RESOLVED_MIN_INSTANTS = 12
+# has a standard error near 1 / sqrt(n), 0.28 at 13 instants), and a row of so few readings costs little: every row is
+# kept as it is, and no row is taken as a copy of another.
+RESOLVED_MIN_INSTANTS = 30
 
 
 def is_resolved(follow: np.ndarray, stand: np.ndarray) -> np.ndarray:
@@ -743,6 +744,40 @@ def resolution(a: np.ndarray, ks: list[int]) -> tuple[np.ndarray, np.ndarray]:
     return follow, stand
 
 
+# A row the instants do not resolve can still carry its trend: a joint a policy steps every half second reads as noise
+# at one instant a second, yet its mean over each instant's stretch of frames follows the motion. Such a row is sent as
+# those window means when they keep at least WINDOW_SIGNAL times the share of variance that means of the same windows
+# keep of white noise (one over the frames in a window); means of noise are left out. On a 15 fps GelSight rollout
+# sampled every 1.47 s the joints, end-effector pose and actions keep 0.19 to 0.48 against 0.045 for noise, and its
+# velocities mostly 0.03 to 0.05; on the YAM spot check velocities and efforts keep 0.19 to 0.74 against 0.033, so they
+# are sent as window means too: the mean velocity over a second is real motion.
+WINDOW_SIGNAL = 4.0
+
+
+def window_means(a: np.ndarray, ks: list[int]) -> tuple[np.ndarray, np.ndarray, float]:
+    """(means, kept, noise): per value of a, its mean over the frames each instant stands for (the stretches resolution
+    uses), one per instant; the share of the value's variance over the first to last instant that those means keep; and
+    the share means of the same windows keep of white noise (the mean of one over each window's length)."""
+    a = columns(a)
+    ks = np.asarray(ks, dtype=int)
+    edges = np.concatenate([[ks[0]], (ks[1:] + ks[:-1] + 1) // 2, [ks[-1] + 1]])
+    lens = np.diff(edges)
+    means = np.full((len(ks), a.shape[1]), np.nan)
+    kept = np.zeros(a.shape[1])
+    with np.errstate(all="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        for j in range(a.shape[1]):
+            col = np.asarray(a[:, j], dtype=np.float64)
+            means[:, j] = [np.nanmean(col[edges[i]:edges[i + 1]]) for i in range(len(ks))]
+            seg = col[edges[0]:edges[-1]]
+            total = float(np.nanvar(seg)) if np.isfinite(seg).any() else 0.0
+            ok = np.isfinite(means[:, j])
+            if total > 0 and ok.sum() > 1:
+                mu = np.average(means[ok, j], weights=lens[ok])
+                kept[j] = float(np.average((means[ok, j] - mu) ** 2, weights=lens[ok]) / total)
+    return means, kept, float(np.mean(1.0 / np.maximum(lens, 1)))
+
+
 def resolved(a: np.ndarray, ks: list[int]) -> np.ndarray:
     """Per value of a, whether its readings at the sampled instants resolve it (resolution)."""
     return is_resolved(*resolution(a, ks))
@@ -762,8 +797,9 @@ TRACK_LEVEL = 0.95
 TRACK_CHANGE = 0.9
 # A good fit on average is not a copy everywhere: a measured joint that stalls while its command moves still fits the
 # whole window closely. So a tracking row is a copy only where the pair tracks as it usually does, and its readings are
-# still sent at the instants where it departs from that (apart_instants); a row apart at more than TRACK_APART_MOST of
-# the instants is sent whole. A follower behind its command is off by about its speed times its lag, so a pair's usual
+# still sent at the instants where it departs from that (apart_instants). A pair apart for much of the request fails
+# the tracking fit itself and both rows are sent whole: of 264 real tracked pairs none is apart at more than 0.43 of its
+# instants, and a synthetic stall of 8 s still tracks while one of 10 s does not. A follower behind its command is off by about its speed times its lag, so a pair's usual
 # one second residual is its own b0 + c x speed, and the excess over that is what departs: a stall leaves the whole
 # distance the command moved, a grasp the distance the commanded close goes past the gripper. A second is apart when
 # its excess is above both the pair's own median excess plus TRACK_APART_TIMES spreads (median absolute deviation,
@@ -775,7 +811,6 @@ TRACK_CHANGE = 0.9
 TRACK_HOLD_S = 1.0
 TRACK_APART_TIMES = 20.0
 TRACK_APART = 0.03
-TRACK_APART_MOST = 0.5
 
 
 def _r2_rows(xs: np.ndarray, y: np.ndarray) -> np.ndarray:

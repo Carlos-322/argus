@@ -175,11 +175,17 @@ def test_a_gripper_that_follows_every_close_is_sent_once():
     assert shown == ["grip"] and len(left) == 1 and not _apart_lines(lines)
 
 
-def test_a_pair_apart_at_most_of_its_instants_keeps_both_full_rows(monkeypatch):
-    """A row apart at more than TRACK_APART_MOST of the instants is sent whole; with the share lowered to 5%, the 6 s
-    stall (10 apart instants of 60) is enough."""
-    monkeypatch.setattr(sg, "TRACK_APART_MOST", 0.05)
-    cmd, arm = _stalled(6, seed=13)
+def test_an_eight_second_stall_is_read_where_it_stalls():
+    """The 8 s stall still tracks its command: the joint is left out except at the instants it stalls (10 of 60)."""
+    cmd, arm = _stalled(8)
+    shown, left, _, lines = _readout(*_case({"cmd": cmd, "arm": arm}))
+    assert shown == ["arm"] and [(r, o, len(t)) for r, o, t in _apart_lines(lines)] == [("cmd", "arm", 10)]
+
+
+def test_a_ten_second_stall_keeps_both_full_rows():
+    """A 10 s stall no longer fits its command (label/signals.py TRACK_LEVEL and TRACK_CHANGE): both rows are sent
+    whole, so no row is ever sent as a few readings beside a partner it mostly does not follow."""
+    cmd, arm = _stalled(10)
     shown, left, _, lines = _readout(*_case({"cmd": cmd, "arm": arm}))
     assert sorted(shown) == ["arm", "cmd"] and not left and not _apart_lines(lines)
 
@@ -224,10 +230,11 @@ def test_a_mirrored_degree_copy_states_its_scale():
 
 
 def test_a_short_pulse_left_out_keeps_its_time():
-    """A 150 ms motor-current pulse on top of noise: the row is left out as unresolved, but when the pulse came stays."""
+    """A 60 ms motor-current pulse on top of noise: too short to lift even the mean of its second above noise, the row is
+    left out as unresolved, but when the pulse came stays."""
     rng = np.random.default_rng(4)
     current = 0.05 * rng.normal(size=N)
-    current[1260:1265] = 3.21          # 42.00 s to 42.13 s, on the instant at 42 s
+    current[1260:1262] = 3.21          # 42.00 s to 42.03 s, on the instant at 42 s
     ep, pl = _case({"motor.current": current, "j": _path(1)})
     lines, _ = me._signal_readout(ep, pl)
     left = next(l for l in lines if "does not resolve their readings" in l)
@@ -251,3 +258,38 @@ def test_what_is_said_about_rows_left_out_is_paid_from_the_readout_budget(monkey
     # the row the command is read from is sent first, whatever its rank
     assert "arm" in shown
     assert sum(len(l) + 1 for l in paid) <= 3000 + len(lines[0]) + 1
+
+
+def test_cells_of_one_sensor_are_never_taken_for_copies_of_each_other():
+    """Five cells of one fingertip sensor move together, yet each is its own measurement: all five rows are sent."""
+    base = _path(5)
+    rng = np.random.default_rng(8)
+    finger = np.stack([base * (1 + 0.05 * c) + 0.01 * rng.normal(size=N) for c in range(5)], axis=1)
+    shown, left, _, lines = _readout(*_case({"finger": finger}, {"finger": [f"cell{c}" for c in range(5)]}))
+    assert shown == [f"finger cell{c}" for c in range(5)] and not left and not _relation_lines(lines)
+
+
+def test_a_stepped_joint_keeps_its_window_means():
+    """A slow joint a policy moves in random half-second steps around its path: one reading a second does not stand for
+    its second, but the mean over each instant's frames follows the path, so that row is sent, marked."""
+    t = np.arange(N) / FPS
+    steps = np.repeat(np.random.default_rng(9).choice([-1.0, 1.0], size=N // 16 + 1), 16)[:N]
+    joint = np.sin(2 * np.pi * t / 20) + steps
+    ep, pl = _case({"joint": joint, "j": _path(1)})
+    assert not sg.resolved(joint[:, None], pl["ks"])[0]
+    shown, _, _, lines = _readout(ep, pl)
+    assert "joint (window mean)" in shown
+    assert any("(window mean) gives, at each instant, the mean of the frames" in l for l in lines)
+
+
+def test_thirteen_instants_keep_every_row_as_it_is():
+    """With 13 instants no score is reliable: a noisy row is kept as read, not dropped and not averaged."""
+    n = 12 * FPS
+    ep, _ = CASES["teleop_video_only"]()
+    ep["state"] = np.zeros((n, 0))
+    ep["signals"] = {"noisy": np.random.default_rng(10).normal(size=(n, 1)), "j": _path(1)[:n, None]}
+    ep["signal_meta"] = {k: {} for k in ep["signals"]}
+    pl = _pl(n, every=1.0)
+    assert len(pl["ks"]) == 13
+    shown, _, _, lines = _readout(ep, pl)
+    assert "noisy" in shown and not any("does not resolve" in l for l in lines)
