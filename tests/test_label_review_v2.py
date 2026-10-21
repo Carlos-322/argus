@@ -254,9 +254,10 @@ def test_final_http_error_status_is_unpaid_and_resumes(tmp_path, monkeypatch, st
 
 
 @pytest.mark.parametrize('outcome', ['timeout', 504])
-def test_unknown_final_outcome_retains_reserve_and_never_replays(tmp_path, monkeypatch, outcome):
+def test_unknown_final_outcome_is_sent_again_twice_and_keeps_every_reserve(tmp_path, monkeypatch, outcome):
     # Sent, then no answer (a read timeout, a gateway timeout): the request may have been billed, so its reservation
-    # stays and a plain resume never sends it again.
+    # stays. Argus sends it again automatically, at most twice (AUTO_RESENDS), each attempt keeping its reservation,
+    # and a plain resume past that bound never sends it again.
     from test_camera_timing import recording
     ep = recording(tmp_path, np.arange(12) / 30)
     sent = []
@@ -272,15 +273,21 @@ def test_unknown_final_outcome_retains_reserve_and_never_replays(tmp_path, monke
     out = tmp_path / 'out'
     args = dict(keys=['sk-or-first', 'sk-or-second'], concurrency=1, force=False, max_spend=1.,
                 model=harness.DEFAULT_MODEL, reasoning='medium', max_tokens=100, timeout=1, cell_w=128)
+    # a cap that covers one reservation but not a second stops the resend: the first possible charge still counts
+    assert harness.run_batch([ep], tmp_path / 'capped', **args) == 1 and sent.count('final') == 1
+    sent.clear()
+    args['max_spend'] = 5.
     assert harness.run_batch([ep], out, **args) == 1
     receipt = out / ('noreply_' + ep.name + '.json')
     result = json.loads(receipt.read_text())
     assert result['final_dispatch_outcome'] == 'unverified' and result['final_reserved_usd'] > 0
-    assert harness.episode_cost(result) > .01
-    original = receipt.read_bytes()
-    # Resume reports the unresolved charge while retaining the receipt and refusing replay.
+    assert sent.count('final') == 1 + harness.AUTO_RESENDS == harness.dispatched_attempts(result)
+    # every attempt that may have been billed is still counted, not only the last
+    assert harness.episode_cost(result) >= (1 + harness.AUTO_RESENDS) * result['final_reserved_usd'] * 0.999
+    original, before = receipt.read_bytes(), list(sent)
+    # Resume reports the unresolved charge while retaining the receipt and refusing a fourth send.
     assert harness.run_batch([ep], out, **args) == 1
-    assert receipt.read_bytes() == original and sent == ['selection', 'final']
+    assert receipt.read_bytes() == original and sent == before
 
 
 def endpoint_metadata(model):

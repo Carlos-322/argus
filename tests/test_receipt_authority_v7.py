@@ -388,7 +388,8 @@ def test_absent_final_response_is_not_a_schema_failure(tmp_path, monkeypatch, mo
     assert result['status'] == 'no_response'
     assert counts['no_response'] == 1 and counts['unparsed'] == 0
     assert counts['parse_share'] is None
-    assert calls == ([] if mode == 'cap' else ['selection', 'final'])
+    # a lost response is sent again automatically, at most AUTO_RESENDS more times, and is still no_response
+    assert calls == ([] if mode == 'cap' else ['selection'] + ['final'] * (1 + harness.AUTO_RESENDS))
 
 
 def test_history_only_annotation_publishes_through_comparison_board(tmp_path):
