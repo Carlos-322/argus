@@ -1162,18 +1162,27 @@ def glued_words(run: str) -> tuple:
     """A run of letters as the known words it is glued from (leftwrist is left and wrist, jointcmd is joint and cmd),
     when the whole run is exactly a sequence of words of three or more letters of name_vocabulary (the last one may
     be plural), the fewest of them; otherwise the run itself, one word, so laptop never yields top, interaction never
-    action and backstop never top. A run that is a known word stays whole (gripper is not grip and per)."""
+    action and backstop never top. A run that is a known word stays whole (gripper is not grip and per). A piece is
+    never longer than the longest known word and its plural, so the split takes time in proportion to the run's
+    length (a run of 3000 cams is read in milliseconds, not the 22s that trying every split took)."""
     if run not in _GLUED:
         vocab = name_vocabulary()
+        # the one rule on a piece's length: three letters or more, so posts is never pos and ts
         known = lambda w, last=True: len(w) >= 3 and (w in vocab or last and w.endswith("s") and w[:-1] in vocab)
-        best = {0: ()}
+        longest = max(map(len, vocab)) + 1
+        # count[j], back[j]: the fewest words covering run[:j] and where the last of them starts
+        count, back = {0: 0}, {}
         if not known(run):
             for i in range(len(run)):
-                if i in best:
-                    for j in range(i + 3, len(run) + 1):
-                        if known(run[i:j], j == len(run)) and (j not in best or len(best[i]) + 1 < len(best[j])):
-                            best[j] = best[i] + (run[i:j],)
-        _GLUED[run] = best.get(len(run)) or (run,)
+                if i in count:
+                    for j in range(i + 1, min(len(run), i + longest) + 1):
+                        if known(run[i:j], j == len(run)) and (j not in count or count[i] + 1 < count[j]):
+                            count[j], back[j] = count[i] + 1, i
+        words, j = [], len(run)
+        while j in back:
+            words.append(run[back[j]:j])
+            j = back[j]
+        _GLUED[run] = tuple(reversed(words)) or (run,)
     return _GLUED[run]
 
 

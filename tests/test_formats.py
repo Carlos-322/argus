@@ -5028,6 +5028,7 @@ def test_a_joint_state_topic_that_says_action_inside_a_word_is_a_state_not_a_com
 # glued (leftwrist, jointcmd, observation.images.depthmap) and started reading letters cut off digits (l515 as left,
 # cam_3ee4f as an end effector). These tests hold the rule that settles both, and compare it with main on real names.
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -5297,4 +5298,19 @@ def test_a_frame_times_file_is_any_word_beginning_time_or_stamp():
         assert f.says_frame_times(stem), stem
     for stem in ("lifetime", "untimed", "postmark", "exo_cam-rgb"):
         assert not f.says_frame_times(stem), stem
+
+
+def test_a_long_glued_run_is_split_in_time_proportional_to_its_length():
+    # trying every split took 22s on a run of 3000 cams; each piece is at most the longest known word (and its plural)
+    for run in ("cam" * 3000, "cam" * 3000 + "q", "x" * 9000, "leftwrist" * 1000):
+        f._GLUED.pop(run, None)
+        start = time.perf_counter()
+        f.glued_words(run)
+        assert time.perf_counter() - start < 1.0, run[:12]
+        f._GLUED.pop(run, None)
+    assert f.glued_words("cam" * 3000) == ("cam",) * 3000
+    assert f.glued_words("cam" * 3000 + "q") == ("cam" * 3000 + "q",)
+    assert f.glued_words("leftwrist" * 1000) == ("left", "wrist") * 1000
+    longest = max(sorted(f.name_vocabulary()), key=len)
+    assert f.glued_words("left" + longest + "s") == ("left", longest + "s")   # the longest word, plural, last
 
