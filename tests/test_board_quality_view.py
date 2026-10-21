@@ -102,7 +102,8 @@ for (const src of [cut('const keyHtml = k ?', '</span>'), cut('class="tip">${esc
   assert(src.includes('keyKindName(k)') && !src.includes('kindName(k.kind)'), src);
 
 // the score chip: only beside a caption whose key event is a subgoal, or the goal reached
-const chipSrc = cut('  const keyWindows =', '  const stateChanges =') + cut('  let _scSig = null', "  document.querySelectorAll('.qual-table");
+const chipSrc = cut('  const subNo = new Map();', '  let subN = 0;') + cut('  const keyWindows =', '  const stateChanges =')
+  + cut('  let _scSig = null', "  document.querySelectorAll('.qual-table");
 const chipEl = {innerHTML: '', on: false, classList: {add() { chipEl.on = true; }, remove() { chipEl.on = false; }}};
 const chip = new Function('keyEvents', 'subs', 'Q', 'qNum', 'episodeGoalT', 'document',
   chipSrc + 'return renderScoreChip;');
@@ -111,11 +112,12 @@ const render = chip(chipKes, qs.subgoals, qs, x => String(x), 44, {getElementByI
 render(5.2);   // the caption is on the contact (its window opened first), so no score beside it
 assert.strictEqual(chipEl.on, false);
 render(7.2);   // the contact's window has closed, the caption is on Subgoal 1
-assert(chipEl.on && chipEl.innerHTML.includes('Execution'));
+assert(chipEl.on && chipEl.innerHTML === '<span class="sc-k">Subgoal 1</span><span class="sc-v">9</span>', chipEl.innerHTML);
 render(20);
 assert.strictEqual(chipEl.on, false);
 render(44.5);  // the goal from goal_reached_at_s
-assert(chipEl.on && chipEl.innerHTML.includes('Outcome'));
+assert(chipEl.on && chipEl.innerHTML === '<span class="sc-k">Episode</span><span class="sc-v">8</span>'
+  + '<span class="sc-k">Outcome</span><span class="sc-v">10</span>', chipEl.innerHTML);
 
 // a closed fold names the row the video is on; an open one does not
 const foldLabel = new Function(cut("function foldLabel(btn)", 'function foldToggle') + 'return foldLabel;')();
