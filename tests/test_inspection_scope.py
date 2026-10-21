@@ -27,7 +27,7 @@ def test_an_array_with_regional_analysis_keeps_its_inspection_owner_in_every_mod
 
 @pytest.mark.parametrize('name, inspected', [('force_torque', False), ('right_wrist_force', False),
                                              ('wrist_wrench', False), ('right_pressure', True),
-                                             ('finger_force', True)])
+                                             ('finger_force', True), ('wrist_pressure', True)])
 def test_a_wrist_wrench_is_not_inspected_by_default_without_a_dictionary_and_touch_still_is(tmp_path, name, inspected):
     path = tmp_path / 'exo.mp4'
     video(path, 90)

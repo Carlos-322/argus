@@ -15,7 +15,7 @@ import numpy as np
 from label.dictionary_context import field_interpretation, prepared_interpretation
 from label import signals as sg
 from label import sensor_copy
-from prepare.formats import TOUCH_CORE, is_sensing, names_touch, _names_word
+from prepare.formats import TOUCH_WORDS, is_sensing, names_touch, _names_word
 
 MAX_SERIES = 12
 MAX_SAMPLES = 96
@@ -121,7 +121,8 @@ def _quantity(name, entry, columns=None):
         return None
     if names_touch(name):
         if _names_word(name, ('torque', 'wrench')) or (
-                columns == 6 and _names_word(name, ('wrist', 'flange', 'tcp')) and not _names_word(name, TOUCH_CORE)):
+                columns == 6 and _names_word(name, ('wrist', 'flange', 'tcp'))
+                and not _names_word(name, tuple(w for w in TOUCH_WORDS if w != 'force'))):
             return 'force_torque'
         # A contact-pressure map is continuous. Only an explicit interpretation
         # establishes recorded contact-state semantics.
