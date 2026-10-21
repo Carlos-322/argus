@@ -69,6 +69,15 @@ def test_no_targets_leave_the_strip_as_it_was():
     assert '1<span class="u"> ep</span> &middot; 45.1 h' in html
 
 
+@pytestmark_node
+def test_a_dataset_with_a_target_and_no_episodes_gets_a_dimmed_tab_and_counts_in_the_totals():
+    html = render({'yam': {'episodes': 2682, 'hours': 101.9}, 'umi': {'episodes': 10, 'hours': 2},
+                   'molmo': {'episodes': 4472, 'hours': 100.1}})
+    assert 'cv-cell none' in html and 'data-ds="molmo"' in html
+    assert '0 of 4,472<span class="u"> eps</span> &middot; 0.0 of 100.1 h' in html
+    assert 'of 7,164 eps' in html and 'of 204.0 h' in html       # 2,682 + 10 + 4,472 episodes, 101.9 + 2 + 100.1 hours
+
+
 def test_targets_read_only_positive_numbers_from_the_manifest(tmp_path):
     (tmp_path / 'manifest.json').write_text(json.dumps({'datasets': [
         {'dataset': 'yam', 'target': {'episodes': 2682, 'hours': 101.9}},
