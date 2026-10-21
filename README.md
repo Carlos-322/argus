@@ -215,7 +215,7 @@ The capture checks in [`checks/vendor/public_dataset_adapter_qc.py`](checks/vend
 
 ## Licenses
 
-The code is Apache-2.0 ([`LICENSE`](LICENSE)), and the few files that carry material under another license are listed in [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt). Full datasets and optional components are downloaded at run time; the architecture chart includes attributed image excerpts. The labels Pantheon publishes, on the data dashboard, in its downloads and in the release, are licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), so anyone may use them for any purpose with credit to Pantheon. The footage they describe keeps its dataset's license.
+The code is Apache-2.0 ([`LICENSE`](LICENSE)), and the few files that carry material under another license are listed in [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt). Full datasets and optional components are downloaded at run time; the architecture chart includes attributed image excerpts. The labels Pantheon publishes, on the data dashboard, in its downloads and in the release, are licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), so anyone may use them for any purpose with credit to Pantheon. DiverseUMI, labels included, is released under the Pantheon Commercial Use License, Version 1.0. The footage they describe keeps its dataset's license.
 
 <details>
 <summary>Dataset and optional component licenses</summary>
