@@ -1,7 +1,10 @@
 """Open an existing local board without running preparation or annotation."""
 import argparse
+from datetime import datetime
+import json
 import os
 from pathlib import Path
+import re
 import socket
 import subprocess
 import sys
@@ -10,6 +13,46 @@ import urllib.error
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def heating_result_info(path):
+    """Identify a saved sample and its batch time without modifying the result."""
+    sample = re.fullmatch(r'(\d{3})_(\d{8}_\d{6}_\d+)', path.name)
+    batch = re.fullmatch(r'heating_v2_api_(\d{8}_\d{6}_\d+)', path.parent.name)
+    if not sample or not batch:
+        return None
+    try:
+        created = datetime.strptime(batch[1], '%Y%m%d_%H%M%S_%f')
+    except ValueError:
+        return None
+    return sample[1], sample[2], created
+
+
+def result_titles(results):
+    """Number saved results per recording, not by menu position or rebuild time."""
+    titles, groups = {}, {}
+    for path in results:
+        info = heating_result_info(path)
+        if info:
+            sample, recording, created = info
+            groups.setdefault(recording, []).append((created, str(path), sample, path))
+        else:
+            titles[path] = ('炒菜任务' if path.name == 'realman_cooking_20261009_180214_deepseek_live' else
+                            'rollout 任务' if path.name == 'realman_rollout_01_deepseek_live' else path.name)
+    for rows in groups.values():
+        for number, (created, _, sample, path) in enumerate(sorted(rows), 1):
+            try:
+                policy = json.loads((path / 'annotation_policy.json').read_text(encoding='utf-8'))
+                policies = [policy] if 'annotation_spec' in policy else list(policy.values())
+                specs = {(p.get('annotation_spec') or {}).get('id') for p in policies if isinstance(p, dict)}
+                spec = next(iter(specs)) if len(specs) == 1 else None
+            except (OSError, ValueError, AttributeError):
+                spec = None
+            rule = {'heating-v2': '旧规则', 'heating-v2-complete': '完整六段'}.get(spec)
+            titles[path] = f'加热 {sample}｜第 {number} 次标注｜{created:%Y-%m-%d %H:%M:%S}'
+            if rule:
+                titles[path] += f'｜{rule}'
+    return titles
 
 
 def discover_results():
@@ -28,9 +71,9 @@ def discover_results():
 def show_results(results):
     print("\n查看已有结果（不调用模型，不需要 API Key）\n", flush=True)
     print("已重新读取 data/review，最近生成的结果排在前面。", flush=True)
+    titles = result_titles(results)
     for i, path in enumerate(results, 1):
-        name = ("炒菜任务" if path.name == "realman_cooking_20261009_180214_deepseek_live" else
-                "rollout 任务" if path.name == "realman_rollout_01_deepseek_live" else path.name)
+        name = titles[path]
         print(f"  {i}. {name}\n     {path.relative_to(ROOT)}", flush=True)
     if not results:
         print("暂时没有可查看的结果。新标注生成网页数据后，输入 r 刷新即可。")
@@ -70,7 +113,8 @@ def main():
         return 1
     url = f"http://localhost:{port}"
     server = subprocess.Popen([sys.executable, "-m", "board", "serve", "--board", str(selected),
-                               "--clips", str(selected / "clips"), "--port", str(port)], cwd=ROOT,
+                               "--clips", str(selected / "clips"), "--port", str(port),
+                               "--title", result_titles(results)[selected]], cwd=ROOT,
                               start_new_session=True)
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))

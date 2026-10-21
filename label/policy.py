@@ -44,7 +44,7 @@ def output_limit(answer_tokens: int, reasoning: str) -> int:
 def resolve(ctx: dict, *, model: str | None = None, reasoning: str | None = None,
             sample_fps: float | None = None, task_mode: str | None = None,
             dataset_note: str | None = None, inspection: str | None = None,
-            field_dictionary: bool | None = None) -> dict:
+            field_dictionary: bool | None = None, annotation_spec=None) -> dict:
     """Source declarations and caller overrides, independent of dataset names or absent task text."""
     saved = ctx.get('annotation_policy') or {}
     if saved and (not isinstance(saved, dict) or saved.get('version') != VERSION):
@@ -52,6 +52,12 @@ def resolve(ctx: dict, *, model: str | None = None, reasoning: str | None = None
     rig = ctx.get('profile') or 'teleop_arms'
     if rig not in PERIODS:
         raise ValueError(f'unknown recording rig {rig!r}')
+    spec = annotation_spec if annotation_spec is not None else saved.get('annotation_spec')
+    if spec is not None:
+        from label.annotation_spec import resolve as resolve_spec
+        spec = resolve_spec(spec)
+        if rig != 'teleop_arms' or ctx.get('piece'):
+            raise ValueError('Heating annotation requires an unsplit teleop_arms recording')
     model = model or saved.get('model') or providers.default_model(ASTRA)
     if not isinstance(model, str) or not model.strip():
         raise ValueError('model must be a nonempty identifier')
@@ -65,6 +71,8 @@ def resolve(ctx: dict, *, model: str | None = None, reasoning: str | None = None
         raise ValueError('unsupported reasoning effort')
     if sample_fps is None:
         sample_fps = saved.get('sample_fps')
+    if sample_fps is None and spec:
+        sample_fps = 4.0
     if sample_fps is not None:
         if type(sample_fps) not in (float, int) or not math.isfinite(sample_fps) or sample_fps <= 0:
             raise ValueError('sample FPS must be finite and positive')
@@ -83,6 +91,8 @@ def resolve(ctx: dict, *, model: str | None = None, reasoning: str | None = None
     mode = task_mode or saved.get('task_mode') or declared or 'episode'
     if mode not in TASK_MODES:
         raise ValueError('task mode must be episode or session')
+    if spec and mode != 'episode':
+        raise ValueError('Heating annotation uses episode mode; repeated cycles are recorded inside it')
     note = dataset_note if dataset_note is not None else saved.get('dataset_note', ctx.get('collection_note', ''))
     if not isinstance(note, str):
         raise ValueError('dataset description must be text')
@@ -94,16 +104,19 @@ def resolve(ctx: dict, *, model: str | None = None, reasoning: str | None = None
         if type(previous) not in (float, int) or not math.isfinite(previous) or not 0 < previous <= maximum:
             raise ValueError('saved part allowance is incompatible; rebuild with an explicit policy')
         maximum = previous
-    inspect = inspection if inspection is not None else inspection_mode(saved) if saved else INSPECTION
+    inspect = inspection if inspection is not None else inspection_mode(saved) if saved else 'off' if spec else INSPECTION
     if inspect not in INSPECTION_MODES:
         raise ValueError(f'inspection must be one of {", ".join(INSPECTION_MODES)}')
-    dictionary = field_dictionary if field_dictionary is not None else saved.get('field_dictionary', True)
+    dictionary = field_dictionary if field_dictionary is not None else saved.get('field_dictionary', not bool(spec))
     if type(dictionary) is not bool:
         raise ValueError('field dictionary must be on or off')
+    if spec and (inspect != 'off' or dictionary):
+        raise ValueError('Station annotation uses inspection off and field dictionary off; it labels against supplied rules')
     return {'version': VERSION, 'rig': rig, 'model': model, 'reasoning': reasoning,
             'sample_fps': float(sample_fps) if sample_fps is not None else None,
             'sample_every_s': period, 'part_max_s': maximum, 'task_mode': mode,
             'dataset_note': note,
+            **({'annotation_spec': spec} if spec else {}),
             **({'inspection': inspect} if inspect != LEGACY_INSPECTION else {}),
             **({'field_dictionary': False} if not dictionary else {})}
 

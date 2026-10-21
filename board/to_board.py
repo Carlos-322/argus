@@ -249,6 +249,8 @@ def convert(result: dict, dataset: str | None = None) -> dict:
     return {
         "dataset": dataset,
         "episode_prompt": labels.get("task_summary") or "",
+        **({'station_review': copy.deepcopy(labels['station_review']),
+            'station_segments': copy.deepcopy(timeline)} if labels.get('station_review') else {}),
         "viewpoint": labels.get("viewpoint"),  # ego: first_person | third_person
         **({'camera_observations': finite(copy.deepcopy(result['camera_observations']))}
            if not failed and isinstance(result.get('camera_observations'), dict)

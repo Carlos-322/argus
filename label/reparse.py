@@ -150,7 +150,9 @@ def refresh_received(record: dict) -> dict:
     if not isinstance(raw, str):
         raise ValueError('saved reply has no complete retained response text')
     updated = copy.deepcopy(record)
-    labels, ok = harness.parse_response(raw)
+    labels, ok = harness.parse_response(raw,
+        annotation_spec=(record.get('annotation_policy') or {}).get('annotation_spec'),
+        duration_s=(record.get('config') or {}).get('annotation_duration_s'))
     if '_reparsed' in (record.get('labels') or {}):
         labels['_reparsed'] = copy.deepcopy(record['labels']['_reparsed'])
     updated.update(labels=labels, parse_ok=ok)
@@ -210,7 +212,9 @@ def _reparse(run: Path) -> dict:
         raw = (r.get("labels") or {}).get("_raw") or r.get('response_text')
         if r.get("parse_ok") or not raw:
             continue
-        labels, ok = harness.parse_response(raw)
+        labels, ok = harness.parse_response(raw,
+            annotation_spec=(r.get('annotation_policy') or {}).get('annotation_spec'),
+            duration_s=(r.get('config') or {}).get('annotation_duration_s'))
         if not ok:
             still.append({"episode": p.stem, "error": labels["_parse_error"]})
             continue

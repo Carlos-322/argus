@@ -268,9 +268,17 @@ def verified_preparation(job: Path, data: Path, args, dataset: str, overrides: d
         return rep, saved
     if unverified_preparation_artifacts(job):
         raise SystemExit(refuse)
-    print('== convert', flush=True)
-    rep = formats.convert(data, args.rig, job / 'episodes', dataset,
-                          args.max_minutes * 60 if args.max_minutes else float('inf'), grouping=args.grouping)
+    from review import preparation_cache
+    cached = preparation_cache.prepare(job, data, args, dataset, current, root=REPO,
+                                       convert=formats.convert, verify_prepared=prepared_identity,
+                                       verify_file=file_identity)
+    if cached is None:
+        print('== convert', flush=True)
+        rep = formats.convert(data, args.rig, job / 'episodes', dataset,
+                              args.max_minutes * 60 if args.max_minutes else float('inf'), grouping=args.grouping)
+    else:
+        rep, cache_info = cached
+        current['conversion_cache'] = cache_info
     if current['source'] != source_identity(data, job) or current['producer'] != preparation_code_identity():
         raise SystemExit(refuse)
     write_atomic(job / 'report.json', rep, indent=1)
@@ -300,6 +308,10 @@ def main() -> int:
     ap.add_argument("--rig", required=True, choices=["teleop_arms", "handheld_gripper", "ego_head"])
     ap.add_argument("--out", type=Path, required=True, metavar="JOB", help="where everything is written")
     ap.add_argument("--dataset", default=None, help="name shown on the board and told to the model")
+    ap.add_argument('--preparation-cache', type=Path, default=None,
+                    help='reuse local MCAP conversion across new output directories; prompts and sampling are independent')
+    ap.add_argument('--reuse-prepared', type=Path, default=None, metavar='OLD_JOB',
+                    help='also check this existing job when filling the preparation cache')
     ap.add_argument("--free", action="store_true", help="stop after the dry run (no model calls)")
     ap.add_argument("--cap", type=float, default=20.0, help="most the labelling may spend, in USD (default 20)")
     ap.add_argument("--concurrency", type=int, default=8, help="requests in flight (default 8)")
@@ -314,6 +326,8 @@ def main() -> int:
     ap.add_argument("--grouping", type=json.loads, default={},
                     help='JSON {folder: "takes" | "cameras"} for folders whose files cannot tell takes from cameras')
     policy.add_arguments(ap)
+    ap.add_argument('--annotation-spec', choices=('heating-v2', 'heating-v2-complete'), default=None,
+                    help='use the supplied heating PDF six-subtask rules instead of free-form annotation')
     ap.add_argument("--field-dictionary", choices=("on", "off"), default=None,
                     help="ask a model what uncertain recorded fields mean, once per upload (default on; off labels "
                          "with the fields as recorded and makes no dictionary call)")
@@ -328,7 +342,7 @@ def main() -> int:
     if a.max_tokens is not None and a.max_tokens <= 0:
         ap.error('--max-tokens must be positive')
     overrides = {key: getattr(a, key) for key in ("model", "reasoning", "sample_fps", "task_mode", "dataset_note",
-                                                  "inspection", "field_dictionary")}
+                                                  "inspection", "field_dictionary", "annotation_spec")}
     policy.resolve({"profile": a.rig}, **overrides)
 
     if a.force and a.retry_received:
@@ -385,6 +399,13 @@ def review_job(a, overrides, lock_fd, output_lock_fd) -> int:
 
     selected = preparation['policies']
     write_atomic(job / "annotation_policy.json", selected)
+
+    # Refuse before any paid auxiliary calls: technical cuts must not become business boundaries.
+    for episode_id, settings in selected.items():
+        if settings.get('annotation_spec') and pieces.needs_pieces(eps / episode_id):
+            raise SystemExit('Heating annotation currently requires one request per recording; this recording '
+                             'exceeds the sampling window. No model call was made. Use a lower --sample-fps '
+                             'that fits the whole recording; do not cut it into artificial subtask boundaries.')
 
     print('== dictionary', flush=True)
     dictionary_stage.prepare(job, eps, [e['episode_id'] for e in rep['episodes']], free=a.free, cap=a.cap,

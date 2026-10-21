@@ -2484,7 +2484,9 @@ RECORDED_BLOCKS = ("state", "state_unaligned", "signals")
 
 def present_blocks(ep: dict, pl: dict) -> list[Block]:
     """The blocks whose data this episode holds, in prompt order."""
-    return [b for b in BLOCKS if b.present(ep, pl)]
+    excluded = {'sensor_evidence', 'contacts', 'camera_observations', 'uploader_notes'} if (
+        policy.effective(ep['context']).get('annotation_spec')) else set()
+    return [b for b in BLOCKS if b.name not in excluded and b.present(ep, pl)]
 
 
 def is_recorded(ep: dict, pl: dict, blocks: list[Block] | None = None) -> bool:
@@ -2498,6 +2500,8 @@ def is_recorded(ep: dict, pl: dict, blocks: list[Block] | None = None) -> bool:
 
 def requested_schema(ep: dict, pl: dict, blocks: list[Block] | None = None) -> tuple:
     """The output fields this episode's blocks ask for beyond the rig's shared schema."""
+    if policy.effective(ep['context']).get('annotation_spec'):
+        return ('spec_id', 'task_summary', 'timeline', 'unobserved_subtasks', 'rule_flags')
     return tuple(f for b in (present_blocks(ep, pl) if blocks is None else blocks) for f in b.schema_fields)
 
 
@@ -2734,6 +2738,8 @@ def task_block(ep: dict) -> str:
     """The task, part of the base: the dataset's instruction (robot rigs) or annotation (head camera). A head camera
     with no annotation is told there is none, because its shared instructions always ask for goal_alignment."""
     ctx = ep["context"]
+    if policy.effective(ctx).get('annotation_spec'):
+        return '\n本次按加热工位六子任务规范独立标注。历史分段标签不作为模型输入。\n'
     if rig(ep) == "ego_head":
         return ego_annotation_block(ctx)
     given = (ctx.get("instruction") or "").strip()
@@ -2789,9 +2795,16 @@ def build_prompt(ep: dict, pl: dict, *, cell_w: int, cell_h: int, example_dir=No
     native = (c0.get("width") or "native", c0.get("height") or "resolution")
     given = (ctx.get("instruction") or "").strip()
     blocks = present_blocks(ep, pl) if blocks is None else blocks
-    fixed = prompts.fixed_instructions(r, has_instruction=bool(given), recorded=is_recorded(ep, pl, blocks),
-                                      sessions=policy.effective(ctx)["task_mode"] == "session")
-    fixed += prompts.example_block(r, example_dir)
+    selected = policy.effective(ctx)
+    if selected.get('annotation_spec'):
+        from label.annotation_spec import instructions
+        if example_dir:
+            raise ValueError('Free-form examples cannot be used with a fixed annotation spec')
+        fixed = instructions(selected['annotation_spec'])
+    else:
+        fixed = prompts.fixed_instructions(r, has_instruction=bool(given), recorded=is_recorded(ep, pl, blocks),
+                                          sessions=selected["task_mode"] == "session")
+        fixed += prompts.example_block(r, example_dir)
     if any(block.name == 'sensor_evidence' for block in blocks):
         fixed = (prompts.EVIDENCE_CONTRACT + '\nVISUAL ANNOTATION CONTRACT\n' + fixed
                  + '\nEND VISUAL ANNOTATION CONTRACT\n')
@@ -2948,6 +2961,7 @@ def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int 
             'camera_observation_labels': {v: cam_name(ep, v) for v in pl['camera_observation_views']},
             "sampling": f"{rig(ep)}-every-{every_s(ep):g}s",
             "annotation_policy": ep['context']['annotation_policy'],
+            "annotation_duration_s": request_duration(ep),
             "blocks": [b.name for b in blocks],
             "schema_fields": list(requested_schema(ep, pl, blocks)),
             "checks_implied": list(implied_checks(ep, pl, blocks)),

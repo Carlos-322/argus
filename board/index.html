@@ -6795,6 +6795,17 @@ function renderEp(d, opts) {
   // playhead (renderSceneGraph)
   const perfHtml = d.performance_review
     ? `<div class="info-block"><div class="perf">${esc(d.performance_review)}</div></div>` : '';
+  const station = d.station_review;
+  const stationHtml = station ? `<h3 class="section">${esc(station.title)}</h3>
+    <div class="info-block"><div class="perf">${station.status === 'excluded_by_spec'
+      ? '发现规范排除项，请查看原因；原始数据仍保留。' : '已按固定六子任务模板生成标注草稿，边界需人工复核。'}
+      抽样画面中的候选时间不代表已经逐帧验证。</div>
+      ${(station.rule_flags || []).map(x => `<div class="line">${esc(x.code)}：${esc(x.reason)}</div>`).join('')}
+      ${(station.unobserved_subtasks || []).map(x => `<div class="line">第${esc(x.cycle)}轮 ${esc(x.subtask_id)} 未定位：${esc(x.reason)}</div>`).join('')}
+      ${(station.notes || []).map(x => `<div class="line">${esc(x)}</div>`).join('')}
+      ${(d.station_segments || []).map(x => `<div class="line"><b>第${esc(x.cycle)}轮 ${esc(x.subtask_id)} ${esc(x.action)}</b>
+        ${fmtT(x.start_s)} – ${fmtT(x.end_s)}<br>开始：${esc(x.start_evidence)}<br>结束：${esc(x.end_evidence)}
+        ${x.notes ? `<br>${esc(x.notes)}` : ''}</div>`).join('')}</div>` : '';
   const scHtml = foldRows((d.state_changes || []).map(x =>
     `<div class="line"><span class="t">${fmtT(x.t_s)}</span> <span class="v">${esc(x.object || '')}</span>: ${esc(x.from
       || '')} <span style="color:var(--fg-3)">-&gt;</span> ${esc(x.to || '')}</div>`), 'changes', 'sc');
@@ -7119,6 +7130,7 @@ function renderEp(d, opts) {
     ${requestPartAssessmentsHtml(d)}
 
     ${qualityHtml}
+    ${stationHtml}
     ${perfHtml ? `<h3 class="section">How well was the task executed?</h3>${perfHtml}` : ''}
     ${rcHtml ? `<h3 class="section">Recoveries</h3><div class="info-block">${rcHtml}</div>` : ''}
 

@@ -427,7 +427,7 @@ def label_episode(ep_dir: Path, out_path: Path, *, model: str, reasoning: str, a
         raise RuntimeError('Request source inputs are missing; no paid request was dispatched.')
     billing = _billing_fields(out_path)
     # an explicit cell width skips the routing; otherwise a routed rig's widest cell comes from its task text
-    route_w, route = (None, {"routed": False}) if cell_w else route_width(
+    route_w, route = (None, {"routed": False}) if cell_w or resolved.get('annotation_spec') else route_width(
         ep_dir, None if dry_run else api_key, call_model_once, timeout=min(timeout, 120),
         out_path=out_path, input_identity=identity,
         reserve_dispatch=reserve_selection, settle_dispatch=settle_selection, billing_fields=billing,
@@ -474,6 +474,10 @@ def label_episode(ep_dir: Path, out_path: Path, *, model: str, reasoning: str, a
                    "prompt_blocks": req["blocks"], "schema_fields": req["schema_fields"],
                    "checks_implied": req["checks_implied"]},
     }
+    if resolved.get('annotation_spec'):
+        fields['prompt_mode'] = 'given'
+        fields['given_prompt'] = resolved['annotation_spec']['definition']['title']
+        fields['config']['annotation_duration_s'] = req['annotation_duration_s']
     if pricing_quote is not None:
         fields['config']['pricing_quote'] = pricing_quote
     return _call_and_record(ep_dir, out_path, req["content"], req["image_bytes"], fields, model=model,
@@ -897,7 +901,7 @@ def _model_diagnostics(labels: dict) -> None:
             _model_diagnostics(assessment)
 
 
-def parse_response(text: str) -> tuple[dict, bool]:
+def parse_response(text: str, *, annotation_spec=None, duration_s=None) -> tuple[dict, bool]:
     """A model's reply as labels, or the raw text and the reason it could not be read. The one parser for every
     model and for re-reading stored replies (label/reparse.py). A reply that is a JSON object but breaks the output
     format in places keeps the rest of its labels (normalize_timeline, typed_labels)."""
@@ -908,6 +912,9 @@ def parse_response(text: str) -> tuple[dict, bool]:
         if not isinstance(labels, dict):
             raise ValueError(f"the reply is {json_kind(labels)}, not an object")
         _model_diagnostics(labels)
+        if annotation_spec is not None:
+            from label.annotation_spec import validate
+            return validate(labels, annotation_spec, duration_s), True
         had_rows = bool(labels.get('timeline'))
         labels = typed_labels(normalize_timeline(labels))
         completion = labels.get('completion')
@@ -1126,7 +1133,9 @@ def annotation_complete(record: dict) -> bool:
     if (reply_truncated(record) or record.get('parse_ok') is not True
             or not isinstance(record.get('labels'), dict)):
         return False
-    return parse_response(json.dumps(record['labels']))[1]
+    return parse_response(json.dumps(record['labels']),
+        annotation_spec=(record.get('annotation_policy') or {}).get('annotation_spec'),
+        duration_s=(record.get('config') or {}).get('annotation_duration_s'))[1]
 
 
 def _times(x: dict, where: str, labels: dict) -> None:
@@ -1393,7 +1402,8 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
     fields.setdefault('config', {})['request_images'] = input_grids.receipt(content,
         {**fields, 'model': model, 'reasoning_effort': reasoning})
     bound_sensor_analysis = None
-    if not dry_run and isinstance(fields.get('sensor_evidence'), dict):
+    if (not dry_run and isinstance(fields.get('sensor_evidence'), dict)
+            and not (fields.get('annotation_policy') or {}).get('annotation_spec')):
         from label import sensor_analysis, sensor_analysis_run
         analysis_request = sensor_analysis.build(content, fields['sensor_evidence'], config={
             **fields['config'], 'model': model, 'reasoning': reasoning, 'max_tokens': max_tokens,
@@ -1548,7 +1558,9 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
         claim_path.unlink(missing_ok=True)
         raise Truncated(f"response truncated (finish_reason=length) at max_tokens={max_tokens}", episode_cost(failed))
     # an unparseable reply is recorded as it came, never repaired or retried
-    labels, parse_ok = parse_response(text)
+    labels, parse_ok = parse_response(text,
+        annotation_spec=(fields.get('annotation_policy') or {}).get('annotation_spec'),
+        duration_s=(fields.get('config') or {}).get('annotation_duration_s'))
     failure = reply_error(resp)
     if failure is not None:
         # the provider failed partway (billed or unpriced, or _post would have retried it): its text is a fragment,
