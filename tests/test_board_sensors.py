@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import shutil
 import struct
 import subprocess
@@ -792,3 +793,70 @@ def test_overview_keeps_a_between_stride_peak_and_native_gap(tmp_path):
                                 capture_output=True, text=True, check=True, timeout=10)
         native = json.loads(result.stdout)
         assert native['t'] == pytest.approx(61 / 120, abs=1e-12) and native['n'] <= 15
+
+
+# ---------------------------------------------------------------- build cache
+
+def _spy(monkeypatch):
+    """Count the episodes the build projects and the sensors files it makes, rather than reusing."""
+    made = {"episodes": 0, "sensors": 0}
+    real_ep, real_sn = board_build.guarded_episode_file, sensors.episode_doc
+
+    def ep(*a, **k):
+        made["episodes"] += 1
+        return real_ep(*a, **k)
+
+    def sn(*a, **k):
+        made["sensors"] += 1
+        return real_sn(*a, **k)
+    monkeypatch.setattr(board_build, "guarded_episode_file", ep)
+    monkeypatch.setattr(sensors, "episode_doc", sn)
+    return made
+
+
+def _files(board):
+    return {f"{d}/{p.name}": p.read_bytes() for d in ("qa", "sensors") for p in sorted((board / d).iterdir())}
+
+
+def test_a_rebuild_reuses_every_unchanged_episode_and_writes_the_same_bytes(tmp_path, monkeypatch):
+    ep = _episode(tmp_path / "eps")
+    board = _board(tmp_path, ep)
+    board_build.build(board)
+    first = _files(board)
+    made = _spy(monkeypatch)
+    board_build.build(board)
+    assert made == {"episodes": 0, "sensors": 0} and _files(board) == first
+    board_build.build(board, cache=False)                    # --no-cache makes them again, to the same bytes
+    assert made == {"episodes": 1, "sensors": 1} and _files(board) == first
+
+
+def test_a_changed_input_rebuilds_its_episode(tmp_path, monkeypatch):
+    ep = _episode(tmp_path / "eps")
+    board = _board(tmp_path, ep)
+    board_build.build(board)
+    made = _spy(monkeypatch)
+    # a target is drawn by the page and changes no file
+    m = json.loads((board / "manifest.json").read_text())
+    m["datasets"][0]["target"] = {"episodes": 9, "hours": 1.0}
+    (board / "manifest.json").write_text(json.dumps(m))
+    board_build.build(board)
+    assert made == {"episodes": 0, "sensors": 0}
+    # a new reply from the run rebuilds the board file; the episode folder is unchanged, so its sensors file is kept
+    out = tmp_path / "runs" / "r1" / "out" / f"{ep.name}.json"
+    reply = json.loads(out.read_text())
+    reply["labels"]["task_summary"] = "lift the red cup"
+    out.write_text(json.dumps(reply))
+    board_build.build(board)
+    assert made == {"episodes": 1, "sensors": 0}
+    assert "lift the red cup" in (board / "qa" / f"{ep.name}.json").read_text()
+    # a rewritten episode file rebuilds both
+    sig = ep / "signals.npz"
+    sig.write_bytes(sig.read_bytes())
+    os.utime(sig, ns=(sig.stat().st_mtime_ns + 10**9,) * 2)
+    board_build.build(board)
+    assert made == {"episodes": 2, "sensors": 1}
+    # and a changed rule in the manifest rebuilds the board file
+    m["datasets"][0]["rules"] = [{"kind": "severity_cap", "tags": ["x"], "severity": "low", "reason": "r"}]
+    (board / "manifest.json").write_text(json.dumps(m))
+    board_build.build(board)
+    assert made == {"episodes": 3, "sensors": 1}
