@@ -12,7 +12,7 @@
 </table>
 
 > [!IMPORTANT]
-> Argus has many tunable settings. Please read [Settings](#settings) in full.
+> Argus has many tunable command-line options. Please read [Settings](#settings) in full.
 
 ### \* DiverseUMI (October 2026)
 
