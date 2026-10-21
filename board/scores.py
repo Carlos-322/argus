@@ -1,52 +1,78 @@
 """Episode and subgoal quality scores, computed from the labels a board already holds, never asked of the model.
 
 A model reads one episode at a time, so a number it writes for one episode is not comparable with the number it writes
-for another. These scores are measured instead: each one is built from fields the annotation already records (the
+for another. These scores are computed instead: each one is built from fields the annotation already records (the
 timeline's advancing, wasteful and idle steps, the key events, the operator mistakes and recoveries, the completion and
 the goal alignment), and the ones that only mean something next to other demonstrations of the same task (how long the
-goal took, how much of the work hesitated) are ranked within the episode's task group on the board.
+goal took, how busy the work was) are compared within the episode's task group on the board.
 
 Four dimensions, each 0 to 10, each with the numbers it came from (inputs), so the board can say why:
 
 | Dimension | Question | Built from | Compared |
 |---|---|---|---|
 | outcome | How much of the labelled goal was achieved | completion, the progress reached | absolute |
-| cleanliness | How free the work is of mistakes and wasted motion | operator mistakes by severity, failed attempts, wasteful time | absolute |
+| cleanliness | How free the work is of mistakes and wasted motion | wasteful time, the operator mistakes the board counts (by severity, half when recovered), failed attempts no mistake explains | absolute |
 | efficiency | How quickly the goal was reached, for this task | time from the first action to the goal | within the task group |
-| fluency | How steadily the work went, for this task | hesitation inside the work, actions per unit of progress | within the task group |
+| fluency | How steadily the work went | hesitation inside the work (absolute), and actions per unit of progress | hesitation absolute, actions within the task group |
 
-execution, the quality of what the operator actually did, is cleanliness, efficiency and fluency together; outcome is
-kept apart, so a clean demonstration of a mislabelled task reads as a good execution with relation "different", never
-as a bad one. A dimension with too few peers to compare against is None, never a guess.
+execution, the quality of what the operator actually did, is cleanliness, efficiency and fluency weighted 0.5, 0.25 and
+0.25 (EXECUTION_WEIGHTS), over the ones that exist, for an episode and for each subgoal alike; outcome is kept apart, so
+a clean demonstration of a mislabelled task reads as a good execution with relation "different", never as a bad one.
+Speed is 10 at or below the median of its peers, which means typical, not fast. A dimension with too few peers is None,
+never a guess, and every score stays between 0 and 10 whatever the labels hold. One malformed record is scored as an
+empty one; it never stops the board.
 """
 from __future__ import annotations
 
 import bisect
+import collections
 import math
 import re
 import statistics
 
-from board.families import union_seconds as _union
+from board.families import Families, union_seconds as _union
+from board.label_projection import severity as _severity
 from checks.results import stored_number
 
 
 def _num(x):
-    """A stored number the scores can compare as it is: a finite int or float (stored_number), never text."""
-    return stored_number(x) if isinstance(x, (int, float)) else None
+    """A stored number the scores can compare as it is: a finite int or float (stored_number), never text, true or
+    false, or an integer too large for a float."""
+    if not isinstance(x, (int, float)) or isinstance(x, bool):
+        return None
+    try:
+        return stored_number(x)
+    except OverflowError:
+        return None
 
 
-VERSION = 1
+VERSION = 2
 MIN_PEERS = 5                     # a relative dimension needs this many other demonstrations of the same task
 SEVERITY_POINTS = {"low": 0.5, "medium": 1.5, "high": 3.0}
 FAILED_ATTEMPT_POINTS = 1.0       # a key event that failed, beyond the mistake that may describe it
+RECOVERY_WINDOW_S = 1.5           # a recovery belongs to a mistake when its failure is this close to the mistake's time
 OUTCOME_CAPS = {"success": 1.0, "success_then_undone": 0.7, "partial": 0.9, "failure": 0.4}
 EXECUTION_WEIGHTS = {"cleanliness": 0.5, "efficiency": 0.25, "fluency": 0.25}
 # the record fields the scores read, so a board build can hold every episode at once without its whole record
-FIELDS = ("dataset", "episode_prompt", "task_label", "event_labels", "key_events", "operator_mistakes", "completion",
-          "goal_alignment", "tasks", "_meta", "_rig")
+FIELDS = ("dataset", "episode_prompt", "task_label", "event_labels", "key_events", "operator_mistakes", "recovery",
+          "completion", "goal_alignment", "tasks", "_meta", "_rig")
 SIMILAR = 0.5                     # two subgoal labels are the same kind of subgoal when they share this share of words
+SAME_TASK = 0.6                   # a one-off wording joins a task whose instruction shares this share of its words
 STOP = {"the", "a", "an", "and", "then", "with", "its", "it", "of", "on", "to", "into", "in", "from", "onto", "by", "at",
         "for", "both", "each", "one", "that", "this", "is", "are", "be", "so", "as", "up", "down", "out", "back", "over"}
+_FAMILIES = None
+
+
+def _families() -> Families:
+    """The board's own issue rules (board/families.py), read once: which operator mistakes count."""
+    global _FAMILIES
+    if _FAMILIES is None:
+        _FAMILIES = Families()
+    return _FAMILIES
+
+
+def _clamp(v):
+    return None if v is None else round(min(10.0, max(0.0, v)), 1)
 
 
 def _subtract(spans, cut):
@@ -62,8 +88,11 @@ def _subtract(spans, cut):
 
 def _verdict(x: dict) -> str | None:
     """A completion's or a task's outcome word, with a partial result read back from the record's failure_kind (a
-    board record stores partial as failure with failure_kind "partial", board/to_board.py convert)."""
+    board record stores partial as failure with failure_kind "partial", board/to_board.py convert). A value that is not
+    a word is no verdict."""
     word = x.get("task_completed", x.get("outcome"))
+    if not isinstance(word, str):
+        return None
     return "partial" if word == "failure" and x.get("failure_kind") == "partial" else word
 
 
@@ -75,17 +104,55 @@ def _list(x) -> list:
     return x if isinstance(x, list) else []
 
 
+def _str(x) -> str | None:
+    return x if isinstance(x, str) else None
+
+
+def _steps(d: dict) -> list:
+    """The timeline steps with usable times, in time order."""
+    return sorted((e for e in _list(d.get("event_labels")) if isinstance(e, dict) and _num(e.get("t_s")) is not None
+                   and _num(e.get("end_s")) is not None), key=lambda e: e["t_s"])
+
+
+def _mistakes(d: dict) -> tuple[list, int]:
+    """(the operator mistakes the board counts, each with recovered read from the mistake or from the recovery list,
+    the number of mistakes of any rating, which explain failed attempts). A mistake the board shows as minor or unrated
+    costs nothing; its wasted motion is already in the wasteful share. A mistake listed twice at one time costs once."""
+    rows = [m for m in _list(d.get("operator_mistakes")) if isinstance(m, dict) and m.get("deliberate") != "yes"]
+    recovered_at = [_num(r.get("failure_t_s")) for r in _list(d.get("recovery")) if isinstance(r, dict)
+                    and (r.get("recovered") is True or _num(r.get("recovered_at_s")) is not None)]
+    recovered_at = [t for t in recovered_at if t is not None]
+    counted, seen = [], set()
+    for m in rows:
+        sev = _severity(m)
+        try:
+            counts = sev is not None and _families().counts("operator_mistakes", {**m, "severity": sev})
+        except (TypeError, ValueError, AttributeError):
+            counts = False
+        t = _num(m.get("t_s"))
+        key = (_str(m.get("category")), sev, t)
+        if not counts or key in seen:
+            continue
+        seen.add(key)
+        recovered = m.get("recovered") is True or (t is not None and any(abs(r - t) <= RECOVERY_WINDOW_S
+                                                                        for r in recovered_at))
+        counted.append({"issue": _str(m.get("issue")), "severity": sev, "t_s": t, "recovered": recovered})
+    return counted, len(rows)
+
+
+def _points(m: dict) -> float:
+    return SEVERITY_POINTS[m["severity"]] * (0.5 if m["recovered"] else 1.0)
+
+
 def facts(d: dict) -> dict:
     """What one episode's labels measure, before any comparison: its work window, its time split, its attempts."""
-    d = {**d, **{k: _list(d.get(k)) for k in ("event_labels", "key_events", "operator_mistakes", "tasks")},
-         **{k: _dict(d.get(k)) for k in ("completion", "goal_alignment")}}
-    steps = [e for e in d.get("event_labels") or [] if isinstance(e, dict) and _num(e.get("t_s")) is not None
-             and _num(e.get("end_s")) is not None]
+    d = d if isinstance(d, dict) else {}
+    steps = _steps(d)
     spans = {c: [(e["t_s"], e["end_s"]) for e in steps if e.get("contribution") == c]
              for c in ("advancing", "wasteful", "idle")}
     work = spans["advancing"] + spans["wasteful"]
     start = min((a for a, _ in work), default=None)
-    comp = d.get("completion") or {}
+    comp = _dict(d.get("completion"))
     goal = _num(comp.get("completed_at_s"))
     if goal is None:
         goal = _num(comp.get("goal_reached_at_s"))
@@ -95,28 +162,31 @@ def facts(d: dict) -> dict:
     # hesitation: stretches inside the work window where no arm advances or wastes, ie every arm waits
     window = [(start, end)] if start is not None and end is not None and end > start else []
     hesitation = _union(_subtract(window, work)) if window else 0.0
-    # progress toward this goal, from the steps that carry it; a recording labelled in parts keeps only each part's
-    # local progress (label/pieces.py), which says nothing about the whole goal, so there it is unknown, never 0
-    progress = [p for p in (_num(e.get("progress")) for e in steps) if p is not None]
+    # progress toward this goal, from the steps that carry it, read within 0 to 1; a recording labelled in parts keeps
+    # only each part's local progress (label/pieces.py), which says nothing about the whole goal, so there it is
+    # unknown, never 0
+    progress = [min(1.0, max(0.0, p)) for p in (_num(e.get("progress")) for e in steps) if p is not None]
     reached = max(progress) if progress else None
-    mistakes = [m for m in d.get("operator_mistakes") or [] if isinstance(m, dict) and m.get("deliberate") != "yes"]
-    failed = [k for k in d.get("key_events") or [] if isinstance(k, dict) and k.get("outcome") == "failure"]
+    mistakes, any_mistakes = _mistakes(d)
+    failed = [k for k in _list(d.get("key_events")) if isinstance(k, dict) and k.get("outcome") == "failure"]
     # progress restarts at each subtask, so a subtask's progress is the furthest its own steps got
-    tasks = [{"outcome": _verdict(t),
-              "progress": max((p for e in steps if t["start_s"] <= e["t_s"] <= t["end_s"]
-                               for p in [_num(e.get("progress"))] if p is not None), default=None)}
-             for t in d.get("tasks") or [] if isinstance(t, dict) and _num(t.get("start_s")) is not None
-             and _num(t.get("end_s")) is not None]
-    return {"tasks": tasks, "measured": bool(steps), "start_s": start, "goal_s": goal, "end_s": end, "active_s": active, "wasteful_s": wasteful,
-            "hesitation_s": hesitation, "window_s": (end - start) if window else None,
+    tasks = []
+    for t in _list(d.get("tasks")):
+        if not isinstance(t, dict) or _num(t.get("start_s")) is None or _num(t.get("end_s")) is None:
+            continue
+        own = [min(1.0, max(0.0, p)) for e in steps if t["start_s"] <= e["t_s"] <= t["end_s"]
+               for p in [_num(e.get("progress"))] if p is not None]
+        tasks.append({"outcome": _verdict(t), "progress": max(own) if own else None})
+    return {"tasks": tasks, "measured": bool(steps), "start_s": start, "goal_s": goal, "end_s": end, "active_s": active,
+            "wasteful_s": wasteful, "hesitation_s": hesitation, "window_s": (end - start) if window else None,
             "actions": sum(1 for e in steps if e.get("contribution") == "advancing"), "progress_reached": reached,
-            "outcome": _verdict(comp) if comp else None, "mistakes": mistakes, "failed_attempts": len(failed),
-            "relation": (d.get("goal_alignment") or {}).get("relation")}
+            "outcome": _verdict(comp) if comp else None, "mistakes": mistakes, "any_mistakes": any_mistakes,
+            "failed_attempts": len(failed), "relation": _str(_dict(d.get("goal_alignment")).get("relation"))}
 
 
 def _content_words(text) -> frozenset:
     """The content words of a text, in any alphabet (a Chinese instruction keeps its words)."""
-    return frozenset(w for w in re.findall(r"\w+", str(text or "").lower()) if w not in STOP)
+    return frozenset(w for w in re.findall(r"\w+", text.lower()) if w not in STOP) if isinstance(text, str) else frozenset()
 
 
 def task_source(d: dict) -> tuple[frozenset, bool]:
@@ -124,9 +194,10 @@ def task_source(d: dict) -> tuple[frozenset, bool]:
     instruction the episode was given, so the same recording labelled twice is always the same task, and the model's
     own summary when there is no usable instruction or the work done is a different task from it (a mislabelled
     episode is compared with what it actually shows)."""
+    d = d if isinstance(d, dict) else {}
     given = _dict(d.get("_meta")).get("given_prompt")
     mislabelled = _dict(d.get("goal_alignment")).get("relation") in ("different", "unrelated")
-    words = frozenset() if mislabelled or not isinstance(given, str) else _content_words(given)
+    words = frozenset() if mislabelled else _content_words(given)
     return (words, True) if words else (_content_words(d.get("episode_prompt")), False)
 
 
@@ -134,24 +205,60 @@ def task_key(d: dict) -> frozenset:
     return task_source(d)[0]
 
 
+class _Near:
+    """Word sets of one scope, found again by any later set sharing at least `share` of its words (Jaccard), through
+    each set's rarest words only (two sets that share that much must share one of each other's rarest few), so a word
+    common to every set costs nothing."""
+
+    def __init__(self, share: float, all_sets):
+        self.share, self.freq, self.index = share, collections.Counter(), {}
+        for words in all_sets:
+            self.freq.update(words)
+
+    def _prefix(self, words):
+        ordered = sorted(words, key=lambda w: (self.freq[w], w))
+        return ordered[:len(ordered) - math.ceil(self.share * len(ordered)) + 1]
+
+    def add(self, words, value):
+        for w in self._prefix(words):
+            self.index.setdefault(w, []).append((words, value))
+
+    def near(self, words):
+        """[(Jaccard, other words, value)] for every added set within share of words."""
+        out, seen = [], set()
+        for w in self._prefix(words):
+            for other, value in self.index.get(w, []):
+                if (other, value) in seen:
+                    continue
+                seen.add((other, value))
+                j = len(words & other) / len(words | other)
+                if j >= self.share:
+                    out.append((j, other, value))
+        return out
+
+
 def task_groups(records: dict) -> dict:
     """{file: group id}: demonstrations of one task, within one dataset. An instruction given word for word to two or
     more episodes is a task of its own, so a dataset's templated instructions ("put the bread in the toaster oven",
     "... in the microwave") never join each other. A wording seen once, or a model summary, joins the group whose words
-    it mostly shares (Jaccard of content words at least 0.6), so a paraphrase finds its task. An episode with no words
-    at all is a group of its own."""
-    keyed = {f: (d.get("dataset"), *task_source(d)) for f, d in sorted(records.items())}
-    count = {}
-    for ds, key, given in keyed.values():
-        if key and given:
-            count[(ds, key)] = count.get((ds, key), 0) + 1
-    groups, members, exact, next_id = {}, {}, {}, 0
+    it mostly shares (Jaccard of content words at least SAME_TASK), so a paraphrase finds its task. An episode with no
+    words at all is a group of its own."""
+    keyed = {}
+    for f, d in sorted(records.items()):
+        d = d if isinstance(d, dict) else {}
+        keyed[f] = (_str(d.get("dataset")), *task_source(d))
+    count = collections.Counter((ds, key) for ds, key, given in keyed.values() if key and given)
+    near = {}
+    for ds, key, _ in keyed.values():
+        near.setdefault(ds, []).append(key)
+    near = {ds: _Near(SAME_TASK, [k for k in keys if k]) for ds, keys in near.items()}
+    groups, exact, next_id = {}, {}, 0
     # the recurring instructions first, each a group, so nothing later can merge two of them
     for f, (ds, key, given) in keyed.items():
         if key and given and count[(ds, key)] >= 2:
             if (ds, key) not in exact:
                 exact[(ds, key)] = next_id
-                members.setdefault(ds, []).append((next_id, key))
+                near[ds].add(key, next_id)
                 next_id += 1
             groups[f] = exact[(ds, key)]
     for f, (ds, key, given) in keyed.items():
@@ -163,52 +270,62 @@ def task_groups(records: dict) -> dict:
         if (ds, key) in exact:
             groups[f] = exact[(ds, key)]
             continue
-        best = max(((len(key & gkey) / len(key | gkey), gid) for gid, gkey in members.get(ds, []) if gkey),
-                   default=(0, None))
-        if best[0] >= 0.6:
-            groups[f] = best[1]
+        best = max(near[ds].near(key), key=lambda m: (m[0], -m[2]), default=None)
+        if best is not None:
+            groups[f] = best[2]
         else:
             groups[f] = next_id
-            members.setdefault(ds, []).append((next_id, key))
+            near[ds].add(key, next_id)
             next_id += 1
-        exact.setdefault((ds, key), groups[f])
+        exact[(ds, key)] = groups[f]
     return groups
+
+
+class _Peers:
+    """The sorted values of a group's demonstrations with some values (the episode's own) left out, so the median of
+    its peers costs a few binary searches rather than a pass over the group."""
+
+    def __init__(self, ordered, without=None):
+        self.ordered = ordered
+        wanted = collections.Counter([] if without is None else without if isinstance(without, (list, tuple))
+                                     else [without])
+        # only values the group holds can be left out, each at most as often as it occurs
+        self.without = sorted(v for v, n in wanted.items()
+                              for _ in range(min(n, bisect.bisect_right(ordered, v) - bisect.bisect_left(ordered, v))))
+
+    def __len__(self):
+        return len(self.ordered) - len(self.without)
+
+    def _at(self, k):
+        """The k-th smallest value (from 0) of the group with the left-out values removed."""
+        lo, hi = 0, len(self.ordered) - 1
+        while lo < hi:
+            mid = (lo + hi) // 2
+            v = self.ordered[mid]
+            kept = bisect.bisect_right(self.ordered, v) - bisect.bisect_right(self.without, v)
+            if kept >= k + 1:
+                hi = mid
+            else:
+                lo = mid + 1
+        return self.ordered[lo]
+
+    def median(self):
+        n = len(self)
+        return self._at(n // 2) if n % 2 else (self._at(n // 2 - 1) + self._at(n // 2)) / 2
 
 
 def _ratio_score(value, peers):
     """0 to 10 for a lower-is-better measure against its peers' median: the median or better is 10, twice the median
     is 5, and so on (10 x median / value). A rank would put half of any group below 5 even when every demonstration
     is fine; against the median, typical work scores full and only work slower or busier than typical loses points.
-    None with too few peers. peers is a _Peers or a plain list."""
+    None with too few peers or no positive value to compare. peers is a _Peers or a plain list."""
     peers = peers if isinstance(peers, _Peers) else _Peers(sorted(peers))
-    if value is None or len(peers) < MIN_PEERS:
+    if value is None or value <= 0 or len(peers) < MIN_PEERS:
         return None
     median = peers.median()
-    if value <= median or value <= 0:
-        return 10.0
-    return round(10 * median / value, 1)
-
-
-class _Peers:
-    """The sorted values of a group's demonstrations, with one value (the episode's own) left out, so the median of its
-    peers costs one index rather than a pass over the group."""
-
-    def __init__(self, ordered, without=None):
-        self.ordered, self.skip = ordered, None
-        if without is not None:
-            i = bisect.bisect_left(ordered, without)
-            if i < len(ordered) and ordered[i] == without:
-                self.skip = i
-
-    def __len__(self):
-        return len(self.ordered) - (self.skip is not None)
-
-    def _at(self, i):
-        return self.ordered[i + 1 if self.skip is not None and i >= self.skip else i]
-
-    def median(self):
-        n = len(self)
-        return self._at(n // 2) if n % 2 else (self._at(n // 2 - 1) + self._at(n // 2)) / 2
+    if median <= 0:
+        return None
+    return 10.0 if value <= median else _clamp(10 * median / value)
 
 
 def _outcome(f: dict):
@@ -218,27 +335,33 @@ def _outcome(f: dict):
         judged = [t for t in f["tasks"] if t["outcome"] in OUTCOME_CAPS
                   and (t["outcome"] == "success" or t["progress"] is not None)]
         values = [1.0 if t["outcome"] == "success" else min(OUTCOME_CAPS[t["outcome"]], t["progress"]) for t in judged]
-        return (round(10 * statistics.mean(values), 1) if values else None,
+        return (_clamp(10 * statistics.mean(values)) if values else None,
                 {"outcome": None, "tasks_total": len(f["tasks"]), "tasks_judged": len(judged),
                  "tasks_done": sum(1 for t in judged if t["outcome"] == "success")})
     cap = OUTCOME_CAPS.get(f["outcome"])
     if cap is None or (f["outcome"] != "success" and f["progress_reached"] is None):
         return None, {"outcome": f["outcome"], "progress_reached": f["progress_reached"]}
     value = 1.0 if f["outcome"] == "success" else min(cap, f["progress_reached"])
-    return round(10 * value, 1), {"outcome": f["outcome"], "progress_reached": f["progress_reached"]}
+    return _clamp(10 * value), {"outcome": f["outcome"], "progress_reached": f["progress_reached"]}
 
 
 def _cleanliness(f: dict):
     if not f["measured"]:
         return None, {"wasteful_share": None, "penalties": [], "unexplained_failed_attempts": 0}
-    penalties = [{"mistake": m.get("issue"), "severity": m.get("severity"), "recovered": bool(m.get("recovered")),
-                  "points": SEVERITY_POINTS.get(m.get("severity"), 1.5) * (0.5 if m.get("recovered") else 1.0)}
+    penalties = [{"mistake": m["issue"], "severity": m["severity"], "recovered": m["recovered"], "points": _points(m)}
                  for m in f["mistakes"]]
-    attempts = FAILED_ATTEMPT_POINTS * max(0, f["failed_attempts"] - len(f["mistakes"]))
+    attempts = FAILED_ATTEMPT_POINTS * max(0, f["failed_attempts"] - f["any_mistakes"])
     share = f["wasteful_s"] / f["active_s"] if f["active_s"] else 0.0
-    score = max(0.0, 10 * (1 - share) - sum(p["points"] for p in penalties) - attempts)
-    return round(score, 1), {"wasteful_share": round(share, 3), "penalties": penalties,
-                             "unexplained_failed_attempts": attempts}
+    score = 10 * (1 - share) - sum(p["points"] for p in penalties) - attempts
+    return _clamp(score), {"wasteful_share": round(share, 3), "penalties": penalties,
+                           "unexplained_failed_attempts": attempts}
+
+
+def _weighted(parts: dict):
+    """execution: the EXECUTION_WEIGHTS mean of the dimensions that exist, None when none does."""
+    have = {k: v for k, v in parts.items() if v is not None}
+    weight = sum(EXECUTION_WEIGHTS[k] for k in have)
+    return _clamp(sum(EXECUTION_WEIGHTS[k] * v for k, v in have.items()) / weight) if weight else None
 
 
 def subgoals(d: dict, f: dict) -> list:
@@ -248,21 +371,30 @@ def subgoals(d: dict, f: dict) -> list:
     outcome is always success and is not scored; how cleanly, steadily and quickly its stretch went is. A subgoal is a
     lasting change the goal depends on, so the failed attempts between two subgoals are attempts at the later one. Each
     carries its duration, wasteful share, hesitation, and the mistakes and failed attempts inside it."""
-    d = {**d, **{k: _list(d.get(k)) for k in ("event_labels", "key_events", "tasks")}}
-    events = sorted((k for k in d.get("key_events") or [] if isinstance(k, dict) and k.get("kind") == "subgoal_complete"
+    d = d if isinstance(d, dict) else {}
+    events = sorted((k for k in _list(d.get("key_events")) if isinstance(k, dict) and k.get("kind") == "subgoal_complete"
                      and _num(k.get("t_s")) is not None), key=lambda k: k["t_s"])
     if f["start_s"] is None or not events:
         return []
-    steps = [e for e in d.get("event_labels") or [] if isinstance(e, dict) and _num(e.get("t_s")) is not None
-             and _num(e.get("end_s")) is not None]
+    steps = _steps(d)
+    starts = [e["t_s"] for e in steps]
+    longest = max((e["end_s"] - e["t_s"] for e in steps), default=0.0)
+    failed_all = sorted((k for k in _list(d.get("key_events")) if isinstance(k, dict) and k.get("outcome") == "failure"
+                         and _num(k.get("t_s")) is not None), key=lambda k: k["t_s"])
+    failed_t = [k["t_s"] for k in failed_all]
+    mistakes = sorted((m for m in f["mistakes"] if m["t_s"] is not None), key=lambda m: m["t_s"])
+    mistake_t = [m["t_s"] for m in mistakes]
+    any_mistake_t = sorted(t for t in (_num(m.get("t_s")) for m in _list(d.get("operator_mistakes"))
+                                       if isinstance(m, dict) and m.get("deliberate") != "yes") if t is not None)
     # an episode of several subtasks (human ego, sessions) has no single goal: each subtask is scored on its own, from
     # its start through its subgoals to its own end-state, and the time between subtasks belongs to none of them
-    tasks = sorted((t for t in d.get("tasks") or [] if isinstance(t, dict) and _num(t.get("start_s")) is not None
+    tasks = sorted((t for t in _list(d.get("tasks")) if isinstance(t, dict) and _num(t.get("start_s")) is not None
                     and _num(t.get("end_s")) is not None), key=lambda t: t["start_s"])
     spans = ([(t["start_s"], _num(t.get("completed_at_s")) if _num(t.get("completed_at_s")) is not None else t["end_s"],
-               t.get("task"), t.get("outcome"), t["end_s"], i + 1) for i, t in enumerate(tasks)] if tasks
-             else [(f["start_s"], f["end_s"], _dict(d.get("completion")).get("success_predicate"), f["outcome"],
+               _str(t.get("task")), _verdict(t), t["end_s"], i + 1) for i, t in enumerate(tasks)] if tasks
+             else [(f["start_s"], f["end_s"], _str(_dict(d.get("completion")).get("success_predicate")), f["outcome"],
                     f["goal_s"], None)])
+
     def owner(t):
         holding = [(task["end_s"] - task["start_s"], i) for i, task in enumerate(tasks) if task["start_s"] < t <= task["end_s"]]
         if holding:
@@ -277,31 +409,30 @@ def subgoals(d: dict, f: dict) -> list:
     for a, end, goal_label, goal_outcome, last, task in spans:
         for k in events:
             if k["t_s"] > a and ((last is None or k["t_s"] <= last + 0.5) if not tasks else owned[id(k)] == task):
-                bounds.append((a, k["t_s"], k.get("label"), k.get("outcome"), False, task))
+                bounds.append((a, k["t_s"], _str(k.get("label")), _str(k.get("outcome")), False, task))
                 a = k["t_s"]
         if end is not None and end > a + 0.5:
             bounds.append((a, end, goal_label, goal_outcome, True, task))
     out = []
     for a, b, label, outcome, goal, task in bounds:
+        near = steps[bisect.bisect_left(starts, a - longest):bisect.bisect_left(starts, b)]
         clip = lambda spans: [(max(a, x), min(b, y)) for x, y in spans if min(b, y) > max(a, x)]
-        work = clip([(e["t_s"], e["end_s"]) for e in steps if e.get("contribution") in ("advancing", "wasteful")])
-        waste = clip([(e["t_s"], e["end_s"]) for e in steps if e.get("contribution") == "wasteful"])
+        work = clip([(e["t_s"], e["end_s"]) for e in near if e.get("contribution") in ("advancing", "wasteful")])
+        waste = clip([(e["t_s"], e["end_s"]) for e in near if e.get("contribution") == "wasteful"])
         active = _union(work)
         share = _union(waste) / active if active else 0.0
         hes = _union(_subtract([(a, b)], work)) / (b - a)
-        ms = [m for m in f["mistakes"] if _num(m.get("t_s")) is not None and a <= m["t_s"] < b]
-        failed = [k for k in d.get("key_events") or [] if isinstance(k, dict) and k.get("outcome") == "failure"
-                  and _num(k.get("t_s")) is not None and a <= k["t_s"] < b]
-        clean = max(0.0, 10 * (1 - share) - sum(SEVERITY_POINTS.get(m.get("severity"), 1.5)
-                                               * (0.5 if m.get("recovered") else 1.0) for m in ms)
-                    - FAILED_ATTEMPT_POINTS * max(0, len(failed) - len(ms)))
+        ms = mistakes[bisect.bisect_left(mistake_t, a):bisect.bisect_left(mistake_t, b)]
+        failed = failed_all[bisect.bisect_left(failed_t, a):bisect.bisect_left(failed_t, b)]
+        explained = bisect.bisect_left(any_mistake_t, b) - bisect.bisect_left(any_mistake_t, a)
+        clean = 10 * (1 - share) - sum(_points(m) for m in ms) - FAILED_ATTEMPT_POINTS * max(0, len(failed) - explained)
         out.append({"start_s": a, "end_s": b, "label": label, "outcome": outcome, "goal": goal, "task": task,
                     "reached": outcome in ("success", "success_then_undone"),
                     "duration_s": round(b - a, 2),
-                    "cleanliness": round(clean, 1), "steady": round(10 * max(0.0, 1 - 2 * hes), 1),
-                    "wasteful_share": round(share, 3), "mistakes": [m.get("issue") for m in ms],
-                    "failed_attempts": [{"t_s": k["t_s"], "label": k.get("label"), "kind": k.get("kind")}
-                                        for k in sorted(failed, key=lambda k: k["t_s"])]})
+                    "cleanliness": _clamp(clean), "steady": _clamp(10 * (1 - 2 * hes)),
+                    "wasteful_share": round(share, 3), "mistakes": [m["issue"] for m in ms],
+                    "failed_attempts": [{"t_s": k["t_s"], "label": _str(k.get("label")), "kind": _str(k.get("kind"))}
+                                        for k in failed]})
     return out
 
 
@@ -309,62 +440,74 @@ def _words(label) -> frozenset:
     return frozenset(w for w in _content_words(label) if len(w) > 2 and not w.isdigit())
 
 
-def _similar_pools(records: dict, subs_of: dict) -> dict:
-    """{(file, subgoal index): _Peers} of the durations of reached subgoals of the same kind elsewhere in the same
-    dataset on the same recording setup, the subgoal itself left out: labels sharing at least SIMILAR of their content
-    words. One dataset is one kind of robot and camera, so durations from another dataset are never compared. Labels
-    are compared once per distinct word set, and only through their rarest words (two sets that share SIMILAR of their
-    words must share one of each other's rarest few), so a word common to every label costs nothing."""
-    def scope(f):
-        rig = records[f].get("_rig")
-        return (records[f].get("dataset"), rig) if isinstance(rig, str) else None
+def _scope(d: dict):
+    """(dataset, recording setup) of an episode, None without a setup: one dataset is one kind of robot and camera."""
+    rig, ds = _str(d.get("_rig")), _str(d.get("dataset"))
+    return (ds, rig) if rig else None
 
-    rows = {}                                   # (scope, words) -> durations
+
+def _similar_pools(records: dict, subs_of: dict) -> dict:
+    """{(file, subgoal index): _Peers} of the durations of reached subgoals of the same kind in other episodes of the
+    same dataset on the same recording setup: labels sharing at least SIMILAR of their content words. Durations from
+    another dataset are never compared, and neither are the episode's own other subgoals, so one operator's repeated
+    units are not their own peers."""
+    rows = {}                                   # (scope, words) -> [(file, duration)]
     for f, subs in subs_of.items():
-        where = scope(f)
+        where = _scope(records[f])
         if where is None:
             continue
         for st in subs:
             words = _words(st["label"])
-            if words and not st["goal"] and st["reached"]:
-                rows.setdefault((where, words), []).append(st["duration_s"])
-    freq = {}
+            if words and not st["goal"] and st["reached"] and st["duration_s"] > 0:
+                rows.setdefault((where, words), []).append((f, st["duration_s"]))
+    by_scope = collections.defaultdict(list)
     for where, words in rows:
-        for w in words:
-            freq[(where, w)] = freq.get((where, w), 0) + 1
-
-    def prefix(where, words):
-        ordered = sorted(words, key=lambda w: (freq[(where, w)], w))
-        return ordered[:len(ordered) - math.ceil(SIMILAR * len(ordered)) + 1]
-
-    index = {}
-    for where, words in rows:
-        for w in prefix(where, words):
-            index.setdefault((where, w), set()).add(words)
+        by_scope[where].append(words)
+    near = {}
+    for where, sets in by_scope.items():
+        index = _Near(SIMILAR, sets)
+        for words in sets:
+            index.add(words, words)
+        near[where] = index
     pools = {}
     for where, words in rows:
-        near = set().union(*(index.get((where, w), set()) for w in prefix(where, words)))
-        pools[(where, words)] = sorted(d for other in near if len(words & other) / len(words | other) >= SIMILAR
-                                       for d in rows[(where, other)])
+        kin = [other for _, other, _ in near[where].near(words)]
+        members = [m for other in kin for m in rows[(where, other)]]
+        own = collections.defaultdict(list)
+        for f, dur in members:
+            own[f].append(dur)
+        pools[(where, words)] = (sorted(dur for _, dur in members), own)
     out = {}
     for f, subs in subs_of.items():
-        where = scope(f)
+        where = _scope(records[f])
         for i, st in enumerate(subs):
             key = (where, _words(st["label"]))
             if key in pools and not st["goal"] and st["reached"]:
-                out[(f, i)] = _Peers(pools[key], st["duration_s"])
+                ordered, own = pools[key]
+                out[(f, i)] = _Peers(ordered, own.get(f, []))
     return out
+
+
+def _safe(fn, *args, fallback):
+    """fn(*args), or fallback when the record is too malformed to read, so one record never stops the board."""
+    try:
+        return fn(*args)
+    except (TypeError, ValueError, AttributeError, KeyError, OverflowError, RecursionError):
+        return fallback
 
 
 def score_board(records: dict) -> dict:
     """{file: scores} for every episode of a board: each record's own measures, and the relative dimensions ranked
     within its task group among the episodes that reached the goal."""
-    fs = {f: facts(d) for f, d in records.items()}
+    records = {f: d if isinstance(d, dict) else {} for f, d in records.items()}
+    empty = facts({})
+    fs = {f: _safe(facts, d, fallback=empty) for f, d in records.items()}
+    unread = {f for f, d in records.items() if fs[f] is empty and d}
     groups = task_groups(records)
-    took_of = {f: x["goal_s"] - x["start_s"] if x["goal_s"] is not None and x["start_s"] is not None else None
-               for f, x in fs.items()}
+    took_of = {f: (x["goal_s"] - x["start_s"]) if x["goal_s"] is not None and x["start_s"] is not None
+               and x["goal_s"] > x["start_s"] else None for f, x in fs.items()}
     pp_of = {f: x["actions"] / x["progress_reached"] if x["progress_reached"] else None for f, x in fs.items()}
-    subs_of = {f: subgoals(d, fs[f]) for f, d in records.items()}
+    subs_of = {f: _safe(subgoals, d, fs[f], fallback=[]) for f, d in records.items()}
     similar = _similar_pools(records, subs_of)
     # the successful demonstrations of each group, as sorted values, built once: time to goal, actions per progress,
     # and each subgoal's duration among those that split the task into the same number of subgoals
@@ -379,17 +522,18 @@ def score_board(records: dict) -> dict:
         if pp_of[f] is not None:
             pp_in.setdefault(g, []).append(pp_of[f])
         for i, st in enumerate(subs_of[f]):
-            sub_in.setdefault((g, len(subs_of[f]), i), []).append(st["duration_s"])
+            if st["duration_s"] > 0:
+                sub_in.setdefault((g, len(subs_of[f]), i), []).append(st["duration_s"])
     for table in (took_in, pp_in, sub_in):
         for values in table.values():
             values.sort()
 
     def peers_of(table, key, f, own):
         """The group's values with this episode's own left out when it is one of them (a successful episode)."""
-        return _Peers(table.get(key, []), own if fs[f]["outcome"] == "success" else None)
+        return _Peers(table.get(key, []), own if fs[f]["outcome"] == "success" and own is not None else None)
 
     out = {}
-    for f, d in records.items():
+    for f in records:
         x = fs[f]
         g = groups[f]
         peers = count.get(g, 0) - (x["outcome"] == "success")
@@ -402,16 +546,15 @@ def score_board(records: dict) -> dict:
         per_progress = pp_of[f]
         peer_pp = peers_of(pp_in, g, f, per_progress)
         # hesitation is absolute (half the work spent with every arm waiting scores 0); busyness is against peers
-        steady = round(10 * max(0.0, 1 - 2 * hes), 1) if hes is not None else None
-        parts = [s for s in (steady, _ratio_score(per_progress, peer_pp)) if s is not None]
-        fluency = round(statistics.mean(parts), 1) if parts else None
+        steady = _clamp(10 * (1 - 2 * hes)) if hes is not None else None
+        busy = _ratio_score(per_progress, peer_pp)
+        parts = [s for s in (steady, busy) if s is not None]
+        fluency = _clamp(statistics.mean(parts)) if parts else None
         dims = {"cleanliness": clean, "efficiency": efficiency, "fluency": fluency}
-        have = {k: v for k, v in dims.items() if v is not None}
-        weight = sum(EXECUTION_WEIGHTS[k] for k in have)
-        execution = round(sum(EXECUTION_WEIGHTS[k] * v for k, v in have.items()) / weight, 1) if weight else None
         subs = subs_of[f]
         # a subgoal's speed is judged against the same subgoal of peers that split the task the same way, and without
-        # enough of them against the same kind of subgoal on the same recording setup anywhere on the board
+        # enough of them against the same kind of subgoal elsewhere in the dataset; a stretch that never reached its
+        # end has no execution score
         for i, st in enumerate(subs):
             same = peers_of(sub_in, (g, len(subs), i), f, st["duration_s"])
             basis = "task"
@@ -422,13 +565,15 @@ def score_board(records: dict) -> dict:
             st["peers"] = len(same)
             st["peer_basis"] = basis if enough else None
             st["peer_median_s"] = same.median() if enough else None
-            parts = [v for v in (st["cleanliness"], st["steady"], st["efficiency"]) if v is not None]
-            st["execution"] = round(statistics.mean(parts), 1) if parts else None
-        out[f] = {"version": VERSION, "execution": execution, "outcome": outcome, **dims, "relation": x["relation"],
+            st["execution"] = (_weighted({"cleanliness": st["cleanliness"], "efficiency": st["efficiency"],
+                                          "fluency": st["steady"]}) if st["reached"] else None)
+        out[f] = {"version": VERSION, "execution": _weighted(dims), "outcome": outcome, **dims, "relation": x["relation"],
                   "subgoals": subs,
                   "peers": peers, "peer_basis": "task" if efficiency is not None else None, "group": g,
                   "inputs": {**o_in, **c_in, "time_to_goal_s": took, "peer_median_time_to_goal_s":
                              peer_took.median() if len(peer_took) else None,
                              "hesitation_share": round(hes, 3) if hes is not None else None,
-                             "actions_per_progress": round(per_progress, 2) if per_progress else None}}
+                             "steadiness": steady, "busyness": busy,
+                             "actions_per_progress": round(per_progress, 2) if per_progress else None},
+                  **({"unread": True} if f in unread else {})}
     return out

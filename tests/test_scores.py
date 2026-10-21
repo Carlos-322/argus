@@ -35,10 +35,10 @@ def test_mistakes_and_wasted_time_lower_cleanliness_and_a_recovered_mistake_cost
     recs["messy.json"] = _record("open the left door then the right door", 10.0,
                                  [(0, 4, "advancing", 0.3), (4, 6, "wasteful", 0.3), (6, 10, "advancing", 1.0)],
                                  [(5, "left door open")],
-                                 [{"issue": "dropped the handle", "severity": "medium", "recovered": True, "t_s": 4}])
+                                 [{"issue": "dropped the handle", "severity": "high", "recovered": True, "t_s": 4}])
     s = scores.score_board(recs)["messy.json"]
     assert s["inputs"]["wasteful_share"] == 0.2
-    assert s["cleanliness"] == round(10 * 0.8 - 1.5 * 0.5, 1)
+    assert s["cleanliness"] == round(10 * 0.8 - 3.0 * 0.5, 1)
 
 
 def test_too_few_peers_leaves_the_relative_scores_empty_never_guessed():
@@ -77,11 +77,11 @@ def test_failed_attempts_belong_to_the_subgoal_they_precede_and_cost_only_when_n
     rec["key_events"] += [{"t_s": 3.0, "kind": "grasp", "outcome": "failure", "label": "handle slips"},
                           {"t_s": 8.0, "kind": "grasp", "outcome": "failure", "label": "right handle missed"},
                           {"t_s": 10.0, "kind": "pickup", "outcome": "success", "label": "handle held"}]
-    rec["operator_mistakes"] = [{"issue": "slipped grasp", "severity": "low", "recovered": True, "t_s": 3.0}]
+    rec["operator_mistakes"] = [{"issue": "slipped grasp", "severity": "high", "recovered": True, "t_s": 3.0}]
     recs["tries.json"] = rec
     first, last = scores.score_board(recs)["tries.json"]["subgoals"]
     assert [k["label"] for k in first["failed_attempts"]] == ["handle slips"]
-    assert first["cleanliness"] == round(10.0 - 0.5 * 0.5, 1)         # the mistake explains the failed grasp
+    assert first["cleanliness"] == round(10.0 - 3.0 * 0.5, 1)         # the mistake explains the failed grasp
     assert [k["label"] for k in last["failed_attempts"]] == ["right handle missed"]
     assert last["goal"] and not last["reached"]
     assert last["cleanliness"] == 0.0                                 # all wasteful, then one unexplained failure
@@ -326,3 +326,48 @@ def test_similar_pools_stay_fast_when_every_label_shares_one_common_word():
     t = time.time()
     scores.score_board(recs)
     assert time.time() - t < 10
+
+
+
+def test_only_mistakes_the_board_counts_cost_points_a_recovery_halves_one_and_a_duplicate_costs_once():
+    rec = _record("open the door", 10.0, [(0, 10, "advancing", 1.0)])
+    rec["operator_mistakes"] = [
+        {"issue": "fumbled the latch", "severity": "low", "t_s": 2.0},                       # minor: no points
+        {"issue": "paused", "t_s": 3.0},                                                     # unrated: no points
+        {"issue": "dropped the handle", "severity": "high", "category": "dropped_object", "t_s": 5.0},
+        {"issue": "dropped the handle", "severity": "high", "category": "dropped_object", "t_s": 5.0}]  # listed twice
+    rec["recovery"] = [{"failure_t_s": 5.5, "failure": "handle dropped", "recovered": True, "recovered_at_s": 7.0}]
+    s = scores.score_board({"m.json": rec})["m.json"]
+    assert [(p["severity"], p["recovered"], p["points"]) for p in s["inputs"]["penalties"]] == [("high", True, 1.5)]
+    assert s["cleanliness"] == 8.5
+
+
+def test_values_of_the_wrong_type_inside_fields_never_stop_the_board_and_scores_stay_between_0_and_10():
+    bad = _record("open the door", 10.0, [(0, 10, "advancing", -3.0)], outcome="failure")
+    bad["completion"]["task_completed"] = ["failure"]
+    bad["operator_mistakes"] = [{"issue": "x", "severity": {"level": "high"}, "t_s": 10 ** 400}]
+    bad["dataset"], bad["_rig"] = ["ds"], {"rig": 1}
+    neg = _record("open the door", 10.0, [(0, 10, "advancing", -2.0)], outcome="failure")
+    s = scores.score_board({"bad.json": bad, "neg.json": neg, "junk.json": "not a record"})
+    for x in s.values():
+        for k in ("execution", "outcome", "cleanliness", "efficiency", "fluency"):
+            assert x[k] is None or 0 <= x[k] <= 10
+    assert s["neg.json"]["outcome"] == 0.0
+
+
+def test_a_peer_whose_goal_comes_before_its_first_step_is_left_out_never_a_negative_median():
+    recs = _board()
+    for i in range(6):
+        r = _record("open the left door then the right door", 10.0, [(12, 14, "advancing", 0.5), (14, 16, "advancing", 1.0)])
+        recs[f"backwards{i}.json"] = r
+    s = scores.score_board(recs)
+    assert all(x["efficiency"] is None or 0 <= x["efficiency"] <= 10 for x in s.values())
+    assert s["p0.json"]["inputs"]["peer_median_time_to_goal_s"] == 10.0
+
+
+def test_similar_subgoals_never_include_the_episodes_own_other_subgoals():
+    recs = {}
+    units = [(i * 5.0 + 5, "unit fitted and set aside") for i in range(10)]
+    recs["me.json"] = _given(_record("factory", 50.0, [(0, 50, "advancing", 1.0)], units), "fit the units")
+    st = scores.score_board(recs)["me.json"]["subgoals"][0]
+    assert st["peer_basis"] is None and st["peers"] == 0

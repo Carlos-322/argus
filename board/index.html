@@ -1288,7 +1288,7 @@ aside.left .cam-row-grippers.cam-main-scene:has(.sensor-overlay-stack) .cam-cell
   font-family: var(--mono); font-size: 10px; font-weight: 600; color: var(--fg-2); border: 1px solid var(--border);
   vertical-align: 1px; }
 .key-ev .ke-kind.sub { background: var(--fg); color: var(--bg, #fff); border-color: var(--fg); }
-.key-ev .ke-label { color: var(--fg); font-size: 13px; line-height: 1.4; }
+.key-ev .ke-label { color: var(--fg); font-size: 13px; line-height: 1.4; min-width: 0; overflow-wrap: anywhere; }
 .key-ev .outcome {
   flex: 0 0 auto; font-size: 10px; font-family: var(--mono); font-weight: 600;
   padding: 3px 9px; border-radius: var(--r-pill); border: 1px solid transparent; white-space: nowrap;
@@ -6418,9 +6418,9 @@ function renderEp(d, opts) {
   const cell = (k, v, sub, tip, bad, shown) => `<div class="qual-cell" title="${esc(tip)}"><div class="qc-k">${k}</div>`
     + (v == null ? `<div class="qc-v qc-word${bad ? ' qc-bad' : ''}">${esc(sub)}</div>`
        : `<div class="qc-v">${shown ?? qNum(v)}</div>${bar(v)}${sub ? `<div class="qc-sub">${esc(sub)}</div>` : ''}`) + '</div>';
-  const box = (title, v, body, wide, folds) => `<div class="qual-box${wide ? ' wide' : ''}${folds ? ' folds' : ''}${folds
+  const box = (title, v, body, wide, folds, tip) => `<div class="qual-box${wide ? ' wide' : ''}${folds ? ' folds' : ''}${folds
     && SUBS_OPEN ? ' open' : ''}"><div class="qual-head">`
-    + `<span class="qual-title">${title}</span>${v === undefined ? '' : `<span class="qual-score">${v == null ? '-'
+    + `<span class="qual-title"${tip ? ` title="${esc(tip)}"` : ''}>${title}</span>${v === undefined ? '' : `<span class="qual-score">${v == null ? '-'
       : `${qNum(v)}<small>/10</small>`}</span>`}</div>`
     + (v === undefined ? '' : `<div class="qual-headbar">${v == null ? '<span class="qual-bar none"></span>' : bar(v)}</div>`)
     + body + '</div>';
@@ -6474,8 +6474,10 @@ function renderEp(d, opts) {
           : Q.efficiency == null && qIn.time_to_goal_s == null ? 'No timed work before the goal to measure'
           : peerWords(null))}
       ${cell('Steadiness', Q.fluency, Q.fluency == null ? 'not measured' : `${Math.round(100 * (qIn.hesitation_share || 0))}% waiting`,
-        'Share of the work with every arm waiting')}
-    </div>`)}
+        `The mean of waiting (share of the work with every arm waiting${qIn.steadiness != null ? `, ${qNum(qIn.steadiness)}` : ''})`
+        + ` and busyness (actions per unit of progress against other demos of this task${qIn.busyness != null
+          ? `, ${qNum(qIn.busyness)}` : ', too few to compare'})`)}
+    </div>`, false, false, 'Execution weighs cleanliness 50%, speed 25% and steadiness 25%, over the ones that exist')}
     ${box('Outcome', Q.outcome, `<div class="qual-cells">
       ${qIn.tasks_total ? `${cell('Subtasks', null, `${qIn.tasks_done} of ${qIn.tasks_total} done`,
           'Subtasks whose end state the footage shows reached', qIn.tasks_done < qIn.tasks_judged)}
@@ -7344,10 +7346,12 @@ function renderEp(d, opts) {
     if (sig === _scSig) return;
     _scSig = sig;
     if (!sig) { scoreChip.classList.remove('active'); return; }
+    // the chip names what it scores: the episode at its goal, else the numbered subgoal the caption is on
     scoreChip.innerHTML = atGoal
-      ? `<span class="sc-k">Execution</span><span class="sc-v">${qNum(Q.execution)}</span>`
+      ? `<span class="sc-k">Episode</span><span class="sc-v">${qNum(Q.execution)}</span>`
         + `<span class="sc-k">Outcome</span><span class="sc-v">${qNum(Q.outcome)}</span>`
-      : `<span class="sc-k">Execution</span><span class="sc-v">${qNum(st.execution)}</span>`;
+      : `<span class="sc-k">Subgoal${subNo.get(Math.round(st.end_s * 100)) ? ' ' + subNo.get(Math.round(st.end_s * 100)) : ''}</span>`
+        + `<span class="sc-v">${qNum(st.execution)}</span>`;
     scoreChip.classList.add('active');
   }
 
