@@ -977,3 +977,11 @@ def test_every_prompt_defines_a_subgoal_once_as_a_lasting_change_and_keeps_failu
     assert "neither moves it nor makes a new subgoal" in s and "waits for the last such adjustment" not in s
     assert "setting it down is a subgoal of its own at the first moment it holds" in s
     assert "Subgoals do not lengthen the list" in s and "are still key_events of their own kind" not in s
+
+
+@pytest.mark.parametrize('rig', ['teleop_arms', 'handheld_gripper'])
+def test_in_a_session_each_repeat_of_a_cycle_is_its_own_task(rig):
+    from label import prompts
+    rules = ' '.join(prompts.session_rules(rig).split())
+    assert ('starts the same unit of work again after its end-state was reached: in a cycle, where the objects are '
+            'reset and the same work repeats, each repeat is its own task, judged on its own.') in rules

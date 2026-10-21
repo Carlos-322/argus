@@ -506,6 +506,22 @@ def test_review_runs_every_stage_on_a_recorders_folder_in_free_mode():
         assert {f: f.read_bytes() for f in sources} == sources
 
 
+def test_review_records_the_paid_calls_it_was_told_to_skip(tmp_path):
+    """--field-dictionary off and --inspection off reach the saved policy of every episode, and the dictionary stage
+    says it was turned off instead of attempting a call."""
+    from label.dictionary_stage import DICTIONARY_OFF
+    root = tmp_path / "upload"
+    recorder_folder(root, n=90, duplicate_stamps=False)
+    job = tmp_path / "job"
+    p = subprocess.run([sys.executable, "-m", "review", "--data", str(root), "--rig", "teleop_arms", "--out", str(job),
+                        "--dataset", "mine", "--free", "--field-dictionary", "off", "--inspection", "off"],
+                       cwd=REPO, capture_output=True, text=True)
+    assert p.returncode == 0, p.stdout + p.stderr
+    policies = json.loads((job / "annotation_policy.json").read_text())
+    assert policies and all(x["field_dictionary"] is False and x["inspection"] == "off" for x in policies.values())
+    assert DICTIONARY_OFF in json.loads((job / "dictionary_status.json").read_text())["limitations"]
+
+
 def _clip_episode(eps: Path, name: str, video: Path) -> None:
     d = eps / name
     d.mkdir(parents=True)
