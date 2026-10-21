@@ -32,7 +32,7 @@ const titles = html => [...html.matchAll(/class="num q-med" title="([^"]*)"/g)].
 
 let q = quality({scores: scores({})}, {completed_at_s: 14}, esc, fmtT, false, 5);
 assert.deepStrictEqual(titles(q.qualityHtml), ['Median of 12 demos of this task',
-  'Median of 200 similar subgoals on this setup', 'Nothing comparable on this board', 'Median of 12 demos of this task']);
+  'Median of 200 similar subgoals in this dataset', 'Nothing comparable on this board', 'Median of 12 demos of this task']);
 assert(q.qualityHtml.includes('title="Time from the first action to the goal, against the median of 12 demos of this task"'));
 // every column is named, so the narrow layout can place it; the folded table carries the same columns
 assert((q.qualityHtml.match(/<col class="q-exec">/g) || []).length === 1);
@@ -55,6 +55,34 @@ assert(exBox.includes('qual-bar none') && !exBox.includes('% wasteful') && !exBo
 assert.strictEqual((exBox.match(/not measured/g) || []).length, 2);
 const row = q.qualityHtml.slice(q.qualityHtml.indexOf('<tr data-t'));
 assert(row.includes('<b>-</b></span>') && !row.includes('-s<') && !row.includes('qual-bar'));
+
+// progress that is unknown (missing or null) is "not measured", never an invented 0% or NaN%; a measured share is its
+// percent
+const progressOf = p => {
+  const h = quality({scores: scores({inputs: {outcome: 'failure', penalties: [], progress_reached: p}})},
+    {completed_at_s: null}, esc, fmtT, false, 5).qualityHtml;
+  return h.slice(h.indexOf('<div class="qc-k">Progress</div>'), h.indexOf('<div class="qc-k">Label</div>'));
+};
+for (const p of [undefined, null]) {
+  const cellHtml = progressOf(p);
+  assert(cellHtml.startsWith('<div class="qc-k">Progress</div><div class="qc-v qc-word">not measured</div>')
+    && !cellHtml.includes('%'), cellHtml);
+}
+assert(progressOf(0.5).startsWith('<div class="qc-k">Progress</div><div class="qc-v">50%</div>'), progressOf(0.5));
+assert(progressOf(0).startsWith('<div class="qc-k">Progress</div><div class="qc-v">0%</div>'), progressOf(0));
+
+// a subgoal not reached is flagged in Done at, one the footage leaves unclear is not; its failed tries are counted,
+// flagged and listed in the tooltip
+q = quality({scores: scores({subgoals: [
+  sub({reached: false, outcome: 'failure', failed_attempts: [{t_s: 2, label: 'slipped'}, {t_s: 3}]}),
+  sub({start_s: 5, end_s: 9, reached: false, outcome: 'unclear'}), sub({start_s: 9, end_s: 12})]})},
+  {completed_at_s: 14}, esc, fmtT, false, 5);
+const subRows = q.qualityHtml.split('<tr data-t').slice(1);
+assert(subRows[0].includes('<td class="num q-at qc-bad">not reached</td>'), subRows[0]);
+assert(subRows[1].includes('<td class="num q-at">unclear</td>'), subRows[1]);
+assert(subRows[2].includes('<td class="num q-at">12.0s</td>'), subRows[2]);
+assert(subRows[0].includes('<td class="num q-fail qc-bad" title="2.0s  slipped\n3.0s  ">2</td>'), subRows[0]);
+assert(subRows[2].includes('<td class="num q-fail" title="">0</td>'), subRows[2]);
 
 // a goal reached and later undone has only goal_reached_at_s: the Outcome box, caption and chip all read it
 q = quality({scores: scores({})}, {completed_at_s: null, goal_reached_at_s: 44}, esc, fmtT, false, 5);
