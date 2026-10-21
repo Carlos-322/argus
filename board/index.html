@@ -3782,7 +3782,10 @@ function renderCoverage(ds, shown) {
   // every dataset of the board keeps its tab; the numbers are the labeller's (a model that labelled none of a
   // dataset's episodes leaves its tab dimmed)
   const src = railEps();
-  const per = presentDatasets(ALL_EPS).map(d => {
+  // a dataset with a target and no episode yet keeps a tab too (dimmed, 0 of its target), so the totals count every
+  // target from the start of a run
+  const present = presentDatasets(ALL_EPS);
+  const per = present.concat(Object.keys(TARGETS).filter(d => !present.includes(d))).map(d => {
     const eps = src.filter(e => datasetOf(e) === d);
     const t = TARGETS[d];
     return { d, n: eps.length, sec: sumDur(eps), t: t && t.episodes > 0 && t.hours > 0 ? t : null };
