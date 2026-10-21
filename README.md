@@ -24,7 +24,7 @@ Recently, [Midcentury AI](https://www.midcentury.xyz/blog/optimizing-argus) push
 
 ### \* Argus improvements (October 2026)
 
-Argus now annotates depth, tactile and other sensor data jointly with video, state and actions. By default the model inspects any recording with depth or a touch sensor, reading any of its fields at full rate; a recording with neither, such as one with only arm signals and a wrist force/torque sensor, is inspected only with [`--inspection all`](#settings), and its fields still reach the model as sampled readings.
+Argus now annotates depth, tactile and other sensor data jointly with video, state and actions. By default the model inspects any recording with depth or a touch sensor, reading any of its fields at full rate, and any recording with fields the prompt does not carry, such as EgoDex hand poses. A recording with only arm signals and a wrist force/torque sensor is inspected only with [`--inspection all`](#settings), and its fields still reach the model as sampled readings.
 Argus also scores each episode out of 10 for execution and outcome, and each subgoal for execution, deterministically from the annotations. Outcome is whether the goal was reached and how far progress got; execution is a weighted mean of cleanliness, steadiness and speed, which [`board/scores.py`](board/scores.py) defines as cleanliness, fluency and efficiency. A subgoal is a lasting state change the goal depends on, such as a block placed in the row, never a pick or a grasp.
 
 ## Overview
@@ -86,7 +86,7 @@ uv run python -m board serve --board data/review/mine --clips data/review/mine/c
 | [`--reasoning`](label/policy.py) | Medium for Astra, high for every other model | `none`, `minimal`, `low`, `medium`, `high` or `xhigh` |
 | [`--sample-fps`](label/policy.py) | A frame every 1.5s for teleop, 1s for UMI and 0.5s for human ego, plus the edges of still spans and the first and last frames; Sol samples every 1s on every rig, human ego included, and refuses sparser sampling | `2` catches subsecond fumbles and rapid recoveries, at the cost of more images and, on teleop and UMI, shorter request windows |
 | [`--task-mode`](label/policy.py) | From source metadata, otherwise `episode` | `session` labels the recording as a sequence of tasks, each with its own outcome, which suits freeform recordings and repeated cycles; human ego uses the activities schema |
-| [`--inspection`](label/policy.py) | `auto`, for recordings with depth or a touch sensor | `all` also inspects recordings with no depth or touch sensor, such as one with only force/torque, arm signals, actions or source metadata; `off` makes no evidence selection call, though a tactile array still gets its separate regional pass |
+| [`--inspection`](label/policy.py) | `auto`, for recordings with depth or a touch sensor, or with fields the prompt does not carry | `all` also inspects recordings with no depth or touch sensor, such as one with only force/torque, arm signals, actions or source metadata; `off` makes no evidence selection call, though a tactile array still gets its separate regional pass |
 | [`--field-dictionary`](review/__main__.py) | `on` | `off` skips the one call per upload (at most $3) that asks a model what unclear recorded fields mean; fields are then labelled as recorded |
 | [`--cap`](review/__main__.py) | $20 | The most the job may spend, counting every call and outstanding reservation |
 | [`--max-minutes`](review/__main__.py) | All footage | Reads at most this many minutes of footage |
