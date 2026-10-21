@@ -81,17 +81,16 @@ def reader_projection_identity(ctx):
 def needs_inspection(ep, sensor_evidence, mode='auto'):
     """Whether a request carries an inspection, by the annotation policy's mode (label/policy.py INSPECTION_MODES).
     auto and off: a recording with depth or a touch sensor (sensor_evidence's sensors: tactile arrays and cameras,
-    pressure, contact, normal and shear force), which inspection was built for; a wrist force/torque sensor alone is
-    not one, as it matters less to the annotation than touch; off keeps the record with no selection. all: also a
-    force/torque sensor and any other recorded field beyond the cameras (arm signals, actions, original metadata).
+    pressure, contact, normal and shear force), which inspection was built for, or with recorded fields that only
+    inspection can reach (source fields no prompt row carries, such as an ego recording's hand poses, and original
+    metadata); a wrist force/torque sensor alone is not touch, and arm signals and actions are not inspection-only, as
+    they reach the prompt as rows; off keeps the record with no selection. all: any recorded field beyond the cameras.
     Ordinary RGB stays on its path in every mode."""
     # an array is touch whatever its quantity: its regional analysis is owned by the inspection record
     touch = [s for s in sensor_evidence.get('sensors') or []
              if s.get('quantity') != 'force_torque' or s.get('array_evidence')]
     if bool(ep.get('depth') or ep.get('additional_depth') or touch):
         return True
-    if mode != 'all':
-        return False
     ctx = ep['context']
     archives = [ctx, *(ctx.get('recorded_sensor_fields') or [])]
     native = any(not detail.get('already_supplied') for archive in archives
@@ -101,6 +100,10 @@ def needs_inspection(ep, sensor_evidence, mode='auto'):
                            for field in archive.get('table_field_inventory') or [])
     from label.source_eligibility import needs_extra_evidence
     metadata = needs_extra_evidence(ctx)
+    if native or metadata:
+        return True
+    if mode != 'all':
+        return False
     from prepare.state_contract import redundant_observation_target
     copied_state = redundant_observation_target(ep)
     actions = ep.get('action') is not None and ep['action'].size > 0 and not copied_state

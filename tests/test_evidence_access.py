@@ -1155,6 +1155,11 @@ def test_by_default_only_depth_and_touch_sensors_are_inspected_and_all_restores_
     arm['signals'] = {'joint_vel': np.zeros((4, 6))}                     # arm signals alone, as YAM teleop records
     arm['action'] = np.ones((4, 7))
     assert not ea.needs_inspection(arm, {}) and not ea.needs_inspection(arm, {}, 'off')
+    # fields only inspection can reach (an ego recording's hand poses, read from the source file and carried by no
+    # prompt row) still opt a recording in, as signals and actions, which reach the prompt as rows, do not
+    poses = {**arm, 'context': {**arm['context'], 'table_field_inventory': [
+        {'name': 'transforms/leftHand', 'shape': [94, 4, 4], 'bookkeeping': False}]}}
+    assert ea.needs_inspection(poses, {}) and ea.needs_inspection(poses, {}, 'off')
     assert ea.needs_inspection(arm, {}, 'all')
     wrench = {'sensors': [{'id': 'signal:wrist_ft', 'kind': 'numeric', 'quantity': 'force_torque'}]}
     assert not ea.needs_inspection(arm, wrench) and ea.needs_inspection(arm, wrench, 'all')
