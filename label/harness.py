@@ -1760,7 +1760,15 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                     except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError):
                         matches = False
             if not matches or any(item.get("missing") for item in current["source_proof"]):
-                stale[ep.name] = f"saved output {q.name} has changed or missing input; use --force to refresh"
+                hint = ''
+                saved_policy = ((saved or {}).get('settings') or {}).get('annotation_policy')
+                if (isinstance(saved_policy, dict) and 'inspection' not in saved_policy
+                        and policy.inspection_mode((current.get('settings') or {}).get('annotation_policy') or {})
+                        != policy.LEGACY_INSPECTION):
+                    # labelled before inspection could be set, when every recorded field was inspected
+                    hint = (f'; it was labelled before inspection could be set, so add --inspection '
+                            f'{policy.LEGACY_INSPECTION} to resume it as it was paid for')
+                stale[ep.name] = f"saved output {q.name} has changed or missing input; use --force to refresh{hint}"
                 return True
         if any(record.get('final_dispatch_outcome') in ('claimed', 'unverified') for _, record in records):
             if ep.name in retry_received and not dry:

@@ -126,3 +126,17 @@ def test_inspection_turned_off_sends_only_the_annotation_and_a_touch_sensor_is_s
     default = json.loads((tmp_path / 'on_out' / (on.name + '.json')).read_text())
     assert default['annotation_policy']['inspection'] == 'auto'
     assert ea.INSPECTION_OFF not in default['evidence_inspection']['limitations']
+
+
+def test_a_run_labelled_before_inspection_could_be_set_is_told_how_to_resume_it_as_paid(tmp_path, monkeypatch, capsys):
+    # a staged run whose episode context never saved a policy: its saved request inspected every recorded field (no
+    # inspection key), today's default is auto, so the saved output is stale and the message names the flag that
+    # resumes it without paying again
+    from test_dispatch_integrity_v5 import options
+    from test_request_attestation import paid_episode
+    ep, out, calls = paid_episode(tmp_path, monkeypatch, inspection='all')
+    capsys.readouterr()
+    assert harness.run_batch([ep], out, **options()) != 0
+    assert '--inspection all to resume it as it was paid for' in capsys.readouterr().err
+    assert harness.run_batch([ep], out, **options(inspection='all')) == 0
+    assert calls == ['selection', 'selection', 'final', 'cards']                # nothing was paid again
