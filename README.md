@@ -97,6 +97,36 @@ Each recording produces one episode. A recording longer than one request allows 
 
 Live and static boards share one [viewer](board/index.html), which overlays behavioral and sensor annotations on the footage with the supporting measurements beside it. The same findings export as episode JSON, filtered JSON Lines and static sites. Issues with missing or invalid severity remain visible as unrated and are excluded from severity totals.
 
+This is an excerpt from a pressure glove episode's downloadable JSON. In the list and on the video, a finding shows its `video_card` words when it has one, otherwise its `list_copy`, otherwise its own headline and detail. Evidence IDs resolve to recorded streams and samples in the full export:
+
+```json
+{
+  "sensor_evidence": {
+    "findings": [
+      {
+        "start_s": 2.63,
+        "end_s": 3.03,
+        "headline": "Thumb loading likely eases more than index finger loading",
+        "detail": "As the cup moves away, the thumb response weakens substantially while the index finger response remains elevated.",
+        "confidence": "medium",
+        "video_card": {
+          "version": 1,
+          "headline": "The thumb likely presses less.",
+          "detail": "The index finger keeps pressing as the cup moves away."
+        },
+        "evidence": [
+          {
+            "sensor_id": "mechanics:signal:right_pressure",
+            "series_id": "mechanics:signal:right_pressure:derivation:regional_response:0",
+            "time_s": [2.63, 2.83, 2.93]
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
 Public exports, meaning the static site, downloads and [`/api/export`](board/serve.py), name the uploader's own metadata (file attributes, sidecar fields, publisher fields) but leave out its values, because no filter can recognize every secret a person writes there. Add [`--publish-uploader-values`](board/serve.py) to `board serve` or `board static site` to publish them. Exports also redact access attributes, recognizable credential values and private access locations in every field.
 
 Field definitions supplied by the dataset publisher or user override inferred meanings and layouts without changing recorded measurements. Changes to source data or field interpretations invalidate stale findings.
@@ -148,36 +178,6 @@ A resumed review keeps its settings, refuses changed ones, and reuses its verifi
 A free review stops after prepared [`episodes/`](review/__main__.py) and base requests in [`dry/`](review/__main__.py). Paid annotation adds model inputs and receipts in [`run/`](review/__main__.py), rejoined labels in [`run_final/`](review/__main__.py), and the board; `review` exits 1 when any unit failed, and the board is still built.
 
 After annotation, one text-only call to the same model picks the sensor findings worth overlaying on the video, at most two at once, and rewrites every finding in plain English; every finding stays in the list and the JSON export, and if the call fails, every finding plays on the video.
-
-This is an excerpt from a pressure glove episode's downloadable JSON. In the list and on the video, a finding shows its `video_card` words when it has one, otherwise its `list_copy`, otherwise its own headline and detail. Evidence IDs resolve to recorded streams and samples in the full export:
-
-```json
-{
-  "sensor_evidence": {
-    "findings": [
-      {
-        "start_s": 2.63,
-        "end_s": 3.03,
-        "headline": "Thumb loading likely eases more than index finger loading",
-        "detail": "As the cup moves away, the thumb response weakens substantially while the index finger response remains elevated.",
-        "confidence": "medium",
-        "video_card": {
-          "version": 1,
-          "headline": "The thumb likely presses less.",
-          "detail": "The index finger keeps pressing as the cup moves away."
-        },
-        "evidence": [
-          {
-            "sensor_id": "mechanics:signal:right_pressure",
-            "series_id": "mechanics:signal:right_pressure:derivation:regional_response:0",
-            "time_s": [2.63, 2.83, 2.93]
-          }
-        ]
-      }
-    ]
-  }
-}
-```
 
 Paid staged runs require a clean tracked checkout. [`--resume RUN --why "reason"`](label/run.py) retains the run and remaining budget, using the same commit, dataset, prepared episodes and run kind; add [`--cap`](label/run.py) to set a new cap, for example to finish a run its cap stopped. Pass [`--dataset`](label/run.py), [`--episodes`](label/run.py) and [`--kind`](label/run.py) again, and the original harness options after [`--`](label/run.py). Cross-host writers require working shared filesystem locks.
 
