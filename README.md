@@ -105,7 +105,7 @@ Each recording produces one episode. A recording longer than one request allows 
 
 ## Results and further use
 
-Live and static boards share one [viewer](board/index.html), which overlays behavioral and sensor annotations on the footage with the supporting measurements beside it. The same findings export as episode JSON, filtered JSON Lines and static sites. Issues with missing or invalid severity remain visible as unrated and are excluded from severity totals. For a run still in progress, give a dataset's manifest entry a [`target`](board/build.py) such as `{"episodes": 2682, "hours": 101.9}`, and the board shows the episodes and hours labelled so far against it.
+Live and static boards share one [viewer](board/index.html), which overlays behavioral and sensor annotations on the footage with the supporting measurements beside it. The same findings export as episode JSON, filtered JSON Lines and static sites. Issues with missing or invalid severity remain visible as unrated and are excluded from severity totals. For a run still in progress, give a dataset's manifest entry a [`target`](board/build.py) such as `{"episodes": 2682, "hours": 101.9}`, and the board shows the episodes and hours labelled so far against it. A page open on `board serve` checks every 30s for a rebuild and updates its list and totals in place, keeping the open episode.
 
 This is an excerpt from a pressure glove episode's downloadable JSON. In the list and on the video, a finding shows its `video_card` words when it has one, otherwise its `list_copy`, otherwise its own headline and detail. Evidence IDs resolve to recorded streams and samples in the full export:
 

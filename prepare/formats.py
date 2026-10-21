@@ -11738,7 +11738,10 @@ class FrameWriter:
             self.enc.width, self.enc.height = im.width - im.width % 2, im.height - im.height % 2
             self.enc.pix_fmt = "yuv420p"
             self.enc.codec_context.time_base = Fraction(1, TIME_BASE_DEN)
-            self.enc.options = {"crf": "18", "preset": "veryfast"}
+            # one encoder thread: with x264's threads the same pictures encoded to different bytes from run to run on a
+            # busy machine, so one upload converted twice gave two different videos; episodes are converted in
+            # parallel processes, which is where the speed comes from
+            self.enc.options = {"crf": "18", "preset": "veryfast", "threads": "1"}
             for q in self.waiting:
                 self._encode(q, None)
             self.waiting = []

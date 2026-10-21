@@ -1447,6 +1447,20 @@ def targets(board: Path) -> dict:
     return out
 
 
+def board_version(board: Path) -> str:
+    """Which build of the board this is, from BUILT.json (board/build.py writes it last, after the episode files are in
+    place) and manifest.json (its targets): an open page asks for it to learn that the board was rebuilt, which costs
+    two stats however many episodes the board holds."""
+    parts = []
+    for name in ("BUILT.json", "manifest.json"):
+        try:
+            st = (board / name).stat()
+            parts.append(f"{st.st_mtime_ns}:{st.st_size}")
+        except OSError:
+            parts.append("-")
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
+
+
 def _label_identity(path):
     return _trusted_version(path, _footage_version(path))
 
@@ -2219,6 +2233,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if parsed.path == '/api/dictionary':
             return self._dictionary()
+        if parsed.path == "/api/version":
+            # an open page asks every 30s whether the board was rebuilt, and with what targets
+            self._send(200, {"version": board_version(HERE.parent), "targets": targets(HERE.parent)})
+            return
         if parsed.path == "/api/episodes":
             raw, gz = list_json()
             self._send(200, raw, gzipped=gz)
