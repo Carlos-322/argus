@@ -928,10 +928,11 @@ def join_scene_objects(objects: list, tasks: list) -> list:
     a task joined across a cut (join_across_cuts, which already requires its halves to share an object) names the
     object in both halves, the name in each half answers to exactly one name in the other, and in each half's part
     exactly one listed object answers to that name. A join never holds two objects of one part: part 1's red cup and
-    blue cup are two objects, so part 2's cup cannot join both of them into one. A joined object keeps its first
-    part's record, with every later part's own record under "continues"; every other object stays its own entry."""
+    blue cup are two objects, so part 2's cup cannot join both of them into one. That holds because an object joins at
+    most one object of the next part and one of the part before (two pairings of one object contradict each other and
+    neither joins), so a joined object is a chain of one record per part. A joined object keeps its first part's
+    record, with every later part's own record under "continues"; every other object stays its own entry."""
     parent = list(range(len(objects)))
-    parts = {k: {n} for k, (n, _) in enumerate(objects)}     # the parts each joined object's records come from
 
     def root(k):
         while parent[k] != k:
@@ -940,10 +941,7 @@ def join_scene_objects(objects: list, tasks: list) -> list:
         return k
 
     def join(x, y):
-        x, y = root(x), root(y)
-        if x != y and not parts[x] & parts[y]:
-            parent[y] = x
-            parts[x] |= parts.pop(y)
+        parent[root(y)] = root(x)
 
     def listed(part, name_tokens):
         hits = [k for k, (n, obj) in enumerate(objects) if n == part
@@ -957,7 +955,8 @@ def join_scene_objects(objects: list, tasks: list) -> list:
             a_part, b_part = (left.get("source_piece") or {}).get("index"), (right.get("source_piece") or {}).get("index")
             if not isinstance(a_part, int) or b_part != a_part + 1:
                 continue
-            names_a, names_b = _object_tokens(left.get("objects")), _object_tokens(right.get("objects"))
+            # each half's distinct names: a half naming one object twice (cup and the cup, cups and cup) names it once
+            names_a, names_b = (list(dict.fromkeys(_object_tokens(h.get("objects")))) for h in (left, right))
             fits = lambda a, b: a <= b or b <= a
             for a in names_a:
                 for b in names_b:
@@ -965,7 +964,8 @@ def join_scene_objects(objects: list, tasks: list) -> list:
                         x, y = listed(a_part, a), listed(b_part, b)
                         if x is not None and y is not None:
                             pairs.add((x, y))
-    # two tasks that pair one object with two different objects of the next part contradict each other: neither joins
+    # two tasks that pair one object with two different objects of the next part contradict each other: neither joins.
+    # This alone keeps each joined object to one record per part (the docstring), in whatever order the tasks come.
     for x, y in sorted(pairs):
         if sum(p[0] == x for p in pairs) == 1 and sum(p[1] == y for p in pairs) == 1:
             join(x, y)

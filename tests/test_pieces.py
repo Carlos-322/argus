@@ -1320,6 +1320,68 @@ def test_a_join_across_the_cut_never_puts_two_objects_of_one_part_into_one():
     assert joined[0]['continues'][0]['source_piece'] == two
 
 
+def test_a_half_naming_its_object_twice_still_joins_it_across_the_cut():
+    """The uniqueness count ran over every name a half listed, so a half naming its one cup twice ("cup" and "the cup")
+    read as two cups and the object never joined. A half's names are counted once each after normalizing."""
+    one, two = {'index': 1, 't0_s': 0., 't1_s': 5.}, {'index': 2, 't0_s': 5., 't1_s': 9.}
+    objects = [(1, {'name': 'cup', 'source_piece': one}), (2, {'name': 'cup', 'source_piece': two})]
+    half = lambda names, source: {'objects': names, 'source_piece': source}
+    for names in (['cup'], ['cup', 'the cup'], ['cups', 'cup'], ['Cup', 'cup'], ['a cup', 'cup', 'the cups']):
+        for task in ({'task': 'carry the cup', 'joined_from': [half(names, one), half(['cup'], two)]},
+                     {'task': 'carry the cup', 'joined_from': [half(['cup'], one), half(names, two)]}):
+            joined = pieces.join_scene_objects(objects, [task])
+            assert [(o['name'], [c['name'] for c in o.get('continues', [])]) for o in joined] == [('cup', ['cup'])], names
+
+
+def test_a_name_answering_to_two_names_of_the_other_half_joins_nothing_even_when_one_part_lists_one():
+    """Part 1 lists only the red cup, but the task's first half names a red cup and a blue cup: its second half's cup
+    could be either, so it joins neither, whichever half names the two."""
+    one, two = {'index': 1, 't0_s': 0., 't1_s': 5.}, {'index': 2, 't0_s': 5., 't1_s': 9.}
+    half = lambda names, source: {'objects': names, 'source_piece': source}
+    objects = [(1, {'name': 'red cup', 'source_piece': one}), (2, {'name': 'cup', 'source_piece': two})]
+    task = {'task': 'stack the cups', 'joined_from': [half(['red cup', 'blue cup'], one), half(['cup'], two)]}
+    assert pieces.join_scene_objects(objects, [task]) == [o for _, o in objects]
+    objects = [(1, {'name': 'cup', 'source_piece': one}), (2, {'name': 'red cup', 'source_piece': two})]
+    task = {'task': 'stack the cups', 'joined_from': [half(['cup'], one), half(['red cup', 'blue cup'], two)]}
+    assert pieces.join_scene_objects(objects, [task]) == [o for _, o in objects]
+    # the same task with each half naming one cup joins it
+    task = {'task': 'carry the cup', 'joined_from': [half(['cup'], one), half(['red cup'], two)]}
+    assert [len(o.get('continues', [])) for o in pieces.join_scene_objects(objects, [task])] == [1]
+
+
+def test_halves_of_parts_that_are_not_next_to_each_other_join_nothing():
+    one, three = {'index': 1, 't0_s': 0., 't1_s': 5.}, {'index': 3, 't0_s': 9., 't1_s': 12.}
+    objects = [(1, {'name': 'cup', 'source_piece': one}), (3, {'name': 'cup', 'source_piece': three})]
+    task = {'task': 'carry the cup', 'joined_from': [{'objects': ['cup'], 'source_piece': one},
+                                                     {'objects': ['cup'], 'source_piece': three}]}
+    assert pieces.join_scene_objects(objects, [task]) == [o for _, o in objects]
+
+
+def test_on_random_recordings_a_joined_object_holds_one_record_per_part_in_any_task_order():
+    import random
+    rng = random.Random(61)
+    words = ['cup', 'red cup', 'blue cup', 'the cup', 'cups', 'tray', 'red tray', 'bowl', 'blue bowl', 'red']
+    joins = 0
+    for _ in range(3000):
+        n_parts = rng.randint(2, 4)
+        source = {i: {'index': i, 't0_s': float(i), 't1_s': i + 1.} for i in range(1, n_parts + 1)}
+        objects = [(i, {'name': rng.choice(words), 'source_piece': source[i]}) for i in range(1, n_parts + 1)
+                   for _ in range(rng.randint(1, 3))]
+        tasks = []
+        for _ in range(rng.randint(1, 4)):
+            start = rng.randint(1, n_parts - 1)
+            tasks.append({'task': 't', 'joined_from': [{'objects': rng.sample(words, rng.randint(1, 3)),
+                                                        'source_piece': source[p]}
+                                                       for p in range(start, rng.randint(start + 1, n_parts) + 1)]})
+        joined = pieces.join_scene_objects(objects, tasks)
+        assert joined == pieces.join_scene_objects(objects, tasks[::-1])
+        for o in joined:
+            parts = [r['source_piece']['index'] for r in [o] + o.get('continues', [])]
+            assert len(parts) == len(set(parts)), (objects, tasks)
+            joins += len(parts) > 1
+    assert joins > 300      # the recordings do join objects, so the check has something to hold
+
+
 def test_the_board_names_the_parts_a_stitched_object_came_from():
     from board import to_board
     one, two = {'index': 1, 't0_s': 0., 't1_s': 5.}, {'index': 2, 't0_s': 5., 't1_s': 9.}
