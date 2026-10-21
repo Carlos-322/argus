@@ -1123,7 +1123,7 @@ SCENE_WORDS = (("top", "topdown"), "high", "head", "overhead", "exo", ("front", 
                ("cam", "camera"))
 FIXED_WORDS = ("top", "topdown", "high", "overhead", "exterior", "front", "frontal", "scene", "exo", "zed", "zedm",
                "zedx", "zedxm", "stereo", "low", "static", "third")
-MOUNTED_WORDS = ("wrist", "hand", "gripper", "arm", "eef", "ee")
+MOUNTED_WORDS = ("wrist", "hand", "handheld", "gripper", "arm", "eef", "ee")
 SIDE_WORDS = {"l": "left", "left": "left", "r": "right", "right": "right"}
 # words that appear in camera, topic and field names glued to the words the matchers look for (jointpos, depthmap,
 # wristview, cmdvel, leaderarm, zedmini, thirdperson, shoulderpan) without being looked for themselves; with every

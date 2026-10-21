@@ -5314,3 +5314,11 @@ def test_a_long_glued_run_is_split_in_time_proportional_to_its_length():
     longest = max(sorted(f.name_vocabulary()), key=len)
     assert f.glued_words("left" + longest + "s") == ("left", longest + "s")   # the longest word, plural, last
 
+
+@pytest.mark.parametrize("name", ["handheld", "Handheld", "HandHeld", "hand_held", "handheld_left", "HandheldCam",
+                                  "observation.images.handheld", "handhelds", "handheldcam"])
+def test_a_handheld_camera_is_mounted_however_its_name_is_written(name):
+    # 7113ecf read handheld as one word that was no mount, so a handheld camera stopped reading as the gripper's camera
+    # while HandHeld (hand and held) still did; a handheld camera is held in the hand, so it is mounted
+    assert f.is_mount_named(name)
+    assert f.mounted_side("handheld_left") == "left"
