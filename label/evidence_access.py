@@ -22,7 +22,8 @@ from label.dictionary_context import _public_source, field_interpretation, nativ
 from label import sensor_evidence as se
 from label import sensor_copy
 from prepare.mcap_fields import SAMPLE_RATE_KEY
-from prepare.signal_alignment import RECORDER_ARRIVAL, RECORDER_ARRIVAL_LIMITATION, recorder_arrival
+from prepare.signal_alignment import (ARRIVAL, RECORDED, RECORDER_ARRIVAL_LIMITATION, recorder_arrival,
+                                      video_timing)
 from prepare.frame_rate import KEY as FPS_KEY, declared_fps
 
 MAX_ROWS = 64
@@ -578,7 +579,20 @@ class Access:
                         row['descriptor'][key] = bounded(meta[key], 600)
         row.update(_validity_metadata(private.get('component_validity')))
         self.fields[ident] = {'public': row, 'value': value, 'descriptor': meta or {}, **private}
+        if kind in ('numeric', 'native', 'array'):
+            row['select_by'] = ('start_s/end_s, start_row/end_row or rows' if self.episode_seconds(self.fields[ident])
+                                else 'start_row/end_row or rows only: no verified alignment to the video')
         return ident
+
+    def episode_seconds(self, field) -> bool:
+        """Whether a numeric field's rows can be chosen and cited by episode seconds: a prepared signal on a recorded
+        or recorder-arrival clock the cameras share (prepare/signal_alignment.py video_timing), with the state's
+        frames on the cameras. Any other field (an original native array, a value placed on the frames by an
+        assumption or from both starts) is selected by its source rows and inspected untimed."""
+        if field['public']['kind'] != 'numeric' or not self.state_usable:
+            return False
+        from label.episode import anchor
+        return video_timing(field['descriptor'], self.ep['context'], anchor(self.ep))['grade'] in (RECORDED, ARRIVAL)
 
     def local(self, name):
         root = Path(self.ep['context'].get('retained_evidence_root') or self.ep['dir']).resolve()
@@ -964,7 +978,8 @@ class Access:
             rows = np.flatnonzero((times >= low - 1e-9) & (times <= high + 1e-9))
         else:
             if 'start_s' in request or 'end_s' in request:
-                raise ValueError('native clock has no verified episode alignment; select source rows')
+                raise ValueError('this field has no verified alignment to the video (its inventory select_by '
+                                 'says so); select source rows with start_row and end_row, or rows')
             start, end = request.get('start_row', 0), request.get('end_row', n)
             if type(start) is not int or type(end) is not int or not 0 <= start <= end <= n:
                 raise ValueError('source row window is outside the recorded array')
@@ -1156,13 +1171,7 @@ class Access:
             limit = min(8, MAX_VALUES // width)
         if not limit:
             raise ValueError('one native row exceeds inspection budget')
-        timing = field['descriptor']
-        arrival = timing.get('aligned_by') == RECORDER_ARRIVAL and recorder_arrival(self.ep['context'])
-        unverified = (bool(timing.get('aligned_by')) and not arrival or
-                      any(timing.get(k) for k in ('camera_aligned_by', 'clock_problem')))
-        from label import episode as me
-        unverified = unverified or bool((self.ep['context'].get('camera_clock') or {}).get(me.anchor(self.ep)))
-        ts = None if native or not self.state_usable or unverified else self.times()[:n]
+        ts = self.times()[:n] if not native and self.episode_seconds(field) else None
         rows, total = self.selection(request, n, ts, n if extrema else limit)
         validity = _selected_component_validity(field.get('component_validity'), cols)
         if validity is not None:
@@ -1556,12 +1565,7 @@ class Access:
                 or receipt.get('mode') not in ('samples', 'extrema')
                 or not receipt.get('times_s') or not self.state_usable):
             return None
-        timing = field['descriptor']
-        arrival = timing.get('aligned_by') == RECORDER_ARRIVAL and recorder_arrival(self.ep['context'])
-        from label import episode as me
-        if ((timing.get('aligned_by') and not arrival)
-                or any(timing.get(key) for key in ('camera_aligned_by', 'clock_problem'))
-                or (self.ep['context'].get('camera_clock') or {}).get(me.anchor(self.ep))):
+        if not self.episode_seconds(field):
             return None
         source = field['value']
         n = min(len(self.ep['state']), len(source))
@@ -1759,7 +1763,7 @@ Prefer unanswered measurement questions over more ordinary RGB frames. A partial
 Consider each distinct additional measurement family. A depth colour image already shown is not a substitute for inspecting its spatial measurements. Depth can answer camera-relative distance or separation questions where its units and calibration allow; numeric state/action can compare source-declared commands with observed values when command semantics are established; unknown action arrays and observation-derived targets do not establish command mismatch; tactile, effort, waveform and original metadata may resolve different questions. Select relevant evidence rather than exhaustively inspecting duplicate fields. For depth, use the video to identify the actual approach, lift, transfer or placement interval. Initial and final recording frames can both be stationary and miss the spatial change. Inspect relevant depth frames during that interval, then measure small valid regions on the surfaces that answer the question. Unrelated background grid values do not establish object distances. If a useful spatial question is visible and depth appears usable, do not conclude it adds nothing from a coarse full-image overview alone. An explicit lack of valid target depth or required calibration can close the question without further measurement. Do not force a finding when the evidence adds nothing.
 When comparing change over a manipulation phase, inspect its beginning, active change and completion or visible end. Interior samples alone do not describe the full phase. If a boundary is unclear, inspect the continuation before choosing the comparison interval.
 For spatial sensor arrays, regional averages can hide opposing local changes. Use declared layouts and the supplied maps to select constituent channels and inspect their native trajectory when local redistribution is visible. Compare corresponding phases of repeated interactions, including quiet held intervals, rather than only the largest changes. Inspect scene images or recorded state around a sensor change when needed to distinguish additional loading from grasp formation or object motion.
-At most 3 requests per round. Numeric samples preserve separate components at up to 64 sampled rows of a time or row window, or at rows:[integer,...], up to 64 exact increasing source rows given instead of a window. columns:[integer,...] selects components by index; without it, every component that fits the response budget is returned and the rest are named. A receipt holds at most ''' + str(MAX_RESPONSE_BYTES) + ''' bytes, so fewer rows leave room for more components; a request over the budget is refused with how many components or rows fit. Uniform samples can miss short changes. For prepared numeric arrays, mode extrema scans the requested window and retains each selected component minimum and maximum, neighboring rows, and sampled context. It reports valid and missing row counts. Peaks do not prove contact, failure, or increased physical force; interpret them with recorded semantics and video. Native arrays use start_row and end_row (exclusive), never invented seconds. Spectrum uses recorded native waveform packets and their recorded sample rate; loudness summaries cannot establish vibration frequency. Images return at most 4 frames. Use rows:[integer,...] to inspect specific increasing presentation rows (at most 4 for images or 32 for regions); do not combine explicit rows with a time or row window. Depth images include a 6-row, 8-column spatial grid of valid-pixel medians. To examine a particular region over time, mode regions takes regions:[[left,top,right,bottom],...] (at most 4 rectangles in depth-image fractions) and returns up to 32 sampled frames with medians and valid-pixel counts. For a fixed rectangle, use regions:[[left,top,right,bottom]] with either a window or explicit rows. Do not wrap a fixed rectangle in regions_by_row. For a moving target, regions_by_row must contain one rectangle group for every explicit row, with the same number of rectangles in each group. For example, rows:[10,20] with regions_by_row:[[[0.2,0.3,0.4,0.5]],[[0.3,0.3,0.5,0.5]]] measures one region at each of two rows. Four requested rows require four groups; one group is not broadcast. Choose them from inspected depth images, not an assumed RGB registration. Verify each region still covers the intended surface; these coordinates do not establish object tracking. Camera movement and occlusion can change their contents. Do not treat depth differences as world-space clearance without appropriate geometry. Unknown or assumed image clocks require start_row/end_row and produce untimed evidence. Metadata uses an optional JSON pointer. Do not emit final annotations in this selection step.
+At most 3 requests per round. Numeric samples preserve separate components at up to 64 sampled rows of a time or row window, or at rows:[integer,...], up to 64 exact increasing source rows given instead of a window. columns:[integer,...] selects components by index; without it, every component that fits the response budget is returned and the rest are named. A receipt holds at most ''' + str(MAX_RESPONSE_BYTES) + ''' bytes, so fewer rows leave room for more components; a request over the budget is refused with how many components or rows fit. Uniform samples can miss short changes. For prepared numeric arrays, mode extrema scans the requested window and retains each selected component minimum and maximum, neighboring rows, and sampled context. It reports valid and missing row counts. Peaks do not prove contact, failure, or increased physical force; interpret them with recorded semantics and video. Native arrays use start_row and end_row (exclusive), never invented seconds. Each numeric field says in select_by how its rows are chosen: one with no verified alignment to the video takes start_row/end_row or rows, never start_s or end_s. Spectrum uses recorded native waveform packets and their recorded sample rate; loudness summaries cannot establish vibration frequency. Images return at most 4 frames. Use rows:[integer,...] to inspect specific increasing presentation rows (at most 4 for images or 32 for regions); do not combine explicit rows with a time or row window. Depth images include a 6-row, 8-column spatial grid of valid-pixel medians. To examine a particular region over time, mode regions takes regions:[[left,top,right,bottom],...] (at most 4 rectangles in depth-image fractions) and returns up to 32 sampled frames with medians and valid-pixel counts. For a fixed rectangle, use regions:[[left,top,right,bottom]] with either a window or explicit rows. Do not wrap a fixed rectangle in regions_by_row. For a moving target, regions_by_row must contain one rectangle group for every explicit row, with the same number of rectangles in each group. For example, rows:[10,20] with regions_by_row:[[[0.2,0.3,0.4,0.5]],[[0.3,0.3,0.5,0.5]]] measures one region at each of two rows. Four requested rows require four groups; one group is not broadcast. Choose them from inspected depth images, not an assumed RGB registration. Verify each region still covers the intended surface; these coordinates do not establish object tracking. Camera movement and occlusion can change their contents. Do not treat depth differences as world-space clearance without appropriate geometry. Unknown or assumed image clocks require start_row/end_row and produce untimed evidence. Metadata uses an optional JSON pointer. Do not emit final annotations in this selection step.
 The inventory includes recorded schema names and field counts across the complete recording. Request {"mode":"inventory","query":"field name or schema substring"} to jump to relevant fields without paging through unrelated sensors. Search is case-insensitive and matches field names or schemas. If next_offset is not null, request {"mode":"inventory","offset":next_offset,"query":"the same query, if used"} for more matching fields. No descriptor is silently discarded. Search and paging consume the same request budget as measurements.
 '''
 
