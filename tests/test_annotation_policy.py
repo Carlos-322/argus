@@ -67,13 +67,18 @@ def test_only_astra_defaults_to_medium_reasoning_and_every_other_model_to_high()
 def test_the_paid_calls_beside_the_annotation_are_on_by_default_and_written_only_when_turned_off(tmp_path):
     ctx = {'profile': 'teleop_arms'}
     default = policy.resolve(ctx)
-    assert 'inspection' not in default and 'field_dictionary' not in default
+    assert default['inspection'] == 'auto' and 'field_dictionary' not in default     # a new policy writes its mode
     assert policy.resolve(ctx, inspection='auto', field_dictionary=True) == default
     off = policy.resolve(ctx, inspection='off', field_dictionary=False)
     assert off == {**default, 'inspection': 'off', 'field_dictionary': False}
     assert policy.resolve({**ctx, 'annotation_policy': off}) == off             # a saved choice is kept on resume
     assert policy.resolve({**ctx, 'annotation_policy': off}, inspection='auto', field_dictionary=True) == default
-    assert policy.resolve(ctx, inspection='all')['inspection'] == 'all'
+    # a policy saved before the setting existed inspected every recorded field, and keeps doing so on resume, with
+    # the saved policy unchanged, so a job labelled then rebinds its paid replies instead of refusing them as stale
+    legacy = {key: value for key, value in default.items() if key != 'inspection'}
+    assert policy.resolve({**ctx, 'annotation_policy': legacy}) == legacy
+    assert policy.inspection_mode(legacy) == 'all' and policy.inspection_mode(default) == 'auto'
+    assert 'inspection' not in policy.resolve(ctx, inspection='all')
     for bad in ('none', 0, True, 'Off'):
         with pytest.raises(ValueError):
             policy.resolve(ctx, inspection=bad)

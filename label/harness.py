@@ -336,7 +336,7 @@ def label_episode(ep_dir: Path, out_path: Path, *, model: str, reasoning: str, a
     req = me.build_request(ep_dir, detail=DETAIL, gate=DECODE_GATE, grid_cols=GRID_COLS, cell_w=cell_w or None,
                            max_cell_w=route_w, example_dir=example_dir, inspect_evidence=True,
                            model=model, reasoning=reasoning, sample_fps=sample_fps,
-                           task_mode=task_mode, dataset_note=dataset_note, inspection=resolved.get('inspection', policy.INSPECTION),
+                           task_mode=task_mode, dataset_note=dataset_note, inspection=policy.inspection_mode(resolved),
                            derived_dir=Path(out_path).parent / ".derived" / "jaws")
     pl = req["plan"]
     fields = {
@@ -1188,7 +1188,7 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
                 cell_w=settings['cell_w'], example_dir=fields.get('example_dir'),
                 sample_fps=selected.get('sample_fps'), task_mode=selected['task_mode'],
                 dataset_note=selected.get('dataset_note'),
-                inspection=selected.get('inspection', policy.INSPECTION))
+                inspection=policy.inspection_mode(selected))
             valid = same_input_identity(saved, current) and not any(item.get('missing') for item in current['source_proof'])
         except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError):
             valid = False
@@ -1242,7 +1242,7 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
                     return True
             # inspection off keeps the inspection record (a tactile array's regional analysis is owned by it) and
             # buys no selection
-            off = (fields.get('annotation_policy') or {}).get('inspection', policy.INSPECTION) == 'off'
+            off = policy.inspection_mode(fields.get('annotation_policy') or {}) == 'off'
             rounds = 0 if off else 2
             try:
                 doc, extra = ea.discover(evidence_access, content, select, cache, rounds=rounds, reserve_cost=reserve,

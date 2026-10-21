@@ -16,8 +16,13 @@ from test_label import _packed_episode
 pytestmark = pytest.mark.usefixtures('inspect_every_field')
 
 
-def paid_episode(tmp_path, monkeypatch):
+def paid_episode(tmp_path, monkeypatch, saved_inspection=None, **extra):
     ep, _ = _packed_episode(tmp_path)
+    if saved_inspection is not None:
+        from label import policy
+        context = json.loads((ep / 'context.json').read_text())
+        context['annotation_policy'] = policy.resolve(context, inspection=saved_inspection)
+        (ep / 'context.json').write_text(json.dumps(context))
     calls = []
     def provider(request, timeout):
         kind = provider_kind(request); calls.append(kind)
@@ -45,10 +50,23 @@ def paid_episode(tmp_path, monkeypatch):
         return response(json.dumps(answer))
     monkeypatch.setattr(harness.urllib.request, 'urlopen', provider)
     out = tmp_path / 'out'
-    assert harness.run_batch([ep], out, **options()) == 0
+    assert harness.run_batch([ep], out, **options(**extra)) == 0
     saved = json.loads((out / (ep.name + '.json')).read_text())
     assert len(saved['evidence_inspection']['inspections']) == 2
     return ep, out, calls
+
+
+def test_a_run_whose_inspection_differs_from_the_saved_policy_resumes_after_a_code_change_without_payment(
+        tmp_path, monkeypatch):
+    # the episode's saved policy says auto, the run says all: the offline rebuild must use the run's mode, or the paid
+    # request no longer matches and resuming it would pay again
+    ep, out, calls = paid_episode(tmp_path, monkeypatch, saved_inspection='auto', inspection='all')
+    path = out / (ep.name + '.json'); before = path.read_bytes()
+    paid = output_spend(out)
+    source_edit(monkeypatch, 'label/harness.py')
+    assert harness.run_batch([ep], out, **options(inspection='all')) == 0
+    assert calls == ['selection', 'selection', 'final', 'cards']
+    assert path.read_bytes() == before and output_spend(out) == paid
 
 
 def source_edit(monkeypatch, module):

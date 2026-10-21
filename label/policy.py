@@ -18,10 +18,18 @@ REASONING_TOKENS = {'none': 0, 'minimal': 1000, 'low': 2000, 'medium': 4000, 'hi
 # (auto) only a recording with depth or a touch sensor (tactile, pressure, contact; a wrist force/torque sensor alone
 # does not count) is inspected, all inspects any recording with recorded fields beyond its cameras, and off buys no
 # selection. The field dictionary asks once per upload what uncertain fields mean
-# (label/dictionary_stage.py), on by default. A setting at its default is not written into the policy, so a default
-# policy reads exactly as it did before these settings existed.
+# (label/dictionary_stage.py), on by default, and is written into the policy only when off.
+# A policy saved before inspection could be set inspected every recording with recorded fields, so a saved policy
+# without the setting keeps that (LEGACY_INSPECTION, never written) and a job labelled then resumes as it was paid
+# for; a new policy writes its mode, auto unless asked otherwise.
 INSPECTION_MODES = ('auto', 'all', 'off')
 INSPECTION = 'auto'
+LEGACY_INSPECTION = 'all'
+
+
+def inspection_mode(selected: dict) -> str:
+    """The inspection mode of a resolved or saved policy."""
+    return selected.get('inspection', LEGACY_INSPECTION)
 
 
 def output_limit(answer_tokens: int, reasoning: str) -> int:
@@ -83,7 +91,7 @@ def resolve(ctx: dict, *, model: str | None = None, reasoning: str | None = None
         if type(previous) not in (float, int) or not math.isfinite(previous) or not 0 < previous <= maximum:
             raise ValueError('saved part allowance is incompatible; rebuild with an explicit policy')
         maximum = previous
-    inspect = inspection if inspection is not None else saved.get('inspection', INSPECTION)
+    inspect = inspection if inspection is not None else inspection_mode(saved) if saved else INSPECTION
     if inspect not in INSPECTION_MODES:
         raise ValueError(f'inspection must be one of {", ".join(INSPECTION_MODES)}')
     dictionary = field_dictionary if field_dictionary is not None else saved.get('field_dictionary', True)
@@ -93,7 +101,7 @@ def resolve(ctx: dict, *, model: str | None = None, reasoning: str | None = None
             'sample_fps': float(sample_fps) if sample_fps is not None else None,
             'sample_every_s': period, 'part_max_s': maximum, 'task_mode': mode,
             'dataset_note': note,
-            **({'inspection': inspect} if inspect != INSPECTION else {}),
+            **({'inspection': inspect} if inspect != LEGACY_INSPECTION else {}),
             **({'field_dictionary': False} if not dictionary else {})}
 
 

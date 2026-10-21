@@ -124,5 +124,5 @@ def test_inspection_turned_off_sends_only_the_annotation_and_a_touch_sensor_is_s
     assert harness.run_batch([on], tmp_path / 'on_out', **args) == 0
     assert sent[0] == 'selection' and sent[-1] == 'final'
     default = json.loads((tmp_path / 'on_out' / (on.name + '.json')).read_text())
-    assert 'inspection' not in default['annotation_policy']
+    assert default['annotation_policy']['inspection'] == 'auto'
     assert ea.INSPECTION_OFF not in default['evidence_inspection']['limitations']
