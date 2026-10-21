@@ -1,6 +1,8 @@
 """A per-instant row whose readings track a row already sent is sent once, named as tracking it; its range line stays."""
 from __future__ import annotations
 
+import re
+
 import numpy as np
 
 from label import episode as me
@@ -51,9 +53,11 @@ def test_a_commanded_arm_and_the_arm_that_follows_it_send_the_following_rows_onc
     shown, left, whole, _ = _readout(ep, pl)
     assert shown == [f"aa.b q{j}" for j in range(6)] + ["aa.b_grip"]
     assert len(left) == 1
-    assert left[0].startswith("  The values at each instant leave out zz.a q0, q1, q2, q3, q4 and q5 (tracking aa.b "
-                              "q0, q1, q2, q3, q4 and q5) and zz.a grip (tracking aa.b_grip)")
-    assert left[0].endswith("Their ranges are given above, where values that come apart still show.")
+    relations = _relation_lines(_readout(ep, pl)[3])
+    assert [r.split(" ≈ ")[0] for r in relations] == [f"zz.a q{j}" for j in range(6)] + ["zz.a grip"]
+    assert all(re.search(rf"≈ (0.999|1) x aa.b q{j}, 0.(07|10) s later \(within \d\.\d%\) \(max ", relations[j])
+               for j in range(6))
+    assert re.search(r"≈ 1 x aa.b_grip, 0.(07|10) s later \(within ", relations[6]) and "(max 1 at " in relations[6]
     assert "zz.a" not in whole and {"aa.b", "aa.b_grip"} <= whole
     # every range line stays
     table = me.build_prompt(ep, pl, cell_w=448, cell_h=252)[1].split("OTHER RECORDED SIGNALS")[1]
@@ -73,7 +77,7 @@ def test_a_sign_flipped_scaled_copy_is_caught():
     assert same and lag == 0
     ep, pl = _case({"rad": x, "deg_mirrored": -57.2958 * x + 10.0})
     shown, left, _, _ = _readout(ep, pl)
-    assert len(shown) == 1 and len(left) == 1 and "tracking" in left[0]
+    assert len(shown) == 1 and len(left) == 1 and len(_relation_lines(_readout(ep, pl)[3])) == 1
 
 
 def test_a_pair_that_comes_apart_halfway_keeps_both_rows():
@@ -103,15 +107,20 @@ def _stalled(secs: int, seed: int = 4):
 
 
 def _apart_lines(lines):
-    """The lines of rows that track another except where they come apart: (row, partner, [reading times])."""
+    """The lines of rows that follow another except where they come apart: (row, partner, [reading times])."""
     out = []
     for l in lines:
-        if " tracks " in l and " except " in l:
-            row, rest = l.strip().split(" tracks ", 1)
-            other = rest.split(" except ", 1)[0]
+        if " ≈ " in l and ", except " in l and "given: " in l:
+            row, rest = l.strip().split(" ≈ ", 1)
+            other = rest.split(" x ", 1)[1].split(",", 1)[0].split(" (", 1)[0]
             times = [float(p.split()[0]) for p in rest.split("given: ", 1)[1].rstrip(".").split(", ")]
             out.append((row, other, times))
     return out
+
+
+def _relation_lines(lines):
+    """The lines of rows left out whole as following another: the fitted relation of each."""
+    return [l.strip() for l in lines if " ≈ " in l and ", except " not in l]
 
 
 def test_a_two_second_stall_sends_the_command_only_around_the_stall():
@@ -124,7 +133,7 @@ def test_a_two_second_stall_sends_the_command_only_around_the_stall():
     (row, other, times), = _apart_lines(lines)
     assert (row, other) == ("cmd", "arm")
     assert 20.0 in times and 21.0 in times and min(times) >= 18.0 and max(times) <= 24.0
-    assert any(l.strip().startswith("These rows follow another row") for l in lines)
+    assert any(l.strip().startswith("These rows follow a sent row") for l in lines)
 
 
 def test_a_six_second_stall_sends_the_command_only_around_the_stall():
@@ -190,3 +199,55 @@ def test_a_stall_between_instants_is_seen_on_the_frames():
     same, lag = sg.tracking(cmd, arm, ks, FPS)
     apart = sg.apart_instants(cmd, arm, ks, lag, FPS)
     assert same and {20, 21} <= set(apart) and len(apart) <= 5
+
+
+def test_grippers_moving_together_and_opposite_give_different_relations():
+    """right = left and right = 1 - left are both sent once, but the line says which: the sign and offset of the fit."""
+    left, _ = _gripper()
+    texts = {}
+    for name, right in (("together", left.copy()), ("opposite", 1.0 - left)):
+        ep, pl = _case({"left_gripper": left, "right_gripper": right})
+        lines, _ = me._signal_readout(ep, pl)
+        (line,) = _relation_lines(lines)
+        texts[name] = line
+    assert texts["together"] != texts["opposite"]
+    assert texts["together"].startswith("right_gripper ≈ 1 x left_gripper")
+    assert texts["opposite"].startswith("right_gripper ≈ 1 - 1 x left_gripper")
+
+
+def test_a_mirrored_degree_copy_states_its_scale():
+    x = _path(3)
+    ep, pl = _case({"rad": x, "deg_mirrored": -57.2958 * x + 10.0})
+    lines, _ = me._signal_readout(ep, pl)
+    (line,) = _relation_lines(lines)
+    assert line.startswith("deg_mirrored ≈ 10 - 57.3 x rad")
+
+
+def test_a_short_pulse_left_out_keeps_its_time():
+    """A 150 ms motor-current pulse on top of noise: the row is left out as unresolved, but when the pulse came stays."""
+    rng = np.random.default_rng(4)
+    current = 0.05 * rng.normal(size=N)
+    current[1260:1265] = 3.21          # 42.00 s to 42.13 s, on the instant at 42 s
+    ep, pl = _case({"motor.current": current, "j": _path(1)})
+    lines, _ = me._signal_readout(ep, pl)
+    left = next(l for l in lines if "does not resolve their readings" in l)
+    assert "motor.current (max 3.21 at 42.00 s" in left
+
+
+def test_what_is_said_about_rows_left_out_is_paid_from_the_readout_budget(monkeypatch):
+    """Relations, extreme times, readings where apart and the rows themselves stay within the character budget; only
+    the sentence naming what the budget left out is outside it."""
+    monkeypatch.setattr(me, "SIGNAL_TABLE_MAX_CHARS", 3000)
+    monkeypatch.setattr(me, "SIGNAL_TABLE_MIN_CHARS", 3000)
+    cmd, arm = _stalled(2)
+    vel = np.random.default_rng(6).normal(size=N)
+    joints = {f"j{k}": _path(20 + k) for k in range(6)}
+    shown, _, _, lines = _readout(*_case({"cmd": cmd, "arm": arm, "vel": vel, **joints}))
+    paid = [l for l in lines if "no more room" not in l]
+    room = next(l for l in lines if "no more room" in l)
+    # the command's readings where it comes apart are ranked with the rows: sent, or named as left out for room
+    assert any(" ≈ " in l for l in paid) or "cmd" in room
+    assert any("does not resolve" in l and "vel (max " in l for l in paid)
+    # the row the command is read from is sent first, whatever its rank
+    assert "arm" in shown
+    assert sum(len(l) + 1 for l in paid) <= 3000 + len(lines[0]) + 1

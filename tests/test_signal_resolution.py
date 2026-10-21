@@ -63,7 +63,8 @@ def test_a_gripper_position_row_survives_and_an_aliased_velocity_row_is_dropped_
     left = [l for l in table.splitlines() if "because one instant every 1.00 s does not resolve their readings" in l]
     assert len(left) == 1 and "arm.vel" in left[0] and "arm.effort" in left[0]
     assert "arm.gripper" not in left[0] and "arm.joint" not in left[0]
-    assert left[0].endswith("Their ranges are given above.")
+    assert left[0].endswith("Their ranges are given above, and when each reached its largest and smallest reading.")
+    assert "arm.vel (max " in left[0] and " s, min " in left[0]
     # a velocity that never changes gets no row and is named once with its value
     assert "    arm.still_vel: " not in readout and "arm.still_vel 0" in table
 

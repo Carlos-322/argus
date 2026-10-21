@@ -1694,7 +1694,7 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
     ks = pl["ks"]
     rows = []             # (how much the row's values move, the signal's place, the row's place, signal, label, values)
     unread = {}           # signal: the error that kept its rows out, named below
-    aliased = {}          # signal: [labels of its rows whose readings at the instants do not resolve it]
+    aliased = {}          # signal: [(label, readings at every frame) of rows the instants do not resolve]
     counts = {}           # signal: how many rows it has
     series = {}           # (signal's place, row's place): the value's readings at every frame, for rows of one value
     for i, (name, a) in enumerate(arrs.items()):
@@ -1720,7 +1720,7 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
         cols = sg.columns(a) if by_value else None
         for j, (lb, v) in enumerate(got):
             if not ok[j]:
-                aliased.setdefault(name, []).append(lb)
+                aliased.setdefault(name, []).append((lb, cols[:, j] if by_value else None))
                 continue
             if by_value:
                 series[i, j] = cols[:, j]
@@ -1735,23 +1735,23 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
     # rows left out because their readings at the instants do not resolve them are named, with why
     step = float(np.median(np.diff([frame_time(ep, k) for k in ks]))) if len(ks) > 1 else every_s(ep)
     unresolved = ([f"  The values at each instant leave out "
-                   + _and_list([f"{nm} ({len(lbs)} of its {counts[nm]} rows)" if len(lbs) < counts[nm] else nm
-                                for nm, lbs in aliased.items()])
+                   + _and_list([lb + _extremes_words(ep, ks, col) for lbs in aliased.values() for lb, col in lbs])
                    + f", because one instant every {_seconds_number(step, 2)} s does not resolve their readings: they "
                      "swing faster than that or only jitter by their noise, so a reading at one instant does not stand "
-                     "for the time around it. Their ranges are given above."] if aliased else [])
+                     "for the time around it. Their ranges are given above, and when each reached its largest and "
+                     "smallest reading."] if aliased else [])
     # a row whose readings track a row already sent is sent once (label/signals.py tracking)
     rows, tracked = _drop_tracking(ep, rows, series, ks)
     whole_copies = [(r, s) for r, s, a in tracked if not a]
     partly = [(r, s, a) for r, s, a in tracked if a]
-    repeated = ([f"  The values at each instant leave out " + _tracking_words(whole_copies)
-                 + f", because their readings at the instants follow that row's (up to sign, scale and a lag of at "
-                   f"most {_seconds_number(sg.TRACK_LAG_S, 1)} s), so each is sent once. Their ranges are given above, "
-                   "where values that come apart still show."] if whole_copies else [])
+    repeated = ([f"  The values at each instant leave out these rows, because each follows a row that is sent, as "
+                 "fitted here (\"later\" means the sent row reaches the same value that much later), so each is sent "
+                 "once; how closely the fit holds is its largest miss at any instant, as a share of the row's range:"]
+                + [f"  {_relation_words(ep, ks, r, s, series)}{_extremes_words(ep, ks, series[r[1], r[2]])}"
+                   for r, s in sorted(whole_copies, key=lambda p: (p[0][1], p[0][2]))] if whole_copies else [])
     # a row read only where it comes apart is charged to the same budget as the rows, ranked with them
-    apart_head = (f"  These rows follow another row the same way (up to sign, scale and a lag of at most "
-                  f"{_seconds_number(sg.TRACK_LAG_S, 1)} s) except where they come apart, so they are given only "
-                  "there, with the time of each reading:")
+    apart_head = ("  These rows follow a sent row as fitted here except where they come apart, so they are given "
+                  "only there, with the time of each reading:")
     unresolved = unresolved + repeated
     partial = [r for r, _, _ in partly]
     if not rows and not partial:
@@ -1759,12 +1759,15 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
     lines = []
     head = "    at: " + " ".join(f"{frame_time(ep, k):.2f}" for k in ks)
     text = {(r[1], r[2]): f"    {r[4]}: " + " ".join(r[5]) for r in rows}
-    text.update({(r[1], r[2]): _apart_line(ep, ks, r, s, a) for r, s, a in partly})
+    text.update({(r[1], r[2]): _apart_line(ep, ks, r, s, a, series) for r, s, a in partly})
     budget = signal_readout_budget(len(ks))
-    room, chosen = budget, set()
+    # what is said about the rows left out (when their extremes fell, the relation a copy follows) is paid first
+    room, chosen = budget - sum(len(x) + 1 for x in unresolved), set()
     skipped, kept_after_skip = False, False
     is_partial = {(r[1], r[2]) for r in partial}
-    for r in sorted(rows + partial, key=lambda r: (-r[0][0], -r[0][1], r[1], r[2])):
+    # a sent row that other rows are read from (their relation names it) comes first: without it they say nothing
+    partners = {(s[1], s[2]) for _, s, _ in tracked}
+    for r in sorted(rows + partial, key=lambda r: ((r[1], r[2]) not in partners, -r[0][0], -r[0][1], r[1], r[2])):
         key = (r[1], r[2])
         # the times row and the heading of the lines read only where apart are paid once, by the first of each
         extra = (len(apart_head) if not any(k in is_partial for k in chosen) else 0) if key in is_partial else \
@@ -1842,8 +1845,8 @@ def _drop_tracking(ep: dict, rows: list, series: dict, ks: list[int]) -> tuple[l
     return [r for r in rows if id(r) in sent], tracked
 
 
-def _apart_line(ep: dict, ks: list[int], row: tuple, other: tuple, apart: list[int]) -> str:
-    """One row that tracks another except at some instants: the stretches, and its readings at those instants."""
+def _apart_line(ep: dict, ks: list[int], row: tuple, other: tuple, apart: list[int], series: dict) -> str:
+    """One row that tracks another except at some instants: the relation, the stretches, and its readings there."""
     runs, start = [], apart[0]
     for a, b in zip(apart, apart[1:] + [None]):
         if b != a + 1:
@@ -1852,23 +1855,50 @@ def _apart_line(ep: dict, ks: list[int], row: tuple, other: tuple, apart: list[i
     stretches = _and_list([f"{_seconds_number(frame_time(ep, ks[a]), 1)} to "
                            f"{_seconds_number(frame_time(ep, ks[b]), 1)} s" for a, b in runs])
     readings = ", ".join(f"{frame_time(ep, ks[i]):.2f} {row[5][i]}" for i in apart)
-    return f"  {row[4]} tracks {other[4]} except {stretches}, where its readings are given: {readings}."
+    return (f"  {_relation_words(ep, ks, row, other, series, apart)}{_extremes_words(ep, ks, series[row[1], row[2]])}"
+            f", except {stretches}, where its readings are given: {readings}.")
 
 
-def _tracking_words(tracked: list) -> str:
-    """The rows left out as tracking another, grouped by their signal and the signal they track: "S [0], [1] and [2]
-    (tracking T [0], [1] and [2])"."""
-    groups = {}
-    for r, s in tracked:
-        groups.setdefault((r[3], s[3]), []).append((r, s))
-    words = []
-    for (name, other), pairs in groups.items():
-        pairs.sort(key=lambda p: (p[0][2], p[1][2]))
-        own = [r[4][len(name):].strip() for r, _ in pairs]
-        theirs = [s[4][len(other):].strip() for _, s in pairs]
-        mine = name + (" " + _and_list(own) if any(own) else "")
-        words.append(f"{mine} (tracking {other}" + (" " + _and_list(theirs) if any(theirs) else "") + ")")
-    return _and_list(words)
+def _relation_words(ep: dict, ks: list[int], row: tuple, other: tuple, series: dict, apart=()) -> str:
+    """"row ≈ a + b x other, 0.10 s later (within 2.1%)": the straight line through the sent row that the left out row
+    follows at the instants (outside its apart instants), in the left out row's own units, the lag at which it holds best,
+    and its largest miss at any of those instants as a share of the row's range."""
+    from label import signals as sg
+    fps = ep_fps(ep)
+    x, y = series[other[1], other[2]], series[row[1], row[2]]
+    _, lag = sg.tracking(x, y, ks, fps)
+    k = np.asarray(ks, dtype=int)
+    keep = np.ones(len(k), dtype=bool)
+    keep[list(apart)] = False
+    xa, ya = x[np.clip(k + lag, 0, len(x) - 1)][keep], y[k][keep]
+    good = np.isfinite(xa) & np.isfinite(ya)
+    b, a = np.polyfit(xa[good], ya[good], 1)
+    span = float(np.ptp(ya[good])) or 1.0
+    miss = float(np.max(np.abs(ya[good] - (a + b * xa[good])))) / span
+    # the offset is said to the nearest 1% of the row's range (the fit is no closer than that), the scale to three
+    # figures; an offset that rounds to nothing is left out
+    step = 10.0 ** np.floor(np.log10(0.01 * span))
+    a = float(np.round(a / step) * step)
+    a = 0.0 if abs(a) < step / 2 else a
+    when = ("" if lag == 0 else f", {_seconds_number(abs(lag) / fps, 2)} s {'later' if lag > 0 else 'earlier'}")
+    scale = f"{sg.reading_text(abs(b))} x {other[4]}"
+    fit = (f"{sg.reading_text(a)} {'-' if b < 0 else '+'} {scale}" if a else f"{'-' if b < 0 else ''}{scale}")
+    return f"{row[4]} ≈ {fit}{when} (within {100 * miss:.1f}%)"
+
+
+def _extremes_words(ep: dict, ks: list[int], col) -> str:
+    """" (max 3.21 at 41.32 s, min -0.05 at 12.10 s)": when a row left out reached its largest and smallest reading,
+    read at every frame from the first instant to the last, so a short pulse between or on an instant keeps its time."""
+    from label import signals as sg
+    if col is None:
+        return ""
+    lo, hi = int(ks[0]), int(ks[-1]) + 1
+    v = np.asarray(col[lo:hi], dtype=np.float64)
+    if not np.isfinite(v).any():
+        return ""
+    i, j = int(np.nanargmax(v)), int(np.nanargmin(v))
+    return (f" (max {sg.reading_text(v[i])} at {_seconds_number(frame_time(ep, lo + i), 2)} s, "
+            f"min {sg.reading_text(v[j])} at {_seconds_number(frame_time(ep, lo + j), 2)} s)")
 
 
 def _readout_of(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
