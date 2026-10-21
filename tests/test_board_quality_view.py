@@ -93,6 +93,19 @@ q = quality({scores: scores({})}, {completed_at_s: null, goal_reached_at_s: 44},
 assert.strictEqual(q.episodeGoalT, 44);
 assert(q.qualityHtml.includes('reached 44.0s'));
 
+// no goal time reads "not reached" only for a failed or partial verdict; an unclear one says so, unflagged; a session
+// with no labelled task says that, with the completion's reason (a part with no labels) as its tooltip
+const outcomeBox = html => html.slice(html.indexOf('Outcome</span>'));
+q = quality({scores: scores({inputs: {outcome: 'unclear', penalties: [], progress_reached: null}})}, {}, esc, fmtT, false, 5);
+assert(outcomeBox(q.qualityHtml).includes('unclear') && !outcomeBox(q.qualityHtml).includes('not reached'));
+q = quality({scores: scores({inputs: {outcome: 'failure', penalties: [], progress_reached: .4}})}, {}, esc, fmtT, false, 5);
+assert(outcomeBox(q.qualityHtml).includes('not reached'));
+const why = "a session of several tasks; each task's outcome is under tasks; part 1 has no labels, as reply cut off";
+q = quality({prompt_mode: 'session', scores: scores({inputs: {outcome: null, penalties: [], progress_reached: null}})},
+            {reason: why}, esc, fmtT, false, 5);
+const sessionBox = outcomeBox(q.qualityHtml);
+assert(sessionBox.includes('none labelled') && sessionBox.includes(esc(why)) && !sessionBox.includes('not reached'), sessionBox);
+
 // key-event kinds: a subgoal_complete is "Subgoal N" everywhere, numbered like the Quality table when scored and
 // among subgoals only when not
 const nameSrc = cut("  // a key event's kind in words", '  let keyMarkersHtml');

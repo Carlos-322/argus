@@ -1281,13 +1281,16 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
     uniq = list(dict.fromkeys(summaries))
     L["task_summary"] = uniq[0] if len(uniq) == 1 else " ".join(f"({i}) {s}" for i, s in enumerate(uniq, 1))
     L["performance_review"] = " ".join(reviews)
-    L["completion"] = {"task_completed": "unclear", "success_predicate": None, "completed_at_s": None,
-                       "goal_reached_at_s": None, "undone_at_s": None, "undone_by": None,
-                       "reason": f"Labelled in {count} requests with independently inferred goals. "
-                                 "Local outcomes and progress are under part_assessments; "
-                                 "they do not establish a whole-recording outcome."
-                                 + ("; " + "; ".join(f"part {g['part']} has no labels, as {g['why']}" for g in missing)
-                                    if missing else "")}
+    # a session has no recording-wide goal in one request or in many (label/prompts.py SESSION_RULES): its outcome is
+    # its tasks', joined across the cuts above; only an episode labelled in parts lacks a whole-recording verdict
+    session = any((r.get('annotation_policy') or {}).get('task_mode') == 'session' for _, r in parts)
+    gaps = ("; " + "; ".join(f"part {g['part']} has no labels, as {g['why']}" for g in missing)) if missing else ""
+    L["completion"] = {"task_completed": None if session else "unclear", "success_predicate": None,
+                       "completed_at_s": None, "goal_reached_at_s": None, "undone_at_s": None, "undone_by": None,
+                       "reason": ("a session of several tasks; each task's outcome is under tasks" if session else
+                                  f"Labelled in {count} requests with independently inferred goals. "
+                                  "Local outcomes and progress are under part_assessments; "
+                                  "they do not establish a whole-recording outcome.") + gaps}
     for k in ("timeline",):
         L[k].sort(key=lambda s: (s.get("start_s") is None, s.get("start_s") or 0))      # an untimed step last
     L["tasks"] = mark_cut_tasks(join_across_cuts(L["tasks"], cuts_s), cuts_s, L)

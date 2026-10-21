@@ -6483,7 +6483,11 @@ function renderEp(d, opts) {
           'Subtasks whose end state the footage shows reached', qIn.tasks_done < qIn.tasks_judged)}
         ${cell('Unclear', null, `${qIn.tasks_total - qIn.tasks_judged} subtask${qIn.tasks_total - qIn.tasks_judged === 1 ? '' : 's'}`,
           'Subtasks the footage does not settle (eg cut off by the end of the clip) or whose progress is not measured; they count for nothing either way')}`
-      : `${cell('Goal', null, goalT != null ? `reached ${fmtT(goalT)}` : 'not reached', 'When the labelled goal was first met', goalT == null)}
+      : d.prompt_mode === 'session' ? cell('Subtasks', null, 'none labelled',
+          (comp && comp.reason) || 'The labels name no task in this session', true)
+      : `${cell('Goal', null, goalT != null ? `reached ${fmtT(goalT)}`
+          : ['failure', 'partial'].includes(qIn.outcome) ? 'not reached' : 'unclear',
+          'When the labelled goal was first met', goalT == null && ['failure', 'partial'].includes(qIn.outcome))}
       ${qIn.progress_reached == null ? cell('Progress', null, 'not measured',
           'Labelled in parts, each part measuring progress toward its own local goal only, so the whole goal has none')
         : cell('Progress', 10 * qIn.progress_reached, '', 'The furthest the work got toward the labelled goal',

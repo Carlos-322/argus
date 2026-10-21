@@ -1215,7 +1215,10 @@ def test_stitch_preserves_session_policy_and_segmented_jaw_receipts(tmp_path, mo
     assert [task['task'] for task in tasks] == ['Seat the latch', 'Tighten the screw']
     assert tasks[1]['completed_at_s'] == round(contexts[2]['piece']['t0_s'] + .6, 3)
     assert [task['source_piece']['index'] for task in tasks] == [1, 3]
-    assert result['labels']['completion']['task_completed'] == 'unclear'
+    # a session labelled in parts has no recording-wide goal, as one labelled in one request has none
+    completion = result['labels']['completion']
+    assert completion['task_completed'] is None
+    assert completion['reason'] == "a session of several tasks; each task's outcome is under tasks; part 2 has no labels, as no reply"
     evidence = result['jaw_evidence']['right']
     assert evidence['status'] == 'segmented' and evidence['missing'] == missing
     assert evidence['source_proof'] == source_proof(parent, src)
