@@ -44,16 +44,16 @@ It is the only harness to combine native multi-format ingestion (rather than res
 | Recording types | Teleop, UMI and human ego |
 | Native formats | LeRobot v2.0/v2.1/v3.0, MCAP, HDF5, video files and folders |
 | Archives | ZIP and TAR, plain or compressed with gzip, bzip2 or xz |
-| Sidecar metadata | JSON, JSON Lines, CSV, TSV, text and Markdown notes, and LeRobot's Parquet and JSON Lines annotation tables; YAML, TOML, INI and XML are reported as unread |
-| Public dataset adapters | Nine, each downloading and preparing a public dataset; six can also sample episodes |
+| Sidecar metadata | JSON, JSON Lines, CSV, TSV, text and Markdown notes, and LeRobot's Parquet and JSON Lines annotation tables |
+| Public dataset adapters | Nine, each downloading and preparing a public dataset |
 
 | Available evidence | How it contributes |
 |---|---|
 | RGB | Timestamped multi-view frames provide visual context for task execution, object interactions, progress, failures and recoveries. |
-| Tactile, inspected by default | Pressure, normal/shear force, contact arrays and optical tactile images support analysis of grip, contact distribution and surface motion. Full-array patterns, individual-cell and regional responses, and hand geometry are compared with video and gripper state. Optical tactile images are compared at the moments they change most, and arrays with regional evidence get a separate regional pass. A publisher's declared layout, such as the bundled [OpenTouch contract](configs/sensor_schemas/opentouch_hdf5_v1.json) that names the glove's hand regions, is treated as the publisher's claim, not a verified map of the hardware. Array shape alone does not establish anatomy or force, and response changes alone do not establish slip. |
+| Tactile, inspected by default | Pressure, normal/shear force, contact arrays and optical tactile images support analysis of grip, contact distribution and surface motion. Full-array patterns, individual-cell and regional responses, and hand geometry are compared with video and gripper state. Optical tactile images are compared at the moments they change most, and arrays with regional evidence get a separate regional pass. Array shape alone does not establish anatomy or force, and response changes alone do not establish slip. |
 | Depth, inspected by default | Metric depth supports camera-relative distance and separation when units, calibration and temporal alignment are known. Relative depth remains relative. |
-| Proprioception and actions | Joint states, end-effector poses, gripper states and action trajectories provide motion context. Training targets retain their declared semantics rather than being assumed to be executed commands. Every reader (LeRobot, HDF5 and MCAP) converts joint angles declared in degrees, or whose readings can only be degrees, to radians, and the state contract records why. A state declared in radians whose readings can only be degrees is kept as recorded, flagged, and left out of kinematic checks. |
-| Other episode fields | Force/torque, numeric channels, event flags, waveform packets and structured metadata reach the prompt as range lines, with a reading at each sampled instant only for channels the sampling rate resolves and that no other channel already carries. [`--inspection all`](label/policy.py) also inspects them. Spectral analysis of eligible waveforms requires a recorded sample rate. |
+| Proprioception and actions | Joint states, end-effector poses, gripper states and action trajectories provide motion context. Training targets retain their declared semantics rather than being assumed to be executed commands. |
+| Other episode fields | Force/torque, numeric channels, event flags, waveform packets and structured metadata reach the prompt as range lines, with a reading at each sampled instant only for channels the sampling rate resolves and that no other channel already carries. [`--inspection all`](label/policy.py) also inspects them. |
 | Task context | Instructions, annotations and calibration metadata provide context. The VLM checks publisher claims against the recording rather than assuming their correctness. |
 
 ## Install and review
@@ -66,16 +66,9 @@ cd argus
 uv sync --frozen
 ```
 
-Paid annotation requires [`OPENROUTER_API_KEYS`](label/harness.py) (comma-separated keys) or [`OPENAI_API_KEY`](label/harness.py) in your shell or secret manager. Gated Hugging Face datasets require accepting their terms and setting [`HF_TOKEN`](prepare/hub.py). Keep inputs and outputs under the ignored [`data/`](.gitignore#L1) directory.
+Paid annotation requires [`OPENROUTER_API_KEYS`](label/harness.py) (comma-separated keys) or [`OPENAI_API_KEY`](label/harness.py) in your shell or secret manager. Gated Hugging Face datasets require accepting their terms and setting [`HF_TOKEN`](prepare/hub.py).
 
-Prepare and inspect base requests without model calls.
-
-```console
-uv run python -m review --data path/to/dataset --rig teleop_arms \
-  --dataset-note "Two arms arrange blocks on a tray." --out data/review/mine --free
-```
-
-Annotate the same data into the same `--out` folder under a spending cap, then open its board.
+Annotate a dataset under a spending cap, then open its board. Add [`--free`](review/__main__.py) to build the same requests without model calls.
 
 ```console
 uv run python -m review --data path/to/dataset --rig teleop_arms \
@@ -102,13 +95,11 @@ Each recording produces one episode. A recording longer than one request allows 
 
 ## Results and further use
 
-Live and static boards share one [viewer](board/index.html), which overlays behavioral and sensor annotations on the footage with the supporting measurements beside it. After annotation, one text-only call to the same model picks the sensor findings worth overlaying on the video, at most two at once, and rewrites every finding in plain English; every finding stays in the list and the JSON export, and if the call fails, every finding plays on the video. The same findings export as episode JSON, filtered JSON Lines and static sites. Issues with missing or invalid severity remain visible as unrated and are excluded from severity totals.
+Live and static boards share one [viewer](board/index.html), which overlays behavioral and sensor annotations on the footage with the supporting measurements beside it. The same findings export as episode JSON, filtered JSON Lines and static sites. Issues with missing or invalid severity remain visible as unrated and are excluded from severity totals.
 
-Action phases distinguish advancing, wasteful and idle behavior. When the board is built, [`board/scores.py`](board/scores.py) combines them with the completion judgment, operator mistakes and failed attempts into execution and outcome scores for each episode and an execution score for each subgoal. Sensor findings include evidence, confidence and alternative explanations; inconclusive evidence need not produce a finding.
+Public exports, meaning the static site, downloads and [`/api/export`](board/serve.py), name the uploader's own metadata (file attributes, sidecar fields, publisher fields) but leave out its values, because no filter can recognize every secret a person writes there. Add [`--publish-uploader-values`](board/serve.py) to `board serve` or `board static site` to publish them. Exports also redact access attributes, recognizable credential values and private access locations in every field.
 
-Public exports, meaning the static site, downloads and [`/api/export`](board/serve.py), name the uploader's own metadata (file attributes, sidecar fields, publisher fields) but leave out its values, because no filter can recognize every secret a person writes there. A board served on 127.0.0.1 without `--allow-host` shows those values in its pages, and its downloads still leave them out. Add [`--publish-uploader-values`](board/serve.py) to `board serve` or `board static site` to publish them. Exports also redact access attributes, recognizable credential values and private access locations in every field.
-
-Field definitions supplied by the dataset publisher or user override inferred meanings and layouts without changing recorded measurements. Changes to source data or field interpretations invalidate stale findings. Shared footage retains its source license and access policy.
+Field definitions supplied by the dataset publisher or user override inferred meanings and layouts without changing recorded measurements. Changes to source data or field interpretations invalidate stale findings.
 
 ![Two-camera UMI annotation walkthrough, with action phases, subgoals and goal reasoning over the footage.](media/board_demo.webp)
 
@@ -128,6 +119,10 @@ The staged commands label each prepared episode in one request: they do not spli
 
 Public adapters are [`molmo`](prepare/molmo.py), [`abc130k`](prepare/abc130k.py), [`galaxea`](prepare/galaxea.py), [`habit`](prepare/habit.py), [`fastumi`](prepare/fastumi.py), [`realomin`](prepare/realomin.py), [`egocentric100k`](prepare/egocentric100k.py), [`genhumanego`](prepare/genhumanego.py) and [`openaoe`](prepare/openaoe.py); [`configs/slices/`](configs/slices/) records published selections. Generic readers preserve source fields and encoded timestamps, using publisher metadata to align episode frames and sensor samples. MCAP falls back to a common recorder arrival clock when capture clocks cannot be shared; arrival timing does not establish physical synchronization. Fields whose clocks cannot be related to the footage remain available as untimed source evidence, except an episode's own sensor file, which is placed from both starts and marked as an assumption. Generic readers do not apply a corpus release's cropping or task selection. Raw video packets with frame reordering are rejected when decode timestamps are unavailable; other readable cameras are retained. When part of an episode is damaged or unreadable, such as its state, a signal, its metadata, a sidecar or one camera, that part is left out and named on the episode, and the episode keeps every camera that can still be read. Each episode is read in a separate process, so a file that hangs or crashes a native reader is read again with its cameras alone instead of stopping the upload. A camera whose own timestamps disagree with the declared frame rate is placed by its timestamps, and the disagreement is flagged. A video used as it was uploaded is decoded once while it is prepared, so frames the decoder hides after damage are named with their span. A damaged ZIP is read through both of its indexes, and a member whose two names disagree is read as an upload of its own, so no table, task or metadata of the upload it came from describes it. Archives inside archives are opened at any depth, up to 20,000 files and 40 GB for the whole upload, and past either limit the unpack stops and says so. A member the filesystem cannot hold is left out and named while the rest of the upload is read.
 
+Every reader (LeRobot, HDF5 and MCAP) converts joint angles declared in degrees, or whose readings can only be degrees, to radians, and the state contract records why. A state declared in radians whose readings can only be degrees is kept as recorded, flagged, and left out of kinematic checks.
+
+A publisher's declared layout, such as the bundled [OpenTouch contract](configs/sensor_schemas/opentouch_hdf5_v1.json) that names the glove's hand regions, is treated as the publisher's claim, not a verified map of the hardware.
+
 For example, download and prepare the single MolmoAct2 episode listed in the quickstart:
 
 ```console
@@ -137,7 +132,7 @@ uv run python -m prepare molmo prepare --episodes configs/quickstart/teleop.txt 
 
 The adapter retrieves the source files needed for that episode, including shared video packs, and preserves its camera offsets and state/action trajectories. Preparation makes no model calls.
 
-For a custom board, create [`data/boards/mine/manifest.json`](configs/quickstart/board.json) with the dataset, prepared episodes and run paths. [configs/quickstart/board.json](configs/quickstart/board.json) shows the structure with published-dataset severity rules. Use [`python -m board build`](board/build.py), [`clips`](board/clips.py), [`serve`](board/serve.py), and [`static media`](board/static.py)/[`static site`](board/static.py); each takes [`--help`](board/__main__.py). Refresh the board after changing field definitions. To edit them in the local viewer, add [`--dictionary-job JOB`](board/serve.py) to [`board serve`](board/serve.py). The board answers only to `localhost`, and when [`--host`](board/serve.py) is a network address, also to IP addresses and the machine's own names. A reverse proxy that keeps the visitor's Host header, such as `tailscale serve` or Caddy, therefore gets 403 until you pass that name with [`--allow-host NAME`](board/serve.py).
+For a custom board, create [`data/boards/mine/manifest.json`](configs/quickstart/board.json) with the dataset, prepared episodes and run paths. [configs/quickstart/board.json](configs/quickstart/board.json) shows the structure with published-dataset severity rules. Use [`python -m board build`](board/build.py), [`clips`](board/clips.py), [`serve`](board/serve.py), and [`static media`](board/static.py)/[`static site`](board/static.py); each takes [`--help`](board/__main__.py). Refresh the board after changing field definitions. To edit them in the local viewer, add [`--dictionary-job JOB`](board/serve.py) to [`board serve`](board/serve.py). The board answers only to `localhost`, and when [`--host`](board/serve.py) is a network address, also to IP addresses and the machine's own names. A reverse proxy that keeps the visitor's Host header, such as `tailscale serve` or Caddy, therefore gets 403 until you pass that name with [`--allow-host NAME`](board/serve.py). A board served on 127.0.0.1 without `--allow-host` shows those values in its pages, and its downloads still leave them out.
 
 Export the same review as a static viewer by preparing the media first, then building the site:
 
@@ -151,6 +146,8 @@ The site is written to [`data/review/mine/static/<build_id>/`](board/static.py),
 A resumed review keeps its settings, refuses changed ones, and reuses its verified preparation, so use a fresh `--out` to change source data, prepared inputs or annotation settings, or to apply newer reader fixes. After a code change, a recording labelled in one request is verified offline against its saved receipt, exact prompt and image order included, and its retained reply is rebound without another call; when that proof is missing or has changed, [`--force`](label/harness.py) relabels the episode with new paid calls. Unresolved charges stay reserved, and inspection blocked by the cap resumes when the allowance increases, before final annotation is dispatched.
 
 A free review stops after prepared [`episodes/`](review/__main__.py) and base requests in [`dry/`](review/__main__.py). Paid annotation adds model inputs and receipts in [`run/`](review/__main__.py), rejoined labels in [`run_final/`](review/__main__.py), and the board; `review` exits 1 when any unit failed, and the board is still built.
+
+After annotation, one text-only call to the same model picks the sensor findings worth overlaying on the video, at most two at once, and rewrites every finding in plain English; every finding stays in the list and the JSON export, and if the call fails, every finding plays on the video.
 
 This is an excerpt from a pressure glove episode's downloadable JSON. In the list and on the video, a finding shows its `video_card` words when it has one, otherwise its `list_copy`, otherwise its own headline and detail. Evidence IDs resolve to recorded streams and samples in the full export:
 
