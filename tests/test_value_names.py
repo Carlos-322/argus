@@ -304,8 +304,9 @@ def test_a_lerobot_info_json_names_a_column_its_reader_left_unnamed():
     issues = vn.resolve(metas, {"observation.state": 3, "observation.effort": 3},
                         vn.claims_in(info, "meta/info.json"))
     assert not issues
-    assert metas["observation.state"] == {"names": ["x", "y", "z"], "names_source": "meta/info.json"}
-    assert metas["observation.effort"] == {}
+    assert metas["observation.state"] == {"names": ["x", "y", "z"], "names_source": "meta/info.json",
+                                          "units_undeclared": True}
+    assert metas["observation.effort"] == {"units_undeclared": True}
 
 
 def test_claims_that_disagree_name_nothing_and_say_so():
@@ -315,7 +316,7 @@ def test_claims_that_disagree_name_nothing_and_say_so():
     b = vn.claims_in({"joint_pos": ["b1", "b2"]}, "two.yaml")
     metas = {"/arm/state joint_pos": {}}
     issues = vn.resolve(metas, {"/arm/state joint_pos": 2}, a + b)
-    assert metas["/arm/state joint_pos"] == {} and issues[0]["kind"] == "value_names_conflict"
+    assert "names" not in metas["/arm/state joint_pos"] and issues[0]["kind"] == "value_names_conflict"
     specific = vn.claims_in({"arm/state": {"joint_pos": ["s1", "s2"]}}, "three.yaml")
     metas = {"/arm/state joint_pos": {}}
     assert not vn.resolve(metas, {"/arm/state joint_pos": 2}, a + b + specific)
