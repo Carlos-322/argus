@@ -1748,33 +1748,43 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
                  + f", because their readings at the instants follow that row's (up to sign, scale and a lag of at "
                    f"most {_seconds_number(sg.TRACK_LAG_S, 1)} s), so each is sent once. Their ranges are given above, "
                    "where values that come apart still show."] if whole_copies else [])
-    if partly:
-        repeated.append(f"  These rows follow another row the same way (up to sign, scale and a lag of at most "
-                        f"{_seconds_number(sg.TRACK_LAG_S, 1)} s) except where they come apart, so they are given only "
-                        "there, with the time of each reading:")
-        repeated += [_apart_line(ep, ks, r, s, a) for r, s, a in partly]
+    # a row read only where it comes apart is charged to the same budget as the rows, ranked with them
+    apart_head = (f"  These rows follow another row the same way (up to sign, scale and a lag of at most "
+                  f"{_seconds_number(sg.TRACK_LAG_S, 1)} s) except where they come apart, so they are given only "
+                  "there, with the time of each reading:")
     unresolved = unresolved + repeated
-    if not rows:
+    partial = [r for r, _, _ in partly]
+    if not rows and not partial:
         return unresolved + not_read, frozenset()
     lines = []
     head = "    at: " + " ".join(f"{frame_time(ep, k):.2f}" for k in ks)
     text = {(r[1], r[2]): f"    {r[4]}: " + " ".join(r[5]) for r in rows}
+    text.update({(r[1], r[2]): _apart_line(ep, ks, r, s, a) for r, s, a in partly})
     budget = signal_readout_budget(len(ks))
-    room, chosen = budget - len(head), set()
+    room, chosen = budget, set()
     skipped, kept_after_skip = False, False
-    for r in sorted(rows, key=lambda r: (-r[0][0], -r[0][1], r[1], r[2])):
-        if len(text[r[1], r[2]]) > room:
+    is_partial = {(r[1], r[2]) for r in partial}
+    for r in sorted(rows + partial, key=lambda r: (-r[0][0], -r[0][1], r[1], r[2])):
+        key = (r[1], r[2])
+        # the times row and the heading of the lines read only where apart are paid once, by the first of each
+        extra = (len(apart_head) if not any(k in is_partial for k in chosen) else 0) if key in is_partial else \
+            (len(head) if not any(k not in is_partial for k in chosen) else 0)
+        if len(text[key]) + extra > room:
             skipped = True
             continue
         kept_after_skip |= skipped
-        chosen.add((r[1], r[2]))
-        room -= len(text[r[1], r[2]])
-    if chosen:
+        chosen.add(key)
+        room -= len(text[key]) + extra
+    table = [r for r in rows if (r[1], r[2]) in chosen]
+    if table:
         lines.append("  Each signal that changes, at every instant you receive (seconds in the first row; \"-\" is "
                      "no reading):")
-        lines += [head] + [text[r[1], r[2]] for r in rows if (r[1], r[2]) in chosen]
+        lines += [head] + [text[r[1], r[2]] for r in table]
+    shown_apart = [text[r[1], r[2]] for r in partial if (r[1], r[2]) in chosen]
+    if shown_apart:
+        unresolved = unresolved + [apart_head] + shown_apart
     left = {}
-    for r in rows:
+    for r in rows + partial:
         if (r[1], r[2]) not in chosen:
             left.setdefault(r[3], []).append(r)
     if left:

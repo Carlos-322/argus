@@ -55,10 +55,11 @@ def test_the_change_threshold_sits_between_these_two_pairs():
     assert sg.tracking(x, _later(x) + 0.18 * noise, KS, FPS)[0] is False
 
 
-def _bump(height: float, secs: float, at: float = 30.0) -> tuple[np.ndarray, np.ndarray]:
-    """x and an exact copy of it 0.1 s later, except for a step of `height` of x's range held for `secs` seconds."""
+def _bump(height: float, secs: float, noise: float = 0.003, at: float = 30.0) -> tuple[np.ndarray, np.ndarray]:
+    """x and a copy of it 0.1 s later with a little noise (`noise` of x's range), except for a step of `height` of
+    x's range held for `secs` seconds."""
     x = _path(4)
-    y = _later(x)
+    y = _later(x) + noise * np.ptp(x) * np.random.default_rng(1).normal(size=N)
     y[int(at * FPS):int((at + secs) * FPS)] += height * np.ptp(x)
     return x, y
 
@@ -69,18 +70,25 @@ def _apart(x, y):
     return sg.apart_instants(x, y, KS, lag, FPS)
 
 
-def test_the_apart_threshold_sits_between_these_two_steps():
-    """A 2 s step of 0.025 of the range comes apart (TRACK_APART 0.02); one of 0.015 does not."""
-    assert 30 in _apart(*_bump(0.025, 2.0))
-    assert _apart(*_bump(0.015, 2.0)) == []
+def test_the_apart_floor_sits_between_these_two_steps():
+    """On a quiet pair the floor decides (TRACK_APART 0.03 of the range): a 1 s step of 0.04 comes apart, one of
+    0.025 does not."""
+    assert 30 in _apart(*_bump(0.04, 1.0))
+    assert _apart(*_bump(0.025, 1.0)) == []
+
+
+def test_the_spread_multiple_sits_between_these_two_steps():
+    """On a noisy pair (noise 0.035 of the range) the pair's own spread decides (TRACK_APART_TIMES 20 spreads): a 2 s
+    step of 0.12 comes apart, one of 0.10 does not."""
+    assert 30 in _apart(*_bump(0.12, 2.0, noise=0.035))
+    assert _apart(*_bump(0.10, 2.0, noise=0.035)) == []
 
 
 def test_the_hold_window_is_one_second():
-    """A step of 0.03 of the range held 1 s keeps a one second mean of 0.03 and comes apart, but a two second window
-    would average it to 0.015; held 0.5 s its one second mean is 0.015 and it does not come apart, though a half second
-    window would keep 0.03 (TRACK_HOLD_S 1)."""
-    assert 30 in _apart(*_bump(0.03, 1.0))
-    assert _apart(*_bump(0.03, 0.5)) == []
+    """A step of 0.05 of the range held 1 s comes apart, though a two second window would halve it; held 0.5 s a step
+    of 0.06 does not, though a half second window would keep it whole (TRACK_HOLD_S 1)."""
+    assert 30 in _apart(*_bump(0.05, 1.0))
+    assert _apart(*_bump(0.06, 0.5)) == []
 
 
 def _capture(own_times, kmap, anchor_fps=30.0, n=90):

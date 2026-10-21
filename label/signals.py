@@ -760,16 +760,21 @@ def resolved(a: np.ndarray, ks: list[int]) -> np.ndarray:
 TRACK_LAG_S = 0.5
 TRACK_LEVEL = 0.95
 TRACK_CHANGE = 0.9
-# A good fit on average is not a copy everywhere: a measured joint that stalls for a second or two while its command
-# moves, or opens a steady offset late in the request, still fits the whole window closely. So a tracking row is a copy
-# only where the line through its partner holds: frames whose mean |residual| over the TRACK_HOLD_S around them is more
-# than TRACK_APART of the row's range are apart (apart_instants), and the row's readings are still sent at the instants
-# there; a row apart at more than TRACK_APART_MOST of the instants is sent whole. In synthetic 60 s requests, a stall
-# of 1 s while the partner moves 10% of its range leaves at least 0.04 of the range, and a 0.2 sd offset that opens
-# after 40 s at least 0.03; on the 16 spot check episodes the median teleoperated joint against its command leaves
-# 0.049 at its worst second, and a commanded close the gripper does not reach (a grasp) comes apart the same way.
+# A good fit on average is not a copy everywhere: a measured joint that stalls while its command moves still fits the
+# whole window closely. So a tracking row is a copy only where the pair tracks as it usually does, and its readings are
+# still sent at the instants where it departs from that (apart_instants); a row apart at more than TRACK_APART_MOST of
+# the instants is sent whole. A follower behind its command is off by about its speed times its lag, so a pair's usual
+# one second residual is its own b0 + c x speed, and the excess over that is what departs: a stall leaves the whole
+# distance the command moved, a grasp the distance the commanded close goes past the gripper. A second is apart when
+# its excess is above both the pair's own median excess plus TRACK_APART_TIMES spreads (median absolute deviation,
+# scaled to a standard deviation, which a stall or grasp over less than half the request cannot widen) and TRACK_APART
+# of the range. Set on the 21 spot check requests with stalls and grasps injected into the real commanded and measured
+# pairs: 28 of 229 joint pairs have any instant apart with nothing injected, and 253 of 264 stalls of 1 s (where the
+# command moves most), 260 of 264 of 2 s and 31 of 35 grasps are found; in synthetic 60 s requests every stall of 1 to
+# 10 s is found except one of 1 s in which the command moves only 3.5% of its range.
 TRACK_HOLD_S = 1.0
-TRACK_APART = 0.02
+TRACK_APART_TIMES = 20.0
+TRACK_APART = 0.03
 TRACK_APART_MOST = 0.5
 
 
@@ -804,6 +809,12 @@ def tracking(x: np.ndarray, y: np.ndarray, ks: list[int], fps: float) -> tuple[b
     lo, hi = int(ks[0]), int(ks[-1]) + 1
     dx = np.nan_to_num(np.diff(x[lo:hi]))
     dy = np.nan_to_num(np.diff(y[lo:hi]))
+    # a jump in one value (a slip, a step) is a few frames of very large change that would pull the alignment its way,
+    # so each value's changes are clipped at their own 99th percentile before they are lined up
+    for d in (dx, dy):
+        cap = float(np.quantile(np.abs(d), 0.99)) if len(d) else 0.0
+        if cap > 0:     # a value that moves in fewer than 1% of its frames keeps its changes as they are
+            np.clip(d, -cap, cap, out=d)
     m = len(dy)
     # searched to twice the allowed lag: a slow copy shifted by more than TRACK_LAG_S can still fit closely at the
     # window's edge, and lining up best outside the window is what tells it apart from a value that follows
@@ -818,7 +829,8 @@ def apart_instants(x: np.ndarray, y: np.ndarray, ks: list[int], lag: int, fps: f
     """The places in ks of the instants where two values that track each other (tracking, x read lag frames later)
     come apart: every frame from the first to the last instant is read, since one reading a second can fall either
     side of a one second stall, and a frame is apart where the mean |residual| from the straight line through the
-    other value, over the TRACK_HOLD_S around it, is more than TRACK_APART of the value's own range, either way round.
+    other value, over the TRACK_HOLD_S around it, departs from the pair's own usual residual at that speed (the rule
+    above TRACK_HOLD_S), either way round.
     Each run of such frames gives the instants inside it and one more on each side, so a stall between two instants
     still shows at both. Every instant when either value is flat or has too few readings."""
     ks = np.asarray(ks, dtype=int)
@@ -838,8 +850,24 @@ def apart_instants(x: np.ndarray, y: np.ndarray, ks: list[int], lag: int, fps: f
         use, here = ok, np.zeros(len(idx), dtype=bool)
         for _ in range(2):
             coef = np.polyfit(a[use], b[use], 1)
-            r = np.where(ok, np.abs(b - np.polyval(coef, np.where(ok, a, 0.0))), 0.0)
-            here = np.convolve(r, np.ones(win), mode="same") / count > TRACK_APART * span
+            fit = np.polyval(coef, np.where(ok, a, 0.0))
+            r = np.where(ok, np.abs(b - fit), 0.0)
+            held = np.convolve(r, np.ones(win), mode="same") / count
+            # the pair's own normal: a follower behind its command is off by about its speed times the lag, and a
+            # still pair by its noise, so its usual residual is b0 + c x speed, read from the pair itself
+            speed = np.convolve(np.where(ok, np.abs(np.diff(fit, prepend=fit[0])) * fps, 0.0), np.ones(win),
+                                mode="same") / count
+            # moving means moving: a gripper still for most of the request has a median speed of its noise, and its
+            # residual over noise speed would set the lag term from nothing
+            moving = ok & (speed > max(float(np.median(speed[ok])), 0.1 * float(np.quantile(speed[ok], 0.99))))
+            c = float(np.median(held[moving] / speed[moving])) if moving.any() else 0.0
+            still = ok & (speed <= np.quantile(speed[ok], 0.25))
+            b0 = float(np.median(held[still])) if still.any() else 0.0
+            excess = held - (b0 + c * speed)
+            # its spread as a median absolute deviation, which a departure over less than half the request cannot widen
+            mid = float(np.median(excess[ok]))
+            usual = mid + TRACK_APART_TIMES * 1.4826 * float(np.median(np.abs(excess[ok] - mid)))
+            here = ok & (excess > max(usual, TRACK_APART * span))
             if (ok & ~here).sum() < max(3, ok.sum() // 2):
                 break
             use = ok & ~here

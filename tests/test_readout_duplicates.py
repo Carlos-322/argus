@@ -136,27 +136,41 @@ def test_a_six_second_stall_sends_the_command_only_around_the_stall():
     assert {21.0, 23.0, 25.0} <= set(times) and min(times) >= 18.0 and max(times) <= 28.0
 
 
-def test_an_offset_that_opens_late_is_read_where_it_is_open():
-    """The measured joint drifts 0.2 sd away from its command from 40 s to 50 s of 60 and stays there (a calibration
-    slip): the command is read only over the late stretch where the two have come apart."""
-    cmd = _path(7)
+def _gripper(stop: float | None = None):
+    """A gripper commanded open and closed five times in 60 s (1 open, 0 shut, smooth 1 s moves), and the gripper that
+    follows it 0.1 s later; with `stop`, the third close is stopped at that opening by what it holds (a grasp)."""
     t = np.arange(N) / FPS
-    arm = _later(cmd, 3) + 0.2 * cmd.std() * np.clip((t - 40) / 10, 0, 1)
-    shown, _, _, lines = _readout(*_case({"cmd": cmd, "arm": arm}))
-    assert shown == ["arm"]
+    cmd = np.ones(N)
+    for a in (6, 16, 26, 36, 46):
+        cmd -= np.clip(t - a, 0, 1) - np.clip(t - a - 5, 0, 1)
+    arm = _later(cmd, 3) + np.random.default_rng(2).normal(0, 0.002, N)
+    if stop is not None:
+        hold = (t >= 26) & (t < 32)
+        arm[hold] = np.maximum(arm[hold], stop)
+    return cmd, arm
+
+
+def test_a_grasp_sends_the_command_where_it_closes_past_the_gripper():
+    """The third close stops at 0.4 open while the command goes on to shut: the command is read over that close."""
+    cmd, arm = _gripper(stop=0.4)
+    shown, _, _, lines = _readout(*_case({"grip_cmd": cmd, "grip": arm}))
+    assert shown == ["grip"]
     (row, other, times), = _apart_lines(lines)
-    assert row == "cmd" and min(times) >= 35.0 and max(times) >= 55.0
+    assert (row, other) == ("grip_cmd", "grip") and {27.0, 28.0, 29.0, 30.0} <= set(times)
+    assert min(times) >= 25.0 and max(times) <= 33.0
 
 
-def test_a_pair_apart_most_of_the_time_keeps_both_full_rows():
-    """An offset of 0.3 sd that opens at 20 s and stays: the two still fit closely over the whole request, but they are
-    apart at more than half the instants, so both full rows are sent."""
-    cmd = _path(7)
-    t = np.arange(N) / FPS
-    arm = _later(cmd, 3) + 0.3 * cmd.std() * (t >= 20)
-    ks = list(range(0, N, FPS))
-    same, lag = sg.tracking(cmd, arm, ks, FPS)
-    assert same and len(sg.apart_instants(cmd, arm, ks, lag, FPS)) > sg.TRACK_APART_MOST * len(ks)
+def test_a_gripper_that_follows_every_close_is_sent_once():
+    cmd, arm = _gripper()
+    shown, left, _, lines = _readout(*_case({"grip_cmd": cmd, "grip": arm}))
+    assert shown == ["grip"] and len(left) == 1 and not _apart_lines(lines)
+
+
+def test_a_pair_apart_at_most_of_its_instants_keeps_both_full_rows(monkeypatch):
+    """A row apart at more than TRACK_APART_MOST of the instants is sent whole; with the share lowered to 5%, the 6 s
+    stall (10 apart instants of 60) is enough."""
+    monkeypatch.setattr(sg, "TRACK_APART_MOST", 0.05)
+    cmd, arm = _stalled(6, seed=13)
     shown, left, _, lines = _readout(*_case({"cmd": cmd, "arm": arm}))
     assert sorted(shown) == ["arm", "cmd"] and not left and not _apart_lines(lines)
 
