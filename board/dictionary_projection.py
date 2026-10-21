@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 
-from label.dictionary_context import camera_content_role, TACTILE_CONTENT_ROLES
+from label.dictionary_context import camera_content_role, camera_role, TACTILE_CONTENT_ROLES
 
 
 def current_camera_observations(record: dict, ctx: dict, episode_dir: Path) -> list:
@@ -76,7 +76,8 @@ def camera_presentation(ctx: dict, observations: list = ()) -> dict:
         else:
             path = 'unshown_cameras/' + str(retained_index[id(entry)])
             interpretation = field_interpretation(ctx, entry.get('name'), 'camera', context_path=path)
-        role = sg._role(interpretation.get('role') if 'role' in interpretation else entry.get('role'))
+        role = (camera_role(ctx, view, interpretation, entry) if 'role' in interpretation
+                else sg._role(entry.get('role')))
         if role:
             presentation[view] = {'role': 'tactile' if role in
                 TACTILE_CONTENT_ROLES else 'sensor' if role in ('sensor', 'sensor_view') else 'scene' if role in

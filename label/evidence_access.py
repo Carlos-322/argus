@@ -32,6 +32,9 @@ MAX_RESPONSE_BYTES = 48000
 # The selection's JSON answer; its output limit adds reasoning room (selection_tokens).
 SELECTION_ANSWER_TOKENS = 2000
 MAX_SELECTION_COST = 1.0
+# The annotation policy can turn the paid selection off (label/policy.py INSPECTION_MODES); the coverage then says so,
+# so an empty inspection is never read as one that found nothing to select.
+INSPECTION_OFF = 'Evidence inspection is off in the annotation policy; no recorded fields were selected.'
 MAX_SCAN_BYTES = 256 * 1024 * 1024
 SOURCE_HASH_LIMIT = 16 * 1024 * 1024
 IMPLEMENTATION_SHA256 = hashlib.sha256(b''.join(path.read_bytes() for path in (
@@ -75,8 +78,19 @@ def reader_projection_identity(ctx):
     return hashlib.sha256(packed(projected).encode()).hexdigest()
 
 
-def needs_inspection(ep, sensor_evidence):
-    """Additional measurements or retained original metadata opt in; ordinary RGB stays on its path."""
+def needs_inspection(ep, sensor_evidence, mode='auto'):
+    """Whether a request carries an inspection, by the annotation policy's mode (label/policy.py INSPECTION_MODES).
+    auto and off: a recording with depth or a touch sensor (sensor_evidence's sensors: tactile arrays and cameras,
+    pressure, contact, normal and shear force), which inspection was built for, or with recorded fields that only
+    inspection can reach (source fields no prompt row carries, such as an ego recording's hand poses, and original
+    metadata); a wrist force/torque sensor alone is not touch, and arm signals and actions are not inspection-only, as
+    they reach the prompt as rows; off keeps the record with no selection. all: any recorded field beyond the cameras.
+    Ordinary RGB stays on its path in every mode."""
+    # an array is touch whatever its quantity: its regional analysis is owned by the inspection record
+    touch = [s for s in sensor_evidence.get('sensors') or []
+             if s.get('quantity') != 'force_torque' or s.get('array_evidence')]
+    if bool(ep.get('depth') or ep.get('additional_depth') or touch):
+        return True
     ctx = ep['context']
     archives = [ctx, *(ctx.get('recorded_sensor_fields') or [])]
     native = any(not detail.get('already_supplied') for archive in archives
@@ -86,6 +100,10 @@ def needs_inspection(ep, sensor_evidence):
                            for field in archive.get('table_field_inventory') or [])
     from label.source_eligibility import needs_extra_evidence
     metadata = needs_extra_evidence(ctx)
+    if native or metadata:
+        return True
+    if mode != 'all':
+        return False
     from prepare.state_contract import redundant_observation_target
     copied_state = redundant_observation_target(ep)
     actions = ep.get('action') is not None and ep['action'].size > 0 and not copied_state
@@ -1891,6 +1909,8 @@ def discover(access, base_content, call, cache_path, *, rounds=2, reserve_cost=0
         doc['status'] = 'complete'
     count = 0
     skipped = {}
+    if rounds <= 0 and INSPECTION_OFF not in doc['limitations']:
+        doc['limitations'].append(INSPECTION_OFF)
     # Large inventories remain accessible through metadata inspection; do not silently drop their descriptors.
     for index in range(min(rounds, 2)):
         content = access.selection_content(base_content) + [{'type': 'text', 'text': SELECTION + '\nFIELD INVENTORY\n' + packed(access.page())}] + extra

@@ -1340,8 +1340,13 @@ def _names_word(name: str, words) -> bool:
 
 
 def is_sensing(name: str) -> bool:
-    """Whether a camera's name says it senses touch (SENSING_WORDS): a GelSight or DIGIT image, a tactile heatmap."""
-    return _names_word(name, SENSING_WORDS)
+    """Whether a camera's name says it senses touch (SENSING_WORDS): a GelSight or DIGIT image, a tactile heatmap.
+    A brand written in camel case (GelSight, GelSightLeft) splits into two words, so adjacent words are also read
+    joined."""
+    if _names_word(name, SENSING_WORDS):
+        return True
+    words = word_tokens(name)
+    return any(a + b in SENSING_WORDS for a, b in zip(words, words[1:]))
 
 
 def names_touch(name: str) -> bool:

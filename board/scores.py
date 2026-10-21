@@ -11,7 +11,7 @@ Four dimensions, each 0 to 10, each with the numbers it came from (inputs), so t
 | Dimension | Question | Built from | Compared |
 |---|---|---|---|
 | outcome | How much of the labelled goal was achieved | completion, the progress reached | absolute |
-| cleanliness | How free the work is of mistakes and wasted motion | wasteful time, the operator mistakes the board counts (by severity, half when recovered), failed attempts no mistake explains | absolute |
+| cleanliness | How free the work is of mistakes and wasted motion | wasteful time, the operator mistakes the board counts (by severity, half when recovered), failed attempts no mistake explains (tries in a row with no success between them count once) | absolute |
 | efficiency | How quickly the goal was reached, for this task | time from the first action to the goal | within the task group |
 | fluency | How steadily the work went | hesitation inside the work (absolute), and actions per unit of progress | hesitation absolute, actions within the task group |
 
@@ -49,13 +49,13 @@ def _num(x):
 VERSION = 2
 MIN_PEERS = 5                     # a relative dimension needs this many other demonstrations of the same task
 SEVERITY_POINTS = {"low": 0.5, "medium": 1.5, "high": 3.0}
-FAILED_ATTEMPT_POINTS = 1.0       # a key event that failed, beyond the mistake that may describe it
+FAILED_ATTEMPT_POINTS = 1.0       # a failed incident (_incidents), beyond the mistake that may describe it
 RECOVERY_WINDOW_S = 1.5           # a recovery belongs to a mistake when its failure is this close to the mistake's time
 OUTCOME_CAPS = {"success": 1.0, "success_then_undone": 0.7, "partial": 0.9, "failure": 0.4}
 EXECUTION_WEIGHTS = {"cleanliness": 0.5, "efficiency": 0.25, "fluency": 0.25}
 # the record fields the scores read, so a board build can hold every episode at once without its whole record
 FIELDS = ("dataset", "episode_prompt", "task_label", "event_labels", "key_events", "operator_mistakes", "recovery",
-          "completion", "goal_alignment", "tasks", "_meta", "_rig")
+          "completion", "goal_alignment", "tasks", "_meta", "_rig", "_stitched")
 SIMILAR = 0.5                     # two subgoal labels are the same kind of subgoal when they share this share of words
 SAME_TASK = 0.6                   # a one-off wording joins a task whose instruction shares this share of its words
 STOP = {"the", "a", "an", "and", "then", "with", "its", "it", "of", "on", "to", "into", "in", "from", "onto", "by", "at",
@@ -177,7 +177,7 @@ def facts(d: dict) -> dict:
     reached = max(progress) if progress else None
     mistakes, explaining = _mistakes(d)
     any_mistakes = len(explaining)
-    failed = [k for k in _list(d.get("key_events")) if isinstance(k, dict) and k.get("outcome") == "failure"]
+    incident = _incidents(d)
     # progress restarts at each subtask, so a subtask's progress is the furthest its own steps got
     tasks = []
     for t in _list(d.get("tasks")):
@@ -190,7 +190,28 @@ def facts(d: dict) -> dict:
             "wasteful_s": wasteful, "hesitation_s": hesitation, "window_s": (end - start) if window else None,
             "actions": sum(1 for e in steps if e.get("contribution") == "advancing"), "progress_reached": reached,
             "outcome": _verdict(comp) if comp else None, "mistakes": mistakes, "any_mistakes": any_mistakes,
-            "failed_attempts": len(failed), "relation": _str(_dict(d.get("goal_alignment")).get("relation"))}
+            "failed_attempts": len(set(incident.values())),
+            "relation": _str(_dict(d.get("goal_alignment")).get("relation"))}
+
+
+def _incidents(d: dict) -> dict:
+    """{id(failed key event): its incident}. The labels already say which failed tries share an aim: the prompt makes
+    one operator mistake "the failed tries at one aim and the motion between them", with t_s and end_s spanning the
+    incident. So the failed tries inside one mistake's span are one incident (a peel retried ten times inside one
+    mistake costs one failed attempt, not ten), and a failed try outside every mistake span, or with no time, is an
+    incident of its own, never grouped by a guess about its aim from its kind or timing."""
+    spans = sorted((t, e) for m in _list(d.get("operator_mistakes")) if isinstance(m, dict) and m.get("issue")
+                   for t, e in [(_num(m.get("t_s")), _num(m.get("end_s")))] if t is not None and e is not None and e >= t)
+    out, count = {}, len(spans)
+    for k in _list(d.get("key_events")):
+        if not isinstance(k, dict) or k.get("outcome") != "failure":
+            continue
+        t = _num(k.get("t_s"))
+        within = next((i for i, (a, b) in enumerate(spans) if t is not None and a <= t <= b), None)
+        if within is None:
+            within, count = count, count + 1
+        out[id(k)] = within
+    return out
 
 
 def _content_words(text) -> frozenset:
@@ -403,6 +424,7 @@ def subgoals(d: dict, f: dict) -> list:
     failed_all = sorted((k for k in _list(d.get("key_events")) if isinstance(k, dict) and k.get("outcome") == "failure"
                          and _num(k.get("t_s")) is not None), key=lambda k: k["t_s"])
     failed_t = [k["t_s"] for k in failed_all]
+    incident = _incidents(d)
     mistakes = sorted((m for m in f["mistakes"] if m["t_s"] is not None), key=lambda m: m["t_s"])
     mistake_t = [m["t_s"] for m in mistakes]
     any_mistake_t = sorted(t for t in _mistakes(d)[1] if t is not None)
@@ -445,7 +467,8 @@ def subgoals(d: dict, f: dict) -> list:
         ms = mistakes[bisect.bisect_left(mistake_t, a):bisect.bisect_left(mistake_t, b)]
         failed = failed_all[bisect.bisect_left(failed_t, a):bisect.bisect_left(failed_t, b)]
         explained = bisect.bisect_left(any_mistake_t, b) - bisect.bisect_left(any_mistake_t, a)
-        clean = 10 * (1 - share) - sum(_points(m) for m in ms) - FAILED_ATTEMPT_POINTS * max(0, len(failed) - explained)
+        tried = len({incident[id(k)] for k in failed})
+        clean = 10 * (1 - share) - sum(_points(m) for m in ms) - FAILED_ATTEMPT_POINTS * max(0, tried - explained)
         out.append({"start_s": a, "end_s": b, "label": label, "outcome": outcome, "goal": goal, "task": task,
                     "reached": outcome in ("success", "success_then_undone"),
                     "duration_s": round(b - a, 2),
@@ -587,6 +610,13 @@ def score_board(records: dict) -> dict:
             st["peer_median_s"] = same.median() if enough else None
             st["execution"] = (_weighted({"cleanliness": st["cleanliness"], "efficiency": st["efficiency"],
                                           "fluency": st["steady"]}) if st["reached"] else None)
+        # a recording labelled in parts with a part that has no labels: the labelled parts say nothing of the rest, so
+        # it gets no whole-recording execution or outcome, only its subgoals' and the parts that are missing
+        missing = [g for g in _list(_dict(records[f].get("_stitched")).get("missing")) if isinstance(g, dict)]
+        if missing:
+            dims = {key: None for key in dims}
+            outcome = None
+            o_in = {**o_in, "unlabelled_parts": [{key: g.get(key) for key in ("part", "t0_s", "t1_s")} for g in missing]}
         out[f] = {"version": VERSION, "execution": _weighted(dims), "outcome": outcome, **dims, "relation": x["relation"],
                   "subgoals": subs,
                   "peers": peers, "peer_basis": "task" if efficiency is not None else None, "group": g,

@@ -2,6 +2,7 @@
 
     python -m review --data PATH_OR_URL --rig teleop_arms|handheld_gripper|ego_head --out JOB \\
         [--dataset NAME] [--free] [--cap 20] [--concurrency 8] [--max-minutes M] [--grouping JSON]
+        [--inspection auto|all|off] [--field-dictionary on|off]
 
 PATH_OR_URL is a folder, a file or an archive, or an http(s) URL of a file or an archive, which is downloaded into
 JOB/upload first. Everything else is written under JOB, and the data itself is never edited. These are the stages
@@ -313,7 +314,11 @@ def main() -> int:
     ap.add_argument("--grouping", type=json.loads, default={},
                     help='JSON {folder: "takes" | "cameras"} for folders whose files cannot tell takes from cameras')
     policy.add_arguments(ap)
+    ap.add_argument("--field-dictionary", choices=("on", "off"), default=None,
+                    help="ask a model what uncertain recorded fields mean, once per upload (default on; off labels "
+                         "with the fields as recorded and makes no dictionary call)")
     a = ap.parse_args()
+    a.field_dictionary = None if a.field_dictionary is None else a.field_dictionary == "on"
     if not math.isfinite(a.cap) or a.cap <= 0:
         ap.error("--cap must be finite and positive")
     if not math.isfinite(a.max_minutes) or a.max_minutes < 0:
@@ -322,7 +327,8 @@ def main() -> int:
         ap.error("--timeout must be positive")
     if a.max_tokens is not None and a.max_tokens <= 0:
         ap.error('--max-tokens must be positive')
-    overrides = {key: getattr(a, key) for key in ("model", "reasoning", "sample_fps", "task_mode", "dataset_note")}
+    overrides = {key: getattr(a, key) for key in ("model", "reasoning", "sample_fps", "task_mode", "dataset_note",
+                                                  "inspection", "field_dictionary")}
     policy.resolve({"profile": a.rig}, **overrides)
 
     if a.force and a.retry_received:
@@ -381,7 +387,8 @@ def review_job(a, overrides, lock_fd, output_lock_fd) -> int:
     write_atomic(job / "annotation_policy.json", selected)
 
     print('== dictionary', flush=True)
-    dictionary_stage.prepare(job, eps, [e['episode_id'] for e in rep['episodes']], free=a.free, cap=a.cap)
+    dictionary_stage.prepare(job, eps, [e['episode_id'] for e in rep['episodes']], free=a.free, cap=a.cap,
+                             enabled=any(p.get('field_dictionary', True) for p in selected.values()))
 
     if any(e["state_kind"] != "none" for e in rep["episodes"]):
         for flag in ([], ["--jumps"], ["--grippers"]):

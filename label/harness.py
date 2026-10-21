@@ -223,6 +223,19 @@ def _retry_after(headers, attempt: int) -> float:
     return min(60.0, 4.0 * 2 ** attempt)
 
 
+def reply_error(resp: dict) -> str | None:
+    """The provider's own failure carried inside a reply it delivered with HTTP 200 (finish_reason error, or an error
+    on the choice, eg an overloaded upstream), or None. Such a reply's text is a fragment, never an answer to parse."""
+    choices = resp.get('choices') if isinstance(resp, dict) else None
+    choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    error = choice.get('error')
+    if choice.get('finish_reason') != 'error' and not error:
+        return None
+    if isinstance(error, dict):
+        return ' '.join(str(error.get(key)) for key in ('code', 'message') if error.get(key) is not None)[:300] or 'error'
+    return str(error)[:300] if error else 'finish_reason error'
+
+
 def _post(url: str, body: dict, api_key: str, timeout: int, *, attempts: int = 6) -> dict:
     """POST one request. attempts bounds retries of failures whose billing is unknown, so a paid call passes 1 and
     is never replayed after it may have been billed. A failure that provably cost nothing (the request never fully
@@ -247,6 +260,19 @@ def _post(url: str, body: dict, api_key: str, timeout: int, *, attempts: int = 6
                 # HTTP 200 carrying an error body and no completion: fail loudly, never record an empty parse
                 err = json.dumps(resp.get("error") or resp)[:300]
                 raise DispatchError(f"200 response with no choices: {err}", http_status=200, stage='unknown')
+            failure = reply_error(resp)
+            cost = (resp.get('usage') or {}).get('cost') if isinstance(resp.get('usage'), dict) else None
+            if failure is not None and type(cost) in (int, float) and cost == 0:
+                # the provider failed inside a 200 reply (an overloaded upstream) and billed nothing: it cost nothing,
+                # so it is retried like an error status; a billed or unpriced one is kept as received, and only
+                # --retry-received sends it again
+                last = f"provider error in the reply: {failure}"
+                unpaid_left -= 1
+                if unpaid_left > 0:
+                    time.sleep(min(30.0, 2.0 ** (tries - 1)))
+                    continue
+                raise DispatchError(f"model call failed after {tries} HTTP attempts: {last}", http_status=200,
+                                    verified_unpaid=clean, stage='rejected')
             return resp
         except urllib.error.HTTPError as e:
             # Read a bounded complete envelope before shortening its display message.
@@ -307,10 +333,10 @@ def label_episode(ep_dir: Path, out_path: Path, *, model: str, reasoning: str, a
                   reserve_final=None, reserve_selection=None, settle_selection=None, force_refresh=False,
                   settle_final=None,
                   sample_fps=None, task_mode=None, dataset_note=None, require_known_pricing=False,
-                  inspection_refresh_id=None) -> dict:
+                  inspection_refresh_id=None, inspection=None) -> dict:
     context = json.loads((Path(ep_dir) / 'context.json').read_text())
     resolved = policy.resolve(context, model=model, reasoning=reasoning, sample_fps=sample_fps,
-                              task_mode=task_mode, dataset_note=dataset_note)
+                              task_mode=task_mode, dataset_note=dataset_note, inspection=inspection)
     model, reasoning = resolved['model'], resolved['reasoning']
     if not dry_run and not is_openrouter_key(api_key) and not model.startswith('openai/'):
         raise ValueError(f'{model} requires an OpenRouter key; no request was dispatched.')
@@ -323,7 +349,7 @@ def label_episode(ep_dir: Path, out_path: Path, *, model: str, reasoning: str, a
         pricing_quote = pricing.quote(model, timeout)
     identity = input_identity(ep_dir, model=model, reasoning=reasoning, max_tokens=max_tokens,
                               cell_w=cell_w, example_dir=example_dir, sample_fps=sample_fps,
-                              task_mode=task_mode, dataset_note=dataset_note)
+                              task_mode=task_mode, dataset_note=dataset_note, inspection=inspection)
     if any(item.get('missing') for item in identity['source_proof']):
         raise RuntimeError('Request source inputs are missing; no paid request was dispatched.')
     billing = _billing_fields(out_path)
@@ -336,7 +362,7 @@ def label_episode(ep_dir: Path, out_path: Path, *, model: str, reasoning: str, a
     req = me.build_request(ep_dir, detail=DETAIL, gate=DECODE_GATE, grid_cols=GRID_COLS, cell_w=cell_w or None,
                            max_cell_w=route_w, example_dir=example_dir, inspect_evidence=True,
                            model=model, reasoning=reasoning, sample_fps=sample_fps,
-                           task_mode=task_mode, dataset_note=dataset_note,
+                           task_mode=task_mode, dataset_note=dataset_note, inspection=policy.inspection_mode(resolved),
                            derived_dir=Path(out_path).parent / ".derived" / "jaws")
     pl = req["plan"]
     fields = {
@@ -430,7 +456,8 @@ def request_implementation(repository: Path) -> dict[Path, bytes]:
 
 
 def input_identity(ep_dir: Path, *, model: str, reasoning: str, max_tokens: int, cell_w: int,
-                   example_dir: str | None, sample_fps=None, task_mode=None, dataset_note=None) -> dict:
+                   example_dir: str | None, sample_fps=None, task_mode=None, dataset_note=None,
+                   inspection=None) -> dict:
     """Bounded proof for source files and the settings that shape a paid annotation request."""
     from label.evidence_access import source_proof, reader_projection_identity
     ep_dir = Path(ep_dir)
@@ -447,7 +474,7 @@ def input_identity(ep_dir: Path, *, model: str, reasoning: str, max_tokens: int,
     if problem:
         raise RuntimeError(f'{ep_dir}: {problem}')
     resolved = policy.resolve(ctx, model=model, reasoning=reasoning, sample_fps=sample_fps,
-                              task_mode=task_mode, dataset_note=dataset_note)
+                              task_mode=task_mode, dataset_note=dataset_note, inspection=inspection)
     me.require_request_window(ep_dir, {**ctx, 'annotation_policy': resolved})
     from label.dictionary_editor import for_episode
     owner = (ctx.get('piece') or {}).get('of') or (ctx.get('data_dictionary') or {}).get('episode_id') or ep_dir.name
@@ -1186,7 +1213,8 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
             current = input_identity(ep_dir, model=model, reasoning=reasoning, max_tokens=max_tokens,
                 cell_w=settings['cell_w'], example_dir=fields.get('example_dir'),
                 sample_fps=selected.get('sample_fps'), task_mode=selected['task_mode'],
-                dataset_note=selected.get('dataset_note'))
+                dataset_note=selected.get('dataset_note'),
+                inspection=policy.inspection_mode(selected))
             valid = same_input_identity(saved, current) and not any(item.get('missing') for item in current['source_proof'])
         except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError):
             valid = False
@@ -1238,8 +1266,12 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
                         return False
                     settle_selection(final_floor, 0.0)
                     return True
+            # inspection off keeps the inspection record (a tactile array's regional analysis is owned by it) and
+            # buys no selection
+            off = policy.inspection_mode(fields.get('annotation_policy') or {}) == 'off'
+            rounds = 0 if off else 2
             try:
-                doc, extra = ea.discover(evidence_access, content, select, cache, reserve_cost=reserve,
+                doc, extra = ea.discover(evidence_access, content, select, cache, rounds=rounds, reserve_cost=reserve,
                                         reserve_dispatch=selection_dispatch, settle_dispatch=settle_selection,
                                         force_refresh=force_refresh, refresh_id=inspection_refresh_id,
                                         ledger_managed=(callable(reserve_selection) and callable(settle_selection)),
@@ -1439,6 +1471,12 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
         raise Truncated(f"response truncated (finish_reason=length) at max_tokens={max_tokens}", episode_cost(failed))
     # an unparseable reply is recorded as it came, never repaired or retried
     labels, parse_ok = parse_response(text)
+    failure = reply_error(resp)
+    if failure is not None:
+        # the provider failed partway (billed or unpriced, or _post would have retried it): its text is a fragment,
+        # so it is named as the provider's error, never as a reply that did not parse; --retry-received resends it
+        labels, parse_ok = {'_raw': text, '_parse_error': f'the provider returned an error in the reply ({failure}); '
+                                                          'resend it with --retry-received'}, False
 
     raw_usage = resp.get("usage")
     usage = raw_usage if isinstance(raw_usage, dict) else {}
@@ -1707,7 +1745,8 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                                      max_tokens=label_kw.get("max_tokens", 64000), cell_w=label_kw.get("cell_w", 0),
                                      example_dir=label_kw.get("example_dir"),
                                      sample_fps=label_kw.get('sample_fps'), task_mode=label_kw.get('task_mode'),
-                                     dataset_note=label_kw.get('dataset_note'))
+                                     dataset_note=label_kw.get('dataset_note'),
+                        inspection=label_kw.get('inspection'))
         except (OSError, ValueError, RuntimeError) as error:
             if never_dispatched:
                 saved_failures.add(ep.name)
@@ -1753,7 +1792,15 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                     except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError):
                         matches = False
             if not matches or any(item.get("missing") for item in current["source_proof"]):
-                stale[ep.name] = f"saved output {q.name} has changed or missing input; use --force to refresh"
+                hint = ''
+                saved_policy = ((saved or {}).get('settings') or {}).get('annotation_policy')
+                if (isinstance(saved_policy, dict) and 'inspection' not in saved_policy
+                        and policy.inspection_mode((current.get('settings') or {}).get('annotation_policy') or {})
+                        != policy.LEGACY_INSPECTION):
+                    # labelled before inspection could be set, when every recorded field was inspected
+                    hint = (f'; it was labelled before inspection could be set, so add --inspection '
+                            f'{policy.LEGACY_INSPECTION} to resume it as it was paid for')
+                stale[ep.name] = f"saved output {q.name} has changed or missing input; use --force to refresh{hint}"
                 return True
         if any(record.get('final_dispatch_outcome') in ('claimed', 'unverified') for _, record in records):
             if ep.name in retry_received and not dry:
@@ -1893,7 +1940,8 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                         reasoning=label_kw.get('reasoning'), max_tokens=label_kw.get('max_tokens', 64000),
                         cell_w=label_kw.get('cell_w', 0), example_dir=label_kw.get('example_dir'),
                         sample_fps=label_kw.get('sample_fps'), task_mode=label_kw.get('task_mode'),
-                        dataset_note=label_kw.get('dataset_note'))
+                        dataset_note=label_kw.get('dataset_note'),
+                        inspection=label_kw.get('inspection'))
                     if not same_input_identity(claim.get('input_identity'), current) or any(
                             item.get('missing') for item in current['source_proof']):
                         raise RuntimeError('Request inputs changed while waiting for spend allowance; no dispatch.')
@@ -1999,7 +2047,8 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                     reasoning=label_kw.get('reasoning'),
                     max_tokens=label_kw.get('max_tokens', 64000), cell_w=label_kw.get('cell_w', 0),
                     example_dir=label_kw.get('example_dir'), sample_fps=label_kw.get('sample_fps'),
-                    task_mode=label_kw.get('task_mode'), dataset_note=label_kw.get('dataset_note'))
+                    task_mode=label_kw.get('task_mode'), dataset_note=label_kw.get('dataset_note'),
+                        inspection=label_kw.get('inspection'))
             except (OSError, ValueError, RuntimeError):
                 pass
         requested_model = (previous.get('model') or
@@ -2107,7 +2156,8 @@ def main() -> int:
         print(f"routing answers seeded for {n} task texts from {args.route_seeds}", flush=True)
     label_kw = dict(model=args.model, reasoning=args.reasoning, max_tokens=args.max_tokens, timeout=args.timeout,
                     cell_w=args.cell_w, example_dir=args.example_dir, dry_run=args.dry_run,
-                    sample_fps=args.sample_fps, task_mode=args.task_mode, dataset_note=args.dataset_note)
+                    sample_fps=args.sample_fps, task_mode=args.task_mode, dataset_note=args.dataset_note,
+                    inspection=args.inspection)
     if args.episode_dir:
         target = args.out or (args.episode_dir / 'labels.json')
         claim = target.with_name(f'noreply_{target.name}')

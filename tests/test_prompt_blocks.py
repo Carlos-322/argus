@@ -831,7 +831,7 @@ def test_the_values_at_each_instant_keep_what_moves_most_and_name_the_rest():
     assert "would not fit" not in table
     readout = table.split("at every instant you receive")[1]
     left = [l for l in table.splitlines() if l.startswith("  The values at each instant leave out ")]
-    assert len(left) == 1 and left[0].endswith(", because these move least and there is no more room.")
+    assert len(left) == 1 and left[0].endswith(", because these rank lowest and there is no more room.")
     body = readout.split(left[0])[0]
     # the budget counts the instants' row and the value rows, without their line breaks
     assert sum(len(l) for l in body.splitlines() if l.startswith("    ")) <= me.SIGNAL_TABLE_MAX_CHARS
@@ -865,7 +865,10 @@ def _humanoid_overflow(state_w, vel_w):
     return episode, left, shown
 
 
-def test_over_the_budget_the_state_line_names_the_joint_readings_only_when_every_row_of_them_is_shown():
+def test_over_the_budget_the_state_line_names_the_joint_readings_only_when_every_row_of_them_is_shown(monkeypatch):
+    # the fixture's waves are one wave at shifted phases, some within a lag of each other, so the readout would
+    # send them once (label/signals.py tracking); this test is about the budget, so no row is taken as a copy
+    monkeypatch.setattr(sg, "TRACK_LEVEL", 2.0)
     named = ("The signal whose name says joints or a state (observation.state) is given value by value under their own "
              "names among the other recorded signals below.")
     episode, left, shown = _humanoid_overflow(0.4, 0.8)
@@ -898,6 +901,9 @@ def test_signal_readout_skips_an_oversized_row_without_discarding_smaller_eviden
     """The captured 60 s fixture fits 42 moving signals, then smaller flags at 12k.
     At 13k the previously oversized row and the remaining flag fit as well.
     """
+    # the fixture's waves are one wave at shifted phases, some within a lag of each other, so the readout would
+    # send them once (label/signals.py tracking); this test is about the budget, so no row is taken as a copy
+    monkeypatch.setattr(sg, "TRACK_LEVEL", 2.0)
     monkeypatch.setattr(me, "SIGNAL_TABLE_MAX_CHARS", budget)
     ep, pl = _sweeps_wide_and_flags()
     lines, whole = me._signal_readout(ep, pl)
@@ -910,13 +916,17 @@ def test_signal_readout_skips_an_oversized_row_without_discarding_smaller_eviden
     omitted = set(ep["signals"]) - expected
     if omitted:
         assert all(name in lines[-1] for name in omitted)
-        assert "ranked by movement" in lines[-1] and "move least" not in lines[-1]
+        assert "ranked by how well each reading stands for its instant, then by movement" in lines[-1]
+        assert "move least" not in lines[-1]
     else:
         assert "leave out" not in "\n".join(lines)
 
 
 def test_with_no_row_that_fits_each_signal_with_rows_is_named_as_left_out_because_none_fits(monkeypatch):
     """A budget smaller than the times row or any value row names every omitted signal with the actual reason."""
+    # the fixture's waves are one wave at shifted phases, some within a lag of each other, so the readout would
+    # send them once (label/signals.py tracking); this test is about the budget, so no row is taken as a copy
+    monkeypatch.setattr(sg, "TRACK_LEVEL", 2.0)
     ep, pl = _sweeps_wide_and_flags()
     head = len("    at: " + " ".join(f"{me.frame_time(ep, k):.2f}" for k in pl["ks"]))
     shortest = min(len("    " + name + ": " + " ".join(sg.reading_text(x) for x in a[pl["ks"], 0]))
@@ -967,3 +977,13 @@ def test_every_prompt_defines_a_subgoal_once_as_a_lasting_change_and_keeps_failu
     assert "neither moves it nor makes a new subgoal" in s and "waits for the last such adjustment" not in s
     assert "setting it down is a subgoal of its own at the first moment it holds" in s
     assert "Subgoals do not lengthen the list" in s and "are still key_events of their own kind" not in s
+
+
+@pytest.mark.parametrize('rig', ['teleop_arms', 'handheld_gripper'])
+def test_in_a_session_each_repeat_of_a_cycle_is_its_own_task(rig):
+    from label import prompts
+    rules = ' '.join(prompts.session_rules(rig).split())
+    assert ('starts the same unit of work again after its end-state was reached: in a cycle, where the objects are '
+            'reset and the same work repeats, each repeat is its own task, judged on its own.') in rules
+    assert ('Stages toward one end state are one task with subgoals, never separate tasks: building a stack in two '
+            'halves, or packing a box item by item, is one task.') in rules

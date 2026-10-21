@@ -359,9 +359,41 @@ def test_a_mistake_listed_twice_explains_one_failed_attempt_not_two():
     rec["operator_mistakes"] = [{"issue": "missed the handle", "severity": "high", "category": "missed_grasp",
                                  "t_s": 5.0}] * 2
     rec["key_events"] = [{"t_s": 4.0, "kind": "grasp", "outcome": "failure", "label": "grasp handle"},
+                         {"t_s": 6.0, "kind": "grasp", "outcome": "success", "label": "handle held"},
                          {"t_s": 8.0, "kind": "grasp", "outcome": "failure", "label": "grasp handle"}]
     s = scores.score_board({"m.json": rec})["m.json"]
     assert s["inputs"]["unexplained_failed_attempts"] == scores.FAILED_ATTEMPT_POINTS and s["cleanliness"] == 6.0
+
+
+def test_a_recording_with_a_part_that_has_no_labels_gets_no_whole_recording_score():
+    # 185622: part 1 of 2 got no reply, and the labelled half scored 10 for the whole recording
+    rec = _record("sort the blocks", None, [(372, 680, "idle", None)])
+    rec["_stitched"] = {"parts": 2, "cuts_s": [371.7], "missing": [{"part": 1, "t0_s": 0.0, "t1_s": 371.7,
+                                                                     "why": "the model gave no reply"}]}
+    s = scores.score_board({"m.json": rec})["m.json"]
+    assert s["execution"] is None and s["outcome"] is None and s["cleanliness"] is None
+    assert s["inputs"]["unlabelled_parts"] == [{"part": 1, "t0_s": 0.0, "t1_s": 371.7}]
+
+
+def test_failed_tries_inside_one_mistakes_span_are_one_incident_and_any_other_failure_counts_alone():
+    # a sticker peel retried ten times inside the one mistake the labels describe is one incident, which that mistake
+    # explains; the failures outside every mistake span, and one with no time, count one each, as on main
+    rec = _record("peel the stickers", 30.0, [(0, 30, "advancing", 1.0)])
+    rec["operator_mistakes"] = [{"issue": "struggles to peel the first sticker", "severity": "low",
+                                 "category": "slow_progress", "t_s": 0.5, "end_s": 11.0}]
+    rec["key_events"] = ([{"t_s": 1.0 + i, "kind": "peel", "outcome": "failure", "label": "sticker stays"}
+                          for i in range(10)]
+                         + [{"t_s": 14.0, "kind": "peel", "outcome": "failure", "label": "next sticker stays"},
+                            {"t_s": 15.0, "kind": "peel", "outcome": "failure", "label": "next sticker stays"},
+                            {"kind": "peel", "outcome": "failure", "label": "a try with no time"}])
+    s = scores.score_board({"p.json": rec})["p.json"]
+    assert s["inputs"]["unexplained_failed_attempts"] == 3 * scores.FAILED_ATTEMPT_POINTS
+    assert s["cleanliness"] == 7.0
+    # two unrelated failures with no mistake around them, a grasp at 1s and a collision at 500s, are two incidents
+    rec = _record("tidy the kitchen", 600.0, [(0, 600, "advancing", 1.0)])
+    rec["key_events"] = [{"t_s": 1.0, "kind": "grasp", "outcome": "failure", "label": "left hand misses the cup"},
+                         {"t_s": 500.0, "kind": "contact", "outcome": "failure", "label": "right hand hits the drawer"}]
+    assert scores.score_board({"k.json": rec})["k.json"]["inputs"]["unexplained_failed_attempts"] == 2.0
 
 
 def test_a_staged_mistake_is_charged_like_the_board_counts_it_and_one_without_text_is_not_read():

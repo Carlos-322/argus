@@ -615,6 +615,32 @@ def _packed_episode(tmp_path):
     return ep, T
 
 
+def test_grid_rebuild_checks_the_inputs_under_the_saved_inspection_mode(tmp_path, monkeypatch):
+    ep, _ = _packed_episode(tmp_path)
+    result = harness.label_episode(ep, tmp_path / 'label.json', model='openai/gpt-6.1-sol',
+        reasoning='high', api_key='dry-run', max_tokens=2000, timeout=60, cell_w=224,
+        dry_run=True, sample_fps=2)
+    from label import grids
+    seen = []
+    original_identity = harness.input_identity
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get('inspection'))
+        return original_identity(*args, **kwargs)
+    monkeypatch.setattr(harness, 'input_identity', spy)
+    for saved, expected in [('off', 'off'), ('all', 'all'), (None, 'all')]:
+        changed = json.loads(json.dumps(result))
+        selected = changed['config']['request_images']['recipe']['annotation_policy']
+        selected.pop('inspection', None)
+        if saved:
+            selected['inspection'] = saved
+        seen.clear()
+        try:
+            grids.rebuild(changed, ep)
+        except grids.GridError:
+            pass                                    # a different mode may change the identity; the mode passed is the point
+        assert seen == [expected], (saved, seen)
+
+
 def test_request_grid_receipt_rebuilds_actual_dense_inputs(tmp_path, monkeypatch):
     ep, _ = _packed_episode(tmp_path)
     result = harness.label_episode(ep, tmp_path / 'label.json', model='openai/gpt-6.1-sol',
@@ -726,7 +752,7 @@ def test_grid_publication_rejects_replaced_or_escaping_images(tmp_path):
     assert bg.read(root, 'episode.json', record) is None
 
 
-def test_final_image_receipt_includes_selected_sensor_images(tmp_path, monkeypatch):
+def test_final_image_receipt_includes_selected_sensor_images(inspect_every_field, tmp_path, monkeypatch):
     from PIL import Image
     from label import evidence_access, grids
     ep, _ = _packed_episode(tmp_path)
@@ -815,7 +841,7 @@ def _assert_verified_selection_charge(record):
     assert inspection['rounds'][0]['response']['usage']['cost'] == pytest.approx(.004)
 
 
-def test_final_timeout_claim_survives_resume_without_second_dispatch(tmp_path, monkeypatch):
+def test_final_timeout_claim_survives_resume_without_second_dispatch(inspect_every_field, tmp_path, monkeypatch):
     ep, _ = _packed_episode(tmp_path)
     out = tmp_path / 'out'
     calls = []
@@ -884,7 +910,7 @@ def test_complete_token_usage_settles_final_claim(tmp_path, monkeypatch):
     assert 'final_dispatch_outcome' not in result
 
 
-def test_run_batch_does_not_replay_successful_reply_with_missing_usage(tmp_path, monkeypatch):
+def test_run_batch_does_not_replay_successful_reply_with_missing_usage(inspect_every_field, tmp_path, monkeypatch):
     from label.dictionary_stage import label_spend, label_spend_complete
     ep, _ = _packed_episode(tmp_path)
     calls = []
@@ -918,7 +944,7 @@ def test_run_batch_does_not_replay_successful_reply_with_missing_usage(tmp_path,
     assert label_spend(tmp_path / 'job') == pytest.approx(receipt['final_reserved_usd'] + .004)
 
 
-def test_final_claim_survives_worker_crash_and_budget_refusal_has_no_dispatch(tmp_path, monkeypatch):
+def test_final_claim_survives_worker_crash_and_budget_refusal_has_no_dispatch(inspect_every_field, tmp_path, monkeypatch):
     ep, _ = _packed_episode(tmp_path)
     calls = []
     def crash(content, *args, **options):
@@ -1080,7 +1106,7 @@ def test_an_openai_key_sends_the_request_straight_to_openai(monkeypatch):
         harness.call_model(content, "anthropic/claude-opus-5.5", "medium", "sk-proj-x", 64000, 60)
 
 
-def test_cut_off_reply_is_kept_beside_the_outputs_and_fails(tmp_path, monkeypatch):
+def test_cut_off_reply_is_kept_beside_the_outputs_and_fails(inspect_every_field, tmp_path, monkeypatch):
     ep, _ = _packed_episode(tmp_path)
     calls = []
 

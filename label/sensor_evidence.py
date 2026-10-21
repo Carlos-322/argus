@@ -15,7 +15,7 @@ import numpy as np
 from label.dictionary_context import field_interpretation, prepared_interpretation
 from label import signals as sg
 from label import sensor_copy
-from prepare.formats import is_sensing, names_touch, _names_word
+from prepare.formats import TOUCH_WORDS, is_sensing, names_touch, _names_word
 
 MAX_SERIES = 12
 MAX_SAMPLES = 96
@@ -96,7 +96,19 @@ def _clock_digest(ctx):
                                 if k in ctx}).encode()).hexdigest()
 
 
-def _quantity(name, entry):
+def _columns(ep, name):
+    """How many values a recorded signal holds per reading, or None when its readings are not loaded."""
+    values = (ep.get('signals') or {}).get(name)
+    if values is None:
+        return None
+    shape = np.shape(values)
+    return math.prod(shape[1:]) if len(shape) > 1 else 1
+
+
+def _quantity(name, entry, columns=None):
+    """What a numeric signal measures, from its dictionary role or, without one, its name. A force reading that is a
+    wrench at one point (its name says torque or wrench, or six values at the wrist or flange: three forces and three
+    torques) is force_torque, not touch, whether or not the field dictionary ran."""
     role = sg._role(entry.get('role'))
     if sg.touch_permission(name, role) is False:
         return None
@@ -108,6 +120,10 @@ def _quantity(name, entry):
     if role:
         return None
     if names_touch(name):
+        if _names_word(name, ('torque', 'wrench')) or (
+                columns == 6 and _names_word(name, ('wrist', 'flange', 'tcp'))
+                and not _names_word(name, tuple(w for w in TOUCH_WORDS if w != 'force'))):
+            return 'force_torque'
         # A contact-pressure map is continuous. Only an explicit interpretation
         # establishes recorded contact-state semantics.
         return 'sensor_response'
@@ -254,7 +270,7 @@ def build(ep, pl, *, shown=None, images=None, native_images=None, capture_select
     for meta in ctx.get('signals') or []:
         name = meta['name']
         entry = field_interpretation(ctx, name)
-        quantity = _quantity(name, entry)
+        quantity = _quantity(name, entry, _columns(ep, name))
         if quantity is None and not names_touch(name):
             continue
         status = ('excluded by interpretation' if sg.touch_permission(name, entry.get('role')) is False
@@ -282,7 +298,7 @@ def build(ep, pl, *, shown=None, images=None, native_images=None, capture_select
     for position, meta in enumerate(numeric):
         name = meta['name']
         entry = field_interpretation(ctx, name)
-        quantity = _quantity(name, entry)
+        quantity = _quantity(name, entry, _columns(ep, name))
         if quantity is None or name not in ep.get('signals', {}):
             continue
         if len(doc['sensors']) >= MAX_SENSORS:
@@ -390,11 +406,14 @@ def build(ep, pl, *, shown=None, images=None, native_images=None, capture_select
     from label import semantic_evidence
     semantic_evidence.append(ep, pl, doc, times)
     shown = shown if shown is not None else {}
-    from label.dictionary_context import camera_content_role, TACTILE_CONTENT_ROLES
+    from label.dictionary_context import camera_content_role, camera_role, TACTILE_CONTENT_ROLES
     for view, meta in (ctx.get('cameras') or {}).items():
         name = str(meta.get('name') or view)
         entry = prepared_interpretation(ctx, view, 'camera')
-        role = sg._role(entry.get('role'))
+        role = camera_role(ctx, view, entry, meta)
+        if role is None and entry.get('role'):
+            doc['limitations'].append(f'{name}: the field dictionary called this camera {entry["role"]}, but the reader '
+                                      'placed it from the recording itself, so it is kept as a camera.')
         content = camera_content_role(ctx, view)
         if content and content['role'] in ('scene', 'other'):
             continue

@@ -13,6 +13,23 @@ TASK_MODES = ('episode', 'session')
 # reasoning any call used in the October 2026 Astra runs (2,128 tokens, a sensor analysis;
 # evidence selection used at most 239), and each effort step doubles it.
 REASONING_TOKENS = {'none': 0, 'minimal': 1000, 'low': 2000, 'medium': 4000, 'high': 8000, 'xhigh': 16000}
+# The paid calls beside the annotation. Evidence inspection asks the model, before it annotates, which recorded fields
+# to read at full rate (label/evidence_access.py discover); it was built for depth and touch sensing, so by default
+# (auto) only a recording with depth or a touch sensor (tactile, pressure, contact; a wrist force/torque sensor alone
+# does not count) is inspected, all inspects any recording with recorded fields beyond its cameras, and off buys no
+# selection. The field dictionary asks once per upload what uncertain fields mean
+# (label/dictionary_stage.py), on by default, and is written into the policy only when off.
+# A policy saved before inspection could be set inspected every recording with recorded fields, so a saved policy
+# without the setting keeps that (LEGACY_INSPECTION, never written) and a job labelled then resumes as it was paid
+# for; a new policy writes its mode, auto unless asked otherwise.
+INSPECTION_MODES = ('auto', 'all', 'off')
+INSPECTION = 'auto'
+LEGACY_INSPECTION = 'all'
+
+
+def inspection_mode(selected: dict) -> str:
+    """The inspection mode of a resolved or saved policy."""
+    return selected.get('inspection', LEGACY_INSPECTION)
 
 
 def output_limit(answer_tokens: int, reasoning: str) -> int:
@@ -24,7 +41,8 @@ def output_limit(answer_tokens: int, reasoning: str) -> int:
 
 def resolve(ctx: dict, *, model: str | None = None, reasoning: str | None = None,
             sample_fps: float | None = None, task_mode: str | None = None,
-            dataset_note: str | None = None) -> dict:
+            dataset_note: str | None = None, inspection: str | None = None,
+            field_dictionary: bool | None = None) -> dict:
     """Source declarations and caller overrides, independent of dataset names or absent task text."""
     saved = ctx.get('annotation_policy') or {}
     if saved and (not isinstance(saved, dict) or saved.get('version') != VERSION):
@@ -37,7 +55,9 @@ def resolve(ctx: dict, *, model: str | None = None, reasoning: str | None = None
         raise ValueError('model must be a nonempty identifier')
     sol = model.split('/')[-1] == SOL61.split('/')[-1]
     prior_reasoning = saved.get('reasoning') if saved.get('model') == model else None
-    reasoning = reasoning or prior_reasoning or ('high' if sol else 'medium')
+    # Astra defaults to medium reasoning, every other model to high
+    astra = model.split('/')[-1] == ASTRA.split('/')[-1]
+    reasoning = reasoning or prior_reasoning or ('medium' if astra else 'high')
     if reasoning not in REASONING_TOKENS:
         raise ValueError('unsupported reasoning effort')
     if sample_fps is None:
@@ -71,10 +91,18 @@ def resolve(ctx: dict, *, model: str | None = None, reasoning: str | None = None
         if type(previous) not in (float, int) or not math.isfinite(previous) or not 0 < previous <= maximum:
             raise ValueError('saved part allowance is incompatible; rebuild with an explicit policy')
         maximum = previous
+    inspect = inspection if inspection is not None else inspection_mode(saved) if saved else INSPECTION
+    if inspect not in INSPECTION_MODES:
+        raise ValueError(f'inspection must be one of {", ".join(INSPECTION_MODES)}')
+    dictionary = field_dictionary if field_dictionary is not None else saved.get('field_dictionary', True)
+    if type(dictionary) is not bool:
+        raise ValueError('field dictionary must be on or off')
     return {'version': VERSION, 'rig': rig, 'model': model, 'reasoning': reasoning,
             'sample_fps': float(sample_fps) if sample_fps is not None else None,
             'sample_every_s': period, 'part_max_s': maximum, 'task_mode': mode,
-            'dataset_note': note}
+            'dataset_note': note,
+            **({'inspection': inspect} if inspect != LEGACY_INSPECTION else {}),
+            **({'field_dictionary': False} if not dictionary else {})}
 
 
 def effective(ctx: dict) -> dict:
@@ -84,12 +112,16 @@ def effective(ctx: dict) -> dict:
 def add_arguments(parser) -> None:
     """Shared optional controls; omitted values inherit source policy or defaults."""
     parser.add_argument('--model', default=None, help='model identifier (default openai/gpt-6-astra)')
-    parser.add_argument('--reasoning', default=None, help='reasoning effort (Astra medium; GPT-6.1 Sol high)')
+    parser.add_argument('--reasoning', default=None, help='reasoning effort (default medium for Astra, high for every other model)')
     parser.add_argument('--sample-fps', type=float, default=None,
                         help='optional sampling override; GPT-6.1 Sol defaults to at least 1 FPS')
     parser.add_argument('--task-mode', choices=TASK_MODES, default=None,
                         help='optional task-scope override; source declarations otherwise apply')
     parser.add_argument('--dataset-note', default=None, help='dataset description supplied as recording context')
+    parser.add_argument('--inspection', choices=INSPECTION_MODES, default=None,
+                        help='paid evidence selection before each annotation: auto (default) for a recording with depth '
+                             'or a touch sensor (not a force/torque sensor alone), all for any recording with recorded '
+                             'fields beyond its cameras, off for none')
 
 
 def persist(episodes, **overrides) -> dict:

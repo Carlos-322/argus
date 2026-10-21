@@ -96,3 +96,82 @@ def test_proven_unpaid_selection_remains_resumable_across_budget_refusal(tmp_pat
     assert completed['cost_usd'] == .01 and settlements == [(.2, .01)]
     row = completed['rounds'][0]
     assert row['state'] == 'received' and row['rejected_attempts'][0]['verified_unpaid'] is True
+
+
+def test_inspection_turned_off_sends_only_the_annotation_and_a_touch_sensor_is_still_inspected_by_default(tmp_path, monkeypatch):
+    sent = []
+    def provider(request, timeout):
+        if request.get_method() == 'GET':
+            return io.BytesIO(json.dumps({'data': {'id': 'custom/model', 'endpoints': [{
+                'context_length': 50000, 'pricing': {'prompt': '.000004', 'completion': '.00001'}}]}}).encode())
+        selection = 'FIELD INVENTORY' in json.dumps(json.loads(request.data)['messages'])
+        sent.append('selection' if selection else 'final')
+        return answer({'requests': []} if selection else {'task_summary': 'The hand reaches.'}, cost=.1)
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', provider)
+    args = dict(keys=['sk-or-test'], concurrency=1, force=False, model='custom/model',
+                reasoning='medium', max_tokens=100, timeout=1, cell_w=128, max_spend=1.)
+    (tmp_path / 'off').mkdir()
+    off = recording(tmp_path / 'off', np.arange(12) / 30)
+    assert harness.run_batch([off], tmp_path / 'off_out', inspection='off', **args) == 0
+    assert sent == ['final']
+    result = json.loads((tmp_path / 'off_out' / (off.name + '.json')).read_text())
+    assert result['annotation_policy']['inspection'] == 'off'
+    assert ea.INSPECTION_OFF in result['evidence_inspection']['limitations']
+    assert result['evidence_inspection']['cost_usd'] == 0 and harness.episode_cost(result) == pytest.approx(.1)
+    sent.clear()
+    (tmp_path / 'on').mkdir()
+    on = recording(tmp_path / 'on', np.arange(12) / 30)
+    assert harness.run_batch([on], tmp_path / 'on_out', **args) == 0
+    assert sent[0] == 'selection' and sent[-1] == 'final'
+    default = json.loads((tmp_path / 'on_out' / (on.name + '.json')).read_text())
+    assert default['annotation_policy']['inspection'] == 'auto'
+    assert ea.INSPECTION_OFF not in default['evidence_inspection']['limitations']
+
+
+@pytest.mark.parametrize('cost', [0, .02])
+def test_a_provider_error_inside_a_200_reply_is_retried_when_unbilled_and_named_when_billed(tmp_path, monkeypatch,
+                                                                                           capsys, cost):
+    # OpenAI overloaded behind OpenRouter: HTTP 200, finish_reason error, an error on the choice and a fragment of JSON
+    sent = []
+    def provider(request, timeout):
+        if request.get_method() == 'GET':
+            return io.BytesIO(json.dumps({'data': {'id': 'custom/model', 'endpoints': [{
+                'context_length': 50000, 'pricing': {'prompt': '.000004', 'completion': '.00001'}}]}}).encode())
+        if 'FIELD INVENTORY' in json.dumps(json.loads(request.data)['messages']):
+            return answer({'requests': []}, cost=.01)
+        sent.append('final')
+        if len(sent) == 1:
+            return io.BytesIO(json.dumps({'usage': {'cost': cost}, 'choices': [{
+                'finish_reason': 'error', 'error': {'code': 502, 'message': 'Our servers are currently overloaded'},
+                'message': {'content': '{"timeline": [{"start_s": 0'}}]}).encode())
+        return answer({'task_summary': 'The hand reaches.'}, cost=.1)
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', provider)
+    monkeypatch.setattr(harness.time, 'sleep', lambda seconds: None)
+    args = dict(keys=['sk-or-test'], concurrency=1, force=False, model='custom/model',
+                reasoning='medium', max_tokens=100, timeout=1, cell_w=128, max_spend=1.)
+    ep = recording(tmp_path, np.arange(12) / 30)
+    out = tmp_path / 'out'
+    result = out / (ep.name + '.json')
+    if cost == 0:
+        assert harness.run_batch([ep], out, **args) == 0                   # retried at once, nothing paid twice
+        assert sent == ['final', 'final'] and json.loads(result.read_text())['parse_ok'] is True
+        return
+    assert harness.run_batch([ep], out, **args) == 1                       # billed: kept, never resent silently
+    record = json.loads(result.read_text())
+    assert record['parse_ok'] is False and 'provider returned an error in the reply (502 Our servers are currently overloaded)' in record['labels']['_parse_error']
+    assert harness.run_batch([ep], out, **args) == 1 and sent == ['final']
+    assert harness.run_batch([ep], out, retry_received=[ep.name], **args) == 0 and sent == ['final', 'final']
+
+
+def test_a_run_labelled_before_inspection_could_be_set_is_told_how_to_resume_it_as_paid(tmp_path, monkeypatch, capsys):
+    # a staged run whose episode context never saved a policy: its saved request inspected every recorded field (no
+    # inspection key), today's default is auto, so the saved output is stale and the message names the flag that
+    # resumes it without paying again
+    from test_dispatch_integrity_v5 import options
+    from test_request_attestation import paid_episode
+    ep, out, calls = paid_episode(tmp_path, monkeypatch, inspection='all')
+    capsys.readouterr()
+    assert harness.run_batch([ep], out, **options()) != 0
+    assert '--inspection all to resume it as it was paid for' in capsys.readouterr().err
+    assert harness.run_batch([ep], out, **options(inspection='all')) == 0
+    assert calls == ['selection', 'selection', 'final', 'cards']                # nothing was paid again
