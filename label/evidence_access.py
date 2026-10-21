@@ -81,10 +81,12 @@ def reader_projection_identity(ctx):
 def needs_inspection(ep, sensor_evidence, mode='auto'):
     """Whether a request carries an inspection, by the annotation policy's mode (label/policy.py INSPECTION_MODES).
     auto and off: a recording with depth or a touch sensor (sensor_evidence's sensors: tactile arrays and cameras,
-    force, pressure and contact signals), which inspection was built for; off keeps the record with no selection.
-    all: also any other recorded field beyond the cameras (arm signals, actions, original metadata). Ordinary RGB stays
-    on its path in every mode."""
-    if bool(ep.get('depth') or ep.get('additional_depth') or sensor_evidence.get('sensors')):
+    pressure, contact, normal and shear force), which inspection was built for; a wrist force/torque sensor alone is
+    not one, as it matters less to the annotation than touch; off keeps the record with no selection. all: also a
+    force/torque sensor and any other recorded field beyond the cameras (arm signals, actions, original metadata).
+    Ordinary RGB stays on its path in every mode."""
+    touch = [s for s in sensor_evidence.get('sensors') or [] if s.get('quantity') != 'force_torque']
+    if bool(ep.get('depth') or ep.get('additional_depth') or touch):
         return True
     if mode != 'all':
         return False

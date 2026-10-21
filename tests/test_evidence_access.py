@@ -1156,6 +1156,8 @@ def test_by_default_only_depth_and_touch_sensors_are_inspected_and_all_restores_
     arm['action'] = np.ones((4, 7))
     assert not ea.needs_inspection(arm, {}) and not ea.needs_inspection(arm, {}, 'off')
     assert ea.needs_inspection(arm, {}, 'all')
+    wrench = {'sensors': [{'id': 'signal:wrist_ft', 'kind': 'numeric', 'quantity': 'force_torque'}]}
+    assert not ea.needs_inspection(arm, wrench) and ea.needs_inspection(arm, wrench, 'all')
     touch = {'sensors': [{'id': 'signal:pressure', 'kind': 'numeric', 'quantity': 'pressure_response'}]}
     for mode in ('auto', 'all', 'off'):
         assert ea.needs_inspection(arm, touch, mode)

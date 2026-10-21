@@ -15,8 +15,9 @@ TASK_MODES = ('episode', 'session')
 REASONING_TOKENS = {'none': 0, 'minimal': 1000, 'low': 2000, 'medium': 4000, 'high': 8000, 'xhigh': 16000}
 # The paid calls beside the annotation. Evidence inspection asks the model, before it annotates, which recorded fields
 # to read at full rate (label/evidence_access.py discover); it was built for depth and touch sensing, so by default
-# (auto) only a recording with depth or a touch sensor is inspected, all inspects any recording with recorded fields
-# beyond its cameras, and off buys no selection. The field dictionary asks once per upload what uncertain fields mean
+# (auto) only a recording with depth or a touch sensor (tactile, pressure, contact; a wrist force/torque sensor alone
+# does not count) is inspected, all inspects any recording with recorded fields beyond its cameras, and off buys no
+# selection. The field dictionary asks once per upload what uncertain fields mean
 # (label/dictionary_stage.py), on by default. A setting at its default is not written into the policy, so a default
 # policy reads exactly as it did before these settings existed.
 INSPECTION_MODES = ('auto', 'all', 'off')
@@ -111,8 +112,8 @@ def add_arguments(parser) -> None:
     parser.add_argument('--dataset-note', default=None, help='dataset description supplied as recording context')
     parser.add_argument('--inspection', choices=INSPECTION_MODES, default=None,
                         help='paid evidence selection before each annotation: auto (default) for a recording with depth '
-                             'or a touch sensor, all for any recording with recorded fields beyond its cameras, off for '
-                             'none')
+                             'or a touch sensor (not a force/torque sensor alone), all for any recording with recorded '
+                             'fields beyond its cameras, off for none')
 
 
 def persist(episodes, **overrides) -> dict:
