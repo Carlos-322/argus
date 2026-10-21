@@ -161,10 +161,11 @@ def camera_role(ctx: dict, view: str, interpretation: dict, meta: dict | None = 
     if role not in SENSOR_CONTENT_ROLES or interpretation.get('provenance') != 'machine':
         return role
     meta = meta if meta is not None else (ctx.get('cameras') or {}).get(view) or {}
-    placed = camera_role_provenance(meta, view, ctx.get('profile') or 'teleop_arms') in ('recorded_name', 'recorded',
-                                                                                          'adapter')
-    named = str(meta.get('key') or meta.get('name') or view)
-    return None if placed and not is_sensing(named) else role
+    # placed from the recording itself: its recorded name or a recorded mount; an adapter's description of a
+    # presentation slot is not a placement
+    placed = camera_role_provenance(meta, view, ctx.get('profile') or 'teleop_arms') in ('recorded_name', 'recorded')
+    said = ' '.join(str(meta.get(key) or '') for key in ('key', 'name', 'desc')) or view
+    return None if placed and not is_sensing(said) else role
 
 
 def camera_content_role(ctx: dict, view: str, entry: dict | None = None) -> dict | None:
