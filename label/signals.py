@@ -831,6 +831,22 @@ def _r2_rows(xs: np.ndarray, y: np.ndarray) -> np.ndarray:
     return out
 
 
+LINE_MIN_POINTS = 3     # a line through two points always fits exactly, so it says nothing about how closely y follows x
+
+
+def line_through(x, y) -> tuple[float, float] | None:
+    """(slope, intercept) of the least-squares line y = intercept + slope x through the pairs where both are finite, or
+    None when fewer than LINE_MIN_POINTS pairs are finite or x has no spread among them. Then no line can be stated,
+    and a fit would divide by zero inside the solver and stop the whole episode (a partner that never moves outside
+    the frames where the pair comes apart). Every straight-line fit on recorded values goes through here."""
+    x, y = np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)
+    ok = np.isfinite(x) & np.isfinite(y)
+    if ok.sum() < LINE_MIN_POINTS or np.ptp(x[ok]) == 0:
+        return None
+    slope, intercept = np.polyfit(x[ok], y[ok], 1)
+    return (float(slope), float(intercept)) if np.isfinite(slope) and np.isfinite(intercept) else None
+
+
 def tracking(x: np.ndarray, y: np.ndarray, ks: list[int], fps: float) -> tuple[bool, int]:
     """(whether y's readings at the instants ks track x's, how many frames later x moves than y). Whether they track
     is judged on the readings at ks, x read at ks shifted by every lag up to TRACK_LAG_S. Which one moves later is read
@@ -891,8 +907,11 @@ def apart_instants(x: np.ndarray, y: np.ndarray, ks: list[int], lag: int, fps: f
         # beyond it, so the line is fitted again without the frames the first fit found apart
         use, here = ok, np.zeros(len(idx), dtype=bool)
         for _ in range(2):
-            coef = np.polyfit(a[use], b[use], 1)
-            fit = np.polyval(coef, np.where(ok, a, 0.0))
+            line = line_through(a[use], b[use])
+            if line is None:
+                # the frames left after a first fit no longer carry a line: there is no usual tracking to depart from
+                return list(range(len(ks)))
+            fit = line[1] + line[0] * np.where(ok, a, 0.0)
             r = np.where(ok, np.abs(b - fit), 0.0)
             held = np.convolve(r, np.ones(win), mode="same") / count
             # the pair's own normal: a follower behind its command is off by about its speed times the lag, and a

@@ -316,3 +316,32 @@ def test_window_mean_rows_come_after_resolved_rows_and_by_the_variance_their_mea
     assert shown == ["b_high (window mean)", "j"]
     cut = next(l for l in lines if "rows given as window means take at most" in l)
     assert "a_low (max " in cut and " s, min " in cut and "b_high" not in cut
+
+
+def test_a_line_is_fitted_only_through_readings_that_carry_one():
+    """No line through fewer than three finite pairs, or through an x with no spread (all zero, or one value): numpy
+    would divide by zero inside the solver and stop the whole episode."""
+    x = np.linspace(0, 1, 50)
+    assert np.allclose(sg.line_through(x, 2 * x + 1), (2.0, 1.0))
+    for bad_x in (np.zeros(50), np.full(50, 0.7), np.r_[np.full(48, np.nan), 1.0, 2.0], np.full(50, np.inf)):
+        assert sg.line_through(bad_x, x) is None
+
+
+def test_a_partner_that_never_moves_outside_where_the_pair_comes_apart_keeps_both_rows(monkeypatch):
+    """A command that moves only from 20 s to 40 s and the joint that follows it: when the instants where they come
+    apart cover every instant the command moves, the readings left carry no line, so the joint is no copy and both
+    rows are sent (episode 151721 of the teleop 100h run stopped here on a zero-spread fit)."""
+    t = np.arange(N) / FPS
+    cmd = np.where((t > 20) & (t < 40), np.sin(2 * np.pi * (t - 20) / 10), 0.0)
+    arm = _later(cmd, 3, noise=0.0)     # still exactly, as the recorded joints were outside the motion
+    ep, pl = _case({"cmd": cmd, "arm": arm})
+    real = sg.apart_instants
+
+    def moving(x, y, ks, lag, fps):
+        ks = np.asarray(ks, dtype=int)
+        return [i for i, k in enumerate(ks) if 19 * fps <= k <= 41 * fps]
+    monkeypatch.setattr(sg, "apart_instants", moving)
+    shown, left, _, lines = _readout(ep, pl)
+    assert sorted(shown) == ["arm", "cmd"] and not left and not _apart_lines(lines)
+    monkeypatch.setattr(sg, "apart_instants", real)
+    _readout(ep, pl)        # and with the real rule the readout is made, whatever it decides
