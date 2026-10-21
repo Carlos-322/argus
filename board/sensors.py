@@ -454,13 +454,17 @@ def summary(doc: dict) -> dict:
                       for entry in (doc.get('depth') or {}).values()) else {})}
 
 
-def build(episodes: dict, out_dir: Path) -> dict:
+def build(episodes: dict, out_dir: Path, reuse=None) -> dict:
     """Write the sensors file of every board label file whose prepared episode has signals or depth into out_dir
-    (which must exist), and index.json. episodes maps a label file to its prepared episode folder."""
-    files, skipped, total, biggest = {}, [], 0, 0
+    (which must exist), and index.json. episodes maps a label file to its prepared episode folder; reuse(file), when
+    given, returns the last build's document for a file whose inputs are unchanged (board/build.py), or None."""
+    files, skipped, total, biggest, reused = {}, [], 0, 0, 0
     for f, ep in sorted(episodes.items()):
+        doc = reuse(f) if reuse else None
+        if doc is not None:
+            reused += 1
         try:
-            doc = episode_doc(Path(ep))
+            doc = doc if doc is not None else episode_doc(Path(ep))
         except Exception as err:  # noqa: BLE001 - reported per episode, the build goes on
             skipped.append({"file": f, "skip": f"{type(err).__name__}: {err}"[:300]})
             continue
@@ -473,7 +477,7 @@ def build(episodes: dict, out_dir: Path) -> dict:
         biggest = max(biggest, size)
     write_atomic(out_dir / "index.json", {"format": FORMAT, "files": files}, indent=None,
                  serializer=dumps, separators=(",", ":"))
-    return {"written": len(files), "skipped": skipped, "bytes": {"total": total, "max": biggest}}
+    return {"written": len(files), "skipped": skipped, "bytes": {"total": total, "max": biggest}, "reused": reused}
 
 
 def episode_folders(qa: Path, roots: list) -> dict:
