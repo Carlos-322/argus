@@ -34,10 +34,8 @@ import numpy as np
 from label.atomic import write_atomic, write_bytes_atomic
 from prepare import cli
 from prepare import hub
+from label.presented import presented_pts
 
-# Data Review and python -m prepare folder hand an upload to an adapter that recognizes it (prepare/formats.py
-# upload_adapters); this one reads only the published dataset
-UPLOAD = None
 
 REPO = "builddotai/Egocentric-100K"
 API = f"https://huggingface.co/api/datasets/{REPO}/tree/main"
@@ -130,7 +128,7 @@ def prepare_clip(shard: str, member: str, raw: Path, out_root: Path) -> dict:
     ep.mkdir(parents=True, exist_ok=True)
     with av.open(str(mp4)) as c:
         st = c.streams.video[0]
-        pts = sorted(p.pts for p in c.demux(st) if p.pts is not None and not p.is_discard)
+        pts = presented_pts(c, st)
         tb, w, h = st.time_base, st.codec_context.width, st.codec_context.height
     n = len(pts)
     fps = float(clip_meta.get("fps") or 30.0)
@@ -169,7 +167,7 @@ def drawn(shard: str, seed: int, raw: Path, out_root: Path) -> dict | None:
             return None
         prepare_one(shard, member, raw, out_root)
         return json.loads((out_root / episode_dir_name(member) / "context.json").read_text())
-    except Exception as e:  # a drawn clip that cannot be read is a finding about the data; listed, not hidden
+    except Exception as e:  # noqa: BLE001 - a drawn clip that cannot be read is printed as FAILED, not hidden
         print(f"FAILED {shard}: {type(e).__name__}: {e}"[:400], file=sys.stderr, flush=True)
         return None
 

@@ -36,7 +36,7 @@ A signal is read by how its numbers behave, and only whether it measures touch a
 """
 from __future__ import annotations
 
-import re
+import json
 import warnings
 
 import numpy as np
@@ -60,8 +60,9 @@ DESCRIBE_ROW_MAX_CHARS = 768
 # names, or whose own name says it holds joints or a state: one row per value under its own name. A humanoid's 26
 # joints and a base's x, y, yaw, vx, wz reached that readout as one "largest change" or "total activity" row while
 # it went value by value only up to SMALL. A map (a 2 D shape, whose strongest cell says more than its cells one by
-# one) and a long unnamed vector (audio samples) keep their summary rows.
-JOINT_LIKE = re.compile(r"joint|qpos|state", re.I)
+# one) and a long unnamed vector (audio samples) keep their summary rows. The name's words are matched whole
+# (prepare/formats.py _names_word, as every name word is), so jointly and statevec are not joints or a state.
+JOINT_LIKE = ("joint", "qpos", "state")
 # A signal recorded below this share of the frame rate says its rate: a 6 Hz glove otherwise reads as if it were
 # sampled every frame.
 RATE_SLOWER = 0.9
@@ -188,18 +189,20 @@ def per_value(name: str, d: int, shape=None, names=None, role=None) -> bool:
         return True
     if names and len(names) == d:
         return True
-    return d <= JOINT_NAME_MAX and bool(JOINT_LIKE.search(name))
+    from prepare.formats import _names_word
+    return d <= JOINT_NAME_MAX and _names_word(name, JOINT_LIKE)
 
 
 def names_joints_or_state(name: str) -> bool:
     """Whether a signal's name says it holds joints or a state, as the no state line names it (label/episode.py): a word
     of it is joint or qpos (left_joint1, /left/joint_states, observations/qpos), or its last word is state or states
     (observation.state, observation.leader_state), and no word of it says a command (prepare/formats.py
-    COMMAND_WORDS, so /left/joint_command and leader_cmd_state are not). Words are split as prepare/formats.py tokens
-    splits them (separators and camelCase). A one value battery_state or estop_state is left out by the line's own
-    rule that a named signal has more than one value."""
-    from prepare.formats import COMMAND_WORDS, _names_word, tokens
-    words = tokens(name)
+    COMMAND_WORDS, so /left/joint_command and leader_cmd_state are not). Words are split as every name matcher splits
+    them (prepare/formats.py word_tokens: separators, camelCase and glued known words, so observation.robotstate ends
+    in state). A one value battery_state or estop_state is left out by the line's own rule that a named signal has
+    more than one value."""
+    from prepare.formats import COMMAND_WORDS, _names_word, word_tokens
+    words = word_tokens(name)
     return ((_names_word(name, ("joint", "qpos")) or bool(words) and words[-1] in ("state", "states"))
             and not _names_word(name, COMMAND_WORDS))
 
@@ -207,18 +210,19 @@ def names_joints_or_state(name: str) -> bool:
 def names_scalar_observed_state(name: str) -> bool:
     """A scalar can disprove absent arm state only when its name identifies a joint or observed arm state.
     Sensor readings, bookkeeping and commands do not establish that state, even under observation.*."""
-    from prepare.formats import TOUCH_WORDS, _names_word, tokens
+    from prepare.formats import TOUCH_WORDS, _names_word, word_tokens
     if not names_joints_or_state(name) or _names_word(name, TOUCH_WORDS + (
             "torque", "clock", "time", "timestamp",
             "battery", "estop", "emergency", "health", "status", "mode", "power", "temperature", "voltage",
             "current")):
         return False
-    words = tokens(name)
+    words = [w for w in word_tokens(name) if not w.isdigit()]      # arm0_state's word before state is arm
     return (_names_word(name, ("joint", "qpos")) or len(words) > 1 and words[-1] in ("state", "states")
             and _names_word(words[-2], ("observation", "arm", "robot", "gripper", "leader", "follower")))
 
 
-def _num(x: float) -> str:
+def reading_text(x: float) -> str:
+    """A reading as the request writes it: three significant figures, and - for no reading."""
     return "-" if not np.isfinite(x) else f"{float(x):.3g}"
 
 
@@ -419,20 +423,9 @@ def distance_at(a: np.ndarray, k: int, rest=None, swing=None) -> tuple[np.ndarra
 
 
 def active_at(a: np.ndarray, k: int, rest=None, swing=None) -> np.ndarray:
-    """_active's row k: which values are away from rest at frame k."""
+    """Which values are away from rest at frame k."""
     d, sw = distance_at(a, k, rest, swing)
     return _away(d, sw) if sw > 0 else np.zeros(len(d), dtype=bool)
-
-
-def _active(a: np.ndarray, rest=None, swing=None) -> np.ndarray:
-    a = _float(a)
-    level = resting_level(a, rest)
-    sw = _swing(a, level, swing)
-    out = np.zeros(a.shape, dtype=bool)
-    if sw > 0:
-        for i, c in _rows64(a):
-            out[i:i + len(c)] = _away(np.abs(c - level), sw)
-    return out
 
 
 def activity(a: np.ndarray, rest=None, swing=None) -> np.ndarray:
@@ -447,6 +440,54 @@ def activity(a: np.ndarray, rest=None, swing=None) -> np.ndarray:
             m[i:i + len(c)] = np.where(_away(d, sw), d, 0.0).sum(axis=1)
         m[i:i + len(c)][~np.isfinite(c).any(axis=1)] = np.nan
     return m
+
+
+def declared_zero_reference(meta: dict, width: int | None = None):
+    """Only a literal finite calibration zero and explicit polarity establish this reference."""
+    calibration = meta.get('calibration')
+    if isinstance(calibration, str) and len(calibration) <= 65536:
+        try:
+            calibration = json.loads(calibration)
+        except (ValueError, RecursionError):
+            return None
+    direction = meta.get('response_direction')
+    if not isinstance(calibration, dict) or direction not in ('up', 'down'):
+        return None
+    zero = calibration.get('zero')
+    if isinstance(zero, bool):
+        return None
+    try:
+        if np.asarray(zero).dtype.kind not in 'iuf':
+            return None
+        level = np.asarray(zero, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if width is None:
+        width = level.size if level.ndim == 1 else 1
+    if level.ndim == 0:
+        level = np.full(width, float(level))
+    if not width or level.shape != (width,) or not np.isfinite(level).all():
+        return None
+    return level, 1 if direction == 'up' else -1
+
+
+def declared_zero_activity(a: np.ndarray, meta: dict):
+    """Positive recorded response from a declared zero; missing rows stay missing.
+
+    No episode-relative threshold or inferred resting endpoint changes the
+    declared zero. This response does not by itself verify physical contact.
+    """
+    reference = declared_zero_reference(meta, a.shape[1])
+    if reference is None:
+        return None
+    level, sign = reference
+    result = np.zeros(len(a))
+    for start, block in _rows64(a):
+        valid = np.isfinite(block)
+        response = np.where(valid, np.maximum(sign * (block - level), 0), 0)
+        result[start:start + len(block)] = response.sum(axis=1)
+        result[start:start + len(block)][~valid.any(axis=1)] = np.nan
+    return result
 
 
 def has_rest(a: np.ndarray, rest=None, swing=None) -> bool:
@@ -567,10 +608,14 @@ def is_touch(name: str, a: np.ndarray, rest=None, swing=None, role=None) -> bool
 def active_spans(a: np.ndarray, t: np.ndarray, rest=None, swing=None) -> list[tuple[float, float]]:
     """[(start s, end s)] where the signal is away from rest (activity at least REST_FRACTION of its peak), from every
     frame; spans closer than MERGE_GAP_S are one, and a single-frame flicker is not a span."""
-    m = activity(a, rest, swing)
+    return response_spans(activity(a, rest, swing), t)
+
+
+def response_spans(m: np.ndarray, t: np.ndarray, *, declared_zero=False) -> list[tuple[float, float]]:
+    """Response intervals; a declared zero uses positive response rather than an inferred relative threshold."""
     if not np.isfinite(m).any() or not np.nanmax(m) > 0:
         return []
-    on = np.nan_to_num(m) >= REST_FRACTION * np.nanmax(m)
+    on = np.isfinite(m) & (m > 0 if declared_zero else m >= REST_FRACTION * np.nanmax(m))
     spans, i, n = [], 0, len(on)
     while i < n:
         if not on[i]:
@@ -644,6 +689,259 @@ def movements(a: np.ndarray) -> np.ndarray:
     return _score(*_range_and_step(a))
 
 
+# A value's readings at the sampled instants resolve it when each reading stands for the stretch of frames its instant
+# represents (the share of the sampled readings' variance their stretch means explain, at least RESOLVED_STAND), or
+# when consecutive readings follow one another (lag-1 autocorrelation of the sampled readings at least RESOLVED_FOLLOW)
+# and the readings are no further from their stretch means than from their own average (stand at least 0, so a
+# vibration sampled near its own period, whose readings drift slowly while the frames around them swing, is not
+# taken for a slow value). A joint or gripper position passes; a velocity or a noisy effort read once a second does
+# not, because its reading at an instant says nothing about the second around it. On 21 bimanual teleop requests at
+# 1 instant per second, velocity rows sent fell from 284 to 22 and effort rows from 276 to 179, joint position rows
+# rose from 523 to 528 (the budget no longer cut them), and the only gripper rows left out were of grippers that did
+# not move in that request (0.999 to 1), whose readings only jitter.
+RESOLVED_FOLLOW = 0.5
+RESOLVED_STAND = 0.85
+# Below this many instants neither score is estimated well enough to drop a row (a lag-1 autocorrelation of n readings
+# has a standard error near 1 / sqrt(n), 0.28 at 13 instants), and a row of so few readings costs little: every row is
+# kept as it is, and no row is taken as a copy of another.
+RESOLVED_MIN_INSTANTS = 30
+
+
+def is_resolved(follow: np.ndarray, stand: np.ndarray) -> np.ndarray:
+    """The rule above, on resolution's (follow, stand)."""
+    return (stand >= RESOLVED_STAND) | ((follow >= RESOLVED_FOLLOW) & (stand >= 0))
+
+
+def resolution(a: np.ndarray, ks: list[int]) -> tuple[np.ndarray, np.ndarray]:
+    """(follow, stand) per value of a (frames by values) at the sampled instants ks: the lag-1 autocorrelation of its
+    readings at ks, and the share of their variance explained by the mean of the frames each instant stands for (from
+    halfway to the instant before to halfway to the instant after). Missing readings are left out of both. A value
+    whose sampled readings do not vary scores 0 on both: its readings at the instants say nothing of how it changed.
+    With fewer than RESOLVED_MIN_INSTANTS instants both are 1."""
+    a = columns(a)
+    ks = np.asarray(ks, dtype=int)
+    d = a.shape[1]
+    follow, stand = np.zeros(d), np.zeros(d)
+    if len(ks) < RESOLVED_MIN_INSTANTS:
+        return np.ones(d), np.ones(d)
+    edges = np.concatenate([[ks[0]], (ks[1:] + ks[:-1] + 1) // 2, [ks[-1] + 1]])
+    with np.errstate(all="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        for j in range(d):
+            col = np.asarray(a[:, j], dtype=np.float64)
+            v = col[ks]
+            means = np.array([np.nanmean(col[edges[i]:edges[i + 1]]) for i in range(len(ks))])
+            ok = np.isfinite(v)
+            dv = v[ok] - v[ok].mean() if ok.any() else np.zeros(0)
+            total = float((dv * dv).sum())
+            if total <= 0:
+                continue
+            both = ok[1:] & ok[:-1]
+            centred = np.where(ok, v - v[ok].mean(), 0.0)
+            follow[j] = float((centred[1:] * centred[:-1])[both].sum() / total)
+            fit = ok & np.isfinite(means)
+            stand[j] = float(1 - ((v[fit] - means[fit]) ** 2).sum() / total)
+    return follow, stand
+
+
+# A row the instants do not resolve can still carry its trend: a joint a policy steps every half second reads as noise
+# at one instant a second, yet its mean over each instant's stretch of frames follows the motion. Such a row is sent as
+# those window means when they keep at least WINDOW_SIGNAL times the share of variance that means of the same windows
+# keep of white noise (one over the frames in a window); means of noise are left out. On a 15 fps GelSight rollout
+# sampled every 1.47 s the joints, end-effector pose and actions keep 0.19 to 0.48 against 0.045 for noise, and its
+# velocities mostly 0.03 to 0.05; on the YAM spot check velocities and efforts keep 0.19 to 0.74 against 0.033, so they
+# are sent as window means too: the mean velocity over a second is real motion.
+WINDOW_SIGNAL = 4.0
+# Window-mean rows rank after every row whose own readings resolve it, among themselves by the share of variance their
+# means keep (so a gripper effort that steps during grasps comes before a joint velocity that mostly mirrors its
+# position), and together use at most WINDOW_SHARE of the readout budget; those that do not fit are named with when
+# they peaked. Set by cost: on the 21 spot requests, sending every window-mean row adds 0.41M characters per footage
+# hour (1.61M to 2.03M); at this share the prompts come to 1.656M per hour (1.661M at 0.035, 1.682M at 0.05), under
+# the 1.665M per hour of the build the 100 h run was priced on.
+WINDOW_SHARE = 0.03
+
+
+def window_means(a: np.ndarray, ks: list[int]) -> tuple[np.ndarray, np.ndarray, float]:
+    """(means, kept, noise): per value of a, its mean over the frames each instant stands for (the stretches resolution
+    uses), one per instant; the share of the value's variance over the first to last instant that those means keep; and
+    the share means of the same windows keep of white noise (the mean of one over each window's length)."""
+    a = columns(a)
+    ks = np.asarray(ks, dtype=int)
+    edges = np.concatenate([[ks[0]], (ks[1:] + ks[:-1] + 1) // 2, [ks[-1] + 1]])
+    lens = np.diff(edges)
+    means = np.full((len(ks), a.shape[1]), np.nan)
+    kept = np.zeros(a.shape[1])
+    with np.errstate(all="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        for j in range(a.shape[1]):
+            col = np.asarray(a[:, j], dtype=np.float64)
+            means[:, j] = [np.nanmean(col[edges[i]:edges[i + 1]]) for i in range(len(ks))]
+            seg = col[edges[0]:edges[-1]]
+            total = float(np.nanvar(seg)) if np.isfinite(seg).any() else 0.0
+            ok = np.isfinite(means[:, j])
+            if total > 0 and ok.sum() > 1:
+                mu = np.average(means[ok, j], weights=lens[ok])
+                kept[j] = float(np.average((means[ok, j] - mu) ** 2, weights=lens[ok]) / total)
+    return means, kept, float(np.mean(1.0 / np.maximum(lens, 1)))
+
+
+def resolved(a: np.ndarray, ks: list[int]) -> np.ndarray:
+    """Per value of a, whether its readings at the sampled instants resolve it (resolution)."""
+    return is_resolved(*resolution(a, ks))
+
+
+# One value tracks another when its readings at the sampled instants are a straight-line function of the other's
+# (either sign, any scale and offset, so degrees against radians or a mirrored joint count), read up to TRACK_LAG_S
+# apart, both in level (r squared at least TRACK_LEVEL) and in how they change from one instant to the next (r squared
+# at least TRACK_CHANGE), and their frame-to-frame changes line up best within TRACK_LAG_S. The change test keeps apart
+# two values that make one big move together and nothing else alike; the lag test keeps apart two slow values that
+# make the same moves a second or more apart. Set from 16 bimanual teleop episodes (21 requests, 767 sent value
+# rows): each teleoperated joint against the same joint of the arm that commands it passes in 264 of 279 pairs, and in
+# all 264 the measured joint moves later; 18 of the 767 rows would merge with some other row, all in three requests
+# (a joint's position with its own effort, or two joints of one arm that moved together).
+TRACK_LAG_S = 0.5
+TRACK_LEVEL = 0.95
+TRACK_CHANGE = 0.9
+# A good fit on average is not a copy everywhere: a measured joint that stalls while its command moves still fits the
+# whole window closely. So a tracking row is a copy only where the pair tracks as it usually does, and its readings are
+# still sent at the instants where it departs from that (apart_instants). A pair apart for much of the request fails
+# the tracking fit itself and both rows are sent whole: of 264 real tracked pairs none is apart at more than 0.43 of its
+# instants, and a synthetic stall of 8 s still tracks while one of 10 s does not. A follower behind its command is off by about its speed times its lag, so a pair's usual
+# one second residual is its own b0 + c x speed, and the excess over that is what departs: a stall leaves the whole
+# distance the command moved, a grasp the distance the commanded close goes past the gripper. A second is apart when
+# its excess is above both the pair's own median excess plus TRACK_APART_TIMES spreads (median absolute deviation,
+# scaled to a standard deviation, which a stall or grasp over less than half the request cannot widen) and TRACK_APART
+# of the range. Set on the 21 spot check requests with stalls and grasps injected into the real commanded and measured
+# pairs: 28 of 229 joint pairs have any instant apart with nothing injected, and 253 of 264 stalls of 1 s (where the
+# command moves most), 260 of 264 of 2 s and 31 of 35 grasps are found; in synthetic 60 s requests every stall of 1 to
+# 10 s is found except one of 1 s in which the command moves only 3.5% of its range.
+TRACK_HOLD_S = 1.0
+TRACK_APART_TIMES = 20.0
+TRACK_APART = 0.03
+
+
+def _r2_rows(xs: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """r squared of y against each row of xs, on the instants where both have a reading (0 where either is flat)."""
+    ok = np.isfinite(xs) & np.isfinite(y)[None, :]
+    out = np.zeros(len(xs))
+    for i in range(len(xs)):
+        a, b = xs[i][ok[i]], y[ok[i]]
+        if len(a) >= 3 and a.std() > 0 and b.std() > 0:
+            out[i] = np.corrcoef(a, b)[0, 1] ** 2
+    return out
+
+
+LINE_MIN_POINTS = 3     # a line through two points always fits exactly, so it says nothing about how closely y follows x
+
+
+def line_through(x, y) -> tuple[float, float] | None:
+    """(slope, intercept) of the least-squares line y = intercept + slope x through the pairs where both are finite, or
+    None when fewer than LINE_MIN_POINTS pairs are finite or x has no spread among them. Then no line can be stated,
+    and a fit would divide by zero inside the solver and stop the whole episode (a partner that never moves outside
+    the frames where the pair comes apart). Every straight-line fit on recorded values goes through here."""
+    x, y = np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)
+    ok = np.isfinite(x) & np.isfinite(y)
+    if ok.sum() < LINE_MIN_POINTS or np.ptp(x[ok]) == 0:
+        return None
+    slope, intercept = np.polyfit(x[ok], y[ok], 1)
+    return (float(slope), float(intercept)) if np.isfinite(slope) and np.isfinite(intercept) else None
+
+
+def tracking(x: np.ndarray, y: np.ndarray, ks: list[int], fps: float) -> tuple[bool, int]:
+    """(whether y's readings at the instants ks track x's, how many frames later x moves than y). Whether they track
+    is judged on the readings at ks, x read at ks shifted by every lag up to TRACK_LAG_S. Which one moves later is read
+    from every frame between the first and last instant (the lag that best lines up their frame-to-frame changes, the
+    shortest of equal ones), since one reading a second cannot place a 0.1 s lag: positive means x follows y. Two
+    columns of frames by one value; fewer than RESOLVED_MIN_INSTANTS instants never track."""
+    ks = np.asarray(ks, dtype=int)
+    if len(ks) < RESOLVED_MIN_INSTANTS:
+        return False, 0
+    x, y = np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)
+    reach = int(round(TRACK_LAG_S * fps))
+    lags = np.arange(-reach, reach + 1)
+    xs = np.stack([x[np.clip(ks + lag, 0, len(x) - 1)] for lag in lags])
+    yk = y[ks]
+    same = _r2_rows(xs, yk).max() >= TRACK_LEVEL and _r2_rows(np.diff(xs, axis=1), np.diff(yk)).max() >= TRACK_CHANGE
+    if not same:
+        return False, 0
+    lo, hi = int(ks[0]), int(ks[-1]) + 1
+    dx = np.nan_to_num(np.diff(x[lo:hi]))
+    dy = np.nan_to_num(np.diff(y[lo:hi]))
+    # a jump in one value (a slip, a step) is a few frames of very large change that would pull the alignment its way,
+    # so each value's changes are clipped at their own 99th percentile before they are lined up
+    for d in (dx, dy):
+        cap = float(np.quantile(np.abs(d), 0.99)) if len(d) else 0.0
+        if cap > 0:     # a value that moves in fewer than 1% of its frames keeps its changes as they are
+            np.clip(d, -cap, cap, out=d)
+    m = len(dy)
+    # searched to twice the allowed lag: a slow copy shifted by more than TRACK_LAG_S can still fit closely at the
+    # window's edge, and lining up best outside the window is what tells it apart from a value that follows
+    score = {int(L): float(np.dot(dx[max(L, 0):m + min(L, 0)], dy[max(-L, 0):m - max(L, 0)]))
+             for L in range(-2 * reach, 2 * reach + 1) if abs(L) < m}
+    # a mirrored copy lines up with the opposite sign, so the size of the agreement decides
+    best = max(sorted(score, key=abs), key=lambda L: abs(score[L]))
+    return (True, best) if abs(best) <= reach else (False, 0)
+
+
+def apart_instants(x: np.ndarray, y: np.ndarray, ks: list[int], lag: int, fps: float) -> list[int]:
+    """The places in ks of the instants where two values that track each other (tracking, x read lag frames later)
+    come apart: every frame from the first to the last instant is read, since one reading a second can fall either
+    side of a one second stall, and a frame is apart where the mean |residual| from the straight line through the
+    other value, over the TRACK_HOLD_S around it, departs from the pair's own usual residual at that speed (the rule
+    above TRACK_HOLD_S), either way round.
+    Each run of such frames gives the instants inside it and one more on each side, so a stall between two instants
+    still shows at both. Every instant when either value is flat or has too few readings."""
+    ks = np.asarray(ks, dtype=int)
+    lo, hi = int(ks[0]), int(ks[-1]) + 1
+    idx = np.arange(lo, hi)
+    xa, ya = x[np.clip(idx + lag, 0, len(x) - 1)], y[idx]
+    ok = np.isfinite(xa) & np.isfinite(ya)
+    win = max(1, int(round(TRACK_HOLD_S * fps)))
+    flagged = np.zeros(len(idx), dtype=bool)
+    count = np.maximum(np.convolve(ok.astype(float), np.ones(win), mode="same"), 1)
+    for a, b in ((xa, ya), (ya, xa)):
+        span = float(np.ptp(b[ok])) if ok.sum() >= 3 else 0.0
+        if span == 0 or a[ok].std() == 0:
+            return list(range(len(ks)))
+        # fitted on the frames where they agree: a long stall would otherwise tilt the line and spread the gap
+        # beyond it, so the line is fitted again without the frames the first fit found apart
+        use, here = ok, np.zeros(len(idx), dtype=bool)
+        for _ in range(2):
+            line = line_through(a[use], b[use])
+            if line is None:
+                # the frames left after a first fit no longer carry a line: there is no usual tracking to depart from
+                return list(range(len(ks)))
+            fit = line[1] + line[0] * np.where(ok, a, 0.0)
+            r = np.where(ok, np.abs(b - fit), 0.0)
+            held = np.convolve(r, np.ones(win), mode="same") / count
+            # the pair's own normal: a follower behind its command is off by about its speed times the lag, and a
+            # still pair by its noise, so its usual residual is b0 + c x speed, read from the pair itself
+            speed = np.convolve(np.where(ok, np.abs(np.diff(fit, prepend=fit[0])) * fps, 0.0), np.ones(win),
+                                mode="same") / count
+            # moving means moving: a gripper still for most of the request has a median speed of its noise, and its
+            # residual over noise speed would set the lag term from nothing
+            moving = ok & (speed > max(float(np.median(speed[ok])), 0.1 * float(np.quantile(speed[ok], 0.99))))
+            c = float(np.median(held[moving] / speed[moving])) if moving.any() else 0.0
+            still = ok & (speed <= np.quantile(speed[ok], 0.25))
+            b0 = float(np.median(held[still])) if still.any() else 0.0
+            excess = held - (b0 + c * speed)
+            # its spread as a median absolute deviation, which a departure over less than half the request cannot widen
+            mid = float(np.median(excess[ok]))
+            usual = mid + TRACK_APART_TIMES * 1.4826 * float(np.median(np.abs(excess[ok] - mid)))
+            here = ok & (excess > max(usual, TRACK_APART * span))
+            if (ok & ~here).sum() < max(3, ok.sum() // 2):
+                break
+            use = ok & ~here
+        flagged |= here
+    out = set()
+    edges = np.flatnonzero(np.diff(np.concatenate([[0], flagged.astype(int), [0]])))
+    for a0, b0 in zip(edges[::2], edges[1::2]):
+        first = max(int(np.searchsorted(ks, lo + a0, side="left")) - 1, 0)
+        last = min(int(np.searchsorted(ks, lo + b0 - 1, side="right")), len(ks) - 1)
+        out.update(range(first, last + 1))
+    return sorted(out)
+
+
 def quiet_spans(arrs: dict, need: int) -> list[tuple[int, int]]:
     """[(a, b)] frame spans of at least need frames over which every moving value of every signal (movements at least
     MOVING_MIN) stays within MOVING_MIN of its own typical steps: where a recording with no arm state shows nothing
@@ -678,7 +976,7 @@ def summary_rows(name: str, a: np.ndarray, ks: list[int], shape=None, names=None
     d = a.shape[1]
     if per_value(name, d, shape, names, role):
         labels = names if names and len(names) == d else ([""] if d == 1 else [f"[{i}]" for i in range(d)])
-        return [(f"{name}{(' ' + lb) if lb else ''}", [_num(a[k, i]) for k in ks]) for i, lb in enumerate(labels)]
+        return [(f"{name}{(' ' + lb) if lb else ''}", [reading_text(a[k, i]) for k in ks]) for i, lb in enumerate(labels)]
     rows = []
     if _role(role) not in MOVEMENT_ROLES and localized(a, rest, swing):
         # the distances, the active values and the activity at the sampled instants alone, as the whole would give them
@@ -689,7 +987,7 @@ def summary_rows(name: str, a: np.ndarray, ks: list[int], shape=None, names=None
                for k, v in dist.items()}
         unread = {k: not np.isfinite(a[k]).any() for k in ks}
         m = {k: (np.nan if unread[k] else float(np.where(act[k], dist[k], 0.0).sum())) for k in ks}
-        rows.append((f"{name} total activity", [_num(m[k]) for k in ks]))
+        rows.append((f"{name} total activity", [reading_text(m[k]) for k in ks]))
         rows.append((f"{name} active values", ["-" if unread[k] else str(int(act[k].sum())) for k in ks]))
         if shape and len(shape) == 2:
             h, w = int(shape[0]), int(shape[1])
@@ -708,7 +1006,7 @@ def summary_rows(name: str, a: np.ndarray, ks: list[int], shape=None, names=None
             with np.errstate(invalid="ignore"):
                 x = np.abs(np.asarray(a[b0], dtype=np.float64) - np.asarray(a[a0], dtype=np.float64))
             x = x[np.isfinite(x)]
-            ch.append(_num(x.max()) if len(x) else "-")
+            ch.append(reading_text(x.max()) if len(x) else "-")
         rows.append((f"{name} largest change of any value since the instant before", ch))
     return rows
 
@@ -735,7 +1033,7 @@ def describe(name: str, a: np.ndarray, shape=None, names=None, rest=None, swing=
             what = (f"{d} named values in value order, value names retained in episode metadata"
                     + (f", {' x '.join(str(int(x)) for x in shape)} shape" if shape and len(shape) > 1 else ""))
     if rate_hz and fps and float(rate_hz) < RATE_SLOWER * float(fps):
-        rate = _num(float(rate_hz))
+        rate = reading_text(float(rate_hz))
         what += (f", recorder arrivals at {rate} Hz" if aligned_by == RECORDER_ARRIVAL else
                  f", estimated at {rate} Hz from assumed placement" if aligned_by == COARSE_CLOCK or clock_problem else
                  f", recorded at {rate} Hz")
@@ -765,19 +1063,19 @@ def describe(name: str, a: np.ndarray, shape=None, names=None, rest=None, swing=
     if d > PER_VALUE_MAX:
         if (hi == lo).all():
             return f"{head}: every value constant throughout{tail}"
-        return f"{head}: values from {_num(np.nanmin(lo))} to {_num(np.nanmax(hi))}{tail}"
+        return f"{head}: values from {reading_text(np.nanmin(lo))} to {reading_text(np.nanmax(hi))}{tail}"
     if (hi == lo).all():
-        value = _num(lo[0]) if d == 1 else "[" + ", ".join(_num(x) for x in lo) + "]"
+        value = reading_text(lo[0]) if d == 1 else "[" + ", ".join(reading_text(x) for x in lo) + "]"
         text = f"{head}: {value} throughout{tail}"
     else:
-        text = f"{head}: " + ", ".join(_num(l) if l == h else f"{_num(l)} to {_num(h)}"
+        text = f"{head}: " + ", ".join(reading_text(l) if l == h else f"{reading_text(l)} to {reading_text(h)}"
                                      for l, h in zip(lo, hi)) + tail
     if len(text) <= DESCRIBE_ROW_MAX_CHARS:
         return text
     if named and f" ({named})" in what:
         what = what.replace(f" ({named})", "", 1)
         what += ", value names retained in episode metadata"
-    readings = [_num(l) + " throughout" if l == h else f"{_num(l)} to {_num(h)}" for l, h in zip(lo, hi)]
+    readings = [reading_text(l) + " throughout" if l == h else f"{reading_text(l)} to {reading_text(h)}" for l, h in zip(lo, hi)]
     # Eight ranges fit within the descriptor allowance even at the longest numeric format. The signal name and
     # clock qualifications are never truncated; the allowance bounds value detail, not original source identities.
     groups = [f"    values {i}-{min(i + 7, d - 1)}: " + ", ".join(readings[i:i + 8])

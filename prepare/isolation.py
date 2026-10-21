@@ -20,7 +20,6 @@ import tempfile
 import time
 from pathlib import Path
 
-UPLOAD = None                     # reads no dataset of its own (formats.upload_adapters)
 READER_STALL_S = float(os.environ.get('ARGUS_READER_STALL_S') or 300)
 _INLINE = 'ARGUS_READER_INLINE'           # set in a child, whose own reads run in place
 _MODE = 'ARGUS_READER_MODE'
@@ -136,6 +135,65 @@ def run_isolated(fn, *args, watch=(), mode=None, stall_s=None, **kwargs):
     raise value
 
 
+def run_while_progressing(cmd, *, watch=(), stall_s=None, lead_s=0.0, check=False, text=False):
+    """subprocess.run for a native tool whose work grows with its input (an encode, a decode of every frame). Its
+    bound is the reader's: it is stopped only when it makes no progress for stall_s seconds, never after a fixed time,
+    so a long recording is never cut short for its length while a tool that hangs is still stopped. Progress is any
+    byte it writes to stdout or stderr, or a change to a watched path (the file it writes). Before its first progress
+    it is also allowed lead_s, the time a known stretch of work that shows none takes (frames decoded before the first
+    one kept). A stopped tool raises subprocess.TimeoutExpired, as subprocess.run's timeout does."""
+    import threading
+    stall_s = READER_STALL_S if stall_s is None else stall_s
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    chunks = {'out': [], 'err': []}
+    heard = []                                  # times a pipe brought bytes
+
+    def pump(stream, key):
+        for block in iter(lambda: stream.read1(1 << 16), b''):
+            chunks[key].append(block)
+            heard.append(time.monotonic())
+    pumps = [threading.Thread(target=pump, args=(proc.stdout, 'out'), daemon=True),
+             threading.Thread(target=pump, args=(proc.stderr, 'err'), daemon=True)]
+    for t in pumps:
+        t.start()
+
+    def files():
+        state = []
+        for path in watch:
+            try:
+                stat = os.stat(path)
+                state.append((stat.st_size, stat.st_mtime_ns))
+            except OSError:
+                state.append(None)
+        return state
+    try:
+        seen, started = files(), time.monotonic()
+        since, progressed = started, False
+        while True:
+            try:
+                proc.wait(timeout=1)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            now = files()
+            if now != seen or (heard and heard[-1] > since):
+                seen, since, progressed = now, time.monotonic(), True
+            elif time.monotonic() - since > stall_s + (0.0 if progressed else lead_s):
+                raise subprocess.TimeoutExpired(cmd, time.monotonic() - started)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        for t in pumps:
+            t.join()
+    out, err = b''.join(chunks['out']), b''.join(chunks['err'])
+    if text:
+        out, err = out.decode(errors='replace'), err.decode(errors='replace')
+    if check and proc.returncode:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, out, err)
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
 def _child(request, result):
     module, name, args, kwargs = pickle.loads(Path(request).read_bytes())
     fn = importlib.import_module(module)
@@ -143,12 +201,12 @@ def _child(request, result):
         fn = getattr(fn, part)
     try:
         outcome = ('ok', fn(*args, **kwargs))
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - the child passes any error back to the parent, which raises it
         outcome = ('error', error)
     try:
         data = pickle.dumps(outcome)
         pickle.loads(data)
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - an outcome that does not pickle is passed back as an error of a known type
         if outcome[0] == 'ok':
             data = pickle.dumps(('error', ReaderStopped(f'returned what could not be passed back '
                                                         f'({type(error).__name__})')))

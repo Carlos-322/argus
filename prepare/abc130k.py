@@ -164,19 +164,6 @@ def prepare_one(ep_path: str, raw_root: Path, out_root: Path, force: bool, keep_
     return "ok"
 
 
-# Uploads use structural MCAP fields. Published preparation and sampling stay available here.
-UPLOAD = None
-
-
-def recognizes(topics: list[str]) -> bool:
-    return any(t in topics for t in TOP_TOPICS) and all(t in topics for t in VIEW_TOPIC.values()) \
-        and all(t in topics for t in ARM)
-
-
-def convert_upload(item: dict, ep: Path) -> dict:
-    return convert(item["file"], ep, ep.name, task=item["name"])
-
-
 def convert(mcap: Path, ep_dir: Path, ep_name: str, task: str, split: str | None = None) -> dict:
     """One ABC-layout MCAP on disk into an episode sidecar dir; returns its context."""
     d = read_mcap(mcap)

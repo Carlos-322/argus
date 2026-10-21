@@ -51,7 +51,8 @@ def indexed_recording(path, *, omit_pose=None, invalid_quaternion=False, actor_m
         if position_unit is not None:
             metadata['position_unit'] = position_unit
         if actor_map:
-            metadata['actor_map'] = json.dumps({'robot0': 'left', 'robot1': 'right'})
+            metadata['actor_map'] = actor_map if isinstance(actor_map, str) else json.dumps(
+                {'robot0': 'left', 'robot1': 'right'})
         writer._writer.add_metadata('source', metadata)
         for robot, side in [(0, 'left'), (1, 'right')]:
             for index, stamp in enumerate(stamps):
@@ -86,24 +87,28 @@ def indexed_recording(path, *, omit_pose=None, invalid_quaternion=False, actor_m
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def converted(root, out, monkeypatch, *, legacy):
-    original = formats.upload_adapters
-    with monkeypatch.context() as patch:
-        patch.setattr(formats, 'upload_adapters', lambda kind: [realomin] if kind == 'mcap' and legacy
-                      else [] if kind == 'mcap' else original(kind))
-        report = formats.convert(root, 'handheld_gripper', out, 'indexed native fixture', 900)
+def converted(root, out):
+    """The upload folder root read as Data Review reads it, by the generic reader."""
+    report = formats.convert(root, 'handheld_gripper', out, 'indexed native fixture', 900)
     assert not report['failed'] and len(report['episodes']) == 1, report
     path = out / report['episodes'][0]['episode_id']
     return path, json.loads((path / 'context.json').read_text())
 
 
-def test_recorded_pose_gripper_join_matches_original_native_reader(tmp_path, monkeypatch):
+def published(raw, out):
+    """The episode the published RealOmin converter (python -m prepare realomin) writes for this recording."""
+    path = out / 'episode'
+    realomin.convert(raw, path, 'task/' + raw.name)
+    return path, json.loads((path / 'context.json').read_text())
+
+
+def test_recorded_pose_gripper_join_matches_original_native_reader(tmp_path):
     root = tmp_path / 'native'
     root.mkdir()
     raw = root / 'episode.mcap'
     digest = indexed_recording(raw)
-    old_ep, old = converted(root, tmp_path / 'old', monkeypatch, legacy=True)
-    new_ep, new = converted(root, tmp_path / 'generic', monkeypatch, legacy=False)
+    old_ep, old = published(raw, tmp_path / 'old')
+    new_ep, new = converted(root, tmp_path / 'generic')
     assert new['state_kind'] == old['state_kind'] == 'ee_pose'
     assert new['n_state_frames'] == old['n_state_frames'] == 6
     with np.load(old_ep / 'state.npz') as a, np.load(new_ep / 'state.npz') as b:
@@ -193,6 +198,13 @@ def test_index_numbers_alone_never_establish_camera_sides(tmp_path):
     assert aliases[topics[0]].startswith('left ')
     assert aliases[topics[1]].startswith('right ')
     assert provenance['source'] == 'MCAP actor_map metadata'
+
+
+def test_an_actor_map_nested_past_the_recursion_limit_is_named_unparsed_never_a_failed_episode(tmp_path):
+    raw = tmp_path / 'episode.mcap'
+    indexed_recording(raw, actor_map='[' * 100_000 + ']' * 100_000)
+    assert mcap_pose.camera_roles(raw, list(realomin.CAMERA_TOPICS)) == (
+        {}, {'limitation': 'Recorded actor map could not be parsed.'})
 
 
 def test_coordinate_frame_names_do_not_supply_actor_sides(tmp_path):

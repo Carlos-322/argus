@@ -31,8 +31,10 @@ dataset's newest finished run that is not a dry run (run ids start with their st
         "episodes": "../../episodes/molmo/quickstart",        the prepared episodes the run labelled
         "rules": [...],                                       optional: definitions applied after labelling
         "file_prefix": "...",                                 optional: a prefix for its board file names
-        "labels_every_episode": true},                        optional: the run labels every episode of the folder,
+        "labels_every_episode": true,                         optional: the run labels every episode of the folder,
                                                               so one it has no reply for is listed (own_data_entry)
+        "target": {"episodes": 2682, "hours": 101.9}},        optional: what a run in progress is meant to label;
+                                                              the page shows what is labelled against it
        ...],
      "comparisons": [...],                                    optional: other models' runs (compare/metrics.py)
      "hands": {"src": KEYPOINT_RUN, "clips": CLIPS},          optional: hand pose overlay (board/hands.py)
@@ -96,6 +98,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import glob
 import json
 import math
 import os
@@ -108,6 +111,7 @@ from pathlib import Path
 from board.to_board import (and_list, convert, dumps, field_words, label_failed, label_outputs, off_schema_text,
                             typed)
 from checks import label_consistency
+from board import scores
 from label.atomic import write_atomic
 
 SEVERITIES = ["low", "medium", "high"]
@@ -758,7 +762,7 @@ def build_hands(board: Path, spec: dict, qa_new: Path, episodes: dict) -> dict:
             "keypoints": {"written": kres["written"], "skipped": len(kres["skipped"]), "bytes": kres["bytes"]}}
 
 
-def build_sensors(board: Path, episodes: dict) -> dict | None:
+def build_sensors(board: Path, episodes: dict, last: dict | None = None, keys: dict | None = None) -> dict | None:
     """The sensors files of the episodes with signals or depth (board/sensors.py), written to BOARD/sensors.new and
     renamed into place with qa/; None, and nothing written, when no episode has either. episodes maps a board file to
     its prepared episode folder."""
@@ -771,10 +775,15 @@ def build_sensors(board: Path, episodes: dict) -> dict | None:
     if out.exists():
         remove_tree(out)
     out.mkdir()
-    res = bs.build(have, out)
+    keys = {} if keys is None else keys
+    for f, ep in have.items():
+        keys[f] = sensors_key(Path(ep))
+    # a sensors file built from the same episode folder by the same code is the last build's, as it is
+    res = bs.build(have, out, reuse=lambda f: cached_file(board / "sensors", f, keys[f], last or {}, drop=()))
     for sk in res["skipped"]:
         print(f"sensors: skipped {sk['file']}: {sk['skip']}", file=sys.stderr)
-    return {"written": res["written"], "skipped": len(res["skipped"]), "bytes": res["bytes"]}
+    return {"written": res["written"], "skipped": len(res["skipped"]), "bytes": res["bytes"],
+            "reused": res.get("reused", 0)}
 
 
 def resolve_run(p: Path) -> Path:
@@ -882,7 +891,7 @@ def _discard_publication(root: Path) -> None:
 
 def recover_publications(board: Path, name: str | None = None) -> None:
     """Restore interrupted installs; retain unrecognized backups for inspection."""
-    for root in sorted(board.glob(f'.{name or "*"}.rollback-*')):
+    for root in sorted(board.glob(f'.{glob.escape(name)}.rollback-*' if name else '.*.rollback-*')):
         if not root.is_dir():
             continue
         marker = root / 'publication.json'
@@ -1114,15 +1123,133 @@ def guarded_episode_file(entry: dict, manifest: dict, fname: str, name: str, r: 
     return episode_file(entry, manifest, fname, name, not_shown(r, err), info, eps, ctx, unread)
 
 
-def build(board: Path) -> dict:
+def add_scores(qa: Path, files: list[str]) -> None:
+    """Each episode's quality scores (board/scores.py), written into its record. They compare an episode with the
+    board's other demonstrations of the same task, so they are computed once every record is written, holding only
+    the fields they read."""
+    records = {}
+    for f in files:
+        d = json.loads((qa / f).read_text())
+        records[f] = {k: d.get(k) for k in scores.FIELDS}
+    for f, s in scores.score_board(records).items():
+        d = json.loads((qa / f).read_text())
+        d["scores"] = s
+        write_atomic(qa / f, d, indent=None, serializer=dumps)
+
+
+
+# ---- the build cache: an episode whose inputs are unchanged keeps the files the last build made of it ----
+BUILD_KEYS = "build_keys.json"      # board file -> the key of the inputs its live qa/ and sensors/ files were built from
+_CODE_ID = None
+
+
+def code_identity() -> str:
+    """One hash of the code and configuration a build runs (board/, label/, checks/, prepare/ and configs/), so any
+    change to them rebuilds every episode."""
+    global _CODE_ID
+    if _CODE_ID is None:
+        import hashlib
+        repo = Path(__file__).resolve().parent.parent
+        h = hashlib.sha256()
+        for top in ("board", "label", "checks", "prepare", "configs"):
+            for f in sorted((repo / top).rglob("*")):
+                if f.is_file() and f.suffix in (".py", ".json", ".html", ".js", ".yaml", ".yml"):
+                    h.update(f.relative_to(repo).as_posix().encode() + b"\0" + f.read_bytes() + b"\0")
+        _CODE_ID = h.hexdigest()
+    return _CODE_ID
+
+
+def _stat_text(path) -> str:
+    try:
+        st = Path(path).stat()
+        return f"{st.st_size}:{st.st_mtime_ns}"
+    except OSError:
+        return "-"
+
+
+def folder_identity(ep_dir: Path) -> list:
+    """Every file of a prepared episode folder by name, size and modification time, and the source videos its
+    sources.json names (read by tools the build starts, outside its own file reads)."""
+    out = []
+    if not ep_dir.is_dir():
+        return out
+    for f in sorted(ep_dir.rglob("*")):
+        if f.is_file():
+            out.append(f"{f.relative_to(ep_dir).as_posix()}={_stat_text(f)}")
+    try:
+        sources = json.loads((ep_dir / "sources.json").read_text())
+    except (OSError, ValueError):
+        sources = {}
+    for view, src in sorted(sources.items()) if isinstance(sources, dict) else []:
+        for k, v in sorted(src.items()) if isinstance(src, dict) else []:
+            if isinstance(v, str) and v.startswith("/"):
+                out.append(f"source {view}.{k}={_stat_text(v)}")
+    return out
+
+
+def _without_targets(value):
+    """The manifest, or an entry, without its targets: a target is drawn by the page and changes no board file."""
+    if isinstance(value, dict):
+        return {k: _without_targets(v) for k, v in value.items() if k != "target"}
+    if isinstance(value, list):
+        return [_without_targets(v) for v in value]
+    return value
+
+
+def episode_key(manifest: dict, entry: dict, fname: str, name: str, src, r, info: dict, ep_dir: Path) -> str:
+    """The key of everything a board file is made from (traced: the episode folder, the run's output and run.json,
+    the manifest and the code). Equal keys make equal files, so the last build's file is used as it is."""
+    import hashlib
+    label = _stat_text(src) if src is not None else json.dumps(r, sort_keys=True, default=str)
+    parts = [code_identity(), json.dumps(_without_targets(manifest), sort_keys=True, default=str),
+             json.dumps(_without_targets(entry), sort_keys=True, default=str), fname, name, str(src), label,
+             json.dumps(info, sort_keys=True, default=str), *folder_identity(ep_dir)]
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()
+
+
+def sensors_key(ep_dir: Path) -> str:
+    """The key of what a sensors file is made from: its prepared episode folder and the code."""
+    import hashlib
+    return hashlib.sha256("\n".join([code_identity(), str(ep_dir), *folder_identity(Path(ep_dir))]).encode()).hexdigest()
+
+
+def read_build_keys(board: Path) -> dict:
+    try:
+        keys = json.loads((board / BUILD_KEYS).read_text())
+    except (OSError, ValueError):
+        return {"qa": {}, "sensors": {}}
+    return keys if isinstance(keys, dict) else {"qa": {}, "sensors": {}}
+
+
+def cached_file(folder: Path, fname: str, key: str, keys: dict, drop=("scores",)):
+    """The last build's file for fname when it was built from the same key, without what the build adds afterwards
+    (scores, which compare an episode with the others), or None."""
+    if not key or keys.get(fname) != key or not (folder / fname).is_file():
+        return None
+    try:
+        d = json.loads((folder / fname).read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict):
+        return None
+    for k in drop:
+        d.pop(k, None)
+    return d
+
+
+def build(board: Path, cache: bool = True) -> dict:
     recover_publications(board)
     manifest = json.loads((board / "manifest.json").read_text())
+    # the last build's keys, read before anything is replaced; --no-cache builds every episode again
+    last = read_build_keys(board) if cache else {"qa": {}, "sensors": {}}
+    keys = {"qa": {}, "sensors": {}}
+    reused = 0
     here = board.resolve()
     new = board / "qa.new"
     if new.exists():
         remove_tree(new)
     new.mkdir(parents=True)
-    counts, built_entries = {}, []
+    counts, built_entries, written = {}, [], []
     board_src = {}      # board file -> the run output its label came from
     episodes = {}       # board file -> its prepared episode folder
     for entry in manifest.get("datasets", []):
@@ -1133,7 +1260,13 @@ def build(board: Path) -> dict:
         labels.update(unlabelled(entry, eps, run, labels))
         for fname, (name, src, r, from_run) in sorted(labels.items()):
             info = infos.get(from_run) or infos.setdefault(from_run, json.loads((from_run / "run.json").read_text()))
-            d = guarded_episode_file(entry, manifest, fname, name, r, info, eps)
+            key = episode_key(manifest, entry, fname, name, src, r, info, eps / name)
+            d = cached_file(board / "qa", fname, key, last.get("qa") or {})
+            if d is None:
+                d = guarded_episode_file(entry, manifest, fname, name, r, info, eps)
+            else:
+                reused += 1
+            keys["qa"][fname] = key
             if (eps / name / "context.json").exists():
                 episodes[fname] = eps / name
             dest = new / fname
@@ -1141,6 +1274,7 @@ def build(board: Path) -> dict:
                 raise RuntimeError(f"{dest.name} comes from two manifest entries; a board holds one label per "
                                    "episode (file_prefix separates datasets whose episode names repeat)")
             write_atomic(dest, d, indent=None, serializer=dumps)
+            written.append(fname)
             if src is not None:
                 board_src[fname] = src
         counts[entry["dataset"]] = {"run_id": json.loads((run / "run.json").read_text())["run_id"],
@@ -1148,14 +1282,20 @@ def build(board: Path) -> dict:
         # BUILT.json names the run that was used, so the board's inputs stay traceable
         built_entries.append(dict(entry, run=os.path.relpath(run, here)) if run != _path(entry["run"], here)
                              else entry)
+    add_scores(new, written)
+    if reused:
+        print(f"board: {reused} of {len(written)} episodes unchanged since the last build, reused", file=sys.stderr)
     compared = build_comparisons(board, manifest, new, board_src) if manifest.get("comparisons") else None
     hands = build_hands(board, manifest["hands"], new, episodes) if manifest.get("hands") else None
-    sensors = build_sensors(board, episodes) if manifest.get("sensors", True) is not False else None
+    sensors = (build_sensors(board, episodes, last.get("sensors") or {}, keys["sensors"])
+               if manifest.get("sensors", True) is not False else None)
     _swap(board, "qa", True)
     _swap(board, "compare", compared is not None)
     _swap(board, "hands", hands is not None)
     _swap(board, "hand_keypoints", hands is not None)
     _swap(board, "sensors", sensors is not None)
+    # the keys describe the files now live, so they are written once qa/ and sensors/ are in place
+    write_atomic(board / BUILD_KEYS, keys, indent=None, serializer=dumps)
     built = {"manifest": {**manifest, "datasets": built_entries}, "counts": counts,
              **({"comparisons": compared} if compared else {}), **({"hands": hands} if hands else {}),
              **({"sensors": sensors} if sensors else {})}
@@ -1169,10 +1309,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(prog="python -m board build", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("board", type=Path, help="the board folder, with manifest.json")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="build every episode again, even one whose inputs and code are unchanged")
     a = ap.parse_args()
     if not (a.board / 'manifest.json').is_file():
         ap.error('No board manifest.json exists. A free review stops before board generation; build a labelled board first.')
-    print(json.dumps(build(a.board)["counts"], indent=1))
+    print(json.dumps(build(a.board, cache=not a.no_cache)["counts"], indent=1))
     return 0
 
 

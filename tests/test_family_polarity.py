@@ -58,7 +58,7 @@ def worst_precision_recall(items):
     # a correction whose subject is another noun phrase states something about that subject, not the impression
     ('At first it seems frozen, but the arm is just still', 'camera-image'),
     ('Looks like glare, actually a white tablecloth', BROAD),
-    # a question asserts nothing, and the sentence after it is no answer to it
+    # a question asserts nothing, and a sentence with something of its own to say is no answer to it
     ('Glare? No question, it hides the cup', BROAD),
     ('Free of glare until 5 s, then a finger covers the lens', 'camera-fault'),
     ('The view is free of glare except near the window where the plate is clipped', 'low-light'),
@@ -83,14 +83,26 @@ def worst_precision_recall(items):
     ('Glare? None.', BROAD),
     ('Checked 0 to 30 s and ruled out occlusion', BROAD),
     ('The exo view is frozen, and the wrist looks like glare but it is not', 'camera-image'),
-    ('Is the exo view frozen? Yes, from 4 s to 9 s', BROAD),
+    ('Is the exo view frozen? Yes, from 4 s to 9 s', 'camera-image'),
     ('No glare. The exo view is frozen from 4 s', 'camera-image'),
     ('nto glare anywhere', BROAD),
     ('A rcetangular blur covers the cutting board', 'privacy-blur'),
-    # notes that search, judge a name wrong, or answer in field notation; a later sentence retracts nothing
+    # notes that search, judge a name wrong, or answer in field notation; a retraction in a later sentence retracts
+    # nothing (board/polarity.py), so those keep what the earlier words assert, while a withdrawal that names the
+    # impression in its own sentence retracts it
     ('Earlier I wrote that the lens was covered. Correction: it never was.', 'camera-fault'),
     ('I initially suspected glare. Nothing is clipped. I am withdrawing the glare flag.', 'low-light'),
-    ('I initially suspected glare and I am withdrawing the glare flag.', 'low-light'),
+    ('I initially suspected glare and I am withdrawing the glare flag.', BROAD),
+    # a refused verdict or withdrawal, a denied other explanation and a state that ended keep the impression (review
+    # of 2ab6857)
+    ('I initially suspected glare, but I have not retracted that finding.', 'low-light'),
+    ('I initially suspected glare, but actually I am not withdrawing the glare flag.', 'low-light'),
+    ('The exo camera appears frozen, but actually it is not just a static scene.', 'camera-image'),
+    ('Glare was reported and has not been retracted.', 'low-light'),
+    ('The camera looked frozen, but it is actually no longer frozen.', 'camera-image'),
+    ('I initially suspected glare and I am withdrawing the occlusion flag.', 'low-light'),
+    ('The camera seems frozen, but this is not the case.', BROAD),
+    ('Looks like glare, actually a white tablecloth', BROAD),
     ('I am withdrawing the glare flag.', BROAD),
     ('Three things checked: glare, occlusion, and freezing. Glare is absent. Freezing occurs twice.', 'camera-image'),
     ('It would be inaccurate to call this footage overexposed.', BROAD),
@@ -293,11 +305,11 @@ def test_family_precision_and_recall_over_corpora(name, items, bound):
     assert worst >= bound, (name, worst, wrong[:10])
 
 
-def test_a_later_sentence_never_retracts_an_earlier_one():
-    """Reviews of f050fa2: a normal result for another camera, a pronoun, or a word saying all is well in a later
-    sentence retracted a fault ("The exo camera appears frozen. The wrist camera plays normally."). What a later
-    sentence is about cannot be read from its grammar, so a statement is denied or retracted only within its own
-    sentence. Measured over every fault followed by sentences of each kind, in one field and split across issue and
+def test_a_later_sentence_never_removes_a_family():
+    """Reviews of f050fa2, 2514ce5: a later sentence retracted a fault when it was a normal result for another camera, a
+    pronoun for something else, a withdrawal that was negated, asked, supposed or about another camera, a recovery, or
+    a correction limited in time. Telling what a later sentence is about needs its meaning, so a later sentence retracts
+    nothing (board/polarity.py): every fault keeps its family whatever follows it, in one field or split across issue and
     evidence."""
     from board.polarity import denied_spans
     faults = {'camera-image': ['The exo camera appears frozen.', 'The wrist view looks frozen.',
@@ -310,22 +322,61 @@ def test_a_later_sentence_never_retracts_an_earlier_one():
     later = ['The wrist camera plays normally throughout.', 'The grasp proceeds normally.',
              'The right view works correctly throughout.', 'The timestamps advance normally.', 'The audio is fine.',
              'The operator does not touch it.', 'Nobody notices it.', 'It does not affect the grasp.',
-             'That is not the main problem.', 'On closer inspection, it is not.', 'Correction: it never was.',
-             'On review, it is just a static scene.', 'Actually, nothing is wrong with it.',
-             'On closer inspection, the timestamps advance while the same frame is repeated.']
-    kept = total = 0
+             'That is not the main problem.', 'On review, it is just a static scene.',
+             'Actually, nothing is wrong with it.', 'On closer inspection, it is not frozen after 9 s.',
+             'On closer inspection, the timestamps advance while the same frame is repeated.',
+             'On closer inspection, it is not.', 'Correction: it never was.', 'That was wrong.',
+             'It is no longer frozen.', 'It was not frozen at the start.', 'It is not covered anymore.',
+             'The wrist camera plays normally. It is not frozen.',
+             'I am not withdrawing the glare flag.', 'I will never dismiss the frozen-frame finding.',
+             'Do not retract the covered-lens finding.', 'Should I withdraw the blur finding?',
+             'If we withdraw the glare flag, the report will be wrong.',
+             'I am withdrawing the glare flag.', 'I am withdrawing the frozen-frame finding for the wrist camera.',
+             'The covered-lens flag was withdrawn.', 'Scratch that.',
+             'I am withdrawing the wrist camera glare flag.', 'Retracting my earlier note about a blur patch.']
+    right = total = 0
+    wrong = []
     for fam, sentences in faults.items():
         for s in sentences:
             for t in later:
                 for issue, evidence in ((s + ' ' + t, ''), (s, t)):
                     total += 1
-                    kept += family(issue, evidence) == fam
+                    got = family(issue, evidence)
+                    right += got == fam
+                    if got != fam:
+                        wrong.append((issue, evidence, got))
             note = s + ' ' + later[0]
             assert not any(a <= len(s) - 2 < b for a, b in denied_spans(note)), note
-    assert kept == total, (kept, total)
+    assert right == total, wrong[:10]
     # within its own sentence a correction still retracts
     assert family('The view looks frozen, but it is not.') == BROAD
     assert family('Looks like glare, actually a white tablecloth') == BROAD
+
+
+def test_reading_a_note_takes_time_in_proportion_to_its_length():
+    """Review of 2514ce5: a pass that compared every clause with every later one took 19 s on a 54 KB evidence field and
+    stalled the episode list. Reading a note is one pass over its clauses, so ten times the text takes about ten times
+    as long, never the hundredfold a comparison of every pair would."""
+    import gc
+    import time
+    from board.polarity import denied_spans
+    unit = 'The operator appears to hold the cup above the table. '
+    timings = {}
+    # the fastest of several runs, with collection paused, so a stall of a shared machine never decides the ratio
+    gc.disable()
+    try:
+        for n in (100, 1000):
+            text = 'The exo camera appears frozen. ' + unit * n
+            runs = []
+            for _ in range(5):
+                start = time.perf_counter()
+                denied_spans(text)
+                runs.append(time.perf_counter() - start)
+            timings[n] = min(runs)
+    finally:
+        gc.enable()
+    assert timings[1000] < 1.0, timings
+    assert timings[1000] < 30 * max(timings[100], 1e-3), timings
 
 
 def test_a_correction_in_the_same_sentence_retracts_only_what_it_refers_to():
@@ -497,7 +548,7 @@ def test_board_compare_gate_and_checks_agree_on_every_derived_value():
             board_view = top is None or SEVS.index(top) <= SEVS.index(bound)
             assert judge({'max_issue_sev': bound}, labels)[0] == board_view
         assert sorted(d.get('_schema_violations') or []) == sorted(m['violations'])
-        assert sorted(metrics.schema_violations(labels, {})) == sorted(m['violations'])
+        assert sorted(metrics.measure(labels, None, {})['violations']) == sorted(m['violations'])
         assert (sorted(f['rule'] for f in label_consistency.check(labels, 60.0))
                 == sorted(f['rule'] for f in label_consistency.check(d, 60.0)))
         for e in d.get('event_labels') or []:

@@ -20,6 +20,46 @@ from pathlib import Path
 FIXED_HEADER = ("HOW TO LABEL. These instructions are the same for every episode; the episode itself "
                 "(its dataset, cameras, frames, recorded motion and instruction) follows after them.\n\n")
 
+EVIDENCE_CONTRACT = (
+    'This request has separate visual and sensor annotation contracts. Return one JSON object containing all '
+    'required fields. Write the supplied sensor_findings and evidence_findings fields first, then the visual annotation fields. '
+    'Sensor findings use their own source evidence, native timestamps and event granularity; the visual timeline '
+    'and short key_events rules do not restrict them. A sensor-supported change can coincide with a visible action '
+    'or occur when the hand or object is outside the RGB view. Preserve the difference between a measured change '
+    'and an inferred physical explanation. adds_beyond_video means information beyond ordinary scene/task footage '
+    'and the behavioral description. Sensor images, sensor video streams and measurement visualizations are '
+    'eligible supporting evidence, even when rendered as RGB or included in the same frame grids. '
+    'Empty findings remain valid.\n'
+    '\nSENSOR MECHANICS ANALYSIS CONTRACT\n'
+    'Analyze sensor mechanics as a primary task alongside visual annotation. Evaluate each applicable goal independently; '
+    'a useful broad regional finding does not complete an applicable local spatial analysis.\n'
+    'For supplied numeric responses, compare coherent trajectories across distinct source components, where supplied, '
+    'with scene footage and available recorded or estimated configuration. Assess what response changes add beyond '
+    'configuration changes. Unknown polarity still permits observed raw rises and falls. Infer relative loading only '
+    'when the supplied source interpretation and convention support it, retaining their qualification and alternatives '
+    'such as bending, changing fit or stale estimates.\n'
+    'For supplied constituent arrays, separately examine within-region redistribution, changing spatial response patterns, '
+    'and coherent localized sustained or pulsed responses beyond gross loading. Support local pattern claims with '
+    'neighboring distinct source components across time; alternate IDs for the same component are not distinct evidence. '
+    'Explain cancellation in a regional average when established by the supplied readings.\n'
+    'When repeated manipulations are observed, compare corresponding phases using supplied sensor measurements, scene '
+    'evidence and recorded configuration. Preserve useful agreement or contrast, including a quieter phase when its '
+    'supported difference is meaningful, in the headline and detail with essential qualification visible. Put measured '
+    'comparisons and source citations in observation and evidence. Do not infer unobserved continuity or unsupported mechanisms.\n'
+    'Distinguish measured patterns from inferred contact movement or manipulation outcomes. Use only the supplied physical '
+    'localization, response convention, calibration, reference and timing authority, preserving their stated limitations. '
+    'An applicable analysis goal does not require a finding. Empty findings remain valid. When a supported comparison '
+    'provides useful added information, preserve that contrast across headline and detail; do not bury it only '
+    'in numeric observations. Use the existing output and citation contracts.\n')
+
+EVIDENCE_REVIEW = (
+    '\nApply the sensor and inspected-evidence contracts independently of visual milestone selection. Review the '
+    'complete supplied trajectory through its final samples. Preserve distinct supported changes and their '
+    'comparisons within a single visible action, rather than merging different manipulation implications into '
+    'one broad phase. Do not infer an unseen physical action or outcome from a sensor change alone. Use exact '
+    'supplied, verified episode-aligned measurement times for timed sensor findings, not a rounding to RGB sample '
+    'times. Preserve all stated calibration, interpretation, coverage and alignment limits.\n')
+
 # An episode with no recorded state and no other signal is video only (label/episode.py RECORDED_BLOCKS), and its
 # shared instructions say nothing of a recorded motion it does not have. These are the words taken out, from the
 # header, the robot rigs' tag list and the data contract; the 2026-10-02 audit found "the recorded motion" in the
@@ -144,7 +184,9 @@ Return ONLY JSON with this shape. Each timeline segment is one array whose value
 Rules:
 - Name objects by what you actually see. There is no fixed vocabulary.
   If you cannot tell what something is, describe it by shape/colour.
-- Only claim what the frames show; when unsure, say so in notes rather than guessing.
+- Ground visual annotations in the frames; when unsure, say so in notes rather than guessing.
+  Separate sensor_findings can describe information supported by supplied sensor readings even when RGB does not
+  show it. Keep the stated measurement limits.
 - progress is judged with the whole available video in view, NEVER as an isolated snapshot.
   Ask what state the task had reached by this step and whether this step moves it toward the goal FROM THERE.
 """ + contribution_rules("teleop_arms") + """
@@ -171,6 +213,19 @@ Rules:
   folding -> each fold completed, not each grasp. Pick the natural unit
   of progress for the task in front of you. A short task with one such
   unit still gets its start and finish marked.
+- A subgoal is a lasting step toward the goal: a change in the scene that the success_predicate depends
+  on and that still holds once the hand or gripper that made it lets go, for example a cup on the stack,
+  the drawer open, a fold made, a screw driven in. A pick, a grasp, a contact or a motion is not a subgoal,
+  because what it gains is lost if the object is let go anywhere else. Every successful demonstration of a
+  task passes through the same subgoals whatever the operator's style, and the goal's end-state (each
+  task's, when there are tasks) is the last one, at the goal frame (completed_at_s, judged by its own rule
+  below). Mark each subgoal as a key_event with kind subgoal_complete at the first moment its change holds
+  once the hand or gripper that made it lets go, labelled with the state reached; nudging or straightening
+  it afterwards neither moves it nor makes a new subgoal. Only the goal's end-state waits, as completed_at_s
+  does, for the last adjustment: when the last piece is set down and then straightened, setting it down is a
+  subgoal of its own at the first moment it holds, and the goal follows once the straightening is done.
+  Subgoals do not lengthen the list: a pick, a placement that is later undone, a contact or a failed attempt
+  that belongs on it keeps a kind of its own (a grasp, a placement), never subgoal_complete.
 - completion judges the whole task on the BALANCE OF EVIDENCE, the way a fair
   human reviewer would, not as a strict verifier. Grade what the footage shows was
   ACHIEVED, not whether every detail was explicitly confirmed on camera.
@@ -378,7 +433,9 @@ Return ONLY JSON with this shape. Each timeline segment is one array whose value
 Rules:
 - Name objects by what you actually see. There is no fixed vocabulary.
   If you cannot tell what something is, describe it by shape/colour.
-- Only claim what the frames show; when unsure, say so in notes rather than guessing.
+- Ground visual annotations in the frames; when unsure, say so in notes rather than guessing.
+  Separate sensor_findings can describe information supported by supplied sensor readings even when RGB does not
+  show it. Keep the stated measurement limits.
 - progress is judged with the whole available video in view, NEVER as an isolated snapshot.
   Ask what state the task had reached by this step and whether this step moves it toward the goal FROM THERE.
 """ + contribution_rules("ego_head") + """
@@ -405,6 +462,19 @@ Rules:
   folding -> each fold completed, not each grasp. Pick the natural unit
   of progress for the task in front of you. A short task with one such
   unit still gets its start and finish marked.
+- A subgoal is a lasting step toward an activity's end-state: a change in the scene that its
+  success_predicate depends on and that still holds once the hand that made it lets go, for example a cup on
+  the stack, the drawer open, a fold made, a screw driven in. A pick, a grasp, a contact or a motion is not a
+  subgoal, because what it gains is lost if the object is let go anywhere else. Every successful attempt at
+  an activity passes through the same subgoals whatever the person's style, and each task's end-state is its
+  last one, at that task's completed_at_s. Mark each subgoal as a key_event with kind subgoal_complete at the
+  first moment its change holds once the hand that made it lets go, even while the other hand still holds
+  the work, labelled with the state reached; nudging or straightening it afterwards neither moves it nor
+  makes a new subgoal. Only a task's end-state waits, as its completed_at_s does, for the last adjustment:
+  when the last piece is set down and then straightened, setting it down is a subgoal of its own at the
+  first moment it holds, and the task's end follows once the straightening is done. Subgoals do not lengthen
+  the list: a pick, a placement that is later undone, a contact or a failed attempt that belongs on it keeps
+  a kind of its own (a grasp, a placement), never subgoal_complete.
 - THIS USES THE HUMAN-HAND ANNOTATION PROFILE: describe the person's work with their own
   hands. Determine viewpoint and camera mounting from the supplied evidence. There is NO robot and usually NO
   single overall goal, especially in a longer clip; the person does a SEQUENCE of
@@ -931,7 +1001,10 @@ emit them as a top-level "tasks" list, in time order:
      "note": "<why, if partial/failure or unclear>"}
   ]
 - A task is a coherent unit of intent, COARSER than key_events (milestones within a task) and coarser than the
-  timeline. A new task begins when the demonstrator turns to a different objective. Name each task as the most
+  timeline. A new task begins when the demonstrator turns to a different objective, or starts the same unit of work
+  again after its end-state was reached: in a cycle, where the objects are reset and the same work repeats, each
+  repeat is its own task, judged on its own. Stages toward one end state are one task with subgoals, never separate
+  tasks: building a stack in two halves, or packing a box item by item, is one task. Name each task as the most
   specific end state its actions converge on, never as a description any motion satisfies (moving, repositioning
   or rearranging the objects). Stretches with no evident objective (idling, looking around, tidying between
   activities) belong to no task; tasks need not cover the whole recording.

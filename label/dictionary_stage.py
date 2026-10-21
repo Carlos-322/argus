@@ -6,6 +6,7 @@ import math
 from pathlib import Path
 
 DICTIONARY_MAX_USD = 3.0
+DICTIONARY_OFF = 'field dictionary is off in the annotation policy; recorded fields are labelled as recorded'
 UNKNOWN_LABEL_RESERVE_USD = 1e300
 
 
@@ -114,7 +115,7 @@ def _known_label_cost(record: dict, path: Path) -> bool:
 
 
 def prepare(job: Path, eps: Path, ids: list[str], *, free: bool, cap: float,
-            api_key=None, call_model=None) -> dict:
+            api_key=None, call_model=None, enabled: bool = True) -> dict:
     """Interpret a converted upload once, with a durable pre-dispatch budget reservation."""
     from label import dictionary as dd, harness
     from label.atomic import write_atomic
@@ -167,11 +168,16 @@ def prepare(job: Path, eps: Path, ids: list[str], *, free: bool, cap: float,
             result['limitations'].append('saved model replies retain their original request interpretation')
         else:
             cached = (job / 'dictionary.json').exists() or (job / 'dictionary.claim').exists()
-            eligible = dd.needs_interpretation(paths) if not cached else True
+            # turned off by the annotation policy: no call and no claim, as when the budget refuses one; a dictionary
+            # an earlier run already paid for is still applied
+            off = not enabled and not cached
+            eligible = (dd.needs_interpretation(paths) if not cached else True) and not off
             keys = harness.get_keys() if api_key is None and not free and not cached and eligible else []
             key = api_key if api_key is not None else (keys[0] if keys else None)
             plan = None
-            refused = False
+            refused = off
+            if off:
+                result['limitations'].append(DICTIONARY_OFF)
             if not free and not cached and eligible and key:
                 inv = dd.inventory(paths)
                 plan = dd.request_plan(inv)
@@ -212,7 +218,7 @@ def prepare(job: Path, eps: Path, ids: list[str], *, free: bool, cap: float,
                         errors.append({'episode': path.name, 'error': type(error).__name__})
                 if errors:
                     result = dict(result, context_errors=errors)
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - recorded as failed, with why, in limitations
         result = {'status': 'failed', 'cost_usd': None if (job / 'dictionary.claim').exists() else 0.0,
                   'limitations': [f'dictionary unavailable ({type(error).__name__}); recorded fields remain usable']}
     if prior_error:

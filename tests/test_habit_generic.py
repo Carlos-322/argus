@@ -63,14 +63,22 @@ def native(root, *, images=False, indexed=False):
     return state, row
 
 
-def converted(root, out, monkeypatch, *, legacy):
-    original = formats.upload_adapters
-    with monkeypatch.context() as patch:
-        patch.setattr(formats, 'upload_adapters', lambda kind: [habit] if kind == 'lerobot' and legacy
-                      else [] if kind == 'lerobot' else original(kind))
-        report = formats.convert(root, 'teleop_arms', out, 'native parity', 900)
+def converted(root, out):
+    """The upload folder root read as Data Review reads it, by the generic reader."""
+    report = formats.convert(root, 'teleop_arms', out, 'native parity', 900)
     assert not report['failed'] and len(report['episodes']) == 1, report
     path = out / report['episodes'][0]['episode_id']
+    return path, json.loads((path / 'context.json').read_text())
+
+
+def published(root, out):
+    """The episode the published HABIT preparation (python -m prepare habit, prepare_one) writes for the one
+    episode in root."""
+    plan, _, _, _ = formats.plan_lerobot({"roots": [str(root)]}, root)
+    item = next(i for i in plan if i["kind"] == "lerobot")
+    rows = {int(r["episode_index"]): r for r in formats.read_jsonl(root / "meta" / "episodes.jsonl")}
+    ctx = habit.write_episode(item, rows.get(int(item["row"]["eidx"]), {}), root, out, 'native parity')
+    path = out / ctx['episode_id']
     return path, json.loads((path / 'context.json').read_text())
 
 
@@ -85,12 +93,12 @@ def prompt(path):
 
 
 @pytest.mark.parametrize('images', [False, True])
-def test_native_pose_arrays_camera_images_and_high_level_task_survive_generic(tmp_path, monkeypatch, images):
+def test_native_pose_arrays_camera_images_and_high_level_task_survive_generic(tmp_path, images):
     root = tmp_path / 'recording'
     expected, _ = native(root, images=images)
     before = source_hashes(root)
-    old_ep, old = converted(root, tmp_path / 'old', monkeypatch, legacy=True)
-    new_ep, new = converted(root, tmp_path / 'generic', monkeypatch, legacy=False)
+    old_ep, old = published(root, tmp_path / 'old')
+    new_ep, new = converted(root, tmp_path / 'generic')
     assert new['instruction'] == old['instruction'] == 'fold the recorded cloth'
     assert new['state_kind'] == old['state_kind'] == 'ee_pose'
     with np.load(old_ep / 'state.npz') as a, np.load(new_ep / 'state.npz') as b:
@@ -126,11 +134,11 @@ def test_native_pose_arrays_camera_images_and_high_level_task_survive_generic(tm
     assert source_hashes(root) == before
 
 
-def test_repeated_task_codes_bind_robot_and_human_to_their_original_tables(tmp_path, monkeypatch):
+def test_repeated_task_codes_bind_robot_and_human_to_their_original_tables(tmp_path):
     root = tmp_path / 'recording'
     native(root)
-    _, old = converted(root, tmp_path / 'old', monkeypatch, legacy=True)
-    _, new = converted(root, tmp_path / 'generic', monkeypatch, legacy=False)
+    _, old = published(root, tmp_path / 'old')
+    _, new = converted(root, tmp_path / 'generic')
     assert 'robot reach' in old['instruction_note'] and 'person hold' in old['instruction_note']
     steps = new['annotation_subtasks']
     for column, labels, filename in [
@@ -147,12 +155,12 @@ def test_repeated_task_codes_bind_robot_and_human_to_their_original_tables(tmp_p
 
 
 @pytest.mark.parametrize('images', [False, True])
-def test_publisher_flags_and_status_are_retained_and_held_out_of_judgment(tmp_path, monkeypatch, images):
+def test_publisher_flags_and_status_are_retained_and_held_out_of_judgment(tmp_path, images):
     root = tmp_path / 'recording'
     _, row = native(root, images=images)
     before = source_hashes(root)
-    _, old = converted(root, tmp_path / 'old', monkeypatch, legacy=True)
-    new_ep, new = converted(root, tmp_path / 'generic', monkeypatch, legacy=False)
+    _, old = published(root, tmp_path / 'old')
+    new_ep, new = converted(root, tmp_path / 'generic')
     assert old['publisher_labels']['task_status'] == row['task_status']
     assert new['publisher_labels']['task_status'] == row['task_status']
     assert all(c not in [s['name'] for s in new.get('signals', [])] for c in habit.PUBLISHER_COLUMNS)
@@ -169,11 +177,11 @@ def test_publisher_flags_and_status_are_retained_and_held_out_of_judgment(tmp_pa
     assert source_hashes(root) == before
 
 
-def test_recorded_pose_has_no_undeclared_physical_robot_or_opening_range(tmp_path, monkeypatch):
+def test_recorded_pose_has_no_undeclared_physical_robot_or_opening_range(tmp_path):
     root = tmp_path / 'recording'
     native(root)
-    _, old = converted(root, tmp_path / 'old', monkeypatch, legacy=True)
-    _, new = converted(root, tmp_path / 'generic', monkeypatch, legacy=False)
+    _, old = published(root, tmp_path / 'old')
+    _, new = converted(root, tmp_path / 'generic')
     assert 'Franka FR3' in old['robot_type'] and old['gripper_range'] == [0., 1.]
     assert new['robot_type'] == 'recorded human interface'
     assert new['state_kind'] == 'ee_pose'
@@ -181,12 +189,12 @@ def test_recorded_pose_has_no_undeclared_physical_robot_or_opening_range(tmp_pat
     assert new.get('gripper_range') != [0., 1.]
 
 
-def test_bare_indexed_positions_never_invent_joint_or_cartesian_axes(tmp_path, monkeypatch):
+def test_bare_indexed_positions_never_invent_joint_or_cartesian_axes(tmp_path):
     root = tmp_path / 'recording'
     expected, _ = native(root, indexed=True)
     original_sources = source_hashes(root)
-    old_ep, old = converted(root, tmp_path / 'old', monkeypatch, legacy=True)
-    new_ep, new = converted(root, tmp_path / 'generic', monkeypatch, legacy=False)
+    old_ep, old = published(root, tmp_path / 'old')
+    new_ep, new = converted(root, tmp_path / 'generic')
     assert old['state_kind'] == 'ee_pose'
     from prepare.state_contract import prepared_state_problem
     assert old['state_contract']['native_contract'] == 'habit'
@@ -243,7 +251,7 @@ def test_default_upload_reaches_generic_without_changing_published_wrapper(tmp_p
 
 
 @pytest.mark.parametrize('images', [False, True])
-def test_habit_native_contract_keeps_commands_without_redundant_units(tmp_path, monkeypatch, images):
+def test_habit_native_contract_keeps_commands_without_redundant_units(tmp_path, images):
     root = tmp_path / 'recording'
     state, _ = native(root, images=images)
     info_path = root / 'meta/info.json'
@@ -253,8 +261,8 @@ def test_habit_native_contract_keeps_commands_without_redundant_units(tmp_path, 
     info_path.write_text(json.dumps(info))
     original = source_hashes(root)
     recorded = np.stack(pd.read_parquet(root / 'data/chunk-000/episode_000000.parquet')['action'])
-    named_ep, named = converted(root, tmp_path / 'native', monkeypatch, legacy=True)
-    generic_ep, generic = converted(root, tmp_path / 'generic', monkeypatch, legacy=False)
+    named_ep, named = published(root, tmp_path / 'native')
+    generic_ep, generic = converted(root, tmp_path / 'generic')
     assert named['state_kind'] == 'ee_pose' and named['state_contract']['native_contract'] == 'habit'
     assert 'recorded_state_archive' not in named
     assert not any(item['name'] in ('observation.state', 'action') for item in named.get('signals', []))

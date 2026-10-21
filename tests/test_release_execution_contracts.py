@@ -136,14 +136,14 @@ def test_reparse_recovers_received_reply_without_releasing_unknown_charge(tmp_pa
 
 @pytest.mark.parametrize('finish,text', [('length', '{"fine_detail":false}'), ('stop', 'not json')])
 def test_routing_keeps_unusable_paid_reply_and_uses_wide_cells(tmp_path, monkeypatch, finish, text):
-    from test_route_accounting import observed_packed_episode, args
+    from test_route_accounting import observed_packed_episode
     ep = observed_packed_episode(tmp_path)
     monkeypatch.setattr(route, '_CACHE', {})
     def provider(content, model, *args, **kwargs):
         return {'usage': {'cost': .004}, 'choices': [{'finish_reason': finish, 'message': {'content': text}}]}
     monkeypatch.setattr(harness, 'call_model', provider)
     width, record = route.route_width(ep, 'sk-or-fixture', harness.call_model_once,
-                                     receipt_path=tmp_path / 'noreply_episode_a.json')
+                                     out_path=tmp_path / 'episode_a.json')
     assert record['response_text'] == text and record['finish_reason'] == finish
     assert record['fine_detail'] is None
     assert width == max(harness.me.ROUTE_WIDTHS[harness.me.rig(harness.me.load(ep))])
@@ -160,7 +160,7 @@ def test_review_unknown_retry_names_fail_before_attempt_metadata(tmp_path, monke
     assert (job / 'run' / 'run.json').read_bytes() == before
 
 
-def test_review_force_recovers_unknown_dispatch_with_original_hold(tmp_path, monkeypatch):
+def test_review_force_recovers_unknown_dispatch_with_original_hold(resends_used_up, tmp_path, monkeypatch):
     job, run = review_fixture(tmp_path, monkeypatch)
     calls = []; funded_provider(monkeypatch, calls)
     provider = harness.urllib.request.urlopen
@@ -275,7 +275,6 @@ def test_long_free_job_reuses_pieces_then_labels_without_rebuying_dictionary(tmp
 
 
 def test_orphan_staged_harness_finalizes_run_after_wrapper_sigkill(tmp_path, monkeypatch):
-    import os
     import time
     from label import run as staged
     ep = recording(tmp_path, np.arange(12) / 30)

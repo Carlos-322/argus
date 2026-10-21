@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import math
-import re
 
 from label import providers
 
@@ -11,15 +10,41 @@ ASTRA = 'openai/gpt-6-astra'
 SOL61 = 'openai/gpt-6.1-sol'
 PERIODS = {'teleop_arms': 1.5, 'handheld_gripper': 1.0, 'ego_head': 0.5}
 TASK_MODES = ('episode', 'session')
+# OpenAI counts reasoning tokens inside max_completion_tokens, so a call's output limit is
+# the answer it writes plus room to reason at its effort. Medium is about twice the most
+# reasoning any call used in the October 2026 Astra runs (2,128 tokens, a sensor analysis;
+# evidence selection used at most 239), and each effort step doubles it.
+REASONING_TOKENS = {'none': 0, 'minimal': 1000, 'low': 2000, 'medium': 4000, 'high': 8000, 'xhigh': 16000}
+# The paid calls beside the annotation. Evidence inspection asks the model, before it annotates, which recorded fields
+# to read at full rate (label/evidence_access.py discover); it was built for depth and touch sensing, so by default
+# (auto) only a recording with depth or a touch sensor (tactile, pressure, contact; a wrist force/torque sensor alone
+# does not count) is inspected, all inspects any recording with recorded fields beyond its cameras, and off buys no
+# selection. The field dictionary asks once per upload what uncertain fields mean
+# (label/dictionary_stage.py), on by default, and is written into the policy only when off.
+# A policy saved before inspection could be set inspected every recording with recorded fields, so a saved policy
+# without the setting keeps that (LEGACY_INSPECTION, never written) and a job labelled then resumes as it was paid
+# for; a new policy writes its mode, auto unless asked otherwise.
+INSPECTION_MODES = ('auto', 'all', 'off')
+INSPECTION = 'auto'
+LEGACY_INSPECTION = 'all'
 
 
-def is_astra(model: str) -> bool:
-    return re.fullmatch(r'(?:openai/)?gpt-6-astra(?:-\d{4}-\d{2}-\d{2})?', model) is not None
+def inspection_mode(selected: dict) -> str:
+    """The inspection mode of a resolved or saved policy."""
+    return selected.get('inspection', LEGACY_INSPECTION)
+
+
+def output_limit(answer_tokens: int, reasoning: str) -> int:
+    """max_completion_tokens for a call that writes up to answer_tokens at this reasoning effort."""
+    if reasoning not in REASONING_TOKENS:
+        raise ValueError(f'unsupported reasoning effort {reasoning!r}')
+    return answer_tokens + REASONING_TOKENS[reasoning]
 
 
 def resolve(ctx: dict, *, model: str | None = None, reasoning: str | None = None,
             sample_fps: float | None = None, task_mode: str | None = None,
-            dataset_note: str | None = None) -> dict:
+            dataset_note: str | None = None, inspection: str | None = None,
+            field_dictionary: bool | None = None) -> dict:
     """Source declarations and caller overrides, independent of dataset names or absent task text."""
     saved = ctx.get('annotation_policy') or {}
     if saved and (not isinstance(saved, dict) or saved.get('version') != VERSION):
@@ -31,9 +56,12 @@ def resolve(ctx: dict, *, model: str | None = None, reasoning: str | None = None
     if not isinstance(model, str) or not model.strip():
         raise ValueError('model must be a nonempty identifier')
     providers.validate_model(model)
+    sol = model.split('/')[-1] == SOL61.split('/')[-1]
     prior_reasoning = saved.get('reasoning') if saved.get('model') == model else None
-    reasoning = reasoning or prior_reasoning or ('high' if model.split('/')[-1] in ('gpt-6.1-sol', 'deepseek-flash') else 'medium')
-    if reasoning not in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh'):
+    # Astra defaults to medium reasoning, every other model to high
+    astra = model.split('/')[-1] == ASTRA.split('/')[-1]
+    reasoning = reasoning or prior_reasoning or ('medium' if astra else 'high')
+    if reasoning not in REASONING_TOKENS:
         raise ValueError('unsupported reasoning effort')
     if sample_fps is None:
         sample_fps = saved.get('sample_fps')
@@ -46,8 +74,8 @@ def resolve(ctx: dict, *, model: str | None = None, reasoning: str | None = None
         if type(period) not in (float, int) or not math.isfinite(period) or period <= 0:
             raise ValueError('saved sampling cadence is invalid')
     else:
-        period = 1.0 if model.split('/')[-1] == 'gpt-6.1-sol' else PERIODS[rig]
-    if model.split('/')[-1] == 'gpt-6.1-sol' and period > 1.0:
+        period = 1.0 if sol else PERIODS[rig]
+    if sol and period > 1.0:
         raise ValueError('GPT-6.1 Sol requires at least 1 sample per second')
     declared = ctx.get('task_mode')
     if declared is None and ctx.get('sessions') is True:
@@ -59,17 +87,25 @@ def resolve(ctx: dict, *, model: str | None = None, reasoning: str | None = None
     if not isinstance(note, str):
         raise ValueError('dataset description must be text')
     # Preserve Astra's request budget. Denser sampling reduces the duration allowance proportionally.
-    baseline = 1.0 if model.split('/')[-1] == 'gpt-6.1-sol' else PERIODS[rig]
+    baseline = 1.0 if sol else PERIODS[rig]
     maximum = 450.0 if period >= baseline else 330.0 * min(1.0, period / 0.5)
     if sample_fps is None and saved.get('model') == model and saved.get('part_max_s') is not None:
         previous = saved['part_max_s']
         if type(previous) not in (float, int) or not math.isfinite(previous) or not 0 < previous <= maximum:
             raise ValueError('saved part allowance is incompatible; rebuild with an explicit policy')
         maximum = previous
+    inspect = inspection if inspection is not None else inspection_mode(saved) if saved else INSPECTION
+    if inspect not in INSPECTION_MODES:
+        raise ValueError(f'inspection must be one of {", ".join(INSPECTION_MODES)}')
+    dictionary = field_dictionary if field_dictionary is not None else saved.get('field_dictionary', True)
+    if type(dictionary) is not bool:
+        raise ValueError('field dictionary must be on or off')
     return {'version': VERSION, 'rig': rig, 'model': model, 'reasoning': reasoning,
             'sample_fps': float(sample_fps) if sample_fps is not None else None,
             'sample_every_s': period, 'part_max_s': maximum, 'task_mode': mode,
-            'dataset_note': note}
+            'dataset_note': note,
+            **({'inspection': inspect} if inspect != LEGACY_INSPECTION else {}),
+            **({'field_dictionary': False} if not dictionary else {})}
 
 
 def effective(ctx: dict) -> dict:
@@ -79,12 +115,16 @@ def effective(ctx: dict) -> dict:
 def add_arguments(parser) -> None:
     """Shared optional controls; omitted values inherit source policy or defaults."""
     parser.add_argument('--model', default=None, help='model identifier (Astra by default; deepseek-flash with ARGUS_PROVIDER=deepseek)')
-    parser.add_argument('--reasoning', default=None, help='reasoning effort (Astra medium; GPT-6.1 Sol high)')
+    parser.add_argument('--reasoning', default=None, help='reasoning effort (default medium for Astra, high for every other model)')
     parser.add_argument('--sample-fps', type=float, default=None,
                         help='optional sampling override; GPT-6.1 Sol defaults to at least 1 FPS')
     parser.add_argument('--task-mode', choices=TASK_MODES, default=None,
                         help='optional task-scope override; source declarations otherwise apply')
     parser.add_argument('--dataset-note', default=None, help='dataset description supplied as recording context')
+    parser.add_argument('--inspection', choices=INSPECTION_MODES, default=None,
+                        help='paid evidence selection before each annotation: auto (default) for a recording with depth '
+                             'or a touch sensor (not a force/torque sensor alone), all for any recording with recorded '
+                             'fields beyond its cameras, off for none')
 
 
 def persist(episodes, **overrides) -> dict:

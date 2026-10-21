@@ -148,6 +148,26 @@ SENSOR_CONTENT_ROLES = frozenset(('sensor', 'sensor_view', 'tactile_image', 'opt
 TACTILE_CONTENT_ROLES = SENSOR_CONTENT_ROLES - {'sensor', 'sensor_view'}
 
 
+def camera_role(ctx: dict, view: str, interpretation: dict, meta: dict | None = None) -> str | None:
+    """The role an interpretation gives a camera, with what the reader read from the camera's own recorded name taking
+    precedence over a model's guess. A machine-interpreted sensor or tactile role is dropped when the reader placed the
+    camera on an arm from its recorded name (prepare/formats.py camera_role_provenance, eg right_wrist_cam) and that
+    name carries no sensing word (is_sensing, eg gelsight or digit): the dictionary model can fill a gap the reader
+    left, or agree with it, but never turn a camera the reader identified into a touch sensor. A role a person set
+    always stands."""
+    from label.signals import _role
+    from prepare.formats import camera_role_provenance, is_sensing
+    role = _role(interpretation.get('role'))
+    if role not in SENSOR_CONTENT_ROLES or interpretation.get('provenance') != 'machine':
+        return role
+    meta = meta if meta is not None else (ctx.get('cameras') or {}).get(view) or {}
+    # placed from the recording itself: its recorded name or a recorded mount; an adapter's description of a
+    # presentation slot is not a placement
+    placed = camera_role_provenance(meta, view, ctx.get('profile') or 'teleop_arms') in ('recorded_name', 'recorded')
+    said = ' '.join(str(meta.get(key) or '') for key in ('key', 'name', 'desc')) or view
+    return None if placed and not is_sensing(said) else role
+
+
 def camera_content_role(ctx: dict, view: str, entry: dict | None = None) -> dict | None:
     """Resolve explicit content roles independently of mounting and initial machine interpretations."""
     from label.signals import _role

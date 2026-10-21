@@ -129,11 +129,11 @@ def test_apply_cannot_restore_physical_delay_flag_to_arrival_episode(tmp_path):
     assert 'timebase_neighbour_lag_frames' not in json.loads(path.read_text())
 
 
-def test_generic_mcap_request_keeps_state_on_log_axis_without_physical_delay_claim(tmp_path, monkeypatch):
+def test_generic_mcap_request_keeps_state_on_log_axis_without_physical_delay_claim(tmp_path):
     from test_abc_generic import capture_mcap, converted
     source = tmp_path / 'source'; source.mkdir()
     capture_mcap(source / 'episode.mcap', n=60, bad_header='/left-arm-state')
-    ep, context = converted(source, tmp_path / 'prepared', monkeypatch, legacy=False)
+    ep, context = converted(source, tmp_path / 'prepared')
     assert context['state_kind'] == 'joints'
     assert context['source']['presentation_clock']['basis'] == 'mcap_log_time'
     # A recorded leader declaration makes this fixture eligible for the follower-delay consumer.

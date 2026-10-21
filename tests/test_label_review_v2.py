@@ -254,9 +254,10 @@ def test_final_http_error_status_is_unpaid_and_resumes(tmp_path, monkeypatch, st
 
 
 @pytest.mark.parametrize('outcome', ['timeout', 504])
-def test_unknown_final_outcome_retains_reserve_and_never_replays(tmp_path, monkeypatch, outcome):
+def test_unknown_final_outcome_is_sent_again_twice_and_keeps_every_reserve(tmp_path, monkeypatch, outcome):
     # Sent, then no answer (a read timeout, a gateway timeout): the request may have been billed, so its reservation
-    # stays and a plain resume never sends it again.
+    # stays. Argus sends it again automatically, at most twice (AUTO_RESENDS), each attempt keeping its reservation,
+    # and a plain resume past that bound never sends it again.
     from test_camera_timing import recording
     ep = recording(tmp_path, np.arange(12) / 30)
     sent = []
@@ -272,15 +273,21 @@ def test_unknown_final_outcome_retains_reserve_and_never_replays(tmp_path, monke
     out = tmp_path / 'out'
     args = dict(keys=['sk-or-first', 'sk-or-second'], concurrency=1, force=False, max_spend=1.,
                 model=harness.DEFAULT_MODEL, reasoning='medium', max_tokens=100, timeout=1, cell_w=128)
+    # a cap that covers one reservation but not a second stops the resend: the first possible charge still counts
+    assert harness.run_batch([ep], tmp_path / 'capped', **args) == 1 and sent.count('final') == 1
+    sent.clear()
+    args['max_spend'] = 5.
     assert harness.run_batch([ep], out, **args) == 1
     receipt = out / ('noreply_' + ep.name + '.json')
     result = json.loads(receipt.read_text())
     assert result['final_dispatch_outcome'] == 'unverified' and result['final_reserved_usd'] > 0
-    assert harness.episode_cost(result) > .01
-    original = receipt.read_bytes()
-    # Resume reports the unresolved charge while retaining the receipt and refusing replay.
+    assert sent.count('final') == 1 + harness.AUTO_RESENDS == harness.dispatched_attempts(result)
+    # every attempt that may have been billed is still counted, not only the last
+    assert harness.episode_cost(result) >= (1 + harness.AUTO_RESENDS) * result['final_reserved_usd'] * 0.999
+    original, before = receipt.read_bytes(), list(sent)
+    # Resume reports the unresolved charge while retaining the receipt and refusing a fourth send.
     assert harness.run_batch([ep], out, **args) == 1
-    assert receipt.read_bytes() == original and sent == ['selection', 'final']
+    assert receipt.read_bytes() == original and sent == before
 
 
 def endpoint_metadata(model):
@@ -529,6 +536,82 @@ def test_budget_increase_resumes_undispatched_selection(tmp_path, monkeypatch, i
     assert sent == ['selection', 'final']
 
 
+@pytest.mark.parametrize('cap', [0., .1, 20.])
+def test_known_rate_inspection_uses_the_funded_batch_cap(tmp_path, monkeypatch, cap):
+    from test_camera_timing import recording
+    from label import evidence_access as ea
+    ep = recording(tmp_path, np.arange(12) / 30)
+    context_path = ep / 'context.json'
+    context = json.loads(context_path.read_text())
+    context['instruction'] = 'Source task context. ' * 12000
+    context['new_fact'] = {'value': 7}
+    context_path.write_text(json.dumps(context))
+    request = harness.me.build_request(ep, model=harness.DEFAULT_MODEL, reasoning='medium', cell_w=128,
+                                       inspect_evidence=True)
+    access = request['evidence_access']
+    selection = access.selection_content(request['content']) + [{'type': 'text', 'text': ea.SELECTION +
+                 '\nFIELD INVENTORY\n' + ea.packed(access.page())}]
+    assert harness.final_cost_bound(selection, ea.selection_tokens('medium')) > ea.MAX_SELECTION_COST
+    sent = []
+    def provider(request, timeout):
+        assert request.get_method() != 'GET', 'Known model rates require no external quote'
+        selecting = 'FIELD INVENTORY' in json.dumps(json.loads(request.data)['messages'])
+        sent.append('selection' if selecting else 'final')
+        return answer({'requests': []} if selecting else {'task_summary': 'The hand reaches.'})
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', provider)
+    out = tmp_path / 'funded'
+    rc = harness.run_batch([ep], out, keys=['sk-or-test'], concurrency=1, force=False,
+        model=harness.DEFAULT_MODEL, reasoning='medium', max_tokens=100, timeout=1, cell_w=128, max_spend=cap)
+    if 0 < cap < 1:
+        assert rc == 1 and sent == []
+    else:
+        result = json.loads((out / (ep.name + '.json')).read_text())
+        assert rc == 0 and sent == ['selection', 'final']
+        assert result['evidence_inspection']['status'] == 'complete'
+        assert harness.episode_cost(result) == pytest.approx(.02)
+
+
+def test_uncapped_batch_completes_second_inspection_round_and_reuses_paid_output(tmp_path, monkeypatch):
+    from test_camera_timing import recording
+    from label import evidence_access as ea
+    ep = recording(tmp_path, np.arange(12) / 30)
+    context_path = ep / 'context.json'
+    context = json.loads(context_path.read_text())
+    context.update(instruction='Source task context. ' * 2000, new_fact={'value': 7})
+    context_path.write_text(json.dumps(context))
+    request = harness.me.build_request(ep, model=harness.DEFAULT_MODEL, reasoning='medium', cell_w=128,
+                                       inspect_evidence=True)
+    field = next(row for row in request['evidence_access'].inventory() if row['name'] == 'new_fact')
+    sent, reservations = [], []
+    def provider(request, timeout):
+        assert request.get_method() != 'GET'
+        content = json.loads(request.data)['messages'][0]['content']
+        selecting = 'FIELD INVENTORY' in json.dumps(content)
+        sent.append('selection' if selecting else 'final')
+        if selecting:
+            reservations.append(harness.final_cost_bound(content, ea.selection_tokens('medium')))
+            if len(reservations) == 1:
+                return answer({'requests': [{'field_id': field['id'], 'mode': 'metadata'}]}, cost=.6)
+            assert 'INSPECTED EVIDENCE' in json.dumps(content)
+            return answer({'requests': []})
+        assert 'INSPECTED EVIDENCE' in json.dumps(content)
+        return answer({'task_summary': 'The hand reaches.'})
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', provider)
+    out = tmp_path / 'uncapped'
+    args = dict(keys=['sk-or-test'], concurrency=1, force=False, max_spend=0.,
+        model=harness.DEFAULT_MODEL, reasoning='medium', max_tokens=100, timeout=1, cell_w=128)
+    assert harness.run_batch([ep], out, **args) == 0
+    result = json.loads((out / (ep.name + '.json')).read_text())
+    inspection = result['evidence_inspection']
+    assert sent == ['selection', 'selection', 'final']
+    assert reservations[0] < ea.MAX_SELECTION_COST < .6 + reservations[1]
+    assert inspection['status'] == 'complete' and len(inspection['rounds']) == 2
+    assert inspection['inspections'][0]['value'] == {'value': 7}
+    assert harness.episode_cost(result) == pytest.approx(.62)
+    assert harness.run_batch([ep], out, **args) == 0
+    assert sent == ['selection', 'selection', 'final']
+
+
 def test_native_search_fee_without_enforceable_ceiling_refuses_paid_dispatch(tmp_path, monkeypatch):
     from test_camera_timing import recording
     ep = recording(tmp_path, np.arange(12) / 30)
@@ -547,7 +630,11 @@ def test_native_search_fee_without_enforceable_ceiling_refuses_paid_dispatch(tmp
     assert harness.episode_cost(receipt) == 0
 
 
-def test_legacy_paid_final_after_budget_pause_requires_explicit_refresh(tmp_path, monkeypatch):
+@pytest.mark.parametrize('limitation', [
+    'Inspection selection exceeds the remaining batch spend cap.',
+    'Inspection selection stopped at the cost or dispatch boundary.',
+])
+def test_legacy_paid_final_after_budget_pause_requires_explicit_refresh(tmp_path, monkeypatch, capsys, limitation):
     from test_camera_timing import recording
     ep = recording(tmp_path, np.arange(12) / 30)
     out = tmp_path / 'out'
@@ -557,7 +644,7 @@ def test_legacy_paid_final_after_budget_pause_requires_explicit_refresh(tmp_path
     record = {'parse_ok': True, 'labels': {'task_summary': 'The hand reaches.'},
               'usage': {'est_cost_usd': .01}, 'input_identity': harness.input_identity(ep, **args),
               'evidence_inspection': {'status': 'incomplete', 'rounds': [], 'cost_usd': 0,
-                  'limitations': ['Inspection selection exceeds the remaining batch spend cap.']}}
+                  'limitations': [limitation]}}
     target = out / (ep.name + '.json')
     target.write_text(json.dumps(record))
     original = target.read_bytes()
@@ -567,6 +654,10 @@ def test_legacy_paid_final_after_budget_pause_requires_explicit_refresh(tmp_path
     assert target.read_bytes() == original
     warning = json.loads((out / ('stale_' + ep.name + '.json')).read_text())
     assert warning['refresh'] == '--force' and 'inspection' in warning['reason']
+    if 'cost or dispatch boundary' in limitation:
+        assert warning['status'] == 'unverified'
+        console = capsys.readouterr()
+        assert 'LIMITED ' + ep.name in console.err and '--force' in console.err
 
 
 @pytest.mark.parametrize('contribution,progress,kept', [
@@ -601,3 +692,64 @@ def test_ego_short_row_does_not_guess_whether_text_is_handwear_or_notes():
     assert ok and labels['timeline'][0]['action'] == 'reach'
     assert 'hands_wearing' not in labels['timeline'][0] and 'notes' not in labels['timeline'][0]
     assert labels['_dropped'][0]['value'] == ambiguous
+
+
+# Endpoint pricing published for google/gemini-4-argon on 2026-10-19 (standard tier): audio prices and a search price
+# beside the token rates.
+GEMINI_PRICING = {'prompt': '0.000002', 'completion': '0.00001', 'image': '0.000002', 'audio': '0.000002',
+                  'input_audio_cache': '0.0000001', 'web_search': '0.014', 'internal_reasoning': '0.00001',
+                  'input_cache_read': '0.0000001', 'input_cache_write': '0.0000001875', 'discount': 0.5}
+
+
+def test_quote_caps_a_gemini_request_whose_audio_and_search_prices_cannot_apply(tmp_path, monkeypatch):
+    """Gemini lists audio prices and a search price. Requests carry text and images only and never ask for search (the
+    web plugin or :online), so the quote accepts both and caps the request by its token and image rates."""
+    from test_camera_timing import recording
+    ep = recording(tmp_path, np.arange(12) / 30)
+    model = 'google/gemini-4-argon'
+    sent = []
+    def provider(request, timeout):
+        sent.append(request.get_method())
+        if request.get_method() == 'GET':
+            return io.BytesIO(json.dumps({'data': {'id': model, 'endpoints': [{
+                'context_length': 1_048_576, 'pricing': GEMINI_PRICING}]}}).encode())
+        body = json.loads(request.data)
+        assert body['provider']['max_price'] == {'prompt': 2., 'completion': 10., 'image': .000002, 'request': 0.}
+        assert 'plugins' not in body and ':online' not in body['model']
+        selection = 'FIELD INVENTORY' in json.dumps(body['messages'])
+        return answer({'requests': []} if selection else {'task_summary': 'The hand reaches.'})
+    monkeypatch.setattr(harness.urllib.request, 'urlopen', provider)
+    out = tmp_path / 'out'
+    assert harness.run_batch([ep], out, keys=['sk-or-test'], concurrency=1, force=False, model=model,
+        reasoning='medium', max_tokens=64000, timeout=1, cell_w=128, max_spend=8.) == 0
+    assert sent == ['GET', 'POST', 'POST']
+    quoted = json.loads((out / (ep.name + '.json')).read_text())['config']['pricing_quote']
+    # the output rate carries the reasoning charge; the input rate is the prompt rate, never an audio one
+    assert quoted['input_usd_per_token'] == .000002 and quoted['output_usd_per_token'] == pytest.approx(.00002)
+
+
+@pytest.mark.parametrize('model, pricing, words', [
+    ('google/gemini-4-argon', {**GEMINI_PRICING, 'video_seconds': '0.001'}, 'unsupported endpoint charge: video_seconds'),
+    ('google/gemini-4-argon:online', GEMINI_PRICING, 'native search fees'),
+    ('perplexity/sonar-x', {'prompt': '0.000001', 'completion': '0.000001', 'web_search': '0.005'}, 'native search fees'),
+])
+def test_a_charge_that_could_apply_still_blocks_the_quote(monkeypatch, model, pricing, words):
+    """Accepting Gemini's unsent-input and on-request search prices is scoped to exactly those: a charge the quote does
+    not know, a variant that searches, or a model that always searches still has no verified ceiling."""
+    from label import pricing as pricing_module
+    def provider(request, timeout):
+        return io.BytesIO(json.dumps({'data': {'id': model, 'endpoints': [{'context_length': 100_000, 'pricing': pricing}]}}).encode())
+    monkeypatch.setattr(pricing_module.urllib.request, 'urlopen', provider)
+    with pytest.raises(ValueError, match=words):
+        pricing_module.quote(model, 5)
+
+
+def test_a_request_part_with_no_verified_bound_is_refused():
+    """The quote accepts audio prices only because requests carry no audio; a part that is not text or an image would
+    break that, so the bound refuses it rather than leave it out."""
+    from label import pricing as pricing_module
+    quote = {'prompt_token_bound': 100_000, 'input_usd_per_token': 1e-6, 'output_usd_per_token': 1e-5,
+             'request_usd': 0., 'image_usd': 0.}
+    assert pricing_module.cost_bound([{'type': 'text', 'text': 'hello'}], 100, quote) > 0
+    with pytest.raises(ValueError, match='no verified bound: input_audio'):
+        pricing_module.cost_bound([{'type': 'text', 'text': 'hello'}, {'type': 'input_audio', 'input_audio': {}}], 100, quote)

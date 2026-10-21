@@ -57,7 +57,7 @@ from label import prompts, policy
 from label import sensor_evidence as se
 from label import state as ms
 from prepare.signal_alignment import ALIGNED_CAMERA, ALIGNED_ASSUMED, recorder_arrival, placement_text
-from prepare.state_notes import ASSUMED_CLOCK, LAYOUT, NOT_RECORDED, SHORT, STATE_WHY, UNREADABLE
+from prepare.state_notes import ASSUMED_CLOCK, LAYOUT, NOT_RECORDED, SHORT, UNREADABLE
 
 FPS = 30
 VIEW_ORDER = ("exo", "left", "right")          # stable presentation slots; their order does not establish content
@@ -291,6 +291,60 @@ def frame_time(ep: dict, k: int) -> float:
     return k / ep_fps(ep)
 
 
+def frame_window(ep: dict, n: int | None = None) -> list[float]:
+    """Actual anchor-frame window, including the final interval, without retained duration claims."""
+    view = anchor(ep)
+    sources = ep.get('sources') or {}
+    source = sources.get(view) or {}
+    if n is None:
+        n = int(source.get('n_frames', len(ep.get('state', []))))
+        n = min([n, *(len(mapping) for name, mapping in (ep.get('kmap') or {}).items()
+                      if name != view and name in sources)])
+    if n <= 0:
+        return [0., 0.]
+    times = (ep.get('times') or {}).get(view)
+    if times is None:
+        return [0., n / ep_fps(ep)]
+    times = np.asarray(times, dtype=float)
+    start = max(0., float(times[0]))
+    if n < len(times):
+        return [start, float(times[n])]
+    steps = np.diff(times[:n])
+    interval = float(np.median(steps[steps > 0])) if np.any(steps > 0) else 1 / ep_fps(ep)
+    interval = float(source.get('last_frame_interval_s', interval))
+    return [start, float(times[n - 1]) + interval]
+
+
+def camera_sample(ep: dict, view: str, k: int, *, source_frame: int | None = None) -> dict | None:
+    """One displayed RGB cell's source capture, separately from its anchor placement."""
+    mapping = (ep.get('kmap') or {}).get(view)
+    if k < 0 or (source_frame is None and mapping is not None and k >= len(mapping)):
+        return None
+    if source_frame is None:
+        source_frame = int(mapping[k]) if mapping is not None else int(k)
+    clocks = ep.get('times')
+    recorded = (ep.get('recorded_times') or {}).get(view)
+    own = (clocks or {}).get(view) if recorded is None else recorded
+    count = (ep.get('sources') or {}).get(view, {}).get('n_frames')
+    if source_frame < 0 or (count is not None and source_frame >= int(count)):
+        return None
+    capture = None
+    if own is not None and source_frame < len(own):
+        value = float(own[source_frame])
+        capture = value if math.isfinite(value) else None
+    elif clocks is None:
+        capture = source_frame / ep_fps(ep)
+    display = frame_time(ep, k)
+    notes = ep['context'].get('camera_clock') or {}
+    sample = {'row': int(k), 'source_frame': source_frame, 'display_time_s': display,
+              'source_time_s': capture, 'capture_offset_s': capture - display if capture is not None else None,
+              'episode_alignment_verified': capture is not None and not (notes.get(view) or notes.get(anchor(ep)))}
+    pts = (clocks or {}).get(view + '_pts')
+    if pts is not None and source_frame < len(pts):
+        sample['source_pts'] = int(pts[source_frame])
+    return sample
+
+
 def seconds(t: float) -> str:
     """A time as the prompt says it, to the hundredth of a second. A recorder's clock can put a frame a hair before
     the episode's zero, and that instant is said as 0.00 s, never as -0.00 s, which reads as a time before the
@@ -307,13 +361,13 @@ def describe_spans(ep: dict, spans) -> list[dict]:
 # dataset name or the camera set.
 RIGS = ("teleop_arms", "handheld_gripper", "ego_head")
 STATE_KINDS = ("joints", "ee_pose", "none")
-# One sampled instant every N s for the whole episode, still spans included (a still span is exactly
-# where a stopped recording would hide). Teleop arms move slowly and are seen by up to three cameras, so one
-# instant every 1.5 s is enough. Handheld demonstrations are short and fast, so denser. Egocentric footage has one
-# low-resolution head camera and the hands are the whole point, so it is sampled twice as densely again.
-SAMPLE_EVERY_S = policy.PERIODS
 
 
+# One sampled instant every N s (label/policy.py PERIODS, per rig) for the whole episode, still spans included (a
+# still span is exactly where a stopped recording would hide). Teleop arms move slowly and are seen by up to three
+# cameras, so one instant every 1.5 s is enough. Handheld demonstrations are short and fast, so denser. Egocentric
+# footage has one low-resolution head camera and the hands are the whole point, so it is sampled twice as densely
+# again.
 def every_s(ep: dict) -> float:
     return policy.effective(ep['context'])['sample_every_s']
 
@@ -981,17 +1035,21 @@ def contact_image(ep: dict, c: dict, gate=None) -> tuple[bytes, dict] | None:
     begin, end = contact_strips(c)
     # a contact placed from both starts says so on its picture: its begin and end are the placement's, not recorded
     by = ", " + contact_placement(c) if c.get("aligned_by") else ""
+    event = 'touch' if c.get('evidence_kind') == 'recorded_contact_state' else 'signal activity'
     if begin:
-        strips.append((f"touch begins by the recording{by}",
+        strips.append((f"{event} begins by the recording{by}",
                        [min(max(c["start_s"] + o, 0.0), t_end) for o in STRIP_OFFSETS_S]))
     if end:
-        strips.append((f"touch ends by the recording{by}",
+        strips.append((f"{event} ends by the recording{by}",
                        [min(max(c["end_s"] + o, 0.0), t_end) for o in END_OFFSETS_S]))
     kp = _frame_at(ep, c["peak_s"])
     ks = sorted({_frame_at(ep, t) for _, ts in strips for t in ts} | {kp})
     try:
         got = {v: _decode_view(ep, v, ks if v in vs else [kp], gate) for v in dict.fromkeys(vs + pvs)}
-    except Exception:
+    except Exception as e:
+        # _decode_view already keeps the frames it can; a fault on our side (a missing file) or in our code raises
+        if not _decode_error(e):
+            raise
         return None
     font = mf._grid_font(16)
     pad, strip_h = 8, 24
@@ -1029,7 +1087,7 @@ def contact_image(ep: dict, c: dict, gate=None) -> tuple[bytes, dict] | None:
         tile = _map_tile(ep, nm, kp)
         if tile is not None:
             peak.append((nm, tile))
-    blocks.append(("strongest", [("", peak)]))
+    blocks.append(("largest recorded response", [("", peak)]))
     widths = [sum(im.width for _, im in cells) + pad * max(len(cells) - 1, 0)
               for _, rows in blocks for _, cells in rows]
     w = max(widths + [640]) + 2 * pad
@@ -1066,7 +1124,13 @@ def _map_tile(ep: dict, name: str, k: int):
     if len(shape) != 2 or name not in (ep.get("signals") or {}):
         return None
     a = ep["signals"][name]
-    d, swing = sg.distance_at(a, min(k, len(a) - 1), m.get("rest"), m.get("swing"))
+    reference = sg.declared_zero_reference(m, a.shape[1])
+    if reference is None:
+        d, swing = sg.distance_at(a, min(k, len(a) - 1), m.get("rest"), m.get("swing"))
+    else:
+        level, sign = reference
+        d = np.maximum(sign * (a[min(k, len(a) - 1)] - level), 0)
+        swing = sg.swing_of(a, level)
     row = d.reshape(int(shape[0]), int(shape[1]))
     g = np.where(np.isfinite(row), np.clip(row / swing, 0, 1) if swing > 0 else 0.0, 0.0)
     cell = max(1, MAP_TILE_PX // max(int(shape[0]), int(shape[1])))
@@ -1291,10 +1355,6 @@ def _coverage_note(ep: dict, pl: dict) -> str:
     return out
 
 
-def _num(x: float) -> str:
-    return f"{float(x):.3g}"
-
-
 def _depth_note(ep: dict) -> str:
     """Which cameras also record depth, and that each detail view is followed by their depth: what the input is, never
     how to read it."""
@@ -1383,9 +1443,11 @@ def _contact_timing(c: dict) -> str:
 
 def _contact_line(c: dict) -> str:
     hand = f"{c['hand']} hand" if c.get("hand") else "hand not named by the recording"
-    when = (f"{c['start_s']:.2f} s" + (" (already touching at the first frame)" if c.get("from_start") else "")
-            + f" to {c['end_s']:.2f} s" + (" (still touching at the last frame)" if c.get("to_end") else "")
-            + f", strongest at {c['peak_s']:.2f} s"
+    physical = c.get('evidence_kind') == 'recorded_contact_state'
+    state = 'touching' if physical else 'active'
+    when = (f"{c['start_s']:.2f} s" + (f" (already {state} at the first frame)" if c.get("from_start") else "")
+            + f" to {c['end_s']:.2f} s" + (f" (still {state} at the last frame)" if c.get("to_end") else "")
+            + f", largest response at {c['peak_s']:.2f} s"
             + _contact_timing(c))
     where = []
     for nm, r in (c.get("regions") or {}).items():
@@ -1397,9 +1459,11 @@ def _contact_line(c: dict) -> str:
     if act:
         where.append("active: " + ", ".join(act))
     return (f"  {c['id']}: {hand}, from {', '.join(c['signals'])}, {when}"
-            + (f"; at its strongest {'; '.join(where)}" if where else "")
+            + (f"; at its largest response {'; '.join(where)}" if where else "")
             + (f"; it weakens and comes back at {', '.join(f'{x:.2f}' for x in c['dips_s'])} s"
-               if c.get("dips_s") else ""))
+               if c.get("dips_s") else "")
+            + (f". {c['reference_note']}" if c.get('reference_note') else
+               '. Response activity has no verified unloaded reference or physical-contact interpretation.' if not physical else ''))
 
 
 def touch_verdicts(ep: dict, n: int) -> frozenset:
@@ -1420,6 +1484,11 @@ def touch_verdicts(ep: dict, n: int) -> frozenset:
         role = field_interpretation(ep["context"], name).get("role")
         permission = sg.touch_cache_permission(name, role, m.get("touch_role"))
         if permission is False:
+            continue
+        from prepare.formats import names_touch
+        if (sg.declared_zero_reference(m, a.shape[1]) is not None and
+                (names_touch(name) or sg._role(role) in ('touch', 'tactile', 'pressure', 'normal_force', 'shear_force', 'force_torque'))):
+            out.add(name)
             continue
         # read as stored (a float32 skin is never copied whole as float64, label/signals.py CHUNK_VALUES)
         stored = "touch" in m and (permission is None or m.get("touch_role") == "touch")
@@ -1458,7 +1527,7 @@ def contacts_block(ep: dict, pl: dict) -> str:
     """Recorded contacts and instrumented-hand coverage, including quiet touch streams."""
     covered = _contact_coverage(ep)
     missing = ('  "contacts_missing": [{"t_s": <float>, "hand": "left" | "right", "object": "<name>"}], '
-               'only a visible grasp or press on an instrumented hand that no recorded contact covers. '
+               'only a visible grasp or press on an instrumented hand that no supplied sensor-activity interval covers. '
                'An uninstrumented hand or an unknown hand cannot establish a missing tactile response. '
                'A discrepancy is a review candidate, not proof of a failed sensor or no physical contact; '
                'sensor placement, contact detection and timing can limit the comparison.\n')
@@ -1472,8 +1541,11 @@ def contacts_block(ep: dict, pl: dict) -> str:
                    'Return an empty contacts_missing list.\n')
     shown = touch_contacts(ep, pl, ep.get("contacts_shown"))
     if not shown:
-        return instruments + '  "contacts": [], no detected contacts were supplied.\n' + missing if covered else ""
+        return instruments + '  "contacts": [], no sensor-activity intervals were supplied.\n' + missing if covered else ""
     rest = [c for c in touch_contacts(ep, pl, ep.get("contacts")) if c["id"] not in {x["id"] for x in shown}]
+    physical = all(c.get('evidence_kind') == 'recorded_contact_state' for c in shown)
+    event = 'touch' if physical else 'signal activity'
+    state = 'touching' if physical else 'active'
     depth = any(_contact_views(ep, c)[2] for c in shown)
     # each strip is described, and its frame asked for, only for the contacts whose picture has it (contact_strips)
     begin = [c["id"] for c in shown if contact_strips(c)[0]]
@@ -1481,22 +1553,24 @@ def contacts_block(ep: dict, pl: dict) -> str:
     lacking = lambda have, why: ("" if len(have) == len(shown) else
                                  f" (not for {_and_list([c['id'] for c in shown if c['id'] not in have])}, {why})")
     only = lambda have: "" if len(have) == len(shown) else f"for {_and_list(have)} only, "
-    picture = ((["five frames around the time the signal says the touch begins, numbered 1 to 5"
-                 + lacking(begin, "already touching at the first frame")] if begin else [])
-               + ([f"three{'' if begin else ' frames'} around the time {'it' if begin else 'the signal'} says the "
-                   "touch ends, numbered 1 to 3" + lacking(end, "still touching at the last frame")] if end else []))
+    picture = (([f"five frames around the time {event} begins, numbered 1 to 5"
+                 + lacking(begin, f"already {state} at the first frame")] if begin else [])
+               + ([f"three{'' if begin else ' frames'} around the time {event} ends, numbered 1 to 3"
+                   + lacking(end, f"still {state} at the last frame")] if end else []))
     claim = ("The following spans describe recorded touch-signal activity in recorder-arrival coordinates. "
              "Describe the pictured frames independently. Their visual touch and hand observations do not "
              "establish tactile event timing, a sensor fault or swapped sensors.\n" if arrival else
-             "The recording's touch signals say a hand is touching something in these spans. They are the "
-             "recording's claims, to check against the frames:\n")
+             "Recorded contact-state channels report touch in these spans; check their states against the frames:\n" if physical else
+             "These spans describe sensor response activity, not confirmed physical contact. An inferred response reference "
+             "is not a verified unloaded baseline. Even a declared calibration zero does not independently verify touch. "
+             "Describe visible touch from the pictured frames independently; sensor activity boundaries do not establish touch onset or release.\n")
     return (instruments + claim + "\n".join(_contact_line(c) for c in shown) + "\n"
-            + (("  The signals record more contacts that are not shown: "
+            + (("  More sensor-activity intervals are not shown: "
                 + "; ".join(f"{c['id']} {c['start_s']:.2f}-{c['end_s']:.2f} s"
                             + (" " + contact_placement(c) if c.get("aligned_by") else "") for c in rest)
                 + ".\n") if rest else "")
             + "After the detail views, each contact above has one picture: " + "".join(p + ", " for p in picture)
-            + ("and " if picture else "") + "the moment it is strongest"
+            + ("and " if picture else "") + "the moment of its largest recorded response"
             + (" with that camera's depth" if depth else "")
             + " and the touch sensor's reading, each frame with its time. Return, beside the other fields:\n"
             '  "contacts": [{"id": "<c1, ...>", "touch_seen": "yes" | "no" | "unclear", '
@@ -1555,8 +1629,8 @@ def _signals_table(ep: dict, pl: dict) -> str:
                 # named once, as the same at every frame only when it reads at every frame
                 complete = np.isfinite(a).all(axis=1)
                 v = a[complete][0] if complete.any() else sg.finite_range(a)[0]
-                said = name + (f" {_num(v[0])}" if len(v) == 1 else
-                               " [" + ", ".join(_num(x) for x in v) + "]" if len(v) <= sg.PER_VALUE_MAX else "")
+                said = name + (f" {sg.reading_text(v[0])}" if len(v) == 1 else
+                               " [" + ", ".join(sg.reading_text(x) for x in v) + "]" if len(v) <= sg.PER_VALUE_MAX else "")
                 said += wording
                 gaps = sg.gap_words(a)
                 if gaps:
@@ -1586,7 +1660,7 @@ def _signals_table(ep: dict, pl: dict) -> str:
                 lo, hi = sg.finite_range(seg)
                 c = float(np.nanmax(hi - lo)) if np.isfinite(seg).any() else 0.0
                 if c > 0:
-                    ch.append(f"{name} {_num(c)}")
+                    ch.append(f"{name} {sg.reading_text(c)}")
             lines.append(f"    {frame_time(ep, a0):.2f}-{frame_time(ep, min(b0, n - 1)):.2f}s: "
                          + ("; ".join(ch) if ch else "none changed"))
     lines += _readout_of(ep, pl)[0]
@@ -1606,6 +1680,8 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
     touch_verdicts), nor has a signal that never changes or has no reading. The rows are ranked by how much their
     values move over the episode (label/signals.py movements) and kept when they fit the allowance for the selected
     instants, then printed in the signals' own order. An oversized row does not prevent smaller rows being shown.
+    A row whose readings at the instants do not resolve its value (label/signals.py resolved), or track a row already
+    sent (_drop_tracking), is left out and named with why.
     Every signal left out, whole or in part, is named with its size and rate; original value names remain in metadata.
     """
     from label import signals as sg
@@ -1617,6 +1693,11 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
     touch = _touch(ep, pl)
     ks = pl["ks"]
     rows = []             # (how much the row's values move, the signal's place, the row's place, signal, label, values)
+    unread = {}           # signal: the error that kept its rows out, named below
+    aliased = {}          # signal: [(label, readings at every frame) of rows the instants do not resolve]
+    counts = {}           # signal: how many rows it has
+    wcols = {}            # (signal's place, row's place): readings at every frame of a row sent as window means
+    series = {}           # (signal's place, row's place): the value's readings at every frame, for rows of one value
     for i, (name, a) in enumerate(arrs.items()):
         try:
             if name in touch or not len(a) or not np.isfinite(a).any() or _constant(a):
@@ -1626,43 +1707,241 @@ def _signal_readout(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
             got = sg.summary_rows(name, a, ks, m.get("shape"), m.get("names"), role=role)
             mv = sg.movements(a)
             by_value = sg.per_value(name, a.shape[1], m.get("shape"), m.get("names"), role=role)
-        except Exception:  # noqa: BLE001 - named as not read in the signals' list (_signals_table), the rest are given
+            # a row of a value's own readings is sent only when those readings resolve it at this sampling
+            # (label/signals.py resolved); rows that summarise a large array are not readings of one value
+            if by_value:
+                follow, stand = sg.resolution(a, ks)
+                ok = sg.is_resolved(follow, stand)
+            else:
+                ok, stand = np.ones(len(got), dtype=bool), np.ones(len(got))
+        except Exception as e:  # noqa: BLE001 - one signal whose rows cannot be made is named below, the rest are given
+            unread[name] = type(e).__name__
             continue
+        counts[name] = len(got)
+        cols = sg.columns(a) if by_value else None
+        wmeans, wkept, wnoise = sg.window_means(a, ks) if by_value and not ok.all() else (None, None, None)
         for j, (lb, v) in enumerate(got):
-            rows.append((float(mv[j]) if by_value else float(np.median(mv)), i, j, name, lb, v))
-    if not rows:
-        return [], frozenset()
+            if not ok[j] and wkept is not None and wkept[j] >= sg.WINDOW_SIGNAL * wnoise:
+                # the readings do not stand for their instants, but the means over each instant's frames keep the
+                # row's trend: those are sent, marked, and the row takes no part in tracking
+                rows.append(((float(wkept[j]), float(mv[j])), i, j, name, f"{lb} (window mean)",
+                             [sg.reading_text(m) if np.isfinite(m) else "-" for m in wmeans[:, j]]))
+                wcols[i, j] = cols[:, j]
+                continue
+            if not ok[j]:
+                aliased.setdefault(name, []).append((lb, cols[:, j] if by_value else None))
+                continue
+            if by_value:
+                series[i, j] = cols[:, j]
+            # ranked for the budget by how well each reading stands for its instant, then by movement: movement alone
+            # ranks a gripper that opens and closes a few times (a few large steps) below a noisy effort, so a budget
+            # cut the gripper first. A summary row's numbers are made at each instant, so they stand for it.
+            rows.append(((round(float(stand[j]), 2), float(mv[j]) if by_value else float(np.median(mv))),
+                         i, j, name, lb, v))
+    # a signal whose rows could not be made is named, so a signal missing from the values is never unexplained
+    not_read = ([f"  The values at each instant leave out {_and_list([f'{nm} ({why})' for nm, why in unread.items()])}"
+                 f", because {'its' if len(unread) == 1 else 'their'} rows could not be read."] if unread else [])
+    # rows left out because their readings at the instants do not resolve them are named, with why
+    step = float(np.median(np.diff([frame_time(ep, k) for k in ks]))) if len(ks) > 1 else every_s(ep)
+    unresolved = ([f"  The values at each instant leave out "
+                   + _and_list([lb + _extremes_words(ep, ks, col) for lbs in aliased.values() for lb, col in lbs])
+                   + f", because one instant every {_seconds_number(step, 2)} s does not resolve their readings: they "
+                     "swing faster than that or only jitter by their noise, so a reading at one instant does not stand "
+                     "for the time around it. Their ranges are given above, and when each reached its largest and "
+                     "smallest reading."] if aliased else [])
+    # a row whose readings track a row already sent is sent once (label/signals.py tracking)
+    rows, tracked = _drop_tracking(ep, rows, series, ks)
+    whole_copies = [(r, s) for r, s, a in tracked if not a]
+    partly = [(r, s, a) for r, s, a in tracked if a]
+    repeated = ([f"  The values at each instant leave out these rows, because each follows a row that is sent, as "
+                 "fitted here (\"later\" means the sent row reaches the same value that much later), so each is sent "
+                 "once; how closely the fit holds is its largest miss at any instant, as a share of the row's range:"]
+                + [f"  {_relation_words(ep, ks, r, s, series)}{_extremes_words(ep, ks, series[r[1], r[2]])}"
+                   for r, s in sorted(whole_copies, key=lambda p: (p[0][1], p[0][2]))] if whole_copies else [])
+    # a row read only where it comes apart is charged to the same budget as the rows, ranked with them
+    apart_head = ("  These rows follow a sent row as fitted here except where they come apart, so they are given "
+                  "only there, with the time of each reading:")
+    unresolved = unresolved + repeated
+    win_note = ("  A row marked (window mean) gives, at each instant, the mean of the frames that instant stands for, "
+                "because its single readings at the instants do not resolve it.")
+    partial = [r for r, _, _ in partly]
+    if not rows and not partial:
+        return unresolved + not_read, frozenset()
     lines = []
     head = "    at: " + " ".join(f"{frame_time(ep, k):.2f}" for k in ks)
     text = {(r[1], r[2]): f"    {r[4]}: " + " ".join(r[5]) for r in rows}
+    text.update({(r[1], r[2]): _apart_line(ep, ks, r, s, a, series) for r, s, a in partly})
     budget = signal_readout_budget(len(ks))
-    room, chosen = budget - len(head), set()
+    # what is said about the rows left out (when their extremes fell, the relation a copy follows) is paid first
+    room, chosen = budget - sum(len(x) + 1 for x in unresolved) - (len(win_note) + 1 if wcols else 0), set()
+    # rows sent as window means come after every other row and share a room of their own within the budget
+    wroom = int(sg.WINDOW_SHARE * budget)
     skipped, kept_after_skip = False, False
-    for r in sorted(rows, key=lambda r: (-r[0], r[1], r[2])):
-        if len(text[r[1], r[2]]) > room:
+    is_partial = {(r[1], r[2]) for r in partial}
+    # a sent row that other rows are read from (their relation names it) comes first: without it they say nothing
+    partners = {(s[1], s[2]) for _, s, _ in tracked}
+    for r in sorted(rows + partial, key=lambda r: ((r[1], r[2]) not in partners, (r[1], r[2]) in wcols, -r[0][0],
+                                                   -r[0][1], r[1], r[2])):
+        key = (r[1], r[2])
+        # the times row and the heading of the lines read only where apart are paid once, by the first of each
+        extra = (len(apart_head) if not any(k in is_partial for k in chosen) else 0) if key in is_partial else \
+            (len(head) if not any(k not in is_partial for k in chosen) else 0)
+        if key in wcols and len(text[key]) + extra > min(room, wroom):
+            continue
+        if len(text[key]) + extra > room:
             skipped = True
             continue
         kept_after_skip |= skipped
-        chosen.add((r[1], r[2]))
-        room -= len(text[r[1], r[2]])
-    if chosen:
+        chosen.add(key)
+        room -= len(text[key]) + extra
+        wroom -= len(text[key]) + extra if key in wcols else 0
+    table = [r for r in rows if (r[1], r[2]) in chosen]
+    if table:
         lines.append("  Each signal that changes, at every instant you receive (seconds in the first row; \"-\" is "
                      "no reading):")
-        lines += [head] + [text[r[1], r[2]] for r in rows if (r[1], r[2]) in chosen]
+        lines += [head] + [text[r[1], r[2]] for r in table]
+    shown_apart = [text[r[1], r[2]] for r in partial if (r[1], r[2]) in chosen]
+    if shown_apart:
+        unresolved = unresolved + [apart_head] + shown_apart
+    if any(k in wcols for k in chosen):
+        unresolved = unresolved + [win_note]
+    cut = [r for r in rows if (r[1], r[2]) in wcols and (r[1], r[2]) not in chosen]
+    if cut:
+        unresolved = unresolved + [
+            "  The values at each instant leave out "
+            + _and_list([r[4].removesuffix(" (window mean)") + _extremes_words(ep, ks, wcols[r[1], r[2]]) for r in cut])
+            + f", because one instant every {_seconds_number(step, 2)} s does not resolve their readings and rows given "
+              f"as window means take at most {int(sg.WINDOW_SHARE * budget)} of the {budget} character budget, kept by "
+              "how much of their variance the means keep. Their ranges are given above, and when each reached its "
+              "largest and smallest reading."]
     left = {}
-    for r in rows:
-        if (r[1], r[2]) not in chosen:
+    for r in rows + partial:
+        if (r[1], r[2]) not in chosen and (r[1], r[2]) not in wcols:
             left.setdefault(r[3], []).append(r)
     if left:
-        named = _and_list([_left_out(nm, arrs[nm], meta.get(nm) or {}, len(left[nm]), sum(r[3] == nm for r in rows))
+        named = _and_list([_left_out(nm, arrs[nm], meta.get(nm) or {}, len(left[nm]), counts[nm])
                            for nm in left])
-        reason = (", because these move least and there is no more room." if chosen else
+        reason = (", because these rank lowest and there is no more room." if chosen else
                   ", because not even one row fits.")
         if kept_after_skip or budget != SIGNAL_TABLE_MIN_CHARS:
-            reason = (f", because rows are ranked by movement and kept when they fit the {budget} character budget."
+            reason = (", because rows are ranked by how well each reading stands for its instant, then by movement, "
+                      f"and kept when they fit the {budget} character budget."
                       if chosen else f", because no row fits the {budget} character budget after the times row.")
         lines.append("  The values at each instant leave out " + named + reason)
-    return lines, frozenset(r[3] for r in rows if r[3] not in left)
+    # a signal any of whose rows is sent: its other rows are said above as copies, window means or unresolved
+    return lines + unresolved + not_read, frozenset(r[3] for r in rows if r[3] not in left)
+
+
+def _drop_tracking(ep: dict, rows: list, series: dict, ks: list[int]) -> tuple[list, list]:
+    """(rows to send, [(row left out, the sent row it tracks)]). Rows of one value's readings are taken in the budget's
+    rank order; one whose readings track a row already kept (label/signals.py tracking) is sent once. Of such a pair the
+    row whose values come later is kept, read from the lag of the best fit: a robot's measured joints follow the
+    command that moves them, so the measured side is kept whatever either is named. With no lag either way the
+    higher ranked row is kept."""
+    from label import signals as sg
+    order = sorted(rows, key=lambda r: (-r[0][0], -r[0][1], r[1], r[2]))
+    kept, tracked, fps = [], [], ep_fps(ep)
+    for r in order:
+        key = (r[1], r[2])
+        if key not in series:
+            kept.append(r)
+            continue
+        hit = None
+        for q in kept:
+            if (q[1], q[2]) not in series:
+                continue
+            if q[3] == r[3]:
+                continue    # values of one signal (cells of one sensor, joints of one state) are distinct readings
+            same, lag = sg.tracking(series[q[1], q[2]], series[key], ks, fps)
+            if not same:
+                continue
+            # where the two come apart (a stall, a slip, a grasp the gripper did not reach) the row is still read
+            apart = sg.apart_instants(series[q[1], q[2]], series[key], ks, lag, fps)
+            hit = (q, lag, apart)
+            break
+        if hit is None:
+            kept.append(r)
+            continue
+        q, lag, apart = hit
+        # the row left out must follow its partner along a line outside the instants where they come apart; when the
+        # readings there carry none (the partner never moves outside them), the pair is not a copy and both are sent
+        left, partner = (q, r) if lag < 0 else (r, q)
+        if _relation_fit(ep, ks, left, partner, series, apart) is None:
+            kept.append(r)
+            continue
+        if lag < 0:
+            # the new row's values come later: it is the measured side, so it takes the kept row's place
+            kept[kept.index(q)] = r
+            tracked = [(t, r if s is q else s, a) for t, s, a in tracked] + [(q, r, apart)]
+        else:
+            tracked.append((r, q, apart))
+    sent = {id(r) for r in kept}
+    return [r for r in rows if id(r) in sent], tracked
+
+
+def _apart_line(ep: dict, ks: list[int], row: tuple, other: tuple, apart: list[int], series: dict) -> str:
+    """One row that tracks another except at some instants: the relation, the stretches, and its readings there."""
+    runs, start = [], apart[0]
+    for a, b in zip(apart, apart[1:] + [None]):
+        if b != a + 1:
+            runs.append((start, a))
+            start = b
+    stretches = _and_list([f"{_seconds_number(frame_time(ep, ks[a]), 1)} to "
+                           f"{_seconds_number(frame_time(ep, ks[b]), 1)} s" for a, b in runs])
+    readings = ", ".join(f"{frame_time(ep, ks[i]):.2f} {row[5][i]}" for i in apart)
+    return (f"  {_relation_words(ep, ks, row, other, series, apart)}{_extremes_words(ep, ks, series[row[1], row[2]])}"
+            f", except {stretches}, where its readings are given: {readings}.")
+
+
+def _relation_fit(ep: dict, ks: list[int], row: tuple, other: tuple, series: dict, apart=()):
+    """(lag, the sent row's readings, the left out row's readings, (slope, intercept)) of the line the left out row
+    follows at the instants outside its apart instants, the sent row read lag frames later, or None when those readings
+    carry no line (label/signals.py line_through): then the row does not follow the sent row and is sent whole."""
+    from label import signals as sg
+    x, y = series[other[1], other[2]], series[row[1], row[2]]
+    _, lag = sg.tracking(x, y, ks, ep_fps(ep))
+    k = np.asarray(ks, dtype=int)
+    keep = np.ones(len(k), dtype=bool)
+    keep[list(apart)] = False
+    xa, ya = x[np.clip(k + lag, 0, len(x) - 1)][keep], y[k][keep]
+    line = sg.line_through(xa, ya)
+    return None if line is None else (lag, xa, ya, line)
+
+
+def _relation_words(ep: dict, ks: list[int], row: tuple, other: tuple, series: dict, apart=()) -> str:
+    """"row ≈ a + b x other, 0.10 s later (within 2.1%)": the straight line through the sent row that the left out row
+    follows at the instants (outside its apart instants), in the left out row's own units, the lag at which it holds best,
+    and its largest miss at any of those instants as a share of the row's range."""
+    from label import signals as sg
+    fps = ep_fps(ep)
+    lag, xa, ya, (b, a) = _relation_fit(ep, ks, row, other, series, apart)
+    good = np.isfinite(xa) & np.isfinite(ya)
+    span = float(np.ptp(ya[good])) or 1.0
+    miss = float(np.max(np.abs(ya[good] - (a + b * xa[good])))) / span
+    # the offset is said to the nearest 1% of the row's range (the fit is no closer than that), the scale to three
+    # figures; an offset that rounds to nothing is left out
+    step = 10.0 ** np.floor(np.log10(0.01 * span))
+    a = float(np.round(a / step) * step)
+    a = 0.0 if abs(a) < step / 2 else a
+    when = ("" if lag == 0 else f", {_seconds_number(abs(lag) / fps, 2)} s {'later' if lag > 0 else 'earlier'}")
+    scale = f"{sg.reading_text(abs(b))} x {other[4]}"
+    fit = (f"{sg.reading_text(a)} {'-' if b < 0 else '+'} {scale}" if a else f"{'-' if b < 0 else ''}{scale}")
+    return f"{row[4]} ≈ {fit}{when} (within {100 * miss:.1f}%)"
+
+
+def _extremes_words(ep: dict, ks: list[int], col) -> str:
+    """" (max 3.21 at 41.32 s, min -0.05 at 12.10 s)": when a row left out reached its largest and smallest reading,
+    read at every frame from the first instant to the last, so a short pulse between or on an instant keeps its time."""
+    from label import signals as sg
+    if col is None:
+        return ""
+    lo, hi = int(ks[0]), int(ks[-1]) + 1
+    v = np.asarray(col[lo:hi], dtype=np.float64)
+    if not np.isfinite(v).any():
+        return ""
+    i, j = int(np.nanargmax(v)), int(np.nanargmin(v))
+    return (f" (max {sg.reading_text(v[i])} at {_seconds_number(frame_time(ep, lo + i), 2)} s, "
+            f"min {sg.reading_text(v[j])} at {_seconds_number(frame_time(ep, lo + j), 2)} s)")
 
 
 def _readout_of(ep: dict, pl: dict) -> tuple[list[str], frozenset]:
@@ -1682,10 +1961,11 @@ def _constant(a: np.ndarray) -> bool:
 def _left_out(name: str, a: np.ndarray, m: dict, n_left: int, n_rows: int) -> str:
     """One signal left out of the values at each instant: its name, its size, its rate when known, and how many of its
     rows were left out when some of them were shown."""
+    from label import signals as sg
     shape = m.get("shape")
     size = (" x ".join(str(int(x)) for x in shape) + " values" if shape and len(shape) > 1
             else f"{a.shape[1]} value{'s' if a.shape[1] > 1 else ''}")
-    rate = f", {_num(m['rate_hz'])} Hz" if m.get("rate_hz") else ""
+    rate = f", {sg.reading_text(m['rate_hz'])} Hz" if m.get("rate_hz") else ""
     part = f", {n_left} of its {n_rows} rows" if n_left < n_rows else ""
     return f"{name} ({size}{rate}{part})"
 
@@ -1695,7 +1975,8 @@ def _and_list(xs: list[str]) -> str:
 
 
 BETWEEN_INSTANTS = (
-    "\nBETWEEN INSTANTS: reconstruct, do not smooth. A brief event can fall between two "
+    "\nBETWEEN INSTANTS: reconstruct, do not smooth. The following rule concerns reconstructing visible actions "
+    "from sampled RGB frames, not separate sensor_findings supported by supplied readings. A brief event can fall between two "
     "instants. When the scene in the frames differs between consecutive instants (something held "
     "is released, moved or gone; a contact is made or broken), an event happened in that "
     "interval: place it there and say in its notes that it is inferred. Do not fill an unseen interval with the "
@@ -1703,7 +1984,8 @@ BETWEEN_INSTANTS = (
     "be a slip, drop, knock or failed grasp, and should be weighed against the frames before "
     "and after, the other side, and where the object ends up. Where the evidence does not "
     "settle it, say so in a note instead of defaulting to the charitable "
-    "reading, and never invent an event when consecutive instants are consistent. An event you "
+    "reading, and never invent a visual action merely because it would be expected between consistent frames. "
+    "Consistent RGB frames do not negate a change measured by a supplied sensor. An event you "
     "infer between instants but cannot confirm from the frames around it goes in the timeline as "
     "inferred; it is not by itself an operator mistake or a data issue.")
 
@@ -1823,7 +2105,7 @@ def ego_annotation_block(ctx: dict) -> str:
 
 # Where a block's text goes in the episode prompt. The base fills the rest: the intro (who and what), the camera
 # paragraph, the frames paragraph, the sampling line, BETWEEN_INSTANTS and the task.
-PROMPT_SLOTS = ("intro", "frames_detail", "frames", "state", "signals", "after_frames", "after_task")
+PROMPT_SLOTS = ("intro", "frames_detail", "frames", "state", "signals", "after_frames", "after_task", "evidence")
 
 
 @dataclass(frozen=True)
@@ -2186,7 +2468,7 @@ BLOCKS = (
     Block("contacts", "after_frames", _has_contacts, contacts_block,
           schema_fields=("contacts", "contacts_missing"),
           checks=("contact_checks",)),
-    Block("sensor_evidence", "signals", _has_sensor_evidence,
+    Block("sensor_evidence", "evidence", _has_sensor_evidence,
           lambda ep, pl: se.prompt(pl["sensor_evidence"]),
           schema_fields=("sensor_findings",)),
     Block("uploader_notes", "after_task", _has_uploader_notes, _uploader_text),
@@ -2282,7 +2564,7 @@ def _intro_head(ep: dict) -> str:
             "or preparation boundaries are described below.\n")
 
 
-def _frames_head(ep: dict, cell_w: int, cell_h: int, native: tuple) -> str:
+def _frames_head(ep: dict, cell_w: int, cell_h: int, native: tuple, *, capture_mapped=False) -> str:
     names = ", ".join(cam_name(ep, v) for v in views(ep))
     ends = "first and last available instant" if ep.get("unavailable_instants") else "first and last instant"
     # A retained parent zero may precede its first capture. Name that zero rather than claim the headings start
@@ -2293,9 +2575,12 @@ def _frames_head(ep: dict, cell_w: int, cell_h: int, native: tuple) -> str:
     assumed = ep["context"].get("camera_clock") or {}
     precision = ("The column times are assumed presentation instants, not measured capture times. "
                  "Use these times for this presentation. " if anchor(ep) in assumed else
+                 "Column times give the anchor camera's display placements. Other cameras can reuse captures "
+                 "or have different capture times; use the capture mapping below for image citations and "
+                 "comparisons with recorded measurements. " if capture_mapped else
                  "The times are exact: use them, do not invent your own. ")
     qualification = "".join(f"{cam_name(ep, v)}. {note['what']} " for v, note in assumed.items() if v in views(ep))
-    time_word = "assumed presentation time" if anchor(ep) in assumed else "exact time"
+    time_word = "assumed presentation time" if anchor(ep) in assumed else "anchor time" if capture_mapped else "exact time"
     return (
         f"\nFRAMES. You receive the episode as grid images: ROWS are the cameras ({names}, top to "
         f"bottom), COLUMNS are instants left to right, and each column is headed with its {time_word} in "
@@ -2304,6 +2589,79 @@ def _frames_head(ep: dict, cell_w: int, cell_h: int, native: tuple) -> str:
         f"downscaled to {_cell_sizes(ep, cell_w, cell_h)}. After the grids, the episode's {ends} are "
         f"repeated larger, at {_detail_desc(native)}; use them for the start and end state and any "
         "small detail (lettering, a display, fine alignment)." + _excluded_camera_clock_notes(ep))
+
+
+def camera_frame_interval_s(ep: dict, view: str) -> float:
+    """A camera's own frame interval: the median positive step of its capture clock, or one frame at the episode's
+    fps when it has none."""
+    recorded = (ep.get('recorded_times') or {}).get(view)
+    own = (ep.get('times') or {}).get(view) if recorded is None else recorded
+    if own is not None:
+        t = np.asarray(own, dtype=np.float64)
+        steps = np.diff(t[np.isfinite(t)])
+        steps = steps[steps > 0]
+        if len(steps):
+            return float(np.median(steps))
+    return 1.0 / ep_fps(ep)
+
+
+def _ms(x: float | None) -> float | None:
+    return None if x is None else round(float(x), 3)
+
+
+def _camera_capture_rows(ep: dict, pl: dict) -> tuple[dict, dict]:
+    """({view: [[display s, source frame, capture s, offset s], ...]}, {view: largest offset left out, in s}).
+    A capture offset is listed only when it is at least half a frame interval, of the camera's own clock or of the
+    anchor's, whichever is shorter: a smaller one is finer than the column times themselves resolve and finer than the
+    camera's own frames, so it cannot change which capture a cell shows or which column an event falls in. Listing
+    those (a wrist camera stamped 10 ms after the anchor at every instant) repeated one sub-frame number per instant.
+    Times are rounded to the millisecond. An unavailable capture time is always listed."""
+    mapping, small = {}, {}
+    base = camera_frame_interval_s(ep, anchor(ep))
+    for view in views(ep):
+        half = 0.5 * min(camera_frame_interval_s(ep, view), base)
+        rows = []
+        for k in pl.get('ks') or []:
+            if not recording_at(ep, view, k):
+                continue
+            sample = camera_sample(ep, view, k)
+            if sample is None:
+                continue
+            delta = sample['capture_offset_s']
+            if delta is None or abs(delta) >= half:
+                rows.append([_ms(sample['display_time_s']), sample['source_frame'], _ms(sample['source_time_s']),
+                             _ms(delta)])
+            elif abs(delta) > 1e-6:
+                small[view] = max(small.get(view, 0.0), abs(delta))
+        if rows:
+            mapping[view] = rows
+    return mapping, small
+
+
+def _small_offsets_text(ep: dict, small: dict) -> str:
+    if not small:
+        return ''
+    each = _and_list([f"{1000 * s:.1f} ms for {cam_name(ep, v)}" for v, s in small.items()])
+    return (f"Capture offsets shorter than half a frame interval are not listed; the largest left out is {each}.")
+
+
+def _camera_capture_text(ep: dict, pl: dict) -> str:
+    """Expose nonidentity cell timing without repeating clocks shared by every row (_camera_capture_rows), and say how
+    large the sub-frame offsets left out were, so that fact is kept."""
+    mapping, small = _camera_capture_rows(ep, pl)
+    if not mapping:
+        if not small:
+            return ''
+        each = _and_list([f"{1000 * s:.1f} ms for {cam_name(ep, v)}" for v, s in small.items()])
+        return ("\nCAMERA CAPTURE TIMES: every camera's captures are within half a frame interval of their column "
+                f"times, at most {each}.")
+    return ('\nCAMERA CAPTURE MAPPING\n'
+            + (_small_offsets_text(ep, small) + ' ' if small else '') +
+            'Each row is [anchor display seconds, source frame, capture seconds, capture minus display seconds]. '
+            'Only differing or unavailable capture times are listed. Null capture times cannot establish synchronized '
+            'events. Camera clock qualifications still apply. Reused source frames are one capture, not separate '
+            'observations. A change between captures is bounded by those capture times; their gap does not establish '
+            'when within it the change happened or continuous movement.\n' + json.dumps(mapping, separators=(',', ':')))
 
 
 def _excluded_camera_clock_notes(ep: dict) -> str:
@@ -2410,17 +2768,20 @@ def episode_text(ep: dict, pl: dict, cell_w: int, cell_h: int, native: tuple,
         pl = {**pl, "readout": _signal_readout(ep, pl)}
     for b in blocks:
         got[b.slot] += b.text(ep, pl)
+    capture_text = _camera_capture_text(ep, pl)
     return (EPISODE_HEADER + _intro_head(ep) + got["intro"] + "\n" + camera_desc(ep, is_recorded(ep, pl, blocks))
             + "\n"
-            + _frames_head(ep, cell_w, cell_h, native) + got["frames_detail"] + "\n" + _instants_line(ep, pl)
+            + _frames_head(ep, cell_w, cell_h, native, capture_mapped="CAMERA CAPTURE MAPPING" in capture_text)
+            + capture_text + got["frames_detail"] + "\n" + _instants_line(ep, pl)
             + got["frames"] + got["state"] + got["signals"] + BETWEEN_INSTANTS + got["after_frames"] + "\n"
-            + task_block(ep) + got["after_task"])
+            + task_block(ep) + got["after_task"] + got['evidence']
+            + (prompts.EVIDENCE_REVIEW if got['evidence'] else ''))
 
 
 def build_prompt(ep: dict, pl: dict, *, cell_w: int, cell_h: int, example_dir=None,
                  blocks: list[Block] | None = None) -> tuple[str, str]:
     """(fixed, episode): the shared instructions (output schema, what the episode is, the data contract),
-    identical for every episode of the same rig, instruction presence and recorded or video only variant (is_recorded),
+    identical for every episode of the same rig, instruction presence, sensor-evidence presence and recorded or video only variant (is_recorded),
     then the facts about THIS episode (episode_text). The present blocks are found once, unless the caller has them."""
     ctx = ep["context"]
     r = rig(ep)
@@ -2430,8 +2791,12 @@ def build_prompt(ep: dict, pl: dict, *, cell_w: int, cell_h: int, example_dir=No
     blocks = present_blocks(ep, pl) if blocks is None else blocks
     fixed = prompts.fixed_instructions(r, has_instruction=bool(given), recorded=is_recorded(ep, pl, blocks),
                                       sessions=policy.effective(ctx)["task_mode"] == "session")
+    fixed += prompts.example_block(r, example_dir)
+    if any(block.name == 'sensor_evidence' for block in blocks):
+        fixed = (prompts.EVIDENCE_CONTRACT + '\nVISUAL ANNOTATION CONTRACT\n' + fixed
+                 + '\nEND VISUAL ANNOTATION CONTRACT\n')
     from prepare import jaws
-    return fixed + prompts.example_block(r, example_dir), episode_text(ep, pl, cell_w, cell_h, native, blocks) + jaws.prompt(ep.get('jaw_evidence') or {})
+    return fixed, episode_text(ep, pl, cell_w, cell_h, native, blocks) + jaws.prompt(ep.get('jaw_evidence') or {})
 
 
 EPISODE_HEADER = "\n\nTHE EPISODE TO LABEL.\n\n"
@@ -2440,12 +2805,13 @@ EPISODE_HEADER = "\n\nTHE EPISODE TO LABEL.\n\n"
 def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int | None = None,
                   max_cell_w: int | None = None, grid_cols: int = 4, grid_quality: int = 80,
                   example_dir=None, inspect_evidence=False, model=None, reasoning=None,
-                  sample_fps=None, task_mode=None, dataset_note=None, derived_dir=None, read_only=False) -> dict:
+                  sample_fps=None, task_mode=None, dataset_note=None, derived_dir=None, read_only=False,
+                  inspection=None) -> dict:
     """Everything the harness sends for one episode (content parts), and what it records about it. cell_w fixes
     the cell width; max_cell_w (the routed width, label/route.py) replaces the rig's default widest cell."""
     ep = load(ep_dir)
     ep['context']['annotation_policy'] = policy.resolve(ep['context'], model=model, reasoning=reasoning,
-        sample_fps=sample_fps, task_mode=task_mode, dataset_note=dataset_note)
+        sample_fps=sample_fps, task_mode=task_mode, dataset_note=dataset_note, inspection=inspection)
     policy.require_request_window(ep['context'], request_duration(ep))
     from prepare import jaws
     ep['jaw_evidence'] = (jaws.for_episode(ep, derived_dir, read_only=True) if read_only
@@ -2464,13 +2830,24 @@ def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int 
         pl["contact"] = []   # wide cells already show contact in detail
     # full size is kept only where a detail view shows it: the first and last instant and the contact instants
     imgs = frames(ep, pl, gate, widths=widths, detail_ks={pl["ks"][0], pl["ks"][-1], *(pl.get("contact") or [])})
+    from label import tactile_capture, sensor_copy
+    native_images, capture_selection = tactile_capture.collect(ep, pl, gate)
+    native_images, native_parts, native_bytes = tactile_capture.bounded_parts(ep, native_images, detail=detail)
+    for view, receipt in capture_selection.items():
+        supplied = sorted(native_images.get(view) or {})
+        receipt['withheld_by_image_budget'] = len(receipt['selected_source_frames']) - len(supplied)
+        receipt['selected_source_frames'] = supplied
     pl['camera_observation_views'] = [v for v in order_views(imgs)
                                     if any(k in imgs[v] and recording_at(ep, v, k) for k in pl['ks'])]
     any_img = next(im[pl["ks"][0]] for im in imgs.values() if pl["ks"][0] in im)
     # A circular area with dark corners is an image observation, not a lens-type or calibration fact.
     ep["lens"] = {v: lens.circular_image(imgs[v]) for v in order_views(imgs)}
     pl["sensor_evidence"] = se.build(ep, pl, shown={v: [k for k in pl["ks"] if k in im and recording_at(ep, v, k)]
-                                                  for v, im in imgs.items()}, images=imgs)
+                                                  for v, im in imgs.items()}, images=imgs,
+                                   native_images=native_images, capture_selection=capture_selection)
+    array_parts = se.image_parts(pl['sensor_evidence'])
+    array_bytes = sum(len(base64.b64decode(p['image_url']['url'].split(',', 1)[1]))
+                      for p in array_parts if p['type'] == 'image_url')
     # depth at the detail instants, and one colour scale per camera from its readings at the sampled instants
     depth_at = _depth_frames(ep, pl)
     if len(views(ep)) == 1:
@@ -2479,8 +2856,17 @@ def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int 
     cam_labels = [cam_name(ep, v) for v in order_views(imgs)]
     contact = [(k, vs, fullres_stack(ep, imgs, k, "just after a sharp gripper change", frame_time(ep, k), vs))
                for k, vs in ((k, [v for v in vs if recording_at(ep, v, k)]) for k, vs in contact_views(ep, pl)) if vs]
-    budget = (IMAGE_LIMIT_BYTES / IMAGE_SIZE_INFLATION - DETAIL_VIEW_BYTES_MAX
-              - sum(len(j) for _, _, j in contact))
+    from label import sensor_scene
+    pairing_shown = {v: [k for k in pl['ks'] if k in images and recording_at(ep, v, k)]
+                     for v, images in imgs.items()}
+    for k, cameras, _ in contact:
+        for v in cameras:
+            pairing_shown.setdefault(v, []).append(k)
+    scene_parts, scene_pairing, scene_bytes = sensor_scene.collect(ep, pl['sensor_evidence'],
+        shown=pairing_shown, gate=gate, width=max(widths), grid_cols=grid_cols,
+        quality=grid_quality, detail=detail)
+    budget = (IMAGE_LIMIT_BYTES / IMAGE_SIZE_INFLATION - DETAIL_VIEW_BYTES_MAX - array_bytes - native_bytes
+              - scene_bytes - sum(len(j) for _, _, j in contact))
     # the blocks follow from the episode and its plan, never from the cell width: found once, for every width and the
     # record
     blocks = present_blocks(ep, pl)
@@ -2493,7 +2879,10 @@ def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int 
         if grid_bytes <= budget:
             break
     prompt = fixed + episode
-    extra_bytes = 0
+    content.extend(array_parts)
+    content.extend(native_parts)
+    content.extend(scene_parts)
+    extra_bytes = array_bytes + native_bytes + scene_bytes
     # the first frame, the contact views in time order, then the last frame
     views_sent = []
     for k, name in ((pl["ks"][0], "first frame"), (pl["ks"][-1], "last frame")):
@@ -2539,11 +2928,15 @@ def build_request(ep_dir: Path, *, detail: str = "high", gate=None, cell_w: int 
         content.append({"type": "image_url", "image_url": {
             "url": "data:image/jpeg;base64," + base64.b64encode(cjpg).decode("ascii"), "detail": detail}})
     from label.evidence_access import Access, needs_inspection
-    access = Access(ep, pl['sensor_evidence'], plan=pl) if inspect_evidence and needs_inspection(ep, pl['sensor_evidence']) else None
+    mode = policy.inspection_mode(policy.effective(ep['context']))
+    access = Access(ep, pl['sensor_evidence'], plan=pl, copy_contract_version=sensor_copy.VERSION) if inspect_evidence and needs_inspection(ep, pl['sensor_evidence'], mode) else None
     return {**({"evidence_access": access} if inspect_evidence else {}), "sensor_evidence": pl["sensor_evidence"],
-            "content": content, "prompt": prompt, "plan": pl, "n_grids": n_grids,
+            "content": content, "prompt": prompt, "plan": pl, "n_grids": n_grids + len(native_parts) // 2,
+            'native_tactile_frames': sum(len(frames) for frames in native_images.values()),
+            'sensor_scene_pairing': scene_pairing,
+            'sensor_copy_contract_version': sensor_copy.VERSION,
             **({"jaw_evidence": ep["jaw_evidence"]} if ep.get("jaw_evidence") else {}),
-            "n_images": n_grids + len(views_sent) + len(depth_sent) + len(contacts_sent),
+            "n_images": n_grids + len(views_sent) + len(depth_sent) + len(contacts_sent) + len(array_parts) // 2 + len(native_parts) // 2 + len(scene_parts) // 2,
             "image_bytes": grid_bytes + extra_bytes,
             "contact_s": [round(frame_time(ep, k), 3) for k in pl["contact"]],
             "given_prompt": (ep["context"].get("instruction") or "").strip() or None,

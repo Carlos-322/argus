@@ -33,6 +33,11 @@ dataset_checks, where it raises a data issue (board/families.py), and which note
 upload's report notes. Only an episode none of whose cameras can be cut is listed in CLIPS/failed.json and left out
 by set_aside_failed; the rest go on.
 
+Only the video itself can make a camera not decode. A cut the machine stopped (a full or read-only disk, a quota, no
+memory, a tool that is missing, stopped making progress or was killed from outside: machine_stopped) says nothing
+about the video, so it never takes a camera out or an episode with it: the episode is left as it was, and the step
+fails, so a rerun once the machine is fixed cuts it.
+
 A depth clip is cut after its camera's colour clip and timed exactly like it: it has the colour clip's frames at the
 colour clip's timestamps, each showing the depth frame recorded nearest that colour frame (depth_times.npz
 depth_<camera> against times.npz <camera>), drawn by label/depth.py picture() (near red and far blue, metric depth
@@ -50,29 +55,31 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from label.atomic import temporary_path, write_atomic
+from label.presented import presented, presented_pts
+from prepare import tools
+from prepare.isolation import run_while_progressing
 
 CAMS = ("exo", "left", "right")
 
 
-def find_ffmpeg() -> str:
-    """$FFMPEG, else the ffmpeg on PATH."""
-    c = os.environ.get("FFMPEG") or shutil.which("ffmpeg")
-    if not c:
-        raise SystemExit("ffmpeg not found: put it on PATH or set FFMPEG")
-    return c
+find_ffmpeg = tools.ffmpeg       # the one ffmpeg every caller runs (prepare/tools.py)
 
 
 def clip_path(mp4_dir: Path, eid: str, cam: str) -> Path:
-    """One camera's clip: the scene camera at the top, the mounted ones and any others in their own folders."""
+    """One camera's clip, where this file writes it and board/serve.py, board/static.py and board/hands.py read it:
+    the fixed or head camera (exo) at the top, the mounted ones in wrist_left/ and wrist_right/, and every other
+    camera in a folder named after it (extra1/, unshown1/, depth_exo/, or any other name)."""
     if cam in ("left", "right"):
         return mp4_dir / f"wrist_{cam}" / f"{eid}.mp4"
     if cam == "exo":
@@ -80,9 +87,12 @@ def clip_path(mp4_dir: Path, eid: str, cam: str) -> Path:
     return mp4_dir / cam / f"{eid}.mp4"
 
 
+DEPTH = "depth_"     # a camera's depth clip is the clip of the camera depth_<camera> (depth_exo, depth_left, ...)
+
+
 def depth_clip(mp4_dir: Path, eid: str, cam: str) -> Path:
     """One camera's depth clip."""
-    return mp4_dir / f"depth_{cam}" / f"{eid}.mp4"
+    return clip_path(mp4_dir, eid, DEPTH + cam)
 
 
 def clip_paths(mp4_dir: Path, eid: str, cams=CAMS) -> dict:
@@ -105,8 +115,12 @@ SIDE_BOX = (1280, 1080)      # a side camera: at most this
 CRF = 20                     # with veryfast, the quality of CRF 22 at medium (VMAF at the shown size) in
 PRESET = "veryfast"          # 40% of the time, which the whole board and every Data Review upload pay
 KEY_S = 2                    # a keyframe every 2 s, so a seek decodes at most 2 s of video
+MIN_DECODE_FPS = 1.0         # the slowest any reader decodes a frame, for the time a cut may take to begin
 DEPTH_CRF = 26               # a depth clip: its colour shading carries sensor noise that CRF 20 keeps at about
                              # five times the colour clip's size; 26 halves that and the shapes stay as clear
+DEPTH_ENC_TAG = f'argus-depth-crf{DEPTH_CRF}-source-presence-v1'
+DEPTH_SOURCE_FPS = 30
+DEPTH_SOURCE_ENC_TAG = f'argus-depth-crf{DEPTH_CRF}-source-frames-v1'
 # names the recipe; board/static.py folds it into its media names, so a new recipe gets new names
 ENC_TAG = f"h264-crf{CRF}-{PRESET}-main{MAIN_BOX[0]}x{MAIN_BOX[1]}-side{SIDE_BOX[0]}x{SIDE_BOX[1]}-kf{KEY_S}s-srcts-camclock-v5"
 
@@ -143,14 +157,39 @@ def video_args(w: int, h: int, main: bool, threads: int, resample: bool = False,
             "-movflags", "+faststart", "-threads", str(threads)]
 
 
-def source_size(ffmpeg: str, path: str) -> tuple:
+def decode_lead_s(packed: str, seek_s: float) -> float:
+    """How much of the video before seek_s an accurate seek decodes before its first frame: back to the keyframe at or
+    before it, which the container's index names. All of it when the index cannot be read."""
+    if seek_s <= 0:
+        return 0.0
+    try:
+        import av
+        with av.open(str(packed)) as source:
+            stream = source.streams.video[0]
+            source.seek(int(seek_s / stream.time_base), stream=stream, backward=True, any_frame=False)
+            packet = next(p for p in source.demux(stream) if p.pts is not None)
+            return max(0.0, seek_s - float(packet.pts * stream.time_base))
+    except Exception:  # noqa: BLE001 - PyAV raises many types; an unread index means the whole lead is decoded
+        return seek_s
+
+
+def clip_threads(clips: int, jobs: int, threads: int) -> int:
+    """Threads per clip when `clips` clips are cut `jobs` at a time with `threads` each. jobs x threads is the step's
+    budget, so fewer clips than jobs share it: one long recording (a single head camera) is encoded with every thread
+    the step was given, not one, and a step with many clips keeps its threads per clip."""
+    if clips <= 0 or clips >= jobs:
+        return threads
+    return max(threads, (jobs * threads) // clips)
+
+
+def source_size(path: str) -> tuple:
     """(width, height, resample) of a video's first stream as it is shown (prepare/display.py, the reader's rule):
     pixels that are not square made square (resample says they must be), and a rotation of 90 or 270 degrees
     swapping the stored size, since ffmpeg turns the frames upright before scaling. Scaling a portrait phone video to
     its stored landscape size squashed it."""
     from prepare import display
-    probe = Path(ffmpeg).with_name("ffprobe")
-    g = display.geometry(str(path), str(probe) if probe.exists() else None)
+    # a missing ffprobe raises tools.Missing, the machine's (machine_stopped), never a size the video does not have
+    g = display.geometry(str(path), tools.ffprobe())
     if not g["stored"][0]:
         raise RuntimeError(f"ffprobe could not read the size of {path}")
     w, h = display.shown_size(g)
@@ -192,25 +231,27 @@ def start_offsets(ep_dir: Path, sources: dict, fps: float = 30.0) -> dict:
     return out
 
 
-def clip_times(ep_dir: Path, sources: dict, fps: float = 30.0) -> dict:
-    """{camera: its frames' capture times on the episode's clock} for each camera times.npz holds one per frame of
-    (sources.json n_frames): the times label/episode.py chooses the model's frames by (frame_time, and each paired
-    camera's kmap, nearest in time). The clock starts where start_offsets puts it."""
+def clip_times(ep_dir: Path, sources: dict, fps: float = 30.0, ctx: dict | None = None) -> dict:
+    """{camera: its frames' capture times on the episode's clock} for each camera the real-times file (context.json
+    real_times, else times.npz) holds one per frame of (sources.json n_frames): the times label/episode.py chooses
+    the model's frames by (frame_time, and each paired camera's kmap, nearest in time). The clock starts where
+    start_offsets puts it. The clips play on these times (retime) and the sensor strips are drawn on the main
+    camera's (board/sensors.py strip_times), so the video and the strips keep one clock. ctx is the episode's
+    context.json, read from ep_dir when not given."""
     import numpy as np
-    ctx = _context(ep_dir)
+    ctx = _context(ep_dir) if ctx is None else ctx
     tp = ep_dir / (ctx.get("real_times") or "times.npz")
     cams = cams_of(sources)
     if not tp.exists() or not cams:
         return {}
     from prepare.camera_clock import load_times
-    z = load_times(ep_dir, _context(ep_dir))
+    z = load_times(ep_dir, ctx)
     t = {c: np.asarray(z[c], dtype=np.float64) for c in cams if c in z
          and len(z[c]) == int(sources[c].get("n_frames") or -1)}
     main = main_cam(sources)
     if main not in t:
         return {}
-    zero = _context(ep_dir).get("clock_zero_s")
-    ref = float(zero or 0.0)
+    ref = float(ctx.get("clock_zero_s") or 0.0)
     return {c: tc - ref for c, tc in t.items()}
 
 
@@ -239,7 +280,7 @@ def extract_one(packed: str, base_s: float, n_frames: int, out_mp4: Path,
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
     # a temporary file of this call's own, so two builders (processes or threads) on one clip never share one
     tmp = temporary_path(out_mp4, '.mp4')
-    w, h, resample = source_size(ffmpeg, packed)
+    w, h, resample = source_size(packed)
     want = int(n_frames) - int(skip)
     dense = False
     timing = ((f"select=gte(n\\,{int(skip)})",) if skip else ()) + ("setpts=PTS-STARTPTS",)
@@ -255,7 +296,7 @@ def extract_one(packed: str, base_s: float, n_frames: int, out_mp4: Path,
             if dense:
                 # Microsecond packet separation retains tied captures, but an accurate seek can discard the whole
                 # short stream. Select its exact display indices from original PTS instead.
-                packets = sorted(p.pts for p in source.demux(video=0) if p.size and p.pts is not None)
+                packets = presented_pts(source, source.streams.video[0])
                 first = packets.index(int(source_pts[0]))
         # Truncate the seek to microseconds so decimal rounding cannot put it after the wanted packet.
         seek = ["-seek_timestamp", "1", "-ss", f"{math.floor(start * 1_000_000) / 1_000_000:.6f}"]
@@ -269,7 +310,15 @@ def extract_one(packed: str, base_s: float, n_frames: int, out_mp4: Path,
            *(["-movie_timescale", str(DISPLAY_TICKS_PER_S)] if dense else []),
            *(["-output_ts_offset", f"{offset_s:.6f}"] if offset_s >= 0.5 / fps else []), str(tmp)]
     try:
-        subprocess.run(cmd, check=True, capture_output=True, timeout=600)
+        # stopped only when the encode makes no progress (the clip file stops growing), never for its length: a long
+        # recording takes as long as it takes. Until the first frame is written it may still be decoding the frames
+        # before the cut (from the keyframe before the seek, and those select skips), at no less than one a second
+        if dense:
+            lead = first + int(skip)
+        else:
+            seek_s = float(seek[seek.index("-ss") + 1])
+            lead = decode_lead_s(packed, seek_s) * fps + int(skip)
+        run_while_progressing(cmd, watch=[tmp], lead_s=lead / MIN_DECODE_FPS, check=True)
         # A zero final packet duration hides a readable frame from the count used to slice its capture times.
         frame_lengths(tmp)
         got = clip_frames(tmp)
@@ -432,6 +481,8 @@ def extract_depth(ep_dir: Path, cam: str, colour_mp4: Path, out_mp4: Path, threa
 
     from board.hands import probe_pts
     from label import depth as dp
+    if colour_mp4 is None:
+        return extract_depth_source(ep_dir, cam, out_mp4, threads)
     entry = dp.load(ep_dir)[cam]
     w, h, tb, pts = probe_pts(colour_mp4)
     sources = json.loads((ep_dir / "sources.json").read_text())
@@ -453,7 +504,8 @@ def extract_depth(ep_dir: Path, cam: str, colour_mp4: Path, out_mp4: Path, threa
     if ctx.get("presentation_times") or ctx.get("depth_presentation_times"):
         from prepare.camera_clock import pairing_times
         times.update(pairing_times(ep_dir, ctx))
-    if cam in times and f"depth_{cam}" in times:
+    timed = cam in times and f"depth_{cam}" in times
+    if timed:
         ct = times[cam][skip:skip + len(pts)]
         want = depth_frame_map(ct, times[f"depth_{cam}"]) + [None] * (len(pts) - len(ct))
         if len(ct) < len(pts):
@@ -463,6 +515,21 @@ def extract_depth(ep_dir: Path, cam: str, colour_mp4: Path, out_mp4: Path, threa
     else:
         # no capture times: the depth stream's frames are the camera's own, one for one
         want = [skip + i if skip + i < len(dpts) else None for i in range(len(pts))]
+    anchor = main_cam(sources)
+    km = entry['km']
+    if cam == anchor:
+        # The stored map retains absent source rows and part boundaries. Re-pairing the surviving packets would
+        # fill a missing source row with a neighboring reading, or shift later rows when no clock was recorded.
+        available = len(ct) if timed else len(pts)
+        want = [int(km[skip + i]) if i < available and skip + i < len(km)
+                and 0 <= km[skip + i] < len(dpts) else None for i in range(len(pts))]
+    elif timed and anchor in times:
+        # Side cameras keep their own nearest depth timing, but cannot fill an authoritative hole in the
+        # anchor's source presence map. Project that presence onto this camera's retained clip frames.
+        anchor_rows = depth_frame_map(times[cam][skip:skip + len(pts)], times[anchor])
+        for i, row in enumerate(anchor_rows):
+            if row is not None and row < len(km) and km[row] < 0:
+                want[i] = None
     index_of = {int(p): i for i, p in enumerate(dpts)}
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
     tmp = temporary_path(out_mp4, '.mp4')
@@ -475,6 +542,7 @@ def extract_depth(ep_dir: Path, cam: str, colour_mp4: Path, out_mp4: Path, threa
         with src, av.open(str(tmp), "w", format="mp4",
             options={"movflags": "+faststart", **({"movie_timescale": str(tb.denominator)}
                                                    if tag == HALFWAY_TAG else {})}) as dst:
+            dst.metadata['description'] = DEPTH_ENC_TAG
             if tag == HALFWAY_TAG:
                 dst.metadata["comment"] = tag          # timed as its colour clip, so read the same way
             if not src.streams.video:
@@ -549,6 +617,69 @@ def extract_depth(ep_dir: Path, cam: str, colour_mp4: Path, out_mp4: Path, threa
     return issues
 
 
+def extract_depth_source(ep_dir: Path, view: str, out_mp4: Path, threads: int = 2) -> list[dict]:
+    """Replay an unpaired stream by native source-frame ordinal, independently of the episode clock."""
+    from fractions import Fraction
+    import av
+    import numpy as np
+    from PIL import Image
+    from label import depth as dp
+    entry = dp.load(ep_dir)[view]
+    pts = entry.get('pts')
+    if pts is None or not len(pts):
+        raise ValueError('Unpaired depth has no recorded packet addresses')
+    with depth_decoding():
+        with av.open(str(entry['packed'])) as source:
+            stream = source.streams.video[0]
+            width = int(entry.get('width') or stream.codec_context.width)
+            height = int(entry.get('height') or stream.codec_context.height)
+    width, height, _ = clip_size(width, height, False)
+    width, height = max(2, width), max(2, height)
+    rng = None
+    if not dp.metric_scale(entry) and not entry.get('range'):
+        rows = np.linspace(0, len(pts) - 1, min(24, len(pts))).astype(int).tolist()
+        rng = dp.scale_range(dp.decode(entry, pts, rows).values())
+    out_mp4.parent.mkdir(parents=True, exist_ok=True)
+    temporary = temporary_path(out_mp4, '.mp4')
+    lost = []
+    try:
+        with av.open(str(entry['packed'])) as source, av.open(str(temporary), 'w', format='mp4',
+                                                           options={'movflags': '+faststart'}) as output:
+            output.metadata['description'] = DEPTH_SOURCE_ENC_TAG
+            incoming = source.streams.video[0]
+            incoming.codec_context.thread_count = threads
+            source.seek(int(pts[0]), stream=incoming, backward=True, any_frame=False)
+            frames = iter(decoded_frames(source, incoming))
+            current = next(frames, None)
+            outgoing = output.add_stream('libx264', rate=DEPTH_SOURCE_FPS)
+            outgoing.width, outgoing.height, outgoing.pix_fmt = width, height, 'yuv420p'
+            outgoing.codec_context.thread_count = threads
+            outgoing.options = {'crf': str(DEPTH_CRF), 'preset': PRESET, 'profile': 'high'}
+            clock = Fraction(1, DEPTH_SOURCE_FPS)
+            for row, packet in enumerate(pts):
+                while current is not None and (current.pts is None or current.pts < packet):
+                    current = next(frames, None)
+                if current is not None and current.pts == packet:
+                    image = dp.picture(dp._array(current, entry), entry, rng)
+                    image = image.resize((width, height), Image.Resampling.NEAREST)
+                    pixels = np.asarray(image)
+                else:
+                    pixels = np.zeros((height, width, 3), np.uint8)
+                    lost.append(row)
+                frame = av.VideoFrame.from_ndarray(pixels, format='rgb24')
+                frame.pts, frame.time_base = row, clock
+                for encoded in outgoing.encode(frame):
+                    output.mux(encoded)
+            for encoded in outgoing.encode():
+                output.mux(encoded)
+        os.replace(temporary, out_mp4)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return ([{'kind': DEPTH_NOT_DECODABLE, 'camera': view, 'source_frames': lost,
+              'what': f'{view} has {len(lost)} undecodable source frames; those sequence frames are black.'}]
+            if lost else [])
+
+
 @contextlib.contextmanager
 def depth_decoding():
     """Reading the recording's depth file: an FFmpeg error that is not an OSError means the file opened and its data
@@ -613,15 +744,17 @@ def frame_lengths(mp4: Path) -> bool:
     the latest frame starts, and a player (and clip_frames) drops that frame: a 480-frame episode came out as 479.
     Each frame then lasts the step to the next frame's time and the last one the step before it, as FrameWriter
     (prepare/formats.py) gives copied frames; the packets, their times and every other stream are copied unchanged,
-    so a camera that starts late still starts where it did. A file whose frames all have a length is left as it is."""
+    so a camera that starts late still starts where it did. A muxer can also end its edit before the final frame
+    despite nonzero packet lengths. Its discarded final presentation packet needs the same remux. Other files
+    whose frames all have a length are left as they are."""
     import av
     with av.open(str(mp4)) as src:
         ist = src.streams.video[0]
         tag = src.metadata.get("comment")
-        meta = [(p.pts, p.duration) for p in src.demux(ist) if p.size and p.pts is not None]
-    if not meta or all(d for _, d in meta[:-1]) and meta[-1][1]:
+        meta = [(p.pts, p.duration, p.is_discard) for p in src.demux(ist) if p.size and p.pts is not None]
+    if not meta or all(d for _, d, _ in meta) and not max(meta, key=lambda p: p[0])[2]:
         return False
-    pts = sorted(p for p, _ in meta)
+    pts = sorted(p for p, _, _ in meta)
     step = {p: (pts[i + 1] - p if i + 1 < len(pts) else (p - pts[i - 1] if i else 0)) for i, p in enumerate(pts)}
     tmp = mp4.with_name(mp4.stem + ".len.mp4")
     try:
@@ -653,8 +786,8 @@ def clip_frames(mp4: Path) -> int:
     try:
         import av
         with av.open(str(mp4)) as c:
-            return sum(1 for p in c.demux(c.streams.video[0]) if p.size and not p.is_discard)
-    except Exception:
+            return sum(1 for _ in presented(c, c.streams.video[0]))
+    except Exception:  # noqa: BLE001 - PyAV raises many types; a clip that does not read counts as not cut, so it is cut again
         return 0
 
 
@@ -778,8 +911,7 @@ def episode_jobs(ep_dir: Path, mp4_dir: Path, force: bool, prefix: str = ""):
 
 
 def depth_jobs(ep_dir: Path, mp4_dir: Path, force: bool, prefix: str = "") -> list:
-    """(episode folder, camera, colour clip, depth clip, fps) for each camera of the episode with a depth stream whose
-    colour clip exists and whose depth clip is missing or does not match the colour clip's frame count."""
+    """Pending depth previews. Paired streams follow their colour clip; unpaired streams replay native source rows."""
     dj = ep_dir / "depth.json"
     src_p = ep_dir / "sources.json"
     if not dj.exists() or not src_p.exists():
@@ -789,16 +921,53 @@ def depth_jobs(ep_dir: Path, mp4_dir: Path, force: bool, prefix: str = "") -> li
     ctx_p = ep_dir / "context.json"
     fps = float((json.loads(ctx_p.read_text()) if ctx_p.exists() else {}).get("fps") or 30.0)
     jobs = []
-    for cam in json.loads(dj.read_text()):
-        if cam not in sources:
-            continue
-        colour, out = clip_path(mp4_dir, eid, cam), depth_clip(mp4_dir, eid, cam)
-        n = clip_frames(colour) if colour.exists() else 0
+    for cam, entry in json.loads(dj.read_text()).items():
+        unpaired = cam not in sources or entry.get('paired_camera', cam) is None
+        colour, out = (None if unpaired else clip_path(mp4_dir, eid, cam)), depth_clip(mp4_dir, eid, cam)
+        n = int(entry.get('n_frames') or 0) if unpaired else clip_frames(colour) if colour.exists() else 0
         if not n:
             continue
-        if force or not (out.exists() and clip_frames(out) == n):
+        current = False
+        if not force and out.exists() and clip_frames(out) == n:
+            import av
+            try:
+                with av.open(str(out)) as preview:
+                    current = preview.metadata.get('description') == (DEPTH_SOURCE_ENC_TAG if unpaired else DEPTH_ENC_TAG)
+            except (OSError, av.error.FFmpegError):
+                pass
+        if force or not current:
             jobs.append((ep_dir, cam, colour, out, fps))
     return jobs
+
+
+# errors of the machine a clip is cut on, never of its video: a full disk, a quota, a read-only disk, no memory, too
+# many open files. ffmpeg prints them in the same words as os.strerror.
+MACHINE_ERRNOS = frozenset({errno.ENOSPC, errno.EDQUOT, errno.EROFS, errno.ENOMEM, errno.EMFILE, errno.ENFILE})
+MACHINE_WORDS = tuple(os.strerror(code) for code in sorted(MACHINE_ERRNOS))
+# signals a tool is stopped with from outside it (the out of memory killer, a shutdown); a tool that crashes on its
+# input dies by its own (SIGSEGV, SIGABRT), which is the video's
+OUTSIDE_SIGNALS = frozenset({signal.SIGKILL, signal.SIGTERM, signal.SIGINT, signal.SIGHUP})
+
+
+def machine_stopped(error: BaseException) -> bool:
+    """Whether a clip failed because of the machine it was cut on, never its video, so a rerun on a sound machine can
+    cut it: a tool that stopped making progress (run_while_progressing) or was killed from outside, an error of the
+    machine (MACHINE_ERRNOS) from ffmpeg or from Python's own writing, or an OSError outside the video decoder (ffmpeg
+    or ffprobe missing, a folder that cannot be written). Everything else, ffmpeg failing on the video, a video that
+    gives no frame, PyAV unable to read it, is the video's."""
+    if isinstance(error, (subprocess.TimeoutExpired, MemoryError)):
+        return True
+    if isinstance(error, subprocess.CalledProcessError):
+        if error.returncode < 0 and -error.returncode in OUTSIDE_SIGNALS:
+            return True
+        said = error.stderr.decode(errors="replace") if isinstance(error.stderr, bytes) else str(error.stderr or "")
+        return any(words in said for words in MACHINE_WORDS)
+    if isinstance(error, OSError):
+        import av
+        if isinstance(error, av.error.FFmpegError):
+            return error.errno in MACHINE_ERRNOS
+        return True
+    return False
 
 
 FAILED = "failed.json"      # in the clips folder: {episode folder: {camera: why its clip could not be cut}}, for the
@@ -1192,26 +1361,21 @@ def recheck(ep_dir: Path) -> None:
     """Run again, for an episode a camera was taken out of, the deterministic checks whose results in its context.json
     read its cameras or the frames its state is on (checks/stream_pairing.py, checks/capture_qc.py, checks/sensors.py),
     so no result names a camera the episode no longer has. A check that crashes now is recorded as errored, the way
-    each check's own runner records it (stream_pairing._safe, capture_qc.run_episode, sensors._safe), never left
-    describing the episode as it was and never taken out, so a finding that had fired never vanishes unseen."""
+    each check's own runner records it (each module's _safe, checks/results.py run_safely), never left describing the
+    episode as it was and never taken out, so a finding that had fired never vanishes unseen."""
+    from functools import partial
     from checks import capture_qc
+    from checks import results
     from checks import sensors
     from checks import stream_pairing
     ctx = _context(ep_dir)
-
-    def capture(d):
-        try:
-            return capture_qc.run_episode(d)
-        except Exception as e:  # noqa: BLE001 - recorded on every check, as run_episode records a crash inside it
-            return capture_qc.errored_record(e)
-    runs = {key: (lambda d, m=mode: stream_pairing._safe(m, str(d))[1])
-            for mode, (key, _, _) in stream_pairing.MODES.items()}
-    runs.update(capture_qc=capture, sensor_checks=lambda d: sensors._safe(str(d))[1])
+    runs = {key: partial(stream_pairing._safe, mode) for mode, (key, _, _) in stream_pairing.MODES.items()}
+    runs.update(capture_qc=capture_qc._safe, sensor_checks=sensors._safe)
     for key, fn in runs.items():
         if key not in ctx:
             continue
         old = ctx[key]
-        new = fn(ep_dir)
+        new = fn(str(ep_dir))[1]
         if key == "sensor_checks" and isinstance(new, dict) and isinstance(old, dict):
             # dead values are judged across a whole folder (checks/sensors.py main), not by run_episode: kept as found
             dead = [n for n in old.get("notes") or [] if isinstance(n, dict) and n.get("check") == "dead_values"]
@@ -1219,7 +1383,7 @@ def recheck(ep_dir: Path) -> None:
                 new["notes"] = (new.get("notes") or []) + dead
                 for c in new.get("checks") or []:
                     if c.get("check") == "dead_values":
-                        c["status"] = "fired"
+                        c["status"] = results.FIRED
         ctx[key] = new
     write_atomic(ep_dir / "context.json", ctx, indent=1)
 
@@ -1374,7 +1538,10 @@ def main() -> int:
                          "run/out beside the episodes folder, as python -m review and Data Review lay a job out)")
     args = ap.parse_args()
 
-    ffmpeg = find_ffmpeg()
+    try:
+        ffmpeg = find_ffmpeg()
+    except tools.Missing as e:
+        raise SystemExit(e.strerror) from e
     labels = args.labels or args.episodes.parent / "run" / "out"
     if args.only:
         want = {x.strip() for x in args.only.split(",") if x.strip()}
@@ -1385,16 +1552,24 @@ def main() -> int:
     jobs = []
     for d in ep_dirs:
         jobs += episode_jobs(d, args.out, args.force, args.name_prefix)
+    threads = clip_threads(len(jobs), args.jobs, args.clip_threads)
     print(f"clips: {len(ep_dirs)} episodes, {len(jobs)} cam-clips to extract "
-          f"(jobs={args.jobs}, threads={args.clip_threads}) -> {args.out}")
+          f"(jobs={args.jobs}, threads={threads}) -> {args.out}")
     ok = fail = 0
     broken: dict[str, dict[str, str]] = {}      # episode folder -> {camera: why its video did not decode}
     short: dict[str, dict[str, dict]] = {}      # episode folder -> {camera: its clip's and the episode's frames}
     cut: dict[str, set] = {}                    # episode folder -> the cameras cut on this run
     unshown_cut: dict[str, set] = {}            # the same for the cameras the model is not shown (unshown_views)
     unshown_broken: dict[str, dict[str, str]] = {}
+    # episode folder -> {camera: why the machine stopped its cut} (machine_stopped), and every clip this run cut for it
+    stopped: dict[str, dict[str, str]] = {}
+    made: dict[str, list[Path]] = {}
+
+    def machine(ep, cam, o, e, when=""):
+        stopped.setdefault(ep, {})[cam] = str(e)[:400]
+        sys.stderr.write(f"clip STOPPED {o}{when}, by the machine, not the video: {str(e)[:160]}\n")
     with ThreadPoolExecutor(max_workers=args.jobs) as ex:
-        futs = {ex.submit(extract_one, pk, b, du, o, ffmpeg, args.clip_threads, fps, is_main, off, skip, t, q, km, pts, end):
+        futs = {ex.submit(extract_one, pk, b, du, o, ffmpeg, threads, fps, is_main, off, skip, t, q, km, pts, end):
                 (o, ep, cam) for (pk, b, du, o, fps, is_main, off, skip, t, q, km, pts, end, ep, cam) in jobs}
         for f in as_completed(futs):
             o, ep, cam = futs[f]
@@ -1405,8 +1580,12 @@ def main() -> int:
                     f.result()
                     ok += 1
                     unshown_cut.setdefault(ep, set()).add(cam)
-                except Exception as e:
+                    made.setdefault(ep, []).append(o)
+                except Exception as e:  # noqa: BLE001 - one clip's failure is named in unshown_broken, the others are cut
                     fail += 1
+                    if machine_stopped(e):
+                        machine(ep, cam, o, e)
+                        continue
                     unshown_broken.setdefault(ep, {})[cam] = str(e)[:400]
                     sys.stderr.write(f"clip FAIL {o}: {str(e)[:160]}\n")
                 continue
@@ -1414,14 +1593,25 @@ def main() -> int:
                 counts = f.result()
                 ok += 1
                 cut.setdefault(ep, set()).add(cam)
+                made.setdefault(ep, []).append(o)
                 if counts:
                     short.setdefault(ep, {})[cam] = counts
                     sys.stderr.write(f"clip SHORT {o}: {counts['clip_frames']} frames, episode has "
                                      f"{counts['episode_frames']}\n")
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - one clip's failure is named in broken, the others are cut
                 fail += 1
+                if machine_stopped(e):
+                    machine(ep, cam, o, e)
+                    continue
                 broken.setdefault(ep, {})[cam] = str(e)[:400]
                 sys.stderr.write(f"clip FAIL {o}: {str(e)[:160]}\n")
+    # an episode a cut of which the machine stopped is left as it was before this run: what its other cameras did is
+    # not recorded and their clips are removed, so the rerun cuts and records the whole episode at once, and no
+    # camera of it is taken out or flagged for what the machine did
+    for ep in stopped:
+        for o in made.get(ep, []):
+            Path(o).unlink(missing_ok=True)
+    ep_dirs = [d for d in ep_dirs if d.name not in stopped]
     for d in ep_dirs:
         if d.name in unshown_cut or d.name in unshown_broken:
             record_unshown(d, unshown_cut.get(d.name, set()), unshown_broken.get(d.name, {}))
@@ -1435,46 +1625,66 @@ def main() -> int:
         if cams and cams <= set(broken.get(d.name, {})):
             failed[d.name] = broken[d.name]
             continue
+        keep = labelled(d, labels)
         main = record_cameras(d, short.get(d.name, {}), broken.get(d.name, {}), cut.get(d.name, set()),
-                              keep_clock=labelled(d, labels))
-        if main:
+                              keep_clock=keep)
+        while main:
             # every camera left is cut again: the camera that is main now was cut as a side camera and is cut at the
             # main camera's size, and the episode's clock may have moved to the earliest camera left (reanchor), so
             # every clip is timed on it (start_offsets); each camera's frames are recorded as they come out
-            # the cameras the model is not shown too, at their start on the moved clock (CLOCK_TIME_KEYS)
-            redo, again, u_cut, u_broken = {}, set(), set(), {}
+            # the cameras the model is not shown too, at their start on the moved clock (CLOCK_TIME_KEYS). A shown
+            # camera whose cut fails now is taken out as broken, like one that failed the first cut; when that moves
+            # the main camera again the loop cuts what is left once more, and each pass takes a camera out, so it ends
+            redo, again, u_cut, u_broken, rebroken = {}, set(), set(), {}, {}
             for (pk, b, du, o, fps, is_main, off, skip, t, q, km, pts, end, ep, cam) in episode_jobs(d, args.out, True,
                                                                                     args.name_prefix):
                 try:
-                    counts = extract_one(pk, b, du, o, ffmpeg, args.clip_threads, fps, is_main, off, skip, t, q, km, pts, end)
+                    # cut one at a time, so each has the step's whole budget
+                    counts = extract_one(pk, b, du, o, ffmpeg, clip_threads(1, args.jobs, args.clip_threads), fps,
+                                         is_main, off, skip, t, q, km, pts, end)
                     if cam.startswith(UNSHOWN):
                         u_cut.add(cam)
                         continue
                     again.add(cam)
                     if counts:
                         redo[cam] = counts
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - every failed clip is named: u_broken, rebroken or machine
+                    if machine_stopped(e):
+                        # the clip from before the main camera went is timed on the old clock: removed, so the rerun
+                        # cuts it on the episode as it is now
+                        Path(o).unlink(missing_ok=True)
+                        machine(ep, cam, o, e, " cut again after the main camera went")
+                        continue
                     if cam.startswith(UNSHOWN):
                         u_broken[cam] = str(e)[:400]
+                    else:
+                        rebroken[cam] = str(e)[:400]
+                        Path(o).unlink(missing_ok=True)      # its clip from before is timed on the old clock
                     sys.stderr.write(f"clip FAIL {o} cut again after the main camera went: {str(e)[:160]}\n")
-            record_cameras(d, redo, {}, again)
             record_unshown(d, u_cut, u_broken)
+            left = set(json.loads((d / "sources.json").read_text()))
+            if rebroken and left <= set(rebroken):
+                failed[d.name] = rebroken                    # no camera of the episode decodes on the moved clock
+                break
+            main = record_cameras(d, redo, rebroken, again, keep_clock=keep)
     # the depth clips, after the colour clips they are timed against; one that comes out imperfect is kept, and one
     # that cannot be cut is left out (the page then offers no depth for that camera), never costing the episode; either
     # is recorded on the episode as a reader issue (record_depth), which the board shows
-    djobs = [j for d in ep_dirs if d.name not in failed for j in depth_jobs(d, args.out, args.force, args.name_prefix)]
+    djobs = [j for d in ep_dirs if d.name not in failed and d.name not in stopped
+             for j in depth_jobs(d, args.out, args.force, args.name_prefix)]
     if djobs:
         print(f"clips: {len(djobs)} depth clips to cut")
         dok = 0
         with ThreadPoolExecutor(max_workers=args.jobs) as ex:
-            futs = {ex.submit(extract_depth, d, cam, colour, out, args.clip_threads, fps): (out, d, cam)
+            dthreads = clip_threads(len(djobs), args.jobs, args.clip_threads)
+            futs = {ex.submit(extract_depth, d, cam, colour, out, dthreads, fps): (out, d, cam)
                     for (d, cam, colour, out, fps) in djobs}
             for f in as_completed(futs):
                 out, d, cam = futs[f]
                 try:
                     record_depth(d, cam, f.result())
                     dok += 1
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - one depth clip's failure is recorded by record_depth, the others are cut
                     sys.stderr.write(f"depth clip FAIL {out}: {str(e)[:160]}\n")
                     record_depth(d, cam, [depth_failed(d, cam, e)])
         print(f"clips: depth ok={dok} fail={len(djobs) - dok}")
@@ -1486,6 +1696,11 @@ def main() -> int:
     print(f"clips: ok={ok} fail={fail}" + (f", {len(short)} episode(s) with a short clip" if short else "")
           + (f", {kept} episode(s) kept without a camera that does not decode" if kept else "")
           + (f", {len(failed)} episode(s) left out" if failed else ""))
+    if stopped:
+        # the step fails, so a rerun on a sound machine cuts these episodes; none of them is left out or loses a camera
+        sys.stderr.write(f"clips: the machine stopped the cut of {len(stopped)} episode(s), not their video, so the step "
+                         f"failed and a rerun cuts them: {', '.join(sorted(stopped))}\n")
+        return 1
     return 1 if failed and len(failed) >= len(ep_dirs) else 0
 
 

@@ -159,7 +159,7 @@ def test_unknown_or_noncanonical_axis_order_cannot_be_physical_state(names):
     assert formats.state_layout(7, 'teleop_arms', names)[0] == 'none'
 
 
-@pytest.mark.parametrize('unit,expected', [(None, 'none'), ('degrees', 'none'), ('rad', 'joints')])
+@pytest.mark.parametrize('unit,expected', [(None, 'none'), ('rad', 'joints')])
 def test_generic_joint_units_are_declared_without_rescaling_values(tmp_path, unit, expected):
     root = tmp_path / 'native'
     original = native_state(root, JOINTS + ['gripper'])
@@ -175,6 +175,192 @@ def test_generic_joint_units_are_declared_without_rescaling_values(tmp_path, uni
     if expected == 'none':
         assert 'unit' in ctx['state_note']
         assert any(s['name'] == 'observation.state' for s in ctx['signals'])
+
+
+def degree_state(root, readings, *, units=None, action_units=None):
+    """A LeRobot episode whose state is the given readings and whose action is half a degree past it, both named six
+    joints and a gripper."""
+    native_state(root, JOINTS + ['gripper'])
+    path = root / 'data/chunk-000/episode_000000.parquet'
+    df = pd.read_parquet(path)
+    df['observation.state'] = list(readings)
+    df['action'] = list(readings + np.float32(.5))
+    df.to_parquet(path)
+    info_path = root / 'meta/info.json'
+    info = json.loads(info_path.read_text())
+    info['features']['action']['names'] = JOINTS + ['gripper']
+    if units:
+        info['features']['observation.state']['units'] = units
+    if action_units:
+        info['features']['action']['units'] = action_units
+    info_path.write_text(json.dumps(info))
+
+
+# per-joint ranges of a recorded Realman arm, which declares no unit: all six of its joints read past 2 pi
+REALMAN = np.linspace([-25.2, 5.6, 20.1, -46.6, 5.5, -211.4, 0], [98.0, 79.6, 130.1, 81.3, 99.6, 120.0, 1],
+                      8).astype(np.float32)
+
+
+@pytest.mark.parametrize('units,basis', [(None, 'readings'), (['degrees'] * 6 + ['fraction'], 'declared')])
+def test_joint_degrees_are_read_as_radians_when_declared_or_proven_by_the_readings(tmp_path, units, basis):
+    root = tmp_path / 'native'
+    degree_state(root, REALMAN, units=units, action_units=units)
+    path, ctx = converted(root, tmp_path / 'prepared')
+    assert ctx['state_kind'] == 'joints' and 'state_note' not in ctx
+    with np.load(path / 'state.npz') as values:
+        for key, recorded in (('state', REALMAN), ('action', REALMAN + np.float32(.5))):
+            expected = recorded.astype(np.float64)
+            expected[:, :6] = np.deg2rad(expected[:, :6])
+            np.testing.assert_allclose(values[key], expected, rtol=1e-6)
+    proof = ctx['state_contract']
+    assert proof['units'][:6] == ['rad'] * 6 and proof['unit_conversion']['basis'] == basis
+    assert proof['unit_conversion']['columns'] == list(range(6))
+    assert proof['action']['unit_conversion']['basis'] == basis
+    from prepare.state_contract import prepared_state_problem
+    assert prepared_state_problem(ctx, 7, has_action=True) is None
+
+
+@pytest.mark.parametrize('change', ['two joints past one turn', 'a joint past two turns of degrees',
+                                    'a joint with no reading', 'a declared radian'])
+def test_joint_readings_that_do_not_prove_degrees_keep_the_state_as_recorded(tmp_path, change):
+    readings = REALMAN.copy()
+    units = None
+    if change == 'two joints past one turn':
+        readings[:, [0, 1, 3, 4]] = np.clip(readings[:, [0, 1, 3, 4]], -6, 6)
+    elif change == 'a joint past two turns of degrees':
+        readings[3, 5] = 900
+    elif change == 'a joint with no reading':
+        readings[:, 2] = np.nan
+    else:
+        units = ['rad'] * 6 + ['fraction']
+    root = tmp_path / 'native'
+    degree_state(root, readings, units=units)
+    path, ctx = converted(root, tmp_path / 'prepared')
+    if change == 'a declared radian':
+        # the declared unit is kept, readings unchanged, but readings only degrees explain contradict it, so the state
+        # is left out of kinematic checks with a reader issue saying so, never trusted as 33 turns of a joint
+        assert ctx['state_kind'] == 'none' and 'state_contract' not in ctx
+        assert 'radians' in ctx['state_note'] and any(s['name'] == 'observation.state' for s in ctx['signals'])
+        assert [i['kind'] for i in ctx['reader_issues']] == ['state_unit_contradicted']
+        with np.load(path / 'state.npz') as values:
+            np.testing.assert_array_equal(values['state'], readings)
+    else:
+        assert ctx['state_kind'] == 'none' and 'state_contract' not in ctx
+        assert any(s['name'] == 'observation.state' for s in ctx['signals'])
+
+
+def test_two_arms_convert_only_when_each_arm_proves_degrees():
+    names = [f'{side}_{name}' for side in ('left', 'right') for name in JOINTS + ['gripper']]
+    both = np.concatenate([REALMAN, REALMAN], axis=1)
+    found = formats.joint_degrees(both, names, None, [None] * 14, 'teleop_arms')
+    assert found['columns'] == list(range(6)) + list(range(7, 13)) and found['joints_beyond_one_turn'] == [6, 6]
+    small = both.copy()
+    small[:, 7:13] = np.deg2rad(small[:, 7:13])
+    assert formats.joint_degrees(small, names, None, [None] * 14, 'teleop_arms') is None
+    # a name that carries its own unit declares it: names ending in _deg are degrees, names ending in _rad radians
+    suffixed = [f'{name}_deg' if i % 7 < 6 else name for i, name in enumerate(names)]
+    found = formats.joint_degrees(both, suffixed, None, formats.state_units({}, suffixed, 14), 'teleop_arms')
+    assert found['basis'] == 'declared' and found['columns'] == list(range(6)) + list(range(7, 13))
+    radians = [f'{name}_rad' if i % 7 < 6 else name for i, name in enumerate(names)]
+    assert formats.joint_degrees(both, radians, None, formats.state_units({}, radians, 14), 'teleop_arms') is None
+
+
+def h5_joints(path, readings, names, units):
+    times = np.arange(len(readings)) / 30
+    with h5py.File(path, 'w') as f:
+        f['timestamps'] = times
+        ds = f.create_dataset('state', data=readings)
+        ds.attrs['names'] = names
+        if units:
+            ds.attrs['units'] = units
+    with h5py.File(path, 'r') as f:
+        signals = formats.h5_signals(f, formats.h5_streams(f, ''), times, 30, len(readings))
+    identity = {}
+    state, _, _, _, note = formats.h5_state(signals, 'teleop_arms', times, identity_ctx=identity)
+    return state, note, identity, signals
+
+
+def mcap_joints(path, readings, names, units):
+    from test_formats import _json_mcap
+    messages = []
+    for index, row in enumerate(readings):
+        message = {'name': list(names), 'position': [float(v) for v in row]}
+        if units:
+            message['units'] = list(units)
+        messages.append((index / 30, message))
+    _json_mcap(path, {'/left/joint_states': messages}, 1000)
+    q = 1000 + np.arange(len(readings)) / 30
+    streams = formats.mcap_joint_streams([path], q)
+    issues = []
+    state, _, note = formats.joint_state(streams, q, issues=issues)
+    identity = {'state_kind': 'joints'}
+    if state is not None:
+        formats.record_joint_state_identity(identity, streams)
+    return state, note, identity, issues
+
+
+DEGREE_DECLARATIONS = {'declared by the units': (JOINTS + ['gripper'], ['degrees'] * 6 + ['fraction']),
+                       'declared by the names': ([f'{j}_deg' for j in JOINTS] + ['gripper'], None)}
+
+
+@pytest.mark.parametrize('reader', ['hdf5', 'mcap', 'lerobot'])
+@pytest.mark.parametrize('declared', list(DEGREE_DECLARATIONS))
+def test_every_reader_reads_declared_joint_degrees_as_radians(tmp_path, reader, declared):
+    # degree conversion had run only for LeRobot: HDF5 and MCAP refused the same declared degrees as outside the
+    # radian contract, and names ending in _deg declared nothing to any reader
+    names, units = DEGREE_DECLARATIONS[declared]
+    from prepare.state_contract import prepared_state_problem
+    expected = REALMAN.astype(np.float64)
+    expected[:, :6] = np.deg2rad(expected[:, :6])
+    if reader == 'lerobot':
+        root = tmp_path / 'native'
+        degree_state(root, REALMAN, units=units)
+        info_path = root / 'meta/info.json'
+        info = json.loads(info_path.read_text())
+        info['features']['observation.state']['names'] = names
+        info_path.write_text(json.dumps(info))
+        path, ctx = converted(root, tmp_path / 'prepared')
+        assert ctx['state_kind'] == 'joints', ctx.get('state_note')
+        with np.load(path / 'state.npz') as values:
+            state = values['state']
+        identity = ctx
+    elif reader == 'hdf5':
+        state, note, identity, _ = h5_joints(tmp_path / 'joints.h5', REALMAN, names, units)
+        assert state is not None, note
+        identity = {**identity, 'state_kind': 'joints'}
+    else:
+        state, note, identity, _ = mcap_joints(tmp_path / 'joint.mcap', REALMAN, names, units)
+        assert state is not None, note
+    np.testing.assert_allclose(state, expected, rtol=1e-6)
+    proof = identity['state_contract']
+    assert proof['units'][:6] == ['rad'] * 6 and proof['unit_conversion']['basis'] == 'declared'
+    assert proof['unit_conversion']['columns'] == list(range(6))
+    assert prepared_state_problem(identity, 7) is None
+
+
+@pytest.mark.parametrize('reader', ['hdf5', 'mcap'])
+def test_every_reader_leaves_out_declared_radians_its_readings_contradict(tmp_path, reader):
+    # a declared radian was trusted whatever the readings, so a Realman arm's degrees reached kinematic checks as
+    # 33 turns of a joint; the declared unit is kept, the state is left out of kinematic checks and an issue says why
+    names, units = JOINTS + ['gripper'], ['rad'] * 6 + ['fraction']
+    if reader == 'hdf5':
+        state, note, _, signals = h5_joints(tmp_path / 'joints.h5', REALMAN, names, units)
+        issues = signals.issues
+        np.testing.assert_array_equal(signals['state'], REALMAN)
+    else:
+        state, note, _, issues = mcap_joints(tmp_path / 'joint.mcap', REALMAN, names, units)
+    assert state is None and 'radians' in str(note)
+    assert [i['kind'] for i in issues] == ['state_unit_contradicted']
+    # radians whose readings stay within a turn are read as declared, with no issue
+    small = REALMAN.copy()
+    small[:, :6] = np.deg2rad(small[:, :6])
+    if reader == 'hdf5':
+        state, note, _, signals = h5_joints(tmp_path / 'small.h5', small, names, units)
+        issues = signals.issues
+    else:
+        state, note, _, issues = mcap_joints(tmp_path / 'small.mcap', small, names, units)
+    assert state is not None and not issues, note
+    np.testing.assert_allclose(state, small, rtol=1e-6)
 
 
 @pytest.mark.parametrize('units,expected', [(None, 'none'), (['mm'] * 3 + ['rad'] * 3 + ['m'], 'none'),
@@ -212,7 +398,7 @@ def test_unqualified_commands_remain_signals_beside_valid_state(tmp_path):
     info_path = root / 'meta/info.json'
     info = json.loads(info_path.read_text())
     info['features']['observation.state']['units'] = ['rad'] * 6 + ['fraction']
-    info['features']['action'].update(names=JOINTS + ['gripper'], units=['degrees'] * 6 + ['fraction'])
+    info['features']['action'].update(names=JOINTS + ['gripper'], units=['mm'] * 6 + ['fraction'])
     info_path.write_text(json.dumps(info))
     path, ctx = converted(root, tmp_path / 'prepared')
     assert ctx['state_kind'] == 'joints'
@@ -221,7 +407,7 @@ def test_unqualified_commands_remain_signals_beside_valid_state(tmp_path):
     assert any(s['name'] == 'action' for s in ctx['signals'])
 
 
-@pytest.mark.parametrize('unit,expected', [(None, False), ('degrees', False), ('rad', True)])
+@pytest.mark.parametrize('unit,expected', [(None, False), ('degrees', True), ('rad', True)])
 def test_mcap_joint_units_survive_decode_and_native_name_order(tmp_path, unit, expected):
     from test_formats import _json_mcap
     path = tmp_path / 'joint.mcap'
@@ -240,7 +426,9 @@ def test_mcap_joint_units_survive_decode_and_native_name_order(tmp_path, unit, e
     state, action, note = formats.joint_state(streams, q)
     assert (state is not None) == expected
     if expected:
-        np.testing.assert_allclose(state[:, :6], np.arange(8)[:, None] / 100 + np.arange(6)[None, :] / 10)
+        recorded = np.arange(8)[:, None] / 100 + np.arange(6)[None, :] / 10
+        # declared degrees are read in radians, as every reader reads them (qualified_state)
+        np.testing.assert_allclose(state[:, :6], np.deg2rad(recorded) if unit == 'degrees' else recorded)
         from prepare.state_contract import prepared_state_problem
         ctx = {'state_kind': 'joints'}
         formats.record_joint_state_identity(ctx, streams)

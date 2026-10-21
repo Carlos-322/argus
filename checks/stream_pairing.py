@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -46,6 +46,8 @@ from label import state as ms
 from label.atomic import write_atomic
 from checks.camera_intervals import to_anchor
 from checks import EXIT_PARTIAL
+from checks import results
+from checks.workers import run_each
 from prepare.signal_alignment import recorder_arrival
 
 SMALL_W = 64          # image change is measured on a 64-px-wide grey copy of each frame
@@ -354,9 +356,7 @@ ALGORITHM_VERSIONS = {"stream_pairing": 2, "recorded_jumps": 3, "gripper_channel
 
 def needs_check(ctx: dict, mode: str) -> bool:
     key, _, field = MODES[mode]
-    versions = ctx.get('check_versions')
-    if (not isinstance(versions, dict) or type(versions.get(key)) is not int
-            or versions[key] != ALGORITHM_VERSIONS[key] or key not in ctx):
+    if results.stale_version(ctx, key, ALGORITHM_VERSIONS[key]):
         return True
     result = ctx[key]
     if result is None:
@@ -368,13 +368,16 @@ def needs_check(ctx: dict, mode: str) -> bool:
     return not (type(result[field]) is bool or (mode == 'pairing' and result[field] is None))
 
 
+def errored_record(mode: str, e: Exception) -> dict:
+    """The result of a check that could not run on an episode: {"error": why, its finding's field false}
+    (checks/results.py)."""
+    return {"error": results.error_text(e), MODES[mode][2]: False}
+
+
 def _safe(mode: str, d: str) -> tuple[str, dict | None, str | None]:
-    """One check's result on one episode. A check that crashes is that check's result, {"error": why, its finding's
-    field false}, which the board shows as an error, never a missing result; the other checks run on as usual."""
-    try:
-        return d, MODES[mode][1](Path(d)), None
-    except Exception as e:  # recorded as the check's result, never silently skipped
-        return d, {"error": f"{type(e).__name__}: {e}"[:300], MODES[mode][2]: False}, None
+    """One check's result on one episode. A check that crashes is that check's result (errored_record), which the
+    board shows as an error, never a missing result; the other checks run on as usual."""
+    return results.run_safely(d, MODES[mode][1], partial(errored_record, mode))
 
 
 def main():
@@ -399,28 +402,33 @@ def main():
                 eps.append(str(d))
     print(f"episodes to scan: {len(eps)}", flush=True)
     done = found = failed = 0
-    with ProcessPoolExecutor(args.jobs) as ex:
-        for d, r, err in ex.map(_safe, [name] * len(eps), eps, chunksize=2):
-            done += 1
-            if err:
-                failed += 1
-                print(f"FAILED {Path(d).name}: {err}", flush=True)
-                continue
-            if r and r.get("error"):
-                failed += 1
-                print(f"ERRORED {Path(d).name}: {r['error']}", flush=True)
-            p = Path(d) / "context.json"
-            ctx = json.loads(p.read_text())
-            ctx[key] = r
-            versions = ctx.get('check_versions')
-            ctx['check_versions'] = {**(versions if isinstance(versions, dict) else {}),
-                                     key: ALGORITHM_VERSIONS[key]}
-            write_atomic(p, ctx, indent=1)
-            if r and r.get(field):
-                found += 1
-                print(f"{key.upper()} {Path(d).name} {r}", flush=True)
-            if done % 50 == 0:
-                print(f"progress {done}/{len(eps)} {field}={found} failed={failed}", flush=True)
+
+    def record(res: tuple[str, dict | None, str | None]) -> None:
+        nonlocal done, found, failed
+        d, r, err = res
+        done += 1
+        if err:
+            failed += 1
+            print(f"FAILED {Path(d).name}: {err}", flush=True)
+            return
+        if r and r.get("error"):
+            failed += 1
+            print(f"ERRORED {Path(d).name}: {r['error']}", flush=True)
+        p = Path(d) / "context.json"
+        ctx = json.loads(p.read_text())
+        ctx[key] = r
+        versions = ctx.get('check_versions')
+        ctx['check_versions'] = {**(versions if isinstance(versions, dict) else {}),
+                                 key: ALGORITHM_VERSIONS[key]}
+        write_atomic(p, ctx, indent=1)
+        if r and r.get(field):
+            found += 1
+            print(f"{key.upper()} {Path(d).name} {r}", flush=True)
+        if done % 50 == 0:
+            print(f"progress {done}/{len(eps)} {field}={found} failed={failed}", flush=True)
+
+    # A worker that dies (out of memory, killed) costs its own episode only, recorded as that check's error.
+    run_each(partial(_safe, name), eps, args.jobs, record, lambda d, e: (d, errored_record(name, e), None))
     print(f"done {done} {field}={found} failed={failed}", flush=True)
     return EXIT_PARTIAL if failed else 0
 

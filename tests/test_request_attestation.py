@@ -12,12 +12,22 @@ from label.dictionary_stage import output_spend
 from test_dispatch_integrity_v5 import options, provider_kind, response
 from test_label import _packed_episode
 
+# every request here inspects a recorded signal of the packed fixture, which only inspection all reaches
+pytestmark = pytest.mark.usefixtures('inspect_every_field')
 
-def paid_episode(tmp_path, monkeypatch):
+
+def paid_episode(tmp_path, monkeypatch, saved_inspection=None, **extra):
     ep, _ = _packed_episode(tmp_path)
+    if saved_inspection is not None:
+        from label import policy
+        context = json.loads((ep / 'context.json').read_text())
+        context['annotation_policy'] = policy.resolve(context, inspection=saved_inspection)
+        (ep / 'context.json').write_text(json.dumps(context))
     calls = []
     def provider(request, timeout):
         kind = provider_kind(request); calls.append(kind)
+        if kind == 'cards':
+            return response('{"cards": []}')
         if kind == 'selection':
             content = json.loads(request.data)['messages'][0]['content']
             first = next(p['text'] for p in content if p.get('text', '').startswith('Inspect additional recorded evidence'))
@@ -40,10 +50,23 @@ def paid_episode(tmp_path, monkeypatch):
         return response(json.dumps(answer))
     monkeypatch.setattr(harness.urllib.request, 'urlopen', provider)
     out = tmp_path / 'out'
-    assert harness.run_batch([ep], out, **options()) == 0
+    assert harness.run_batch([ep], out, **options(**extra)) == 0
     saved = json.loads((out / (ep.name + '.json')).read_text())
     assert len(saved['evidence_inspection']['inspections']) == 2
     return ep, out, calls
+
+
+def test_a_run_whose_inspection_differs_from_the_saved_policy_resumes_after_a_code_change_without_payment(
+        tmp_path, monkeypatch):
+    # the episode's saved policy says auto, the run says all: the offline rebuild must use the run's mode, or the paid
+    # request no longer matches and resuming it would pay again
+    ep, out, calls = paid_episode(tmp_path, monkeypatch, saved_inspection='auto', inspection='all')
+    path = out / (ep.name + '.json'); before = path.read_bytes()
+    paid = output_spend(out)
+    source_edit(monkeypatch, 'label/harness.py')
+    assert harness.run_batch([ep], out, **options(inspection='all')) == 0
+    assert calls == ['selection', 'selection', 'final', 'cards']
+    assert path.read_bytes() == before and output_spend(out) == paid
 
 
 def source_edit(monkeypatch, module):
@@ -68,7 +91,7 @@ def test_bookkeeping_source_edit_resumes_actual_paid_request_without_payment(tmp
     tree = fixture_tree(tmp_path)
     source_edit(monkeypatch, module)
     assert harness.run_batch([ep], out, **options()) == 0
-    assert calls == ['selection', 'selection', 'final']
+    assert calls == ['selection', 'selection', 'final', 'cards']
     assert path.read_bytes() == before and cache.read_bytes() == cached
     assert output_spend(out) == paid
     assert fixture_tree(tmp_path) == tree
@@ -100,7 +123,7 @@ def test_actual_prompt_image_or_field_meaning_change_still_requires_explicit_ref
             return request
         monkeypatch.setattr(harness.me, 'build_request', changed)
     assert harness.run_batch([ep], out, **options()) == 1
-    assert calls == ['selection', 'selection', 'final']
+    assert calls == ['selection', 'selection', 'final', 'cards']
     assert json.loads((out / ('stale_' + ep.name + '.json')).read_text())['status'] == 'stale'
 
 
@@ -124,7 +147,7 @@ def test_incomplete_or_changed_saved_request_proof_fails_closed(tmp_path, monkey
     source_edit(monkeypatch, 'label/run.py')
     assert harness.run_batch([ep], out, **options()) == 1
     assert path.read_bytes() == before
-    assert calls == ['selection', 'selection', 'final']
+    assert calls == ['selection', 'selection', 'final', 'cards']
 
 
 def test_compatible_raw_reply_repairs_binding_and_retains_human_rejection_offline(tmp_path, monkeypatch):
@@ -143,7 +166,7 @@ def test_compatible_raw_reply_repairs_binding_and_retains_human_rejection_offlin
     assert finding['review_status'] == 'rejected'
     assert 'time_origin_s' not in finding and 'start_label' not in finding
     assert refreshed['response_text'] == raw and refreshed['config']['request_images'] == proof
-    assert output_spend(out) == paid and calls == ['selection', 'selection', 'final']
+    assert output_spend(out) == paid and calls == ['selection', 'selection', 'final', 'cards']
 
 
 def test_rgb_only_paid_request_uses_actual_attestation_after_bookkeeping_edit(tmp_path, monkeypatch):
@@ -169,4 +192,4 @@ def test_history_only_paid_attestation_reuses_reply_without_changing_ledger(tmp_
     assert harness.annotation_record(out, ep.name + '.json')[1]['_authority_history_index'] == 0
     source_edit(monkeypatch, 'label/run.py')
     assert harness.run_batch([ep], out, **options()) == 0
-    assert output_spend(out) == paid and calls == ['selection', 'selection', 'final']
+    assert output_spend(out) == paid and calls == ['selection', 'selection', 'final', 'cards']

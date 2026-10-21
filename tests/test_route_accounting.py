@@ -21,6 +21,13 @@ def episode(root, name='episode_a', instruction='Place the cup.'):
     return ep
 
 
+def route_bound(ep):
+    """The reservation _paid_route holds for one routing call of this episode."""
+    rates = harness.OPENAI_PRICES[route.ROUTE_MODEL.split('/', 1)[-1]][1]
+    text = route.request(route.me.load(ep))[0]['text']
+    return (len(text.encode('utf-8')) + 1024) * rates[0] + route.ROUTE_MAX_TOKENS * rates[2]
+
+
 def build_failure(*args, **kwargs):
     raise RuntimeError('fixture frame decode failure')
 
@@ -31,7 +38,7 @@ def args(**changes):
 
 
 @pytest.mark.parametrize('received_first', [False, True])
-def test_http_rejected_selection_fails_over_without_replaying_received_rounds(tmp_path, monkeypatch, received_first):
+def test_http_rejected_selection_fails_over_without_replaying_received_rounds(inspect_every_field, tmp_path, monkeypatch, received_first):
     import io
     import urllib.error
     from label import evidence_access as ea
@@ -75,7 +82,7 @@ def test_http_rejected_selection_fails_over_without_replaying_received_rounds(tm
 
 
 @pytest.mark.parametrize('stage,status', [('inspection', 402), ('routing', 401)])
-def test_module_cli_retires_rejected_key_without_losing_paid_inspection_or_route(tmp_path, monkeypatch, stage, status):
+def test_module_cli_retires_rejected_key_without_losing_paid_inspection_or_route(inspect_every_field, tmp_path, monkeypatch, stage, status):
     import io
     import runpy
     import sys
@@ -135,7 +142,7 @@ def test_module_cli_retires_rejected_key_without_losing_paid_inspection_or_route
 
 
 @pytest.mark.parametrize('response_kind', ['body_error', 'timeout', 'unproven_key_error'])
-def test_unverified_final_key_error_never_releases_hold_or_fails_over(tmp_path, monkeypatch, response_kind):
+def test_unverified_final_key_error_never_releases_hold_or_fails_over(resends_used_up, tmp_path, monkeypatch, response_kind):
     import io
     ep = observed_packed_episode(tmp_path)
     out = tmp_path / 'job' / 'run' / 'out'
@@ -235,12 +242,12 @@ def observed_packed_episode(root):
     np.savez(ep / 'state.npz', state=observed)
     loaded = me.load(ep)
     assert loaded['action'] is None
-    assert not evidence_access.needs_inspection(loaded, {})
+    assert not evidence_access.needs_inspection(loaded, {}, 'all')
     return ep
 
 
 @pytest.mark.parametrize('stage', ['build', 'inspection'])
-def test_changed_source_during_request_assembly_cannot_dispatch_stale_annotation(tmp_path, monkeypatch, stage):
+def test_changed_source_during_request_assembly_cannot_dispatch_stale_annotation(inspect_every_field, tmp_path, monkeypatch, stage):
     from test_label import _packed_episode, _accounted_evidence_selection
     ep = observed_packed_episode(tmp_path) if stage == 'build' else _packed_episode(tmp_path)[0]
     out = tmp_path / 'out' / f'{ep.name}.json'
@@ -442,8 +449,10 @@ def test_concurrent_routes_cannot_dispatch_beyond_reserved_budget(tmp_path, monk
     monkeypatch.setattr(harness.me, 'build_request', build_failure)
     job = tmp_path / 'job'
     with ThreadPoolExecutor(1) as executor:
+        # The cap holds one routing reservation, and not a second beside the first's settled $0.004.
+        cap = max(route_bound(ep) for ep in eps) + .003
         future = executor.submit(harness.run_batch, eps, job / 'run' / 'out',
-            keys=['sk-or-fixture'], concurrency=2, force=False, max_spend=.04, **args())
+            keys=['sk-or-fixture'], concurrency=2, force=False, max_spend=cap, **args())
         try:
             assert entered.wait(2)
         finally:
@@ -569,8 +578,10 @@ def test_route_build_failure_settles_shared_budget_once(tmp_path, monkeypatch):
     monkeypatch.setattr(harness, 'call_model', provider)
     monkeypatch.setattr(harness.me, 'build_request', build_failure)
     job = tmp_path / 'job'
+    # The cap holds two settled $0.004 routes and then a third reservation does not fit.
+    cap = .008 + max(route_bound(ep) for ep in eps) - .0005
     assert harness.run_batch(eps, job / 'run' / 'out', keys=['sk-or-fixture'], concurrency=1,
-                             force=False, max_spend=.043, **args()) == 1
+                             force=False, max_spend=cap, **args()) == 1
     assert calls == [1, 1]
     assert label_spend(job) == pytest.approx(.008)
     assert label_spend_complete(job) is True
@@ -773,7 +784,8 @@ def test_inspection_cache_is_carried_through_new_route_claim(tmp_path, monkeypat
     build_request = harness.me.build_request
     def build_with_access(*a, **kw):
         result = build_request(*a, **kw)
-        result['evidence_access'] = ea.Access(harness.me.load(ep))
+        result['evidence_access'] = ea.Access(harness.me.load(ep),
+            copy_contract_version=result['sensor_copy_contract_version'])
         return result
     monkeypatch.setattr(harness.me, 'build_request', build_with_access)
     def discover(*a, **kw):
@@ -822,16 +834,18 @@ def test_cache_only_inspection_does_not_consume_remaining_cap_again(tmp_path, mo
     build_request = harness.me.build_request
     def build_with_access(*a, **kw):
         result = build_request(*a, **kw)
-        result['evidence_access'] = ea.Access(harness.me.load(ep))
+        result['evidence_access'] = ea.Access(harness.me.load(ep),
+            copy_contract_version=result['sensor_copy_contract_version'])
         return result
     monkeypatch.setattr(harness.me, 'build_request', build_with_access)
     monkeypatch.setattr(harness, 'call_model', provider)
     monkeypatch.setattr(ea, 'discover', lambda *a, **kw: ({'digest': 'same-cache', 'cost_usd': .02,
         'rounds': [], 'limitations': []}, []))
     req = build_with_access(ep, cell_w=128)
-    addition = [{'type': 'text', 'text': ea.FINAL + '\nINSPECTION COVERAGE\n' +
-                 ea.packed(ea.Access.coverage_summary({'limitations': []}))}]
-    cap = harness.final_cost_bound(req['content'] + addition, 100) + .000001
+    content, _, _ = ea.final_content(req['content'], req['image_bytes'], req['evidence_access'],
+        {'limitations': []}, [], image_limit=harness.MAX_IMAGES,
+        image_bytes_limit=harness.IMAGE_LIMIT_BYTES, image_inflation=harness.IMAGE_SIZE_INFLATION)
+    cap = harness.final_cost_bound(content, 100) + .000001
     assert label_spend(job) == pytest.approx(.02)
     assert harness.run_batch([ep], out, keys=['sk-or-fixture'], concurrency=1,
         force=False, max_spend=cap, **args(cell_w=128)) == 0
@@ -840,7 +854,7 @@ def test_cache_only_inspection_does_not_consume_remaining_cap_again(tmp_path, mo
 
 
 @pytest.mark.parametrize('unknown', [False, True])
-def test_dry_run_preserves_prior_paid_invoices(tmp_path, monkeypatch, unknown):
+def test_dry_run_preserves_prior_paid_invoices(resends_used_up, tmp_path, monkeypatch, unknown):
     ep = observed_packed_episode(tmp_path)
     job = tmp_path / 'job'
     out = job / 'run' / 'out'

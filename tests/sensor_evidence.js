@@ -37,7 +37,7 @@ assert(!E.activeSensorEvidence(d,2).detail, 'unshown contacts cannot reuse model
 d = E.sensorEvidence({contacts_missing:[{t_s:3, hand:'left', object:'cup'},{t_s:null},
   {t_s:0,hand:'left',object:'bowl',withheld_from_final:true,withheld_reason:'Uninstrumented hand'}]});
 assert.equal(d.moments.length, 1);
-assert.equal(E.activeSensorEvidence(d,3).headline, 'Visible grasp has no recorded contact');
+assert.equal(E.activeSensorEvidence(d,3).headline, 'Visible grasp has no covering sensor-activity interval');
 const missingOverlay = E.gripFindingStripHtml({...d.overlayFindings[0], phase:'Now'});
 assert(missingOverlay.includes('3.0s') && !missingOverlay.includes('3.0s to 3.0s'));
 assert(missingOverlay.includes('left cup'), 'the discrepancy identifies its hand and object');

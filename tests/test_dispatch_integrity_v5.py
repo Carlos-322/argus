@@ -26,7 +26,9 @@ def options(**extra):
 
 
 def provider_kind(request):
-    return 'selection' if 'FIELD INVENTORY' in json.dumps(json.loads(request.data)['messages']) else 'final'
+    text = json.dumps(json.loads(request.data)['messages'])
+    return ('selection' if 'FIELD INVENTORY' in text else
+            'cards' if 'A person will watch this recording with short cards' in text else 'final')
 
 
 def test_run_fractional_cent_cap_reaches_real_harness_without_rounding(tmp_path, monkeypatch):
@@ -146,6 +148,9 @@ def test_interrupt_cancels_queued_episodes_and_retains_inflight_reply(tmp_path, 
         return response('{"requests":[]}' if kind == 'selection' else '{"task_summary":"A hand reaches."}')
     monkeypatch.setattr(harness.urllib.request, 'urlopen', transport)
     def work():
+        # a shell starts a background job with SIGINT ignored, and Python then never raises KeyboardInterrupt, so the
+        # worker sets the handler an interactive run has instead of inheriting however the suite was launched
+        signal.signal(signal.SIGINT, signal.default_int_handler)
         try: results.put(harness.run_batch(episodes, tmp_path / 'out', **options()))
         except KeyboardInterrupt: results.put(130)
     worker = ctx.Process(target=work); worker.start()
@@ -327,8 +332,9 @@ def test_run_resume_before_primary_output_keeps_claim_and_finishes_untouched_wor
     monkeypatch.setenv('OPENROUTER_API_KEYS', 'sk-or-fixture')
     def finish(run_dir, info, command, slice_dir, mode):
         monkeypatch.setattr(sys, 'argv', command[2:])
-        # An untouched sibling can finish while the interrupted charge remains unresolved.
-        assert harness.main() == (0 if force else 1)
+        # The untouched sibling finishes, and the interrupted request (killed after dispatch, its charge unknown) is
+        # sent again automatically with its first reservation still counted, or refreshed by --force.
+        assert harness.main() == 0
     monkeypatch.setattr(run, 'finish', finish)
     args = SimpleNamespace(resume=folder, dataset='fixture', kind='full', why='killed child', concurrency=1,
         harness_args=['--cell-w', '128', '--max-tokens', '100'] + (['--force'] if force else []))
@@ -338,9 +344,12 @@ def test_run_resume_before_primary_output_keeps_claim_and_finishes_untouched_wor
         assert (folder / 'out' / 'episode_0.json').exists()
         assert output_spend(folder / 'out') == pytest.approx(spent + .012)
     else:
-        assert claim.read_bytes() == before and not (folder / 'out' / 'episode_0.json').exists()
-        assert sent == ['selection', 'final']
-        assert output_spend(folder / 'out') == pytest.approx(spent + .006)
+        saved = json.loads((folder / 'out' / 'episode_0.json').read_text())
+        assert saved['parse_ok'] is True and harness.dispatched_attempts(saved) == 2
+        assert any(h.get('final_dispatch_outcome') == 'claimed' for h in saved['final_cost_history'])
+        # the resend reuses the saved inspection and pays only the final request again; --force redoes both
+        assert sent == ['final', 'selection', 'final']
+        assert output_spend(folder / 'out') == pytest.approx(spent + .009)
 
 
 def test_inspection_replay_recomputes_failure_notes_without_rebilling(tmp_path, monkeypatch):

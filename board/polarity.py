@@ -17,7 +17,8 @@ grammar English uses to deny something, so a new wording of an old form needs no
   - two negations cancel ("not without glare"), and a negative prefix denies the rest of its word ("unobstructed");
   - what is withdrawn or only looked for is not asserted ("retracting the occlusion flag", "checked for occlusion
     and rotation"), nor is a name judged wrong ("it would be inaccurate to call this overexposed");
-  - a question asserts nothing ("Frozen?"); a label is denied by a bare negative or a count of zero ("Occlusion:
+  - a question asserts nothing ("Frozen?") unless the next sentence opens by answering it yes ("Frozen? Yes, at 4 s",
+    "Is the view frozen? It is, from 4 s"); a label is denied by a bare negative or a count of zero ("Occlusion:
     none", "Dropout - no", "Glare: 0"), and a negative or searching label denies the bare list it introduces
     ("Absent: glare, occlusion", "Checked: glare, freezing");
   - an impression corrected in its own sentence is retracted ("looks like glare, actually a white tablecloth", "seems
@@ -28,15 +29,20 @@ grammar English uses to deny something, so a new wording of an old form needs no
   - a condition ("if glare hits the plate") asserts nothing.
 
 A statement is denied, retracted, asked about or supposed only within its own grammatical scope: its clause, the list
-or coordination joined to it, and a correction joined to an impression in the same sentence. Nothing in another
-sentence reaches it: not a normal result for another camera ("The exo camera appears frozen. The wrist camera plays
-normally."), not a pronoun ("Glare appears on the plate. The operator does not touch it."), not a correction label,
-not the answer to a question. A later sentence could only be tied to an earlier one by guessing what it is about, and
-every rule that tried to (a list of words that mean all is well, a test for pronouns, a list of correction labels)
-retracted real faults on notes whose next sentence was about something else. Within a sentence, a negation stops at
-a subordinating or contrasting conjunction ("because", "while", "but", "then", "which"), or a comma or "and" that
-starts a new subject. So an unrelated negation ("the grasp is not visible because the view is frozen") never reaches
-the problem.
+or coordination joined to it, and a correction joined to an impression in the same sentence whose subject is the
+impression's subject (a pronoun standing alone, the same noun phrase, or none of its own). The one tie across
+sentences is an answer with no content of its own, which answers the question just before it ("Frozen? Yes, at 4 s",
+"Is the view frozen? It is, from 4 s"). Nothing else in another sentence reaches a statement: not a normal result for
+another camera ("The exo camera appears frozen. The wrist camera plays normally."), not a pronoun ("Glare appears on the
+plate. The operator does not touch it."), not a withdrawal, a denial or a recovery ("I am withdrawing the glare flag",
+"It is not frozen", "It is no longer frozen"). Telling what a later sentence is about needs its meaning, not its
+grammar, and every rule that tried retracted real faults on notes whose later sentence was about something else, was
+itself negated or asked, or described a change over time. A note that does withdraw a finding in a later sentence
+therefore keeps it; the family stays, as it would for a person skimming the first sentence. Within a sentence, a person
+("but we actually see the robot moving") and a noun phrase that only begins like a pronoun ("but that wrist camera is
+just fine") are other subjects and retract nothing, and a negation stops at a subordinating or contrasting conjunction
+("because", "while", "but", "then", "which"), or a comma or "and" that starts a new subject. So an unrelated negation
+("the grasp is not visible because the view is frozen") never reaches the problem.
 
 The word lists below are closed grammatical classes (negators, auxiliaries, determiners, prepositions,
 conjunctions, pronouns) and a few small semantic classes: predicates that only state existence, predicates that end
@@ -116,6 +122,18 @@ _ARTICLES = {'the', 'a', 'an', 'its', 'their', 'his', 'her', 'this', 'that', 'so
 # the personal and demonstrative pronouns: a subject that refers back instead of naming something new
 PRONOUNS = {'it', "it's", 'this', 'that', "that's", 'these', 'those', 'they', 'them', 'there', "there's", 'i', 'we',
             'you', 'he', 'she'}
+# pronouns for the writer, the reader or a person: none can stand for a camera, a view or a picture, so one refers back
+# only to the same pronoun ("he seems to drop it, but he actually places it")
+_PERSONAL = {'i', 'we', 'you', 'he', 'she'}
+# a demonstrative is a pronoun only standing alone ("that is a shadow"); before a noun it opens that noun's phrase
+# ("that wrist camera")
+_DEMONSTRATIVES = {'this', 'that', 'these', 'those'}
+# words that answer the question before them yes, alone or before what they add ("Yes, at 4 s", "Definitely, it
+# hides the label"); an answer that is only a pronoun and an auxiliary answers too ("It is, from 4 s", "It did")
+_YES = {'yes', 'yeah', 'yep', 'yup', 'definitely', 'certainly', 'absolutely', 'indeed', 'confirmed', 'affirmative'}
+# the words a bare denial may have besides its negator ("but it isn't", "but this is not the case", "not at all")
+_BARE_DENIAL = {'it', 'this', 'that', 'is', 'was', "it's", "that's", 'really', 'the', 'case', 'so', 'there', "there's",
+                'any', 'at', 'all'}
 # prepositions that end a negated predicate: what follows is an adjunct of it, not part of it
 PREDICATE_END = {'in', 'on', 'at', 'from', 'to', 'for', 'with', 'during', 'until', 'after', 'before', 'since',
                  'throughout', 'across', 'near', 'around', 'within', 'beyond', 'behind', 'due', 'because',
@@ -133,7 +151,6 @@ HEDGES = {'looks', 'look', 'looked', 'looking', 'seems', 'seem', 'seemed', 'appe
           'believed', 'mistook'}
 # words that introduce what something really is
 CORRECTIONS = {'actually', 'just', 'merely', 'simply', 'really', 'reality', 'fact', 'only', 'instead'}
-
 
 def _verb(entry: str) -> tuple[set, set]:
     """(every form, the past forms) of a verb given as its base, with any irregular past forms after slashes
@@ -495,9 +512,20 @@ def _restricts(words):
     before what it counts ("on a second look") limits nothing."""
     ordinal = {x for x, w in enumerate(words[:-1]) if w == 'second' and words[x + 1][:1].isalpha()
                and words[x + 1] not in _ENDS_A_PHRASE}
+    # "no longer", "any longer" and "anymore" say a state ended, which limits it in time and does not deny it
     return (any(w in _RESTRICTS and x not in ordinal for x, w in enumerate(words))
             or any(w[:1].isdigit() for w in words)
-            or any(a in ('only', 'just') and b in _TIME_WORDS for a, b in zip(words, words[1:])))
+            or any(a in ('only', 'just') and b in _TIME_WORDS for a, b in zip(words, words[1:]))
+            or 'anymore' in words or any(a in ('no', 'any') and b == 'longer' for a, b in zip(words, words[1:])))
+
+
+def _negated_at(words, i):
+    """Whether the word at i is negated: the nearest word before it that is not an auxiliary or an adverb between a
+    negator and its predicate is a negator ("has not been retracted", "am not withdrawing", "never dismissed")."""
+    j = i - 1
+    while j >= 0 and words[j] in SKIP:
+        j -= 1
+    return j >= 0 and _pred_negator(words[j])
 
 
 def _correction(clause):
@@ -510,14 +538,14 @@ def _correction(clause):
     body = words[1:] if lead else words
     if not body or _restricts(body):
         return False
-    if any(w in VERDICTS for w in body):
+    # a verdict corrects only when it is given, not when it is refused ("but I have not retracted that finding")
+    if any(w in VERDICTS and not _negated_at(body, x) for x, w in enumerate(body)):
         return True
     if any(a in ('turns', 'turned') and b == 'out' for a, b in zip(body, body[1:])):
         return True
     if not lead:
         return False
-    content = [w for w in body if w not in ('it', 'this', 'that', 'is', 'was', "it's", "that's", 'really', 'the',
-                                            'case', 'so', 'there', "there's", 'any', 'at', 'all') and not _negator(w)]
+    content = [w for w in body if w not in _BARE_DENIAL and not _negator(w)]
     if not content and any(map(_negator, body)):
         return True
     return lead in ('actually', 'in', 'instead', 'rather') or any(w in CORRECTIONS for w in body) \
@@ -533,12 +561,14 @@ def _subject(words):
     while x < len(words) and (words[x] in CONTRAST or words[x] in ('and', 'or', 'at', 'first', 'fact', 'reality')
                               or words[x] in HEDGES and x + 1 < len(words) and words[x + 1] in DETERMINERS):
         x += 1
-    if x < len(words) and words[x] in PRONOUNS:
+    stop = AUX | SKIP | CORRECTIONS | PREDICATE_END | PHRASE_END | BOUNDARY | HEDGES
+    if x < len(words) and words[x] in PRONOUNS and (
+            words[x] not in _DEMONSTRATIVES or x + 1 >= len(words) or words[x + 1] in stop
+            or _negator(words[x + 1])):
         return 'pronoun', words[x:x + 1], x + 1 < len(words)
     while x < len(words) and words[x] in _ARTICLES:
         x += 1
     y = x
-    stop = AUX | SKIP | CORRECTIONS | PREDICATE_END | PHRASE_END | BOUNDARY | HEDGES
     while y < len(words) and words[y] not in stop and not _negator(words[y]):
         y += 1
     return ('noun' if y > x else 'none'), words[x:y], y < len(words)
@@ -550,10 +580,22 @@ def _refers(correction, impression):
     tablecloth", says what the impression was), or it is no more than the impression's own subject ("the camera" after
     "the exo camera"). A clause whose subject is another noun phrase states something about that other subject and
     retracts nothing ("The exo camera appears frozen, but the wrist camera is just fine", "it looks frozen, but the
-    timestamps actually advance")."""
+    timestamps actually advance"), and neither does one whose subject is a person, which can be the impression's
+    subject only as the same pronoun ("The exo camera appears frozen, but we actually see the robot moving")."""
     kind, said, predicate = _subject(correction)
-    if kind != 'noun' or not predicate:
+    if kind == 'pronoun' and said[0] in _PERSONAL:
+        before_kind, before, _ = _subject(impression)
+        return before_kind == 'pronoun' and before == said
+    if kind != 'noun':
         return True
+    if not predicate:
+        # a phrase with no verb this module knows says what the impression was only as a predicate noun ("actually a
+        # white tablecloth"); a definite phrase names a subject of its own whose verb is simply not a word listed here
+        # ("but the wrist camera actually plays normally"), so it is compared as a subject below
+        lead = [w for w in correction if w not in CONTRAST and w not in CORRECTIONS
+                and w not in ('and', 'or', 'at', 'first', 'fact', 'reality')]
+        if lead and lead[0] in ('a', 'an'):
+            return True
     kind, before, _ = _subject(impression)
     norm = lambda ws: {w[:-1] if w.endswith('s') and len(w) > 3 else w for w in ws}
     return kind == 'noun' and norm(said) <= norm(before)
@@ -567,7 +609,8 @@ def _corrected_within(clause):
     h = _hedge_at(words)
     if h is None:
         return None
-    if any(w in VERDICTS for w in words[h + 1:]):
+    # a verdict refused ("glare was reported and has not been retracted") retracts nothing
+    if any(w in VERDICTS and not _negated_at(words, x) for x, w in enumerate(words) if x > h):
         return (clause[0].start, clause[-1].end)
     turns = next((x for x in range(h + 1, len(words) - 1) if words[x] in ('turns', 'turned')
                   and words[x + 1] == 'out'), None)
@@ -576,6 +619,83 @@ def _corrected_within(clause):
     x = _identity(words, h + 1)
     if x is not None and not _restricts(words[x:]):
         return _span(clause, 0, x)
+    return None
+
+
+# A statement in another sentence is tied to an earlier one only when grammar alone ties it: an answer with no content
+# of its own can answer nothing but the question just before it. Every rule that reached further (a later clause that
+# denies, a withdrawal that names a word, a pronoun read across sentences) had to guess what the later sentence is
+# about, and each guess retracted real faults on notes whose later sentence was about something else.
+
+def _same_word(a, b):
+    """Whether two words are forms of one word ("covered" and "covers", "glare" and "glaring")."""
+    a, b = a.lower(), b.lower()
+    if a == b:
+        return True
+    if len(a) < 5 or len(b) < 5:
+        return False
+    k = 0
+    while k < min(len(a), len(b)) and a[k] == b[k]:
+        k += 1
+    return k >= max(4, min(len(a), len(b)) - 3)
+
+
+def _withdraws_part_of(said, impression):
+    """Whether a clause of the impression's own sentence withdraws it by name: a withdrawing verb, not refused and not
+    supposed, whose object names a word of the impression ("I initially suspected glare and I am withdrawing the glare
+    flag"). A withdrawal of something else ("withdrawing the occlusion flag") withdraws nothing of it."""
+    if not said or said[0] in CONDITIONAL:
+        return False
+    for i, w in enumerate(said):
+        if w in WITHDRAW and not _negated_at(said, i):
+            closed = DETERMINERS | _ARTICLES | PRONOUNS | AUX | PREDICATE_END | {'and', 'or', 'of'}
+            named = [x for part in said[i + 1:_phrase_end_words(said, i + 1)] for x in part.split('-')
+                     if len(x) > 2 and x not in closed]
+            return any(_same_word(n, x) for n in named for x in impression)
+    return False
+
+
+def _phrase_end_words(words, j):
+    k = j
+    while k < len(words) and words[k] not in PHRASE_END and words[k] not in BOUNDARY and not _negator(words[k]):
+        k += 1
+    return k
+
+
+def _refuses_correction(said):
+    """Whether a correction clause negates the correction itself: a withdrawal or verdict refused ("but actually I am
+    not withdrawing the glare flag", "but I have not retracted that finding"), or another explanation denied ("but
+    actually it is not just a static scene", "not merely a reflection"). The negator stands just before the verb or the
+    word that offers the explanation. Such a clause keeps the impression; any other negation reads as it did."""
+    for i, w in enumerate(said):
+        if not _pred_negator(w):
+            continue
+        j = i + 1
+        while j < len(said) and said[j] in SKIP:
+            j += 1
+        if j < len(said) and (said[j] in WITHDRAW or said[j] in VERDICTS
+                              or said[j] in ('just', 'merely', 'simply', 'only')):
+            return True
+    return False
+
+
+def _answer(toks):
+    """'yes' or 'no' when a sentence opens with an answer that has no content of its own, so it can only answer the
+    question just before it ("Yes, at 4 s", "Briefly, yes", "It did, twice", "No."); None for a sentence that says
+    something of its own ("No question, it hides the cup", "The arm moves on")."""
+    words = [t.w for t in toks if _is_word(t) or t.w == ',']
+    while words and (words[0] == ',' or (words[0].endswith('ly') and words[0] not in _YES)):
+        words = words[1:]
+    head = words[:words.index(',')] if ',' in words else words
+    if not head:
+        return None
+    if head[0] in _YES:
+        return 'yes'
+    if head == [head[0]] and head[0] in _BARE_NO:
+        return 'no'
+    if (head[0] in PRONOUNS and head[0] not in _PERSONAL and any(w in AUX for w in head[1:])
+            and all(w in PRONOUNS or w in AUX or w in ('so', 'indeed') or _negator(w) for w in head)):
+        return 'no' if any(map(_negator, head)) else 'yes'
     return None
 
 
@@ -605,11 +725,13 @@ def denied_spans(text: str) -> list[tuple[int, int]]:
     flat = []   # (sentence index, clause)
     for si, sentence in enumerate(sentences):
         body = [t for t in sentence if t.w not in _SENTENCE_END]
-        # a question asserts nothing. An answer in the next sentence ("Frozen? Yes, at 4 s") would assert it only by
-        # standing for the question, and telling an answer from a sentence about something else ("Frozen? The arm
-        # moves on.") is the guess this module does not make across sentences.
+        # a question asserts nothing, unless the next sentence opens by answering it yes with no content of its own
+        # ("Frozen? Yes, at 4 s"), which can be about nothing but that question; a sentence that says something of its
+        # own answers nothing ("Frozen? The arm moves on.")
         if sentence and sentence[-1].w == '?' and body:
-            spans.append((body[0].start, body[-1].end))
+            following = [t for t in sentences[si + 1] if t.w not in _SENTENCE_END] if si + 1 < len(sentences) else []
+            if _answer(following) != 'yes':
+                spans.append((body[0].start, body[-1].end))
         # a label and its answer: either side that is a bare negative denies the other ("Glare: none"), and a
         # negative label denies the bare list it introduces ("None of these were seen: glare, rotation")
         parts, cur = [], []
@@ -656,8 +778,10 @@ def denied_spans(text: str) -> list[tuple[int, int]]:
             words = [t.w for t in flat[back][1]]
             h = _hedge_at(words)
             if h is not None:
-                if _correction(clause) and _refers([t.w for t in clause if _is_word(t)],
-                                                   [t.w for t in flat[back][1] if _is_word(t)]):
+                said = [t.w for t in clause if _is_word(t)]
+                impression = [t.w for t in flat[back][1] if _is_word(t)]
+                corrects = _correction(clause) or _withdraws_part_of(said, impression)
+                if corrects and _refers(said, impression) and not _refuses_correction(said):
                     spans.append((flat[back][1][0].start, flat[k - 1][1][-1].end))
                 break
             if words and words[0] in CONTRAST:

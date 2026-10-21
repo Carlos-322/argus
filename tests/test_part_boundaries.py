@@ -6,7 +6,6 @@ import json
 
 import h5py
 import numpy as np
-import pytest
 from PIL import Image
 
 from prepare import formats

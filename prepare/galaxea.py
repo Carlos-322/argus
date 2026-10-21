@@ -35,9 +35,8 @@ import numpy as np
 from label.atomic import write_atomic
 from prepare import cli
 from prepare import hub
+from label.presented import presented_pts
 
-# Uploads use structural LeRobot fields. Published preparation and sampling stay available here.
-UPLOAD = None
 GALAXEA_COLUMNS = ("observation.state.left_arm", "observation.state.right_arm", "observation.state.left_gripper",
                    "observation.state.right_gripper", "coarse_task_index", "task_index", "quality_index")
 
@@ -80,21 +79,6 @@ def meta_from(get, folder: str) -> dict:
     return {"folder": folder, "tasks": tasks, "episodes": eps, "info": info}
 
 
-def recognizes(r: dict) -> bool:
-    """A LeRobot dataset (prepare/formats.py read_root) in Galaxea's layout."""
-    return all(k in (r.get("features") or {}) for k in GALAXEA_COLUMNS)
-
-
-def convert_upload(item: dict, rig: str, out: Path, dataset: str) -> dict:
-    from prepare import formats
-    root = Path(item["root"]["dir"])
-    get = lambda rel: formats.inside(root, root / rel)
-    meta = meta_from(get, item["root"]["rel"] or root.name)
-    eidx = int(item["row"]["eidx"])
-    ep = next(e for e in meta["episodes"] if int(e["episode_index"]) == eidx)
-    return write_episode(meta, ep, get, out / (item.get("output_name") or formats.episode_name(item["name"])), dataset)
-
-
 def episode_dir_name(folder: str, index: int) -> str:
     """Plug_Into_A_Fixed_Socket_20250710_006, 69 -> episode_Plug_Into_A_Fixed_Socket_20250710_006_000069"""
     return f"episode_{re.sub(r'[^A-Za-z0-9]+', '_', folder).strip('_')}_{index:06d}"
@@ -134,7 +118,7 @@ def write_episode(meta: dict, ep: dict, get, ep_dir: Path, dataset: str) -> dict
         p = get(info["video_path"].format(episode_chunk=chunk, video_key=key, episode_index=i))
         with av.open(str(p)) as c:
             s = c.streams.video[0]
-            pts = sorted(pk.pts for pk in c.demux(s) if pk.pts is not None and not pk.is_discard)
+            pts = presented_pts(c, s)
             w, h, tb = s.codec_context.width, s.codec_context.height, s.time_base
         step = int(round(1 / (FPS * float(tb))))
         on_grid = bool(pts) and pts[0] == 0 and all(pp == k * step for k, pp in enumerate(pts))
@@ -219,7 +203,7 @@ def drawn(meta: dict, ep: dict, raw: Path, out: Path) -> dict | None:
         prepare_one(meta, ep, raw, out)
         return json.loads((out / episode_dir_name(meta["folder"], int(ep["episode_index"])) / "context.json")
                           .read_text())
-    except Exception as e:  # a drawn episode that cannot be read is a finding about the data; listed, not hidden
+    except Exception as e:  # noqa: BLE001 - a drawn episode that cannot be read is printed as FAILED, not hidden
         print(f"FAILED {meta['folder']}/{ep['episode_index']}: {type(e).__name__}: {e}"[:400], file=sys.stderr,
               flush=True)
         return None

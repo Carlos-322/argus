@@ -9,6 +9,13 @@ import urllib.parse
 import urllib.request
 
 
+# Prices published for inputs a request here never carries: audio, and its cached tokens (Gemini lists both). They are
+# accepted in a quote because cost_bound refuses any part but text and images, so they cannot be charged.
+UNSENT_INPUT_CHARGES = ('audio', 'input_audio_cache')
+# The request parts cost_bound bounds; any other (an audio or file part) has no verified bound under a quote
+BOUNDED_PARTS = ('text', 'image_url')
+
+
 def quote(model: str, timeout: int) -> dict:
     # https://openrouter.ai/docs/api/api-reference/endpoints/list-all-endpoints-for-a-model
     # https://openrouter.ai/docs/guides/routing/provider-selection#max-price
@@ -33,6 +40,10 @@ def quote(model: str, timeout: int) -> dict:
         # https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool
         # Model variants such as :online can enable search outside that contract.
         claude = model.startswith('anthropic/claude-') and ':' not in model
+        # Gemini searches only when a request asks for it as well: on OpenRouter, through the web plugin or an :online
+        # variant (https://openrouter.ai/docs/guides/features/web-search). Requests here supply neither, so a published
+        # search price cannot apply to them.
+        searches_on_request = claude or (model.startswith('google/gemini-') and ':' not in model)
         maxima = dict.fromkeys(('prompt', 'completion', 'request', 'image'), 0.0)
         context = 0
         input_rate = output_rate = 0.0
@@ -61,10 +72,10 @@ def quote(model: str, timeout: int) -> dict:
                     if not math.isfinite(rate) or rate < 0:
                         raise ValueError('endpoint price must be finite and nonnegative')
                     if name not in (*maxima, 'input_cache_read', 'input_cache_write', 'input_cache_write_1h',
-                                    'internal_reasoning', 'discount', 'web_search') and rate:
+                                    'internal_reasoning', 'discount', 'web_search', *UNSENT_INPUT_CHARGES) and rate:
                         raise ValueError('unsupported endpoint charge: ' + name)
                     rates[name] = max(rates.get(name, 0), rate)
-            if rates.get('web_search', 0) and not claude:
+            if rates.get('web_search', 0) and not searches_on_request:
                 # max_price has no search dimension, so a snapshot search rate cannot
                 # enforce a native-search ceiling. Do not authorize that capped call.
                 raise ValueError('native search fees have no verified enforceable ceiling')
@@ -84,7 +95,9 @@ def quote(model: str, timeout: int) -> dict:
                 'image_usd': maxima['image'],
                 'bound_basis': ('Prompt bounded by the request text and, per image, the most a published tokenizer charges for its size, at most the published context window; separate image and request fees bounded by provider.max_price. '
                                 + ('Claude search requires an explicit tool; none is supplied. Cache TTL is 5 minutes.'
-                                   if claude else 'No published native search charge.')),
+                                   if claude else 'Gemini search requires the web plugin or :online; neither is supplied.'
+                                   if searches_on_request else 'No published native search charge.')
+                                + ' Audio prices apply only to audio input; requests carry text and images only.'),
                 'provider_max_price': {**maxima, 'prompt': float(Decimal(str(maxima['prompt'])) * 1_000_000),
                                        'completion': float(Decimal(str(maxima['completion'])) * 1_000_000)}}
     except (OSError, ValueError, KeyError, TypeError, OverflowError) as error:
@@ -121,7 +134,7 @@ def image_sizes(content: list) -> list:
                 raw = base64.b64decode(part['image_url']['url'].split(',', 1)[1])
                 with Image.open(io.BytesIO(raw)) as image:
                     sizes.append(image.size)
-            except Exception:
+            except Exception:  # noqa: BLE001 - an image whose size does not read is priced at the largest size
                 sizes.append(LARGEST_CHARGED_SIZE)
     return sizes
 
@@ -131,6 +144,9 @@ def cost_bound(content: list, max_tokens: int, quote: dict) -> float:
     most a published tokenizer charges for its size (image_token_bound), never more than the published context
     window. Reserving the whole window held about $6 for a request that costs well under $1, so a small cap
     labelled nothing."""
+    unbounded = sorted({str(part.get('type')) for part in content if part.get('type') not in BOUNDED_PARTS})
+    if unbounded:
+        raise ValueError(f"a request part has no verified bound: {', '.join(unbounded)}")
     sizes = image_sizes(content)
     images = len(sizes)
     text_bytes = sum(len(str(part.get('text', '')).encode('utf-8')) for part in content if part.get('type') == 'text')

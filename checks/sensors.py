@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -46,6 +45,8 @@ from label import episode as me
 from label import signals as sg
 from label.atomic import write_atomic
 from checks import EXIT_PARTIAL
+from checks import results
+from checks.workers import run_each
 
 NO_READING_SHARE = 0.2
 PINNED_SHARE = 0.1
@@ -132,7 +133,7 @@ def _signal_findings(ep: dict, name: str, a, skipped: dict) -> list[dict]:
                 many = np.flatnonzero(pinned > PINNED_SHARE)
                 if len(many):
                     out.append({"check": "pinned", "signal": name, "count": int(len(many)),
-                                "evidence": f"{len(many)} values of {name} read exactly {sg._num(edge)}, the "
+                                "evidence": f"{len(many)} values of {name} read exactly {sg.reading_text(edge)}, the "
                                             f"{'top' if way == 'up' else 'bottom'} of its range, at more than "
                                             f"{PINNED_SHARE:.0%} of the frames ("
                                             + ", ".join(_cell(i, m.get("shape")) for i in many[:8])
@@ -261,7 +262,7 @@ def run_episode(ep_dir: Path) -> dict | None:
         try:
             found += fn(ep)
         except Exception as e:  # noqa: BLE001 - recorded on its checks, the other checks stand
-            errored.update({c: f"{type(e).__name__}: {e}"[:300] for c in names})
+            errored.update({c: results.error_text(e) for c in names})
     applies = set()
     if ep.get("signals"):
         applies |= set(SIGNAL_CHECKS)
@@ -278,18 +279,22 @@ def run_episode(ep_dir: Path) -> dict | None:
     ran_on = {(f["check"], f.get("signal")) for f in found}     # a check with a finding on a signal ran on it
 
     def status(c: str) -> dict:
+        row = {"check": c, "name": NAMES[c]}
         if c in errored:
-            return {"check": c, "name": NAMES[c], "status": "errored", "error": errored[c]}
-        row = {"check": c, "name": NAMES[c], "status": "fired" if c in fired else "clear" if c in applies else "na"}
-        if c in ('depth_frozen', 'depth_offset') and unpaired_depth:
-            why = ', '.join(unpaired_depth) + ': no available paired colour camera'
-            row['why' if row['status'] == 'na' else 'not_run_on'] = why
+            return results.errored_row(row, errored[c])
+        paired_why = (', '.join(unpaired_depth) + ': no available paired colour camera'
+                      if c in ('depth_frozen', 'depth_offset') and unpaired_depth else None)
+        if c not in fired and c not in applies:
+            return results.not_applicable_row(row, paired_why)
+        row["status"] = results.FIRED if c in fired else results.CLEAR
+        if paired_why:
+            row["not_run_on"] = paired_why
         # a signal check names the signals it was not run on; one run on no signal is not assessed, never clear
         left = {nm: why for nm, why in skipped.items() if (c, nm) not in ran_on} if c in SIGNAL_CHECKS else {}
-        if left and row["status"] != "na":
+        if left:
             words = "; ".join(f"{nm} ({why})" for nm, why in left.items())
-            if row["status"] == "clear" and set(left) == set(ep["signals"]):
-                return {**row, "status": "na", "why": f"no signal could be checked: {words}"}
+            if row["status"] == results.CLEAR and set(left) == set(ep["signals"]):
+                return results.not_applicable_row(row, f"no signal could be checked: {words}")
             row["not_run_on"] = words
         return row
     return {"notes": found, "flagged": False, "checks": [status(c) for c in NAMES],
@@ -297,41 +302,38 @@ def run_episode(ep_dir: Path) -> dict | None:
                      "frames")}
 
 
-def _constants(d: str) -> dict:
+def _constants(d: str) -> tuple[str, dict]:
+    """(episode, its constant values); an episode that does not read has none."""
     try:
-        return constant_values(Path(d))
-    except Exception:
-        return {}
+        return d, constant_values(Path(d))
+    except Exception:  # noqa: BLE001 - an episode that does not load has no constants; _safe records its checks as errored
+        return d, {}
+
+
+def errored_record(e: Exception) -> dict:
+    """The context["sensor_checks"] of an episode whose checks could not run at all: the error, and every check
+    errored with it (checks/results.py)."""
+    err = results.error_text(e)
+    return {"notes": [], "flagged": False, "error": err,
+            "checks": [results.errored_row({"check": c, "name": NAMES[c]}, err) for c in NAMES]}
 
 
 def _safe(d: str):
     """One episode's result; an episode whose checks cannot run at all (its folder does not read) still gets one, with
     every check errored and the error."""
-    try:
-        return d, run_episode(Path(d)), None
-    except Exception as e:  # recorded on every check, never silently skipped
-        err = f"{type(e).__name__}: {e}"[:300]
-        return d, {"notes": [], "flagged": False, "error": err,
-                   "checks": [{"check": c, "name": NAMES[c], "status": "errored", "error": err} for c in NAMES]}, None
+    return results.run_safely(d, run_episode, errored_record)
 
 
 def needs_check(ctx: dict) -> bool:
-    versions = ctx.get('check_versions')
-    if (not isinstance(versions, dict) or type(versions.get('sensor_checks')) is not int
-            or versions['sensor_checks'] != VERSION or 'sensor_checks' not in ctx):
+    """Retry missing, older, errored and malformed results; an episode with no signals or depth (None) is done."""
+    if results.stale_version(ctx, 'sensor_checks', VERSION):
         return True
     result = ctx['sensor_checks']
     if result is None:
         return False
     if not isinstance(result, dict) or result.get('error'):
         return True
-    checks = result.get('checks')
-    if not isinstance(checks, list) or not all(isinstance(row, dict) for row in checks):
-        return True
-    names = [row.get('check') for row in checks]
-    return (not all(isinstance(name, str) for name in names) or len(names) != len(set(names))
-            or set(names) != set(NAMES)
-            or any(row.get('status') not in ('clear', 'fired', 'na') for row in checks))
+    return results.rows_need_check(result.get('checks'), NAMES)
 
 
 def main():
@@ -349,37 +351,42 @@ def main():
                 eps.append(str(d))
     print(f"episodes to check: {len(eps)}", flush=True)
     done = fired = failed = 0
-    # dead values are judged across every episode of each folder, never within one (module docstring)
+    # dead values are judged across every episode of each folder, never within one (module docstring). A worker that
+    # dies (out of memory, killed) costs its own episode only: no constant values here, every check errored below.
     every = {}
     for root in a.roots:
         ds = [str(d) for d in sorted(root.glob("episode_*")) if (d / "context.json").exists()]
-        with ProcessPoolExecutor(a.jobs) as ex:
-            consts = dict(zip(ds, ex.map(_constants, ds, chunksize=4)))
+        consts = {}
+        run_each(_constants, ds, a.jobs, lambda res: consts.__setitem__(*res), lambda d, e: (d, {}))
         dead = dead_across(consts)
         for d in ds:
             every[d] = [f for name, f in dead.items() if name in (consts.get(d) or {})]
-    with ProcessPoolExecutor(a.jobs) as ex:
-        for d, r, err in ex.map(_safe, eps, chunksize=2):
-            if r is not None and every.get(d):
-                r["notes"] += every[d]
-                for c in r["checks"]:
-                    if c["check"] == "dead_values":
-                        c["status"] = "fired"
-            done += 1
-            errors = [check for check in (r or {}).get('checks', []) if check.get('status') == 'errored']
-            if err or (r and r.get('error')) or errors:
-                failed += 1
-                reason = err or r.get('error') or errors[0].get('error', 'sensor checks could not finish')
-                print(f"ERRORED {Path(d).name}: {reason}", flush=True)
-            p = Path(d) / "context.json"
-            ctx = json.loads(p.read_text())
-            ctx["sensor_checks"] = r
-            versions = ctx.get('check_versions')
-            ctx['check_versions'] = {**(versions if isinstance(versions, dict) else {}), 'sensor_checks': VERSION}
-            write_atomic(p, ctx, indent=1)
-            if r and r["notes"]:
-                fired += 1
-                print(f"SENSORS {Path(d).name}: " + "; ".join(n["evidence"] for n in r["notes"][:4]), flush=True)
+
+    def record(res) -> None:
+        nonlocal done, fired, failed
+        d, r, err = res
+        if r is not None and every.get(d):
+            r["notes"] += every[d]
+            for c in r["checks"]:
+                if c["check"] == "dead_values":
+                    c["status"] = results.FIRED
+        done += 1
+        errors = [check for check in (r or {}).get('checks', []) if results.status(check) == results.ERRORED]
+        if err or (r and r.get('error')) or errors:
+            failed += 1
+            reason = err or r.get('error') or errors[0].get('error', 'sensor checks could not finish')
+            print(f"ERRORED {Path(d).name}: {reason}", flush=True)
+        p = Path(d) / "context.json"
+        ctx = json.loads(p.read_text())
+        ctx["sensor_checks"] = r
+        versions = ctx.get('check_versions')
+        ctx['check_versions'] = {**(versions if isinstance(versions, dict) else {}), 'sensor_checks': VERSION}
+        write_atomic(p, ctx, indent=1)
+        if r and r["notes"]:
+            fired += 1
+            print(f"SENSORS {Path(d).name}: " + "; ".join(n["evidence"] for n in r["notes"][:4]), flush=True)
+
+    run_each(_safe, eps, a.jobs, record, lambda d, e: (d, errored_record(e), None))
     print(f"done {done} with_notes={fired} failed={failed}", flush=True)
     return EXIT_PARTIAL if failed else 0
 

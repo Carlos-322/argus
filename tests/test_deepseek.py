@@ -100,7 +100,8 @@ def test_budget_uses_deepseek_peak_rates(deepseek):
     assert harness.final_cost_bound([{"type":"text","text":"hello"}], 100) == pytest.approx(.000429)
 
 
-def test_episode_including_router_uses_only_deepseek(deepseek, monkeypatch, tmp_path):
+@pytest.mark.parametrize("inspection", ["off", "all"])
+def test_episode_including_router_uses_only_deepseek(deepseek, monkeypatch, tmp_path, inspection):
     from test_route_accounting import observed_packed_episode
     from label import route, evidence_access as ea
     ep = observed_packed_episode(tmp_path)
@@ -123,9 +124,12 @@ def test_episode_including_router_uses_only_deepseek(deepseek, monkeypatch, tmp_
     monkeypatch.setattr(harness.urllib.request, "urlopen", answer)
     out = tmp_path / "out"
     assert harness.run_batch([ep], out, keys=["sk-ds-test"], concurrency=1, force=False, max_spend=1,
-        model=providers.DEEPSEEK_MODEL, reasoning="high", max_tokens=100, timeout=5) == 0
+        model=providers.DEEPSEEK_MODEL, reasoning="high", max_tokens=100, timeout=5,
+        inspection=inspection) == 0
     result = json.loads((out / f"{ep.name}.json").read_text())
     assert "route" in sent and "label" in sent
+    if inspection == "off":
+        assert "inspect" not in sent
     assert result["parse_ok"] and result["provider"] == "deepseek"
     assert result["usage"]["cost_source"] == "peak_list_estimate"
     assert "sk-ds-test" not in json.dumps(result)
@@ -160,3 +164,59 @@ def test_deepseek_connection_failure_retries_without_losing_billing_state(deepse
         harness.call_model_once([], providers.DEEPSEEK_MODEL, "high", "sk-ds-test", 100, 5)
     assert error.value.verified_unpaid and error.value.stage == "not sent"
     assert sent == [providers.DEEPSEEK_URL] * harness.UNPAID_ATTEMPTS
+
+
+def test_new_sensor_cards_use_the_original_deepseek_transport(deepseek, monkeypatch, tmp_path):
+    from test_sensor_cards_harness import install
+    from test_dispatch_integrity_v5 import response, options
+    from test_label import _packed_episode
+
+    ep, _ = _packed_episode(tmp_path)
+    calls = []
+    install(monkeypatch, calls, lambda: response('{"cards": []}'))
+    original = harness.urllib.request.urlopen
+
+    def answer(request, timeout):
+        body = json.loads(request.data)
+        assert request.full_url == providers.DEEPSEEK_URL
+        assert request.get_header("Authorization") == "Bearer sk-ds-test"
+        assert body["model"] == "deepseek-flash"
+        payload = json.loads(original(request, timeout).read())
+        payload["usage"] = {"prompt_tokens": 100, "completion_tokens": 10}
+        return io.BytesIO(json.dumps(payload).encode())
+
+    monkeypatch.setattr(harness.urllib.request, "urlopen", answer)
+    out = tmp_path / "out"
+    args = {**options(), "keys": ["sk-ds-test"], "model": providers.DEEPSEEK_MODEL,
+            "inspection": "all"}
+    assert harness.run_batch([ep], out, **args) == 0
+    result = json.loads((out / f"{ep.name}.json").read_text())
+    assert result["parse_ok"] and result["provider"] == "deepseek"
+    assert {"selection", "final", "cards"} <= set(calls)
+    assert result["usage"]["cost_source"] == "peak_list_estimate"
+
+
+def test_new_episode_retry_keeps_deepseek_transport_and_attempt_history(deepseek, monkeypatch, tmp_path):
+    from test_route_accounting import observed_packed_episode
+
+    ep = observed_packed_episode(tmp_path)
+    calls = []
+
+    def answer(request, timeout):
+        assert request.full_url == providers.DEEPSEEK_URL
+        assert json.loads(request.data)["model"] == "deepseek-flash"
+        calls.append(request.full_url)
+        if len(calls) == 1:
+            raise TimeoutError("response lost after dispatch")
+        return io.BytesIO(json.dumps({"choices": [{"finish_reason": "stop", "message": {
+            "content": json.dumps({"timeline": [], "task_summary": "Wait beside the workspace."})}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 10}}).encode())
+
+    monkeypatch.setattr(harness.urllib.request, "urlopen", answer)
+    out = tmp_path / "out"
+    assert harness.run_batch([ep], out, keys=["sk-ds-test"], concurrency=1, force=False,
+        model=providers.DEEPSEEK_MODEL, reasoning="high", max_tokens=100, timeout=1,
+        cell_w=128, inspection="off", max_spend=1) == 0
+    result = json.loads((out / f"{ep.name}.json").read_text())
+    assert result["parse_ok"] and result["provider"] == "deepseek"
+    assert len(calls) == harness.dispatched_attempts(result) == 2

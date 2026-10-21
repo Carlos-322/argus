@@ -228,7 +228,7 @@ def test_reparse_received_history_retains_newer_financial_receipt(tmp_path, monk
     assert harness.run_batch([ep], out, **options()) == 0
 
 
-def test_actual_stitch_after_cap_refused_refresh_keeps_all_charges(tmp_path, monkeypatch):
+def test_actual_stitch_after_cap_refused_refresh_keeps_all_charges(inspect_every_field, tmp_path, monkeypatch):
     from test_pieces import _three_parts
     from label import pieces
     job, ep, parts = _three_parts(tmp_path, monkeypatch)
@@ -276,7 +276,8 @@ def test_only_complete_first_dispatch_quota_proof_can_release_charge(monkeypatch
 def test_offline_rebind_preserves_human_rejection_of_same_finding():
     from test_tactile_contract import episode
     from label import sensor_evidence as se
-    ep = episode({'contact': np.array([[0], [1], [1], [0], [0]])}, [{'name': 'contact', 'shape': [1]}])
+    ep = episode({'contact': np.array([[0], [1], [1], [0], [0]])}, [{'name': 'contact', 'shape': [1]}],
+                 {'contact': {'role': 'contact_state'}})
     doc = se.build(ep, {'n': 5, 'ks': [0, 2, 4]})
     finding = {'start_s': .1, 'end_s': .3, 'headline': 'Contact ends', 'claim_type': 'contact_change',
                'evidence': [{'sensor_id': doc['sensors'][0]['id'], 'series_id': doc['series'][0]['id'], 'time_s': [.2, .3]}]}
@@ -387,7 +388,8 @@ def test_absent_final_response_is_not_a_schema_failure(tmp_path, monkeypatch, mo
     assert result['status'] == 'no_response'
     assert counts['no_response'] == 1 and counts['unparsed'] == 0
     assert counts['parse_share'] is None
-    assert calls == ([] if mode == 'cap' else ['selection', 'final'])
+    # a lost response is sent again automatically, at most AUTO_RESENDS more times, and is still no_response
+    assert calls == ([] if mode == 'cap' else ['selection'] + ['final'] * (1 + harness.AUTO_RESENDS))
 
 
 def test_history_only_annotation_publishes_through_comparison_board(tmp_path):

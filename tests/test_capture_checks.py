@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from checks import capture_qc as cq
+from checks import workers
 from checks.vendor import public_dataset_adapter_qc as up
 from label import state as ms
 
@@ -415,7 +416,7 @@ def test_an_episode_whose_capture_worker_stops_gets_a_record_with_every_check_er
         if d.name == "episode_000001":
             raise RuntimeError("the worker stopped")
         return good
-    monkeypatch.setattr(cq, "ProcessPoolExecutor", ThreadPoolExecutor)
+    monkeypatch.setattr(workers, "ProcessPoolExecutor", ThreadPoolExecutor)
     monkeypatch.setattr(cq, "run_episode", run)
     monkeypatch.setattr(sys, "argv", ["python -m checks.capture_qc", "--force", str(eps)])
     cq.main()
@@ -549,7 +550,7 @@ def test_complete_capture_failure_fails_cli_and_retries_after_input_repair(tmp_p
     ep = tmp_path / 'episode_broken'
     ep.mkdir()
     (ep / 'context.json').write_text(json.dumps({'fps': 30}))
-    monkeypatch.setattr(cq, 'ProcessPoolExecutor', ThreadPoolExecutor)
+    monkeypatch.setattr(workers, 'ProcessPoolExecutor', ThreadPoolExecutor)
     monkeypatch.setattr(sys, 'argv', ['checks.capture_qc', '--jobs', '1', str(tmp_path)])
     assert cq.main() == cq.EXIT_FAILED
     ctx = json.loads((ep / 'context.json').read_text())

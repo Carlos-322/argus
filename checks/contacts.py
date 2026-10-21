@@ -1,28 +1,9 @@
-"""The recording's contacts checked against what the model saw at them, after labelling.
+"""Compare sensor intervals with independent visual touch observations.
 
-The touch signals time each contact exactly (label/contacts.py). The model is shown frames around each contact's begin
-and end (label/episode.py contact_image) and says, per contact, whether the frames show the hand touching, the first
-frame of the begin strip that shows touch and the last of the end strip, and which hand; and it lists the moments a
-hand clearly takes hold of something that no contact covers. The two sources are compared here:
-
-  clock_offset       where touch first shows in the frames against where the signal says it begins (and the same at
-                     the end), over every contact whose strip brackets it: the median is how far the touch sensor's
-                     clock runs from the cameras'. Reported when at least MIN_CONTACTS contacts agree on it and it is
-                     more than OFFSET_FRAMES camera frames
-  touch_not_seen     contacts the signal records but the frames show no touch at (a sensor that fires on its own, a
-                     contact on the other hand, a clock far off)
-  hand_mismatch      contacts the model sees on the other hand than the signal's name says; when every contact with a
-                     hand disagrees, the gloves look swapped
-  contact_missing    moments the model sees a hand take hold of or press something that no recorded contact covers (a
-                     sensor that missed it, or one that was off)
-
-A contact with an alignment assumption (its "aligned_by", label/contacts.py mark_aligned) has times that are the
-placement's, not measured contact times. It never counts toward clock_offset or touch_not_seen. The result groups
-such contacts by their particular placement assumption.
-
-The result is context-free numbers and sentences, written by `python -m board build` into the episode's
-dataset_checks["contact_checks"]. Like checks/sensors.py they are notes, not counted issues, until the datasets they
-fire on are checked on the frames.
+Response activity does not establish contact boundaries, sensor clock error or
+swapped sensors. Explicit contact-state claims retain timing comparisons when
+their clock is usable. Differences remain review candidates, not sensor faults.
+Alignment assumptions further limit which comparisons are available.
 """
 from __future__ import annotations
 
@@ -77,10 +58,12 @@ def check(labels: dict, contacts: list[dict], strips: dict, fps: float, instrume
     if arrival_clock:
         placed = list(by_id)
         arrival |= {cid for cid, rec in by_id.items() if not rec.get('aligned_by')}
-    physically_unverified = set(by_id) if arrival_clock else arrival
+    physically_unverified = set(by_id) if arrival_clock else set(arrival)
+    activity_only = {cid for cid, rec in by_id.items() if rec.get('evidence_kind') == 'response_activity'}
+    physically_unverified |= activity_only
     for cid, rec in by_id.items():
         m = seen.get(cid)
-        if not m or cid in placed:
+        if not m or cid in placed or cid in activity_only:
             continue
         st = strips.get(cid) or {}
         b = _between(st.get("begin") or [], m.get("first_touch_frame"), True)
@@ -94,6 +77,9 @@ def check(labels: dict, contacts: list[dict], strips: dict, fps: float, instrume
     rate = float(fps) if isinstance(fps, (int, float, np.number)) and np.isfinite(fps) and fps > 0 else 30.0
     frame_ms = 1000.0 / rate
     out = {"contacts": len(by_id), "checked": len(shown), "notes": []}
+    if activity_only:
+        out['response_activity_intervals'] = sorted(activity_only)
+        out['activity_limitation'] = 'Response activity is not verified contact timing; its disagreement with video does not establish sensor clock error or swapped sensors.'
     if arrival_clock or arrival:
         out.update(timing_basis='mcap_log_time', timing_limitation=RECORDER_ARRIVAL_LIMITATION)
     if arrival_clock or arrival and len(arrival) == len(by_id):
@@ -117,8 +103,10 @@ def check(labels: dict, contacts: list[dict], strips: dict, fps: float, instrume
     not_seen = [cid for cid in timed if str(seen[cid].get("touch_seen")).lower() == "no"]
     if not_seen:
         notes.append({"check": "touch_not_seen", "evidence": (
-            f"{len(not_seen)} of the {len(timed)} contacts checked show no touch in the frames "
-            f"({', '.join(not_seen)})")})
+            f"{len(not_seen)} of the {len(timed)} sensor intervals checked show no touch in the frames "
+            f"({', '.join(not_seen)})"
+            + ('; response activity does not establish physical contact, so this is a review candidate rather than a sensor fault.'
+               if activity_only.intersection(not_seen) else ''))})
     pairs = [(cid, by_id[cid].get("hand"), str(seen[cid].get("hand") or "").lower())
              for cid in shown if cid not in physically_unverified]
     known = [(cid, h, m) for cid, h, m in pairs if h in ("left", "right") and m in ("left", "right")]
@@ -138,10 +126,10 @@ def check(labels: dict, contacts: list[dict], strips: dict, fps: float, instrume
     if missing:
         notes.append({"check": "contact_missing", "evidence": (
             f"{len(missing)} moment{'s' if len(missing) != 1 else ''} where a hand takes hold of or presses something "
-            "with no recorded contact: " + "; ".join(
+            "without a covering sensor-activity interval; this discrepancy does not establish missing physical contact or a failed sensor: " + "; ".join(
                 f"{float(x.get('t_s') or 0):.1f} s, {x.get('hand') or 'a hand'}, {x.get('object') or 'an object'}"
                 for x in missing[:6])
-            + ("; the contacts " + " or ".join(dict.fromkeys(
+            + ("; the intervals " + " or ".join(dict.fromkeys(
                 placement_text(by_id[cid]["aligned_by"]) for cid in placed))
                 + " can miss a grasp by their placement alone" if placed else ""))})
     out["notes"] = notes

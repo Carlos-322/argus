@@ -1,5 +1,4 @@
 """Offline writer, retry, and invoice boundaries for execution resumes."""
-import copy
 import json
 import multiprocessing as mp
 import sys
@@ -127,9 +126,10 @@ def test_received_retry_cannot_repurchase_healthy_output(tmp_path, monkeypatch):
     assert not (out / f'stale_{ep.name}.json').exists()
 
 
-def test_unknown_charge_is_retried_only_when_named_and_stays_counted(tmp_path, monkeypatch):
-    # A dispatch whose outcome is unknown may have been billed: a plain resume never sends it again, and naming it
-    # sends that unit alone while its possible charge stays reserved against the cap.
+def test_unknown_charge_past_its_automatic_resends_is_retried_only_when_named_and_stays_counted(
+        resends_used_up, tmp_path, monkeypatch):
+    # A dispatch whose outcome is unknown may have been billed: once its automatic resends are used up, a plain
+    # resume never sends it again, and naming it sends that unit alone while its possible charge stays reserved.
     ep = recording(tmp_path, np.arange(12) / 30)
     settings = dict(model=harness.DEFAULT_MODEL, reasoning='medium', max_tokens=100, cell_w=128, example_dir=None)
     record = {'input_identity': harness.input_identity(ep, **settings), 'parse_ok': False,

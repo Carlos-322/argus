@@ -22,7 +22,7 @@ def only_implementation_changed(saved: dict, current: dict) -> bool:
 
 def matches(record: dict, current: dict, ep_dir: Path, out_dir: Path, *, example_dir=None) -> bool:
     """Replay proven selections locally; no provider, routing, or cache mutation."""
-    from label import harness, grids, evidence_access as ea
+    from label import harness, grids, evidence_access as ea, sensor_analysis as sa
     saved = record.get('input_identity')
     if not only_implementation_changed(saved, current):
         return False
@@ -52,6 +52,7 @@ def matches(record: dict, current: dict, ep_dir: Path, out_dir: Path, *, example
             grid_cols=harness.GRID_COLS, cell_w=settings['cell_w'] or None, max_cell_w=route_width,
             example_dir=example_dir, inspect_evidence=True, model=settings['model'], reasoning=settings['reasoning'],
             sample_fps=policy.get('sample_fps'), task_mode=policy['task_mode'], dataset_note=policy.get('dataset_note'),
+            inspection=harness.policy.inspection_mode(policy),
             derived_dir=Path(out_dir) / '.derived' / 'jaws', read_only=True)
         for key, field in (('cell', 'cell'), ('grid_cols', 'grid_cols'), ('timesteps_s', 'timesteps'),
                            ('views', 'views'), ('cam_labels', 'cam_labels')):
@@ -64,6 +65,18 @@ def matches(record: dict, current: dict, ep_dir: Path, out_dir: Path, *, example
             content, _, _ = ea.final_content(content, request['image_bytes'], access, doc, extra,
                 image_limit=harness.MAX_IMAGES, image_bytes_limit=harness.IMAGE_LIMIT_BYTES,
                 image_inflation=harness.IMAGE_SIZE_INFLATION)
+        analysis = sa.build(content, request['sensor_evidence'], config={
+            **(record.get('config') or {}), 'model': settings['model'], 'reasoning': settings['reasoning'],
+            'max_tokens': settings['max_tokens'], 'input_identity': saved},
+            ep=access.ep if access is not None else None)
+        receipt = record.get('sensor_analysis')
+        if analysis is not None:
+            if not isinstance(receipt, dict) or receipt.get('digest') != analysis['digest']:
+                return False
+            sa.bind(analysis, receipt)
+            content = sa.local_content(content)
+        elif receipt is not None:
+            return False
         rebuilt = grids.receipt(content, {}, reference_recipe=recipe)
         return rebuilt['fingerprint'] == proof['fingerprint']
     except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError, RuntimeError):

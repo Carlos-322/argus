@@ -570,7 +570,7 @@ def check_goal_frames(run, cam, clip, f, tr, serve, main, capture=None):
     from PIL import Image
     sizes = set()
     for ask in asks:
-        jpg = serve.extract_frame(clip, ask, 640)
+        jpg = serve.extract_frame(clip, ask, 640, _wait=True)  # cases run in threads and share the media semaphore
         if not jpg:
             run.fail(cam, "goal frame", f"none at {ask} s")
             continue

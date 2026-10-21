@@ -272,5 +272,58 @@ def test_saved_contact_veto_filters_named_signals_without_removing_unattributed_
     ep['context']['contacts'] = [unbound, mixed]
     reviewed = bind(ep, record, {'field0': {'role': ''}})
     before = copy.deepcopy(reviewed['context'])
-    assert lc.of_episode(reviewed) == [unbound, {**mixed, 'signals': ['left_pressure']}]
+    kept = lc.of_episode(reviewed)
+    assert kept[0] == unbound
+    assert {key: kept[1][key] for key in mixed} == {**mixed, 'signals': ['left_pressure']}
+    assert kept[1]['evidence_kind'] == 'response_activity'
+    assert kept[1]['reference_kind'] == 'inferred'
     assert reviewed['context'] == before
+
+
+def test_a_machine_role_never_turns_a_camera_the_reader_placed_into_a_touch_sensor(monkeypatch):
+    # YAM teleop, Oct 20 2026: the dictionary model called right_wrist_cam "tactile_image" while its own meaning said
+    # "Right wrist RGB camera images", and the board filed it under Tactile cameras
+    from board import dictionary_projection
+    from label import dictionary_context, tactile_capture
+    from label.dictionary_context import camera_role
+    wrist = lambda side: {'key': f'{side}_wrist_cam-images-rgb', 'name': side, 'role_provenance': 'recorded_name',
+                          'mounting': 'actor'}
+    ctx = {'profile': 'teleop_arms', 'cameras': {
+        'exo': {'key': 'exo_cam-images-rgb', 'name': 'exo_cam', 'role_provenance': 'presentation',
+                'mounting': 'unspecified'}, 'left': wrist('left'), 'right': wrist('right')}}
+    machine = {'role': 'tactile_image', 'provenance': 'machine', 'meaning': 'Right wrist RGB camera images.'}
+    assert camera_role(ctx, 'right', machine) is None
+    assert camera_role(ctx, 'right', {**machine, 'provenance': 'human'}) == 'tactile_image'
+    gelsight = {'key': 'left_gripper_gelsight', 'name': 'left', 'role_provenance': 'recorded_name', 'mounting': 'actor'}
+    assert camera_role({**ctx, 'cameras': {'left': gelsight}}, 'left', machine) == 'tactile_image'
+    unnamed = {'key': 'cam3', 'name': 'cam3', 'role_provenance': 'presentation', 'mounting': 'unspecified'}
+    assert camera_role({**ctx, 'cameras': {'exo': unnamed}}, 'exo', machine) == 'tactile_image'
+    # an adapter's description is not a placement: an ego ROS topic and an older context keep the model's role, and a
+    # sensing word in the description counts like one in the name
+    glove = {'key': '/left_glove/image_raw', 'name': 'left_glove', 'role_provenance': 'adapter',
+             'desc': 'Recorded camera channel /left_glove/image_raw.'}
+    assert camera_role({'profile': 'ego_head', 'cameras': {'extra1': glove}}, 'extra1', machine) == 'tactile_image'
+    older = {'key': 'finger_cam', 'name': 'finger_cam', 'desc': 'GelSight image of the left finger pad'}
+    assert camera_role({**ctx, 'cameras': {'extra1': older}}, 'extra1', machine) == 'tactile_image'
+    placed_gelsight = {'key': 'left_gripper_cam', 'name': 'left', 'role_provenance': 'recorded_name',
+                       'mounting': 'actor', 'desc': 'GelSight Mini on the left gripper pad'}
+    assert camera_role({**ctx, 'cameras': {'left': placed_gelsight}}, 'left', machine) == 'tactile_image'
+    from prepare.formats import is_sensing
+    assert all(is_sensing(n) for n in ('GelSight Mini', 'GelSightLeft', 'gel_sight_right', 'gelsight', 'digit_0'))
+    assert not any(is_sensing(n) for n in ('left_gripper_cam', 'digital_cam', 'right_wrist_cam', 'sight_gel'))
+    read = lambda c, view, kind: machine if view == 'right' else {}
+    monkeypatch.setattr(dictionary_context, 'prepared_interpretation', read)
+    monkeypatch.setattr(tactile_capture, 'prepared_interpretation', read)
+    shown = dictionary_projection.camera_presentation(ctx)
+    assert all((shown.get(view) or {}).get('role') not in ('tactile', 'sensor') for view in ('exo', 'left', 'right'))
+    assert not any(tactile_capture.eligible(ctx, view) for view in ('exo', 'left', 'right'))
+    # the sensor evidence keeps it a camera too, and says why the model's role was not used
+    from label import sensor_evidence as se
+    from test_tactile_contract import episode as tactile_episode
+    monkeypatch.setattr(se, 'prepared_interpretation', read)
+    ep = tactile_episode({}, [], cameras=ctx['cameras'])
+    ep['context']['profile'] = 'teleop_arms'
+    doc = se.build(ep, {'n': 5, 'ks': [0, 4]}, shown={'right': [0, 4]})
+    assert not any(sensor['id'] == 'camera:right' for sensor in doc['sensors'])
+    assert any(note.startswith('right: the field dictionary called this camera tactile_image')
+               for note in doc['limitations']), doc['limitations']

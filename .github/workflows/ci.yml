@@ -20,9 +20,16 @@ env:
   HF_DATASETS_OFFLINE: "1"
 
 jobs:
-  tests:
+  # The suite runs as eight shards side by side, each a set of whole test files balanced by recorded time
+  # (tests/sharding.py); "tests" passes only when every shard does.
+  shard:
+    name: tests ${{ matrix.shard }}/8
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -38,15 +45,30 @@ jobs:
           package-manager-cache: false
       - name: Install video tools
         run: |
-          sudo apt-get update
+          # the runner image lists third-party repositories (packages.microsoft.com among them) whose index can
+          # refuse a fetch; that must not fail the job, and the install below still fails if Ubuntu's index is missing
+          sudo apt-get update || echo "some package indexes could not be fetched; installing from those that were"
           sudo apt-get install --yes --no-install-recommends ffmpeg
           node --version
           ffmpeg -version
           ffprobe -version
       - name: Install locked dependencies
-        run: uv sync --frozen
+        run: uv sync --locked
       - name: Test without provider or dataset access
+        env:
+          ARGUS_TEST_SHARD: ${{ matrix.shard }}/8
         run: uv run --frozen --offline pytest -q -ra
+
+  tests:
+    needs: shard
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every shard passed
+        env:
+          RESULT: ${{ needs.shard.result }}
+        run: test "$RESULT" = success
 
   secrets:
     runs-on: ubuntu-24.04

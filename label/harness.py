@@ -67,13 +67,11 @@ from label.route import route_width
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 DEFAULT_MODEL = providers.default_model("openai/gpt-6-astra")
-DEFAULT_REASONING = "medium"
 DETAIL = "high"
 GRID_COLS = 4
 
-# gpt-6-astra list prices (USD per token), used only when a response carries no billed cost.
+# gpt-6-astra's input list price (USD per token); gate/score.py prices prompt cache reads and writes from it
 PRICE_IN = 1.0e-5
-PRICE_OUT = 5.0e-5
 # OpenAI list prices (USD per token: input, cached input, output), and from LONG_PROMPT_TOKENS prompt tokens the
 # long-context ones, for a call sent straight to OpenAI, whose response carries tokens but no cost
 OPENAI_PRICES = {"gpt-6-astra": ((1.0e-5, 1.0e-6, 5.0e-5), (2.0e-5, 2.0e-6, 7.5e-5)),
@@ -255,6 +253,62 @@ def _retry_after(headers, attempt: int) -> float:
     return min(60.0, 4.0 * 2 ** attempt)
 
 
+# A request the provider failed on its side (the reply never came or was cut off, or the provider reported an error
+# inside the reply) is sent again automatically, up to AUTO_RESENDS more times per unit, after AUTO_RESEND_DELAYS_S.
+# Each attempt that may have been billed keeps its charge in the unit's billing history and against the cap, as an
+# explicit --retry-received does; past the bound only --retry-received sends it again. A reply the model wrote that
+# does not parse, a reply cut at the output limit and a complete annotation are never resent automatically.
+AUTO_RESENDS = 2
+AUTO_RESEND_DELAYS_S = (30.0, 120.0)
+
+
+def provider_failure(record: dict) -> str | None:
+    """Why a unit's last attempt failed on the provider's side, or None: no verified response (a request cut off or
+    whose machine stopped), or the provider's own error inside a reply it delivered."""
+    if not isinstance(record, dict) or record.get('dry_run') or record.get('parse_ok') is True:
+        return None
+    resp = record.get('response')
+    if resp is None and record.get('final_dispatch_outcome') in ('claimed', 'unverified'):
+        return str(record.get('no_reply') or 'the request has no verified response')[:200]
+    if isinstance(resp, dict) and record.get('finish_reason') != 'length':
+        failure = reply_error(resp)
+        if failure is not None:
+            return f'the provider returned an error in the reply ({failure})'
+    return None
+
+
+def dispatched_attempts(record: dict) -> int:
+    """How many times this unit's final request was sent: the attempts in its billing history and the last one,
+    never counting an attempt that was not dispatched."""
+    # an attempt was sent when its request was claimed for dispatch or anything came back (a completed record names no
+    # dispatch outcome, but holds the response); one refused before dispatch or built in a dry run was not
+    sent = lambda r: (isinstance(r, dict) and not r.get('dry_run')
+                      and r.get('final_dispatch_outcome') != 'not dispatched'
+                      and (r.get('final_dispatch_outcome') in ('claimed', 'unverified', 'received')
+                           or r.get('response') is not None or r.get('finish_reason') is not None))
+    history = record.get('final_cost_history') if isinstance(record, dict) else None
+    return sum(1 for r in history or [] if sent(r)) + (1 if sent(record) else 0)
+
+
+def auto_resend(record: dict) -> str | None:
+    """The provider failure to send this unit again for, while it has been sent at most AUTO_RESENDS times, or None."""
+    why = provider_failure(record)
+    return why if why and dispatched_attempts(record) <= AUTO_RESENDS else None
+
+
+def reply_error(resp: dict) -> str | None:
+    """The provider's own failure carried inside a reply it delivered with HTTP 200 (finish_reason error, or an error
+    on the choice, eg an overloaded upstream), or None. Such a reply's text is a fragment, never an answer to parse."""
+    choices = resp.get('choices') if isinstance(resp, dict) else None
+    choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    error = choice.get('error')
+    if choice.get('finish_reason') != 'error' and not error:
+        return None
+    if isinstance(error, dict):
+        return ' '.join(str(error.get(key)) for key in ('code', 'message') if error.get(key) is not None)[:300] or 'error'
+    return str(error)[:300] if error else 'finish_reason error'
+
+
 def _post(url: str, body: dict, api_key: str, timeout: int, *, attempts: int = 6) -> dict:
     """POST one request. attempts bounds retries of failures whose billing is unknown, so a paid call passes 1 and
     is never replayed after it may have been billed. A failure that provably cost nothing (the request never fully
@@ -279,6 +333,19 @@ def _post(url: str, body: dict, api_key: str, timeout: int, *, attempts: int = 6
                 # HTTP 200 carrying an error body and no completion: fail loudly, never record an empty parse
                 err = json.dumps(resp.get("error") or resp)[:300]
                 raise DispatchError(f"200 response with no choices: {err}", http_status=200, stage='unknown')
+            failure = reply_error(resp)
+            cost = (resp.get('usage') or {}).get('cost') if isinstance(resp.get('usage'), dict) else None
+            if failure is not None and type(cost) in (int, float) and cost == 0:
+                # the provider failed inside a 200 reply (an overloaded upstream) and billed nothing: it cost nothing,
+                # so it is retried like an error status; a billed or unpriced one is kept as received, and only
+                # --retry-received sends it again
+                last = f"provider error in the reply: {failure}"
+                unpaid_left -= 1
+                if unpaid_left > 0:
+                    time.sleep(min(30.0, 2.0 ** (tries - 1)))
+                    continue
+                raise DispatchError(f"model call failed after {tries} HTTP attempts: {last}", http_status=200,
+                                    verified_unpaid=clean, stage='rejected')
             return resp
         except urllib.error.HTTPError as e:
             # Read a bounded complete envelope before shortening its display message.
@@ -296,8 +363,8 @@ def _post(url: str, body: dict, api_key: str, timeout: int, *, attempts: int = 6
                 # billed; after one, it is just a failure whose cost is unknown
                 if clean and (e.code in (401, 402) or (url == OPENAI_URL and e.code == 429
                                                          and quota == 'insufficient_quota')):
-                    raise KeyExhausted(last, http_status=e.code, first_attempt=True, rejection_code=quota)
-                raise DispatchError(last, http_status=e.code, verified_unpaid=clean, stage='rejected')
+                    raise KeyExhausted(last, http_status=e.code, first_attempt=True, rejection_code=quota) from e
+                raise DispatchError(last, http_status=e.code, verified_unpaid=clean, stage='rejected') from e
             if e.code in UNKNOWN_OUTCOME_STATUS:
                 clean = False
                 unknown_left -= 1
@@ -305,14 +372,14 @@ def _post(url: str, body: dict, api_key: str, timeout: int, *, attempts: int = 6
                     time.sleep(_retry_after(None, tries - 1))
                     continue
                 raise DispatchError(f"model call failed after {tries} HTTP attempts: {last}", http_status=e.code,
-                                    stage='unknown')
+                                    stage='unknown') from e
             if e.code in TRANSIENT_STATUS:
                 unpaid_left -= 1
                 if unpaid_left > 0:
                     time.sleep(_retry_after(e.headers, tries - 1))
                     continue
             raise DispatchError(f"model call failed after {tries} HTTP attempts: {last}", http_status=e.code,
-                                verified_unpaid=clean, stage='rejected')
+                                verified_unpaid=clean, stage='rejected') from e
         except urllib.error.URLError as e:
             last = f"request not sent: {e.reason}"
             unpaid_left -= 1
@@ -337,11 +404,12 @@ def _post(url: str, body: dict, api_key: str, timeout: int, *, attempts: int = 6
 def label_episode(ep_dir: Path, out_path: Path, *, model: str, reasoning: str, api_key: str, max_tokens: int,
                   timeout: int, cell_w: int = 0, example_dir: str | None = None, dry_run: bool = False,
                   reserve_final=None, reserve_selection=None, settle_selection=None, force_refresh=False,
+                  settle_final=None,
                   sample_fps=None, task_mode=None, dataset_note=None, require_known_pricing=False,
-                  inspection_refresh_id=None) -> dict:
+                  inspection_refresh_id=None, inspection=None) -> dict:
     context = json.loads((Path(ep_dir) / 'context.json').read_text())
     resolved = policy.resolve(context, model=model, reasoning=reasoning, sample_fps=sample_fps,
-                              task_mode=task_mode, dataset_note=dataset_note)
+                              task_mode=task_mode, dataset_note=dataset_note, inspection=inspection)
     model, reasoning = resolved['model'], resolved['reasoning']
     if not dry_run:
         validate_transport(model, api_key)
@@ -354,20 +422,20 @@ def label_episode(ep_dir: Path, out_path: Path, *, model: str, reasoning: str, a
         pricing_quote = pricing.quote(model, timeout)
     identity = input_identity(ep_dir, model=model, reasoning=reasoning, max_tokens=max_tokens,
                               cell_w=cell_w, example_dir=example_dir, sample_fps=sample_fps,
-                              task_mode=task_mode, dataset_note=dataset_note)
+                              task_mode=task_mode, dataset_note=dataset_note, inspection=inspection)
     if any(item.get('missing') for item in identity['source_proof']):
         raise RuntimeError('Request source inputs are missing; no paid request was dispatched.')
     billing = _billing_fields(out_path)
     # an explicit cell width skips the routing; otherwise a routed rig's widest cell comes from its task text
     route_w, route = (None, {"routed": False}) if cell_w else route_width(
         ep_dir, None if dry_run else api_key, call_model_once, timeout=min(timeout, 120),
-        receipt_path=Path(out_path).with_name(f'noreply_{Path(out_path).name}'), input_identity=identity,
+        out_path=out_path, input_identity=identity,
         reserve_dispatch=reserve_selection, settle_dispatch=settle_selection, billing_fields=billing,
         force_refresh=force_refresh)
     req = me.build_request(ep_dir, detail=DETAIL, gate=DECODE_GATE, grid_cols=GRID_COLS, cell_w=cell_w or None,
                            max_cell_w=route_w, example_dir=example_dir, inspect_evidence=True,
                            model=model, reasoning=reasoning, sample_fps=sample_fps,
-                           task_mode=task_mode, dataset_note=dataset_note,
+                           task_mode=task_mode, dataset_note=dataset_note, inspection=policy.inspection_mode(resolved),
                            derived_dir=Path(out_path).parent / ".derived" / "jaws")
     pl = req["plan"]
     fields = {
@@ -389,11 +457,17 @@ def label_episode(ep_dir: Path, out_path: Path, *, model: str, reasoning: str, a
         # the recording's contacts (label/contacts.py) and the strips each one shown was drawn with (checks/contacts.py)
         **({"contacts": req["contacts"], "contact_views": req["contact_views"]} if req.get("contact_views") else {}),
         "config": {"views": req["views"], "cam_labels": req["cam_labels"], "layout": "grid",
+                   **({'sensor_copy_contract_version': req['sensor_copy_contract_version']}
+                      if 'sensor_copy_contract_version' in req else {}),
+                   **({'sensor_scene_pairing': req['sensor_scene_pairing']}
+                      if (req.get('sensor_scene_pairing', {}).get('snapshot_times')
+                          or any(req.get('sensor_scene_pairing', {}).get('omissions', {}).values())) else {}),
                    **({'camera_observation_views': req['camera_observation_views'],
                        'camera_observation_labels': req['camera_observation_labels']}
                       if 'camera_observations' in req['schema_fields'] else {}),
                    "grid_cols": req["grid_cols"], "cell": req["cell"],
-                   "n_timesteps": len(pl["ks"]), "n_frames_sent": len(pl["ks"]) * len(req["cam_labels"]),
+                   "n_timesteps": len(pl["ks"]), "n_frames_sent": len(pl["ks"]) * len(req["cam_labels"]) + req.get("native_tactile_frames", 0)
+                   + req.get('sensor_scene_pairing', {}).get('supplemental_captures', 0),
                    "n_image_parts": req["n_images"], "fullres_frames": ["first", "last"],
                    "contact_detail_s": req["contact_s"], "resolution_route": route,
                    "timesteps_s": req["timesteps"], "detail": DETAIL, "circular_image": req["lens"],
@@ -406,7 +480,7 @@ def label_episode(ep_dir: Path, out_path: Path, *, model: str, reasoning: str, a
                             reasoning=reasoning, api_key=api_key, max_tokens=max_tokens, timeout=timeout,
                             dry_run=dry_run, prompt_text=req["prompt"], evidence_access=req["evidence_access"],
                             reserve_final=reserve_final, reserve_selection=reserve_selection,
-                            settle_selection=settle_selection, force_refresh=force_refresh,
+                            settle_selection=settle_selection, settle_final=settle_final, force_refresh=force_refresh,
                             require_known_pricing=require_known_pricing, inspection_refresh_id=inspection_refresh_id,
                             pricing_quote=pricing_quote)
 
@@ -455,7 +529,8 @@ def request_implementation(repository: Path) -> dict[Path, bytes]:
 
 
 def input_identity(ep_dir: Path, *, model: str, reasoning: str, max_tokens: int, cell_w: int,
-                   example_dir: str | None, sample_fps=None, task_mode=None, dataset_note=None) -> dict:
+                   example_dir: str | None, sample_fps=None, task_mode=None, dataset_note=None,
+                   inspection=None) -> dict:
     """Bounded proof for source files and the settings that shape a paid annotation request."""
     from label.evidence_access import source_proof, reader_projection_identity
     ep_dir = Path(ep_dir)
@@ -472,7 +547,7 @@ def input_identity(ep_dir: Path, *, model: str, reasoning: str, max_tokens: int,
     if problem:
         raise RuntimeError(f'{ep_dir}: {problem}')
     resolved = policy.resolve(ctx, model=model, reasoning=reasoning, sample_fps=sample_fps,
-                              task_mode=task_mode, dataset_note=dataset_note)
+                              task_mode=task_mode, dataset_note=dataset_note, inspection=inspection)
     me.require_request_window(ep_dir, {**ctx, 'annotation_policy': resolved})
     from label.dictionary_editor import for_episode
     owner = (ctx.get('piece') or {}).get('of') or (ctx.get('data_dictionary') or {}).get('episode_id') or ep_dir.name
@@ -856,7 +931,7 @@ def parse_response(text: str) -> tuple[dict, bool]:
         if not substantive_annotation(labels):
             raise ValueError('the reply contains no substantive annotation content')
         return labels, True
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - any reply that does not parse is kept raw, with why
         return {"_raw": text, "_parse_error": f"{type(e).__name__}: {e}"[:300]}, False
 
 
@@ -1202,7 +1277,7 @@ def camera_observation_sources_match(parent, child, views) -> bool:
 def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int, fields: dict, *, model: str,
                      reasoning: str, api_key: str, max_tokens: int, timeout: int, dry_run: bool = False,
                      prompt_text: str = "", evidence_access=None, reserve_final=None,
-                     reserve_selection=None, settle_selection=None, force_refresh=False,
+                     reserve_selection=None, settle_selection=None, settle_final=None, force_refresh=False,
                      require_known_pricing=False, inspection_refresh_id=None, pricing_quote=None) -> dict:
     """Send one request (or, in a dry run, record exactly what would be sent) and write the result."""
     fields = {**fields, **(_billing_fields(out_path) if 'final_cost_history' not in fields else {})}
@@ -1216,7 +1291,8 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
             current = input_identity(ep_dir, model=model, reasoning=reasoning, max_tokens=max_tokens,
                 cell_w=settings['cell_w'], example_dir=fields.get('example_dir'),
                 sample_fps=selected.get('sample_fps'), task_mode=selected['task_mode'],
-                dataset_note=selected.get('dataset_note'))
+                dataset_note=selected.get('dataset_note'),
+                inspection=policy.inspection_mode(selected))
             valid = same_input_identity(saved, current) and not any(item.get('missing') for item in current['source_proof'])
         except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError):
             valid = False
@@ -1232,11 +1308,12 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
         raise RuntimeError(f"payload {img_bytes} B exceeds the image-size cap; refusing to send")
     if evidence_access is not None:
         from label import evidence_access as ea
+        evidence_access.copy_contract_version = (fields.get('config') or {}).get('sensor_copy_contract_version')
         fields = copy.deepcopy(fields)
         fields['evidence_inspection'] = evidence_access.record()
         if not dry_run:
             def select(parts):
-                response = call_model_once(parts, model, reasoning, api_key, ea.MAX_SELECTION_TOKENS, min(timeout, 120),
+                response = call_model_once(parts, model, reasoning, api_key, ea.selection_tokens(reasoning), min(timeout, 120),
                     **({'pricing_quote': pricing_quote} if pricing_quote is not None else {}))
                 usage = response.get('usage') or {}
                 cost, _ = _verified_final_cost(usage, model)
@@ -1245,7 +1322,7 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
                 return response
             # Reserve the maximum output and a conservative input allowance before each selection dispatch.
             def reserve(parts):
-                return final_cost_bound(parts, ea.MAX_SELECTION_TOKENS, model=model,
+                return final_cost_bound(parts, ea.selection_tokens(reasoning), model=model,
                                         require_known_pricing=require_known_pricing,
                                         **({'pricing_quote': pricing_quote} if pricing_quote is not None else {}))
             cache = Path(out_path).parent / '.evidence' / (Path(out_path).name + '.inspection.json')
@@ -1267,12 +1344,15 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
                         return False
                     settle_selection(final_floor, 0.0)
                     return True
+            # inspection off keeps the inspection record (a tactile array's regional analysis is owned by it) and
+            # buys no selection
+            off = policy.inspection_mode(fields.get('annotation_policy') or {}) == 'off'
+            rounds = 0 if off else 2
             try:
-                doc, extra = ea.discover(evidence_access, content, select, cache, reserve_cost=reserve,
+                doc, extra = ea.discover(evidence_access, content, select, cache, rounds=rounds, reserve_cost=reserve,
                                         reserve_dispatch=selection_dispatch, settle_dispatch=settle_selection,
                                         force_refresh=force_refresh, refresh_id=inspection_refresh_id,
-                                        ledger_managed=(pricing_quote is not None and reserve_selection is not None
-                                                        and settle_selection is not None),
+                                        ledger_managed=(callable(reserve_selection) and callable(settle_selection)),
                                         image_limit=MAX_IMAGES, image_bytes_limit=IMAGE_LIMIT_BYTES / IMAGE_SIZE_INFLATION)
             except Exception as error:
                 doc = evidence_access.record()
@@ -1312,6 +1392,53 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
     fields = copy.deepcopy(fields)
     fields.setdefault('config', {})['request_images'] = input_grids.receipt(content,
         {**fields, 'model': model, 'reasoning_effort': reasoning})
+    bound_sensor_analysis = None
+    if not dry_run and isinstance(fields.get('sensor_evidence'), dict):
+        from label import sensor_analysis, sensor_analysis_run
+        analysis_request = sensor_analysis.build(content, fields['sensor_evidence'], config={
+            **fields['config'], 'model': model, 'reasoning': reasoning, 'max_tokens': max_tokens,
+            'input_identity': fields.get('input_identity')},
+            ep=evidence_access.ep if evidence_access is not None else None)
+        if analysis_request is not None:
+            content = sensor_analysis.local_content(content)
+            prompt_text = '\n'.join(part['text'] for part in content if part.get('type') == 'text')
+            fields['config']['request_images'] = input_grids.receipt(content,
+                {**fields, 'model': model, 'reasoning_effort': reasoning})
+            analysis_doc = fields.get('evidence_inspection')
+            if not isinstance(analysis_doc, dict) or not analysis_doc.get('digest'):
+                raise ValueError('Required sensor analysis has no durable inspection owner; no dispatch.')
+            analysis_cache = Path(out_path).parent / '.evidence' / (Path(out_path).name + '.inspection.json')
+            def analysis_call(parts):
+                return call_model_once(parts, model, reasoning, api_key, max_tokens, timeout,
+                    **({'pricing_quote': pricing_quote} if pricing_quote is not None else {}))
+            def analysis_reserve(parts):
+                return final_cost_bound(parts, max_tokens, model=model, require_known_pricing=require_known_pricing,
+                    **({'pricing_quote': pricing_quote} if pricing_quote is not None else {}))
+            analysis_dispatch = reserve_selection
+            if callable(reserve_selection) and callable(settle_selection):
+                analysis_final_floor = analysis_reserve(content)
+                def analysis_dispatch(amount):
+                    if not reserve_selection(amount + analysis_final_floor):
+                        return False
+                    settle_selection(analysis_final_floor, 0.0)
+                    return True
+            try:
+                analysis_receipt = sensor_analysis_run.execute(analysis_request, analysis_doc, analysis_cache,
+                    call=analysis_call, reserve_cost=analysis_reserve, model=model,
+                    reserve_dispatch=analysis_dispatch, settle_dispatch=settle_selection,
+                    verify_inputs=verify_inputs)
+                fields['sensor_analysis'] = copy.deepcopy(analysis_receipt)
+                bound_sensor_analysis = sensor_analysis.bind(analysis_request, analysis_receipt)
+            except Exception as error:
+                if isinstance(analysis_doc.get('sensor_analysis'), dict):
+                    fields['sensor_analysis'] = copy.deepcopy(analysis_doc['sensor_analysis'])
+                persist_final_claim(Path(out_path).with_name(f'noreply_{Path(out_path).name}'), {
+                    'episode_dir': str(ep_dir), 'model': model, 'reasoning_effort': reasoning, **fields,
+                    'parse_ok': False, 'final_dispatch_outcome': 'not dispatched', 'final_reserved_usd': 0.0,
+                    'no_reply': f'Sensor analysis incomplete: {error}',
+                    **({'no_reply_kind': 'spend_cap'} if isinstance(error, SpendCap) else {})})
+                raise
+            verify_inputs()
     if dry_run:
         fields['config']['request_images']['dispatch_status'] = 'dry_run'
         import io
@@ -1397,6 +1524,9 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
     received_path = Path(out_path).with_name(f'failed_{Path(out_path).name}') if finish == 'length' else Path(out_path)
     persist_final_claim(received_path, received)
     claim_path.unlink(missing_ok=True)
+    if received_cost is not None and settle_final is not None:
+        # The reply is billed: hold its real cost, not its upper bound, so later calls see the true allowance.
+        settle_final(received_cost)
     if finish == "length":
         # the output hit max_tokens, so the JSON is cut off: keep what came back beside the outputs (never as an
         # episode_*.json), then fail. Paid retry requires --retry-received for this episode.
@@ -1419,6 +1549,12 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
         raise Truncated(f"response truncated (finish_reason=length) at max_tokens={max_tokens}", episode_cost(failed))
     # an unparseable reply is recorded as it came, never repaired or retried
     labels, parse_ok = parse_response(text)
+    failure = reply_error(resp)
+    if failure is not None:
+        # the provider failed partway (billed or unpriced, or _post would have retried it): its text is a fragment,
+        # so it is named as the provider's error, never as a reply that did not parse; --retry-received resends it
+        labels, parse_ok = {'_raw': text, '_parse_error': f'the provider returned an error in the reply ({failure}); '
+                                                          'resend it with --retry-received'}, False
 
     raw_usage = resp.get("usage")
     usage = raw_usage if isinstance(raw_usage, dict) else {}
@@ -1456,7 +1592,9 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
             'generation_id': result.get('generation_id'), 'method': 'same episode annotation request'}
     if isinstance(fields.get("sensor_evidence"), dict):
         from label.sensor_evidence import bind
-        result["sensor_evidence"] = bind(fields["sensor_evidence"], labels.get("sensor_findings"))
+        result["sensor_evidence"] = bind(fields["sensor_evidence"], labels.get("sensor_findings"),
+                                         ep=evidence_access.ep if evidence_access is not None else None,
+                                         copy_contract_version=(fields.get('config') or {}).get('sensor_copy_contract_version'))
         result["sensor_evidence"]["provenance"] = {"model": result.get("model_served") or model,
             "generation_id": result.get("generation_id"), "method": "same episode annotation request"}
     if evidence_access is not None:
@@ -1468,10 +1606,19 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
                 evidence.setdefault(key, []).extend(additional[key])
         evidence.setdefault('provenance', {}).update(model=result.get('model_served') or model,
             generation_id=result.get('generation_id'), method='episode annotation with bounded evidence inspection')
+    if bound_sensor_analysis is not None:
+        sensor_analysis.attach(result, bound_sensor_analysis)
     if msg.get("reasoning"):
         # the reasoning text or summary the provider returned, when it returns one
         result["reasoning_text"] = msg["reasoning"][:20000]
     write_atomic(out_path, result)
+    if parse_ok and isinstance(result.get('sensor_evidence'), dict) and isinstance(result.get('evidence_inspection'), dict) \
+            and result['evidence_inspection'].get('digest'):
+        # The paid annotation is saved first, so nothing that happens during the card call can cost it.
+        _video_cards(result, out_path, model=model, reasoning=reasoning, api_key=api_key, timeout=timeout,
+                     pricing_quote=pricing_quote, require_known_pricing=require_known_pricing,
+                     reserve_selection=reserve_selection, settle_selection=settle_selection, verify_inputs=verify_inputs)
+        write_atomic(out_path, result)
     claim_path.unlink(missing_ok=True)
     c = fields.get("config") or {}
     cost_text = f"cost=${cost:.3f}" if cost is not None else f"reserved=${bound:.3f} cost=unverified"
@@ -1480,14 +1627,30 @@ def _call_and_record(ep_dir: Path, out_path: Path, content: list, img_bytes: int
     return result
 
 
-def _cost(usage: dict) -> float:
-    """The billed cost of a call, or the list-price estimate when the response carries none (list_cost on a call
-    straight to OpenAI)."""
-    if usage.get("cost") is not None:
-        return float(usage["cost"])
-    if usage.get("list_cost") is not None:
-        return float(usage["list_cost"])
-    return usage.get("prompt_tokens", 0) * PRICE_IN + usage.get("completion_tokens", 0) * PRICE_OUT
+def _video_cards(result, out_path, *, model, reasoning, api_key, timeout, pricing_quote, require_known_pricing,
+                 reserve_selection, settle_selection, verify_inputs):
+    """Choose and write the video cards from the bound sensor findings (label/sensor_cards.py), billed into the
+    inspection invoice. The annotation is already paid for and bound, so a failure here is recorded and the record
+    is still written: its findings stay in the list, and the board shows them as it did before cards existed."""
+    from label import sensor_analysis_run, sensor_cards
+    evidence, inspection = result['sensor_evidence'], result['evidence_inspection']
+    request = sensor_cards.build(evidence, task=(result.get('labels') or {}).get('task_summary'),
+                                 config={'model': model, 'reasoning': reasoning})
+    if request is None:
+        return
+    cache = Path(out_path).parent / '.evidence' / (Path(out_path).name + '.inspection.json')
+    quote = {'pricing_quote': pricing_quote} if pricing_quote is not None else {}
+    try:
+        receipt = sensor_analysis_run.execute(
+            request, inspection, cache, key='sensor_cards', model=model,
+            call=lambda parts: call_model_once(parts, model, reasoning, api_key, request['config']['max_tokens'], timeout,
+                                               **quote),
+            reserve_cost=lambda parts: final_cost_bound(parts, request['config']['max_tokens'], model=model,
+                                                        require_known_pricing=require_known_pricing, **quote),
+            reserve_dispatch=reserve_selection, settle_dispatch=settle_selection, verify_inputs=verify_inputs)
+        sensor_cards.apply(evidence, receipt['request'], receipt)
+    except Exception as error:  # noqa: BLE001 - the cards are optional; named in the evidence's limitations
+        evidence.setdefault('limitations', []).append(f'Video cards were not written: {error}')
 
 
 def _served(resp: dict) -> dict:
@@ -1663,7 +1826,8 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                                      max_tokens=label_kw.get("max_tokens", 64000), cell_w=label_kw.get("cell_w", 0),
                                      example_dir=label_kw.get("example_dir"),
                                      sample_fps=label_kw.get('sample_fps'), task_mode=label_kw.get('task_mode'),
-                                     dataset_note=label_kw.get('dataset_note'))
+                                     dataset_note=label_kw.get('dataset_note'),
+                        inspection=label_kw.get('inspection'))
         except (OSError, ValueError, RuntimeError) as error:
             if never_dispatched:
                 saved_failures.add(ep.name)
@@ -1709,9 +1873,21 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                     except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError):
                         matches = False
             if not matches or any(item.get("missing") for item in current["source_proof"]):
-                stale[ep.name] = f"saved output {q.name} has changed or missing input; use --force to refresh"
+                hint = ''
+                saved_policy = ((saved or {}).get('settings') or {}).get('annotation_policy')
+                if (isinstance(saved_policy, dict) and 'inspection' not in saved_policy
+                        and policy.inspection_mode((current.get('settings') or {}).get('annotation_policy') or {})
+                        != policy.LEGACY_INSPECTION):
+                    # labelled before inspection could be set, when every recorded field was inspected
+                    hint = (f'; it was labelled before inspection could be set, so add --inspection '
+                            f'{policy.LEGACY_INSPECTION} to resume it as it was paid for')
+                stale[ep.name] = f"saved output {q.name} has changed or missing input; use --force to refresh{hint}"
                 return True
         if any(record.get('final_dispatch_outcome') in ('claimed', 'unverified') for _, record in records):
+            why = None if dry or annotation_complete(records[0][1]) else auto_resend(records[0][1])
+            if why and ep.name not in retry_received:
+                auto_resent[ep.name] = (why, dispatched_attempts(records[0][1]))
+                return False
             if ep.name in retry_received and not dry:
                 # The caller named this unit, accepting that its unknown charge may have been real. The unresolved
                 # attempt stays in the billing history with its reservation (_final_cost_history), so the cap still
@@ -1719,8 +1895,10 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                 return False
             saved_failures.add(ep.name)
             retryable_received.add(ep.name)
-            unverified[ep.name] = ('saved dispatch has an unresolved charge (it may have been billed); no automatic '
-                                   f'paid retry. --retry-received {ep.name} sends this unit alone again')
+            unverified[ep.name] = ('saved dispatch has an unresolved charge (it may have been billed)'
+                                   + (f' after {dispatched_attempts(records[0][1])} attempts'
+                                      if provider_failure(records[0][1]) else '')
+                                   + f'; --retry-received {ep.name} sends this unit alone again')
             if not dry and any(record.get('parse_ok') is True and not annotation_complete(record) for _, record in records):
                 stale[ep.name] = 'saved annotation is unusable and its charge is unresolved; use --force to refresh explicitly'
             return True
@@ -1735,10 +1913,16 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                     return True
                 if ep.name in retry_received:
                     return False
+                why = auto_resend(record)
+                if why:
+                    auto_resent[ep.name] = (why, dispatched_attempts(record))
+                    return False
                 saved_failures.add(ep.name)
                 retryable_received.add(ep.name)
                 unverified[ep.name] = ('saved paid reply needs reparse or explicit '
-                                       f'--retry-received {ep.name}; no automatic paid retry')
+                                       f'--retry-received {ep.name}'
+                                       + (f'; sent {dispatched_attempts(record)} times' if provider_failure(record)
+                                          else '; a reply the model wrote is never resent automatically'))
                 return True
         record = records[0][1]
         if dry:
@@ -1754,9 +1938,14 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
             unverified[ep.name] = 'received retry refused: this episode already has a usable annotation'
             return True
         inspection = record.get('evidence_inspection') or {}
-        if complete and (inspection.get('pause_reason') == 'spend_cap' or
+        internally_limited = ('Inspection selection stopped at the cost or dispatch boundary.'
+                              in inspection.get('limitations', []))
+        if complete and (internally_limited or inspection.get('pause_reason') == 'spend_cap' or
                 'Inspection selection exceeds the remaining batch spend cap.' in inspection.get('limitations', [])):
             unverified[ep.name] = 'saved paid annotation omitted budget-blocked inspection; use --force to refresh explicitly'
+            if internally_limited:
+                print(f'LIMITED {ep.name}: saved paid annotation has incomplete inspection; '
+                      'use --force to refresh explicitly', file=sys.stderr, flush=True)
         if record.get('parse_ok') is True and not complete:
             try:
                 _billing_fields(p)
@@ -1766,7 +1955,11 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
         return complete
 
     stale, unverified, saved_failures, retryable_received = {}, {}, set(), set()
+    auto_resent = {}       # unit -> (the provider failure it is sent again for, how many times it was sent)
     todo = [ep for ep in episodes if not is_done(ep)]
+    for name, (why, sent) in sorted(auto_resent.items()):
+        print(f'RESEND {name}: sent {sent} time{"s" if sent != 1 else ""}, {why}; sending it again '
+              f'(automatic, at most {AUTO_RESENDS + 1} sends)', file=sys.stderr, flush=True)
     # a marker says what this run found; one left by an earlier run for a unit now current would say it twice
     for name in {ep.name for ep in episodes} - set(stale) - set(unverified):
         (out_dir / f"stale_{name}.json").unlink(missing_ok=True)
@@ -1844,7 +2037,8 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                         reasoning=label_kw.get('reasoning'), max_tokens=label_kw.get('max_tokens', 64000),
                         cell_w=label_kw.get('cell_w', 0), example_dir=label_kw.get('example_dir'),
                         sample_fps=label_kw.get('sample_fps'), task_mode=label_kw.get('task_mode'),
-                        dataset_note=label_kw.get('dataset_note'))
+                        dataset_note=label_kw.get('dataset_note'),
+                        inspection=label_kw.get('inspection'))
                     if not same_input_identity(claim.get('input_identity'), current) or any(
                             item.get('missing') for item in current['source_proof']):
                         raise RuntimeError('Request inputs changed while waiting for spend allowance; no dispatch.')
@@ -1852,6 +2046,13 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                 spent['usd'] += new_amount
                 reserved[0] = new_amount
                 pending[ep] = new_amount
+        def settle_final(cost):
+            with spend_lock:
+                held = max(0.0, cost - selection_accounted[0] - prior_cost)
+                spent['usd'] += held - reserved[0]
+                reserved[0] = held
+                pending[ep] = 0.0
+                spend_lock.notify_all()
         while True:
             key = pool.take() if not dry else "dry-run"
             if key is None:
@@ -1859,6 +2060,7 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
             try:
                 r = label_episode(ep, out_for(ep), api_key=key, reserve_final=reserve_final,
                                   reserve_selection=reserve_selection, settle_selection=settle_selection,
+                                  settle_final=settle_final,
                                   force_refresh=force, inspection_refresh_id=inspection_refresh_id,
                                   require_known_pricing=max_spend > 0, **label_kw)
                 _release_memory()
@@ -1901,7 +2103,7 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                 return ("fail", ep, str(e))
             except SpendCap as e:
                 return ("skip", ep, str(e))
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - one episode's failure is returned with why, the batch goes on
                 failure = out_for(ep).with_name(f"noreply_{out_for(ep).name}")
                 if failure.exists() and not reserved[0]:
                     with spend_lock:
@@ -1912,7 +2114,23 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
         try:
             if stopping.is_set():
                 return ('cancelled', ep, 'Label execution interrupted before work started')
-            return work_claimed(ep)
+            result = work_claimed(ep)
+            for delay in AUTO_RESEND_DELAYS_S[:AUTO_RESENDS]:
+                if dry or result[0] not in ('fail', 'invalid'):
+                    break
+                saved = billing_record(out_dir, out_for(ep).name)
+                why = auto_resend(saved[1]) if saved is not None and not annotation_complete(saved[1]) else None
+                if not why:
+                    break
+                print(f'RESEND {ep.name}: sent {dispatched_attempts(saved[1])} times, {why}; sending it again in '
+                      f'{delay:g}s (automatic, at most {AUTO_RESENDS + 1} sends)', file=sys.stderr, flush=True)
+                if stopping.wait(delay):
+                    break
+                with spend_lock:
+                    pending[ep] = 0.0
+                    spend_lock.notify_all()
+                result = work_claimed(ep)
+            return result
         finally:
             with spend_lock:
                 pending.pop(ep, None)
@@ -1942,7 +2160,8 @@ def _run_batch(episodes: list[Path], out_dir: Path, *, keys: list[str], concurre
                     reasoning=label_kw.get('reasoning'),
                     max_tokens=label_kw.get('max_tokens', 64000), cell_w=label_kw.get('cell_w', 0),
                     example_dir=label_kw.get('example_dir'), sample_fps=label_kw.get('sample_fps'),
-                    task_mode=label_kw.get('task_mode'), dataset_note=label_kw.get('dataset_note'))
+                    task_mode=label_kw.get('task_mode'), dataset_note=label_kw.get('dataset_note'),
+                        inspection=label_kw.get('inspection'))
             except (OSError, ValueError, RuntimeError):
                 pass
         requested_model = (previous.get('model') or
@@ -2053,7 +2272,8 @@ def main() -> int:
         print(f"routing answers seeded for {n} task texts from {args.route_seeds}", flush=True)
     label_kw = dict(model=args.model, reasoning=args.reasoning, max_tokens=args.max_tokens, timeout=args.timeout,
                     cell_w=args.cell_w, example_dir=args.example_dir, dry_run=args.dry_run,
-                    sample_fps=args.sample_fps, task_mode=args.task_mode, dataset_note=args.dataset_note)
+                    sample_fps=args.sample_fps, task_mode=args.task_mode, dataset_note=args.dataset_note,
+                    inspection=args.inspection)
     if args.episode_dir:
         target = args.out or (args.episode_dir / 'labels.json')
         claim = target.with_name(f'noreply_{target.name}')

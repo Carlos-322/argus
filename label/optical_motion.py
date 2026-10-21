@@ -10,7 +10,8 @@ from PIL import ImageFilter
 
 ANALYSIS_WIDTH = 384
 MIN_MARKERS = 24
-MAX_COMPARISONS = 16
+MAX_COMPARISONS = 128
+MAX_NATIVE_COMPARISONS = 4
 
 
 def _image(im, width=ANALYSIS_WIDTH):
@@ -101,16 +102,78 @@ def _measurement(reference, a, b, valid, agreement):
     return row
 
 
-def measure(frames, times):
+def _correspondence(row, a, b):
+    """Reject local matches contradicted by global contrast or competing repeated-pattern alignments."""
+    if row.get('p95_px') is None:
+        return row
+    shape = tuple(1 << (2 * size - 2).bit_length() for size in a.shape)
+    correlation = np.fft.irfftn(np.fft.rfftn(b, s=shape, axes=(0, 1)) *
+        np.fft.rfftn(a[::-1, ::-1], s=shape, axes=(0, 1)), s=shape, axes=(0, 1))
+    cy, cx = np.asarray(a.shape) - 1
+    radius = min(64, min(a.shape) // 3)
+    search = correlation[cy-radius:cy+radius+1, cx-radius:cx+radius+1].copy()
+    y, x = np.unravel_index(np.argmax(search), search.shape)
+    peak = float(search[y, x])
+    shift = np.array([x-radius, y-radius], dtype=float)
+    search[max(0, y-3):y+4, max(0, x-3):x+4] = -np.inf
+    ratio = float(np.max(search) / peak) if peak > 0 else 1.
+    disagreement = float(np.linalg.norm(shift - [row['mean_dx_px'], row['mean_dy_px']]))
+    # A deforming pad need not have one global translation peak. Competing global
+    # translations qualify coherent local fields, rather than erasing elastic motion.
+    coherent = row['local_p95_px'] <= max(.35, 2 * row['threshold_agreement_p95_px'])
+    ambiguous = (ratio >= .98 and coherent) or disagreement > max(1., row['p95_px'] * .5)
+    quality = {'global_translation_px': shift.tolist(), 'alternative_peak_ratio': round(ratio, 4),
+               'coherent_local_field': coherent, 'ambiguous': ambiguous}
+    if ambiguous:
+        return {**{key: row[key] for key in ('time_s', 'from_s', 'to_s', 'matched', 'tracked_fraction') if key in row}, 'p95_px': None,
+                'correspondence': quality,
+                'quality_gap': 'Competing repeated-pattern alignments or global contrast movement contradict a unique local dot correspondence.'}
+    return {**row, 'correspondence': quality}
+
+
+def _select(pairs, limit):
+    """Reserve elapsed-time context and small valid changes before activity peaks."""
+    if not pairs:
+        return []
+    if len(pairs) <= limit:
+        return [{**row, 'selection': 'anchor_context'} for row in pairs]
+    start, end = pairs[0]['from_s'], pairs[-1]['from_s']
+    chosen = {}
+    for target in np.linspace(start, end, min(8, limit, len(pairs))):
+        i = min(range(len(pairs)), key=lambda j: (abs(pairs[j]['from_s'] - target), j))
+        chosen.setdefault(i, 'anchor_context')
+    edges = np.linspace(start, pairs[-1]['to_s'], min(4, limit) + 1)
+    for left, right in zip(edges, edges[1:]):
+        candidates = [i for i, row in enumerate(pairs) if i not in chosen
+                      and left <= row['from_s'] < right and row.get('p95_px') is not None]
+        if candidates and len(chosen) < limit:
+            chosen[min(candidates, key=lambda i: (pairs[i]['p95_px'], i))] = 'quiet_context'
+    activity = sorted((i for i, row in enumerate(pairs) if row.get('p95_px') is not None),
+                      key=lambda i: (-pairs[i]['p95_px'], i))
+    for i in activity:
+        if len(chosen) >= limit:
+            break
+        chosen.setdefault(i, 'activity')
+    # Retain a bounded view of tracking loss too; unavailable is never quiet.
+    for i in range(len(pairs)):
+        if len(chosen) >= limit:
+            break
+        chosen.setdefault(i, 'anchor_context')
+    return [{**pairs[i], 'selection': chosen[i]} for i in sorted(chosen)]
+
+
+def measure(frames, times, *, anchor_frames=None):
     """Evidence at supplied instants, with explicit quality gaps and image coordinates."""
     ks = sorted(k for k in frames if k in times)
     if len(ks) < 2:
         return None
+    anchors = ks if anchor_frames is None else [k for k in ks if k in anchor_frames]
+    reference_k = anchors[0] if anchors else ks[0]
     from label.frames import Shrunk
     width = min(ANALYSIS_WIDTH, *(min(frames[k].width, max(frames[k].by_width))
                                   if isinstance(frames[k], Shrunk) else frames[k].width for k in ks))
-    native_size = (frames[ks[0]].width, frames[ks[0]].height)
-    first = _image(frames[ks[0]], width)
+    native_size = (frames[reference_k].width, frames[reference_k].height)
+    first = _image(frames[reference_k], width)
     if min(first.size) < 64:
         return None
     detected = _dots(_contrast(first))
@@ -119,8 +182,7 @@ def measure(frames, times):
     reference, spacing = detected
     radius = max(2, min(8, int(spacing*.32)))
     baseline, base_valid, base_agreement = _positions(_contrast(first), reference, radius)
-    samples, pairs = [], []
-    previous = None
+    samples, positions = [], {}
     for k in ks:
         im = _image(frames[k], width)
         if (frames[k].width, frames[k].height) == native_size and im.size == first.size:
@@ -129,23 +191,42 @@ def measure(frames, times):
             position = baseline; valid = np.zeros(len(reference), dtype=bool); agreement = base_agreement
         samples.append({'time_s': times[k], **_measurement(reference, baseline, position, base_valid & valid,
                                                          np.maximum(base_agreement, agreement))})
-        if previous:
-            pk, pa, pv, pagreement = previous
-            pairs.append({'from_s': times[pk], 'to_s': times[k],
-                          **_measurement(reference, pa, position, pv & valid,
-                                         np.maximum(pagreement, agreement))})
-        previous = k, position, valid, agreement
-    if not any(p['p95_px'] is not None for p in pairs):
+        positions[k] = position, valid, agreement
+    contrast = {reference_k: _contrast(first)}
+    def pixels(k):
+        if k not in contrast:
+            contrast[k] = _contrast(_image(frames[k], width))
+        return contrast[k]
+    anchor_pairs = list(zip(anchors, anchors[1:]))
+    anchor_set = set(anchor_pairs)
+    native_pairs = [pair for pair in zip(ks, ks[1:]) if pair not in anchor_set]
+    def compare(keys):
+        rows = []
+        for pk, k in keys:
+            pa, pv, pagreement = positions[pk]
+            position, valid, agreement = positions[k]
+            row = {'from_s': times[pk], 'to_s': times[k],
+                   **_measurement(reference, pa, position, pv & valid,
+                                  np.maximum(pagreement, agreement))}
+            rows.append(_correspondence(row, pixels(pk), pixels(k)))
+        return rows
+    selected = _select(compare(anchor_pairs), MAX_COMPARISONS)
+    anchor_supplied = len(selected)
+    selected += [{**row, 'selection': 'native_detail'}
+                 for row in _select(compare(native_pairs), MAX_NATIVE_COMPARISONS)]
+    selected.sort(key=lambda row: (row['from_s'], row['to_s']))
+    if not any(pair['p95_px'] is not None for pair in selected):
         return None
-    # Keep large changes and quiet comparisons within a fixed payload budget.
-    chosen = set(np.rint(np.linspace(0, len(pairs)-1, min(8, len(pairs)))).astype(int))
-    chosen.update(sorted(range(len(pairs)), key=lambda i: pairs[i].get('p95_px') or 0,
-                         reverse=True)[:MAX_COMPARISONS-len(chosen)])
-    selected = [pairs[i] for i in sorted(chosen)]
-    used_times = {times[ks[0]], *(p['from_s'] for p in selected), *(p['to_s'] for p in selected)}
-    return {'version': 1, 'analysis_size': list(first.size), 'reference_s': times[ks[0]],
-            'reference_markers': len(reference), 'samples': [r for r in samples if r['time_s'] in used_times],
-            'pairs': selected, 'comparisons_total': len(pairs),
-            'method': 'Contrast-weighted dot centers at two thresholds. Pairs compare the same valid markers. Coherent movement is retained; local_p95_px separately removes a fitted affine field.',
-            'coordinates': 'Pixels at the common analysis_size, x right and y down. No world direction, pressure or force calibration. The first supplied frame is a reference, not a certified unloaded pad.',
-            'coverage': 'Only supplied image instants. Large movement, lost dots and ambiguous centers produce quality gaps. Sparse comparisons cannot establish continuous slip or complete transient coverage.'}
+    used_times = {times[reference_k], *(p['from_s'] for p in selected), *(p['to_s'] for p in selected)}
+    selected_samples = []
+    for k, row in zip(ks, samples):
+        if row['time_s'] in used_times:
+            selected_samples.append(_correspondence(row, pixels(reference_k), pixels(k)))
+    return {'version': 1, 'analysis_size': list(first.size), 'reference_s': times[reference_k],
+            'reference_markers': len(reference), 'samples': selected_samples,
+            'pairs': selected, 'comparisons_total': len(anchor_pairs) + len(native_pairs),
+            'method': 'Contrast-weighted dot centers at two thresholds. Global contrast rejects competing pattern alignments or movement inconsistent with local matches. Remaining local matches are not certified marker identities. Coherent movement is retained; local_p95_px separately removes a fitted affine field.',
+            'coordinates': 'Pixels at the common analysis_size, x right and y down. No world direction, pressure or force calibration. The first supplied anchor, or first capture when no anchors are supplied, is a reference, not a certified unloaded pad.',
+            'coverage': 'Only supplied image instants. Large movement, lost dots and ambiguous centers can produce quality gaps. Repeated patterns can alias adjacent dots; zero reported displacement does not establish no movement. Sparse comparisons cannot establish continuous slip or complete transient coverage.'
+                        + (f' {len(anchor_pairs) - anchor_supplied} anchor comparisons omitted by the {MAX_COMPARISONS}-pair limit; elapsed-time context, quiet comparisons and activity peaks are retained.'
+                           if anchor_supplied < len(anchor_pairs) else '')}

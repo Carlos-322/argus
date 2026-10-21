@@ -17,6 +17,8 @@ from pathlib import Path
 
 import numpy as np
 
+from label.presented import presented
+
 TIME_BASE_DEN = 1_000_000   # microseconds: some ABC frames are stamped only 1 us apart
 NOMINAL_FPS = 30            # only a one-frame tolerance for the muxer's own shift
 
@@ -116,7 +118,7 @@ def remux(frames: list[bytes], t_rel_s: np.ndarray, fmt: str, out: Path) -> np.n
     finally:
         os.unlink(raw)
     with av.open(str(out)) as c:
-        got = np.asarray([p.pts for p in c.demux(c.streams.video[0]) if p.size], dtype=np.int64)
+        got = np.asarray([p.pts for p in presented(c, c.streams.video[0])], dtype=np.int64)
     # the mp4 muxer shifts the whole track so its first frame sits at 0 (by an edit list); accept only
     # a constant shift under one frame and return the pts actually in the file, which is what the
     # decoder sees. The real capture times stay in times.npz.

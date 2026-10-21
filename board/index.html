@@ -427,6 +427,12 @@ aside.rail {
   font-variant-numeric: tabular-nums; }
 .cv-cell.on .cv-num { color: var(--fg-2); }
 .cv-num em { font-style: normal; color: var(--accent); }
+/* a run in progress: labelled footage against the manifest's target, as a bar under the numbers */
+.cv-bar { display: block; height: 3px; min-width: 96px; border-radius: var(--r-pill); background: var(--border);
+  overflow: hidden; }
+.cv-bar i { display: block; height: 100%; background: var(--accent); transition: width 400ms ease; }
+.cv-cell.none .cv-bar i { background: var(--fg-disabled); }
+.cv-all .cv-bar { width: 100%; }
 /* a dataset the chosen model did not label: dimmed and not clickable */
 .cv-cell.none { cursor: default; }
 .cv-cell.none .cv-name, .cv-cell.none .cv-num, .cv-cell.none:hover .cv-name { color: var(--fg-disabled); }
@@ -613,7 +619,7 @@ aside.left .grip-strip .state-toast.active { position: static; order: 3; transfo
 aside.left .unshown-note { margin: 0; padding: 6px 12px 8px; background: #000; font-family: var(--mono);
   font-size: 10px; line-height: 1.45; color: rgba(255,255,255,0.72); }
 /* its label wraps inside a narrow cell instead of running past it */
-aside.left .cam-unshown .cam-label { white-space: normal; max-width: calc(100% - 28px); border-radius: var(--r-sm); }
+aside.left .cam-unshown .cam-label { white-space: normal; overflow-wrap: anywhere; max-width: calc(100% - 28px); border-radius: var(--r-sm); }
 aside.left .cam-label {
   position: absolute; top: 8px; left: 8px; z-index: 2;
   padding: 1px 6px;
@@ -640,6 +646,8 @@ aside.left .cam-cell.cam-exo .cam-label { top: calc(var(--fx-top, 0px) + 8px); l
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
 }
 .video-overlay.active { opacity: 1; transform: translateX(-50%) translateY(0); }
+.video-wrap.media-pending :is(.sensor-overlay-stack, .sensor-evidence-band, .video-overlay,
+  .state-toast, .recovery-overlay, #prog-overlay, #es-hand, .hp-canvas, .dp-roi) { visibility: hidden !important; }
 .video-overlay.adv   { border-left: 3px solid rgba(255,255,255,0.55); box-shadow: 0 4px 18px rgba(0,0,0,0.45); }
 .video-overlay.waste { border-left: 3px solid #a3aee0; box-shadow: 0 4px 18px rgba(0,0,0,0.45),
   inset 3px 0 12px -4px rgba(163,174,224,0.3); }
@@ -886,6 +894,14 @@ section.right { overflow-y: auto; padding: 22px 28px; }
 .se-moments { display: flex; gap: 6px; overflow-x: auto; padding: 4px 0 10px; }
 .se-moments button { display: grid; gap: 3px; white-space: nowrap; text-align: left; }
 .se-depth { padding-bottom: 10px; }
+.source-depth { display: grid; gap: 8px; margin: 16px 0; max-width: 720px; }
+.source-depth-stage { position: relative; width: 100%; background: #000; }
+.source-depth-stage video, .source-depth-roi { position: absolute; inset: 0; width: 100%; height: 100%; }
+.source-depth-roi { pointer-events: none; }
+.source-depth-controls, .source-depth-samples { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.source-depth-controls input { flex: 1; min-width: 100px; }
+.source-depth-controls span { font-size: 12px; }
+.source-depth button { padding: 4px 8px; cursor: pointer; }
 .sensor-evidence-details { margin: 12px 0; }
 .sensor-evidence-details > summary { cursor: pointer; font-size: 12px; color: var(--fg-2); padding: 8px 0; }
 .sensor-overlay { display: none; position: absolute; z-index: 5; left: calc(var(--fx-left, 0px) + 12px); top: 8px; text-align: left;
@@ -1029,7 +1045,7 @@ aside.left .grip-strip .sensor-overlay { position: static; order: 2; max-width: 
 .sensor-overlay-stack .gf-phase { padding: 3px 5px; font-size: 9px; }
 .sensor-overlay-stack .gf-pressure { padding-top: 5px; }
 .sensor-overlay-stack .gf-pressure-head { font-size: 10px; }
-.sensor-overlay-stack .gf-pressure-row { grid-template-columns: 78px minmax(0,1fr); font-size: 10px; }
+.sensor-overlay-stack .gf-pressure-row { grid-template-columns: 112px minmax(0,1fr); font-size: 10px; }
 .sensor-overlay-stack .gf-pressure-label { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sensor-overlay-stack .gf-pressure-row svg { height: 20px; }
 .sensor-overlay-stack .gf-pressure-range, .sensor-overlay-stack .gf-pressure-value { display: none; }
@@ -1274,7 +1290,11 @@ aside.left .cam-row-grippers.cam-main-scene:has(.sensor-overlay-stack) .cam-cell
 .key-ev.untimed .ke-time, .feed .ev.untimed .t { font-size: 10.5px; white-space: nowrap; }
 .key-ev .ke-body { min-width: 0; }
 .key-ev .ke-row1 { display: flex; align-items: baseline; gap: 10px; justify-content: space-between; }
-.key-ev .ke-label { color: var(--fg); font-size: 13px; line-height: 1.4; }
+.key-ev .ke-kind { display: inline-block; margin-right: 8px; padding: 1px 7px; border-radius: var(--r-pill);
+  font-family: var(--mono); font-size: 10px; font-weight: 600; color: var(--fg-2); border: 1px solid var(--border);
+  vertical-align: 1px; }
+.key-ev .ke-kind.sub { background: var(--fg); color: var(--bg, #fff); border-color: var(--fg); }
+.key-ev .ke-label { color: var(--fg); font-size: 13px; line-height: 1.4; min-width: 0; overflow-wrap: anywhere; }
 .key-ev .outcome {
   flex: 0 0 auto; font-size: 10px; font-family: var(--mono); font-weight: 600;
   padding: 3px 9px; border-radius: var(--r-pill); border: 1px solid transparent; white-space: nowrap;
@@ -1375,8 +1395,10 @@ h3.section .count {
 
 /* problem rows: a check, a data issue or an operator mistake, each with its severity */
 .di-block { display: flex; flex-direction: column; gap: 0; }
-.di-row { display: grid; grid-template-columns: 54px 1fr; gap: 10px; align-items: start; padding: 9px 2px;
+.di-row { display: grid; grid-template-columns: 54px minmax(0, 1fr); gap: 10px; align-items: start; padding: 9px 2px;
   border-top: 1px solid var(--row-divider); }
+/* upload paths and recorded field names are long unbroken words; they wrap inside the row instead of running past it */
+.di-row > * { min-width: 0; overflow-wrap: anywhere; }
 .di-row:first-child { border-top: none; }
 .di-row.minor { opacity: 0.72; }
 .di-minor { font-family: var(--mono); font-size: 10px; color: var(--fg-3); border: 1px dashed var(--border-strong);
@@ -1417,10 +1439,10 @@ h3.section .count {
 .task-row .task-num {
   width: 20px; height: 20px; border-radius: 4px; display: inline-flex;
   align-items: center; justify-content: center; font-family: var(--mono);
-  font-size: 11px; font-weight: 700; color: #0b0b0c; background: var(--fg-3);
+  font-size: 11px; font-weight: 700; color: #fff; background: var(--fg-3);
 }
 .task-row .task-num.success { background: #2f7d52; }
-.task-row .task-num.partial { background: #e7b0b8; }
+.task-row .task-num.partial { background: #e7b0b8; color: #0b0b0c; }
 .task-row .task-num.failure { background: #b3263c; color: #fff; }
 .task-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 .task-head .task-name { font-size: 13px; font-weight: 600; color: var(--fg); }
@@ -1612,6 +1634,82 @@ h3.section .count {
   vector-effect: non-scaling-stroke; }
 .prog-overlay .po-past { fill: none; stroke: #f3f2ec; stroke-width: 2; vector-effect: non-scaling-stroke; }
 .prog-overlay .po-dot { fill: #f3f2ec; }
+/* the Quality section: Execution and Outcome are two boxes side by side, each its score over a grid of cells, and
+   Subgoals is a table in a box of its own; every box has the same header, the same cell and the same bar */
+.qual { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.qual-box { border: 1px solid var(--border); border-radius: var(--r-md); background: var(--raised); overflow: hidden; }
+.qual-box.wide { grid-column: 1 / -1; }
+.qual-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  padding: 12px 14px 10px; border-bottom: 1px solid var(--row-divider); }
+.qual-title { font-size: 14px; font-weight: 600; color: var(--fg); }
+.qual-score { font-family: var(--mono); font-size: 24px; font-weight: 700; line-height: 1; }
+.qual-score small { font-size: 12px; font-weight: 600; color: var(--fg-2); margin-left: 2px; }
+.qual-headbar { padding: 0 14px 12px; border-bottom: 1px solid var(--row-divider); }
+/* every bar is drawn against its full track to 10, so a short fill reads as a share of the whole */
+.qual-bar { display: block; height: 8px; border-radius: 4px; background: rgba(0,0,0,0.10);
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.06); overflow: hidden; }
+.qual-bar i { display: block; height: 100%; background: var(--fg); }
+.qual-bar.none { visibility: hidden; }
+.qual-cells { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.qual-cell { padding: 10px 14px 12px; border-right: 1px solid var(--row-divider); min-width: 0; }
+.qual-cell:last-child { border-right: 0; }
+.qual-cell .qc-k { font-size: 11px; color: var(--fg-2); font-weight: 600; }
+.qual-cell .qc-v { font-family: var(--mono); font-size: 17px; font-weight: 700; margin: 3px 0 6px; }
+.qual-cell .qual-bar { height: 6px; margin-bottom: 6px; }
+.qual-cell .qc-sub { font-family: var(--mono); font-size: 11px; color: var(--fg-2); line-height: 1.35; }
+.qual-cell .qc-bad, .qual-table .qc-bad { color: var(--danger); }
+.qual-cell .qc-word { font-family: var(--sans, inherit); font-size: 14px; font-weight: 600; }
+.qual-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.qual-table th { text-align: left; font-size: 11px; font-weight: 600; color: var(--fg-2); padding: 8px 14px;
+  border-bottom: 1px solid var(--row-divider); white-space: nowrap; }
+.qual-table td { padding: 8px 14px; border-bottom: 1px solid var(--row-divider); vertical-align: middle; }
+.qual-table tr:last-child td { border-bottom: 0; }
+.qual-table .num { font-family: var(--mono); text-align: right; white-space: nowrap; }
+
+.qual-table .qt-score { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 8px; align-items: center; }
+.qual-table col.q-task { width: 64px; }
+.qual-table col.q-no { width: 48px; }
+.qual-table col.q-at { width: 92px; }
+.qual-table col.q-took { width: 64px; }
+.qual-table col.q-med { width: 72px; }
+.qual-table col.q-fail { width: 100px; }
+.qual-table col.q-exec { width: 164px; }
+.qual-table .qt-score b { font-family: var(--mono); text-align: right; }
+.qual-table { table-layout: fixed; }
+.qual-table .qt-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qual-box.folds .ck-all-in .qual-table tr:first-child td { border-top: 1px solid var(--row-divider); }
+.qual-box.open .ck-all { grid-template-rows: 1fr; }
+.qual-box.open .ck-all-in { opacity: 1; }
+.qual-box .qual-more { margin: 0; padding: 10px 14px; border-top: 1px solid var(--row-divider); width: 100%; text-align: left; }
+.qual-table tr[data-t] { cursor: pointer; }
+.qual-table tr[data-t]:hover td { background: var(--hover, rgba(0,0,0,0.03)); }
+/* a box too narrow for the table's columns (a phone) stacks each row: the subgoal on its own line over its time, its
+   failed tries and its execution, on one grid shared by the header, the shown rows and the folded ones; Took and
+   Median are left to the wide table */
+.qual-box { container-type: inline-size; }
+@container (max-width: 620px) {
+  .qual-table, .qual-table thead, .qual-table tbody { display: block; }
+  .qual-table colgroup, .qual-table .q-took, .qual-table .q-med { display: none; }
+  .qual-table tr { display: grid; grid-template-columns: 26px minmax(0, 1fr) 76px 96px; column-gap: 10px; row-gap: 3px;
+    grid-template-areas: "no name name name" ". at fail exec"; align-items: center; padding: 8px 14px;
+    border-bottom: 1px solid var(--row-divider); }
+  .qual-table.has-task tr { grid-template-columns: 50px 26px minmax(0, 1fr) 76px 96px;
+    grid-template-areas: "task no name name name" ". at at fail exec"; }
+  .qual-table tr:last-child { border-bottom: 0; }
+  .qual-table th, .qual-table td { padding: 0; border: 0; }
+  .qual-table th, .qual-table th.num { white-space: normal; }
+  .qual-table .q-task { grid-area: task; text-align: left; }
+  .qual-table .q-no { grid-area: no; text-align: left; }
+  .qual-table .qt-name { grid-area: name; }
+  .qual-table .q-at { grid-area: at; text-align: left; }
+  .qual-table .q-fail { grid-area: fail; }
+  .qual-table .q-exec { grid-area: exec; }
+  .qual-table tr[data-t]:hover { background: var(--hover, rgba(0,0,0,0.03)); }
+  .qual-table tr[data-t]:hover td { background: none; }
+  .qual-box.folds .ck-all-in .qual-table tr:first-child { border-top: 1px solid var(--row-divider); }
+  .qual-box.folds .ck-all-in .qual-table tr:first-child td { border-top: 0; }
+}
+@media (max-width: 900px) { .qual { grid-template-columns: 1fr; } }
 /* top-right transient toast: object state changes, below the fullscreen button (.fs-btn, 8 px + 26 px) */
 .state-toast {
   position: absolute; top: calc(var(--fx-top, 0px) + 40px); right: calc(var(--fx-right, 0px) + 8px);
@@ -1712,6 +1810,26 @@ h3.section .count {
 }
 .timeline .marker.goal:hover { width: 5px; z-index: 8; }
 
+/* the score chip (board/scores.py): bottom left of the video, beside the caption, only while the caption shows a
+   subgoal or the goal reached (the caption's own key-event window), just the scores. It stands on the caption's
+   bottom line and as tall as the caption (scoreChipHeight), so the two read as one row */
+.score-chip {
+  position: absolute; left: calc(var(--fx-left, 0px) + 12px); bottom: calc(var(--fx-bottom, 0px) + 44px); z-index: 4;
+  box-sizing: border-box; display: grid; grid-template-columns: auto auto; column-gap: 14px; row-gap: 2px;
+  align-items: baseline; align-content: center;
+  padding: 9px 14px; border-radius: var(--r-md); background: rgba(0,0,0,0.6); border: 1px solid rgba(255,255,255,0.14);
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  opacity: 0; transform: translateY(6px); pointer-events: none;
+  transition: opacity 150ms ease, transform 150ms ease, height 130ms ease;
+}
+.score-chip.active { opacity: 1; transform: translateY(0); }
+/* a caption under the video (narrow screens): the chip keeps its own size in the corner, clear of the controls */
+.score-chip.corner { bottom: calc(var(--fx-bottom, 0px) + 70px); }
+/* a video too narrow for the chip beside the caption: the chip stands above the caption at its own size */
+.score-chip.above { bottom: calc(var(--fx-bottom, 0px) + 50px + var(--cap-h, 0px)); height: auto !important; }
+.score-chip .sc-k { font-size: 12.5px; color: rgba(255,255,255,0.72); }
+.score-chip .sc-v { font-family: var(--mono); font-size: 20px; font-weight: 700; color: #f3f2ec; text-align: right; }
+.section .ke-what { font-size: 12px; font-weight: 400; color: var(--fg-2); margin-left: 6px; }
 /* key-event flag module inside the bottom segment overlay */
 .video-overlay .vo-key { display: block; margin-bottom: 6px; }
 .video-overlay .vo-key-badge {
@@ -1819,7 +1937,13 @@ h3.section { border-top: 1px solid var(--border-strong); }
 .ck-all { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 320ms cubic-bezier(.32,.72,0,1); }
 .ck-all-in { overflow: hidden; min-height: 0; opacity: 0; transition: opacity 240ms ease; }
 .ck-theirs.open .ck-all { grid-template-rows: 1fr; }
+.fold.open .ck-all { grid-template-rows: 1fr; }
+.fold.open .ck-all-in { opacity: 1; }
+.key-events .fold-in { display: flex; flex-direction: column; gap: 6px; }
+.key-events .fold.open .fold-in { padding-top: 0; }
+.tasks-panel .fold-in .task-row:first-child { border-top: 1px solid var(--row-divider); }
 .ck-theirs.open .ck-all-in { opacity: 1; }
+.ck-more .fold-now { color: var(--accent); font-weight: 600; }
 .ck-more { margin-top: 6px; padding: 4px 0; background: none; border: 0; font: 500 12px/1.3 var(--sans);
   color: #2f7f76; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
 @media (prefers-reduced-motion: reduce) { .ck-all, .ck-all-in { transition: none; } }
@@ -2035,8 +2159,9 @@ table.et a.et-o { font: 600 11px/1.2 var(--mono); text-decoration: none; white-s
    narrower, its timeline rows ran the arm name into the contribution chip. */
 @media (max-width: 1229px) {
   .coverage { position: relative; top: 0; height: auto; grid-template-columns: 1fr; }
-  .cv-all { flex-direction: row; align-items: baseline; justify-content: space-between; gap: 12px; padding: 12px 16px;
-    border-right: 0; border-bottom: 1px solid var(--border-strong); }
+  .cv-all { flex-direction: row; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 12px;
+    padding: 12px 16px; border-right: 0; border-bottom: 1px solid var(--border-strong); }
+  .cv-all .cv-bar { flex-basis: 100%; }
   .cv-cells { grid-auto-columns: max-content; overflow-x: auto; scrollbar-width: thin; }
   .cv-cell { padding: 11px 16px; }
   .cv-name, .cv-num { overflow: visible; text-overflow: clip; }
@@ -2513,12 +2638,9 @@ async function fetchJson(url) {
   } catch (e) { return null; }
 }
 function episodeDownloadUrl(file) { return STATIC ? episodeUrl(file) : episodeUrl(file) + '&download=1'; }
-// the static build's media key of a camera value: left, right, extra1, extra2, ... and a camera's depth clip
-// (depth_exo, depth_left, ...) are their own, anything else the main camera (board/static.py media_key)
-function mediaKey(cam) {
-  return (cam === 'left' || cam === 'right' || /^(extra|unshown)\d{1,2}$/.test(cam)
-    || /^depth_(exo|left|right|extra\d{1,2})$/.test(cam)) ? cam : 'exo';
-}
+// the static build's media key of a camera value: the value itself, since every camera has a clip of its own
+// (board/clips.py clip_path, board/static.py media_key)
+function mediaKey(cam) { return cam; }
 // web copy of one camera's clip; cam is the value the page asks /api/video for (left, right, or the top camera)
 function videoSrc(eidEnc, cam) {
   // stable URLs: the server tags each clip and revalidates it, so a replaced clip is fetched again and an
@@ -2884,9 +3006,8 @@ function unshownNote(d) {
   if (!us.length) return '';
   const each = us.map(u => `${esc(u.name || u.view)}${u.why ? ` (${esc(u.why)})` : ''}`);
   const list = each.length > 1 ? `${each.slice(0, -1).join(', ')} and ${each[each.length - 1]}` : each[0];
-  return `<p class="unshown-note">The model was not shown ${us.length === 1 ? 'the camera' : 'the cameras'} ${list}. `
-    + `${us.length === 1 ? 'It plays' : 'They play'} here so every camera of the upload can be watched.`
-    + (us.some(u => u.clock_alignment === 'unverified') ? ' Independent-clock cameras have separate controls and are excluded from synchronized downloads.' : '') + '</p>';
+  return `<p class="unshown-note">Not shown to the model: ${list}.`
+    + (us.some(u => u.clock_alignment === 'unverified') ? ' Cameras on their own clock have their own controls and are left out of synchronized downloads.' : '') + '</p>';
 }
 // next to a session's success count: how many parts of a long recording have no labels (label/pieces.py stitch_run)
 function partsGapHtml(d) {
@@ -3154,7 +3275,34 @@ let ISSUE_FILTER = null;   // null = show all; else an issue-class string
 // mistake that changed the outcome at medium or high, or any at high), or everything the model reported, low severity
 // included. Remembered per viewer.
 let INCLUDE_MINOR = false;
-let CHECKS_OPEN = false;       // the full list of capture checks, kept open or closed across episodes
+let CHECKS_OPEN = false;
+let SUBS_OPEN = false;         // the Subgoals table past its first rows, kept open or closed across episodes
+const SUBS_FIRST = 5;          // subgoal rows shown before "Show all"
+const FOLD_FIRST = 5;          // rows of a list under the video shown before "Show all"
+const FOLD_OPEN = {};          // which of those lists are open, kept across episodes
+// a list that grows with the episode: its first rows, then the rest folded behind "Show all N <noun>"
+function foldRows(rows, noun, key) {
+  if (rows.length <= FOLD_FIRST) return rows.join('');
+  const open = !!FOLD_OPEN[key];
+  return rows.slice(0, FOLD_FIRST).join('') + `<div class="fold${open ? ' open' : ''}" data-fold="${key}">`
+    + `<div class="ck-all"><div class="ck-all-in fold-in">${rows.slice(FOLD_FIRST).join('')}</div></div>`
+    + `<button class="ck-more fold-more" type="button" data-n="${rows.length}" data-noun="${noun}" `
+    + `onclick="foldToggle(this)">${open ? `Show the first ${FOLD_FIRST}` : `Show all ${rows.length} ${noun}`}</button></div>`;
+}
+// the fold's button; while the row the video is on sits in the closed fold (data-now, its number), the button says so
+function foldLabel(btn) {
+  const f = btn.closest('.fold');
+  if (f && f.classList.contains('open')) return `Show the first ${FOLD_FIRST}`;
+  return `Show all ${btn.dataset.n} ${btn.dataset.noun}`
+    + (btn.dataset.now ? `<span class="fold-now">, now at ${btn.dataset.now}</span>` : '');
+}
+function foldToggle(btn) {
+  const f = btn.closest('.fold');
+  const open = !f.classList.contains('open');
+  FOLD_OPEN[f.dataset.fold] = open;
+  f.classList.toggle('open', open);
+  btn.innerHTML = foldLabel(btn);
+}       // the full list of capture checks, kept open or closed across episodes
 
 // Every check run on this episode, fired or not, in one section: ours (recording and label) and the capture checks
 // of public-dataset-adapter. A firing counted as a problem is also in the problem cards above; here each check
@@ -3241,9 +3389,11 @@ function checksSection(d) {
     for (const n of sc.notes || []) (ev[n.check] = ev[n.check] || []).push(n.evidence);
     // a check not run on some signal (one with no rows, or whose checks stopped with an error) names it, and one run on
     // no signal at all says why; a check with nothing to run on (no depth, one clock) is left out
-    const all = sc.checks.filter(c => c.status !== 'na' || c.why).map(c => ({name: c.name,
-      st: c.status === 'fired' ? 'note' : c.status === 'errored' ? 'err' : c.status === 'na' ? 'na' : 'clear',
-      text: c.status === 'errored' ? `The check stopped with an error (${c.error}).` : c.status === 'na'
+    // not applicable is not_applicable (checks/results.py), and na in a result saved before 2026-10-20
+    const na = c => c.status === 'not_applicable' || c.status === 'na';
+    const all = sc.checks.filter(c => !na(c) || c.why).map(c => ({name: c.name,
+      st: c.status === 'fired' ? 'note' : c.status === 'errored' ? 'err' : na(c) ? 'na' : 'clear',
+      text: c.status === 'errored' ? `The check stopped with an error (${c.error}).` : na(c)
         ? sentences(c.why)
         : (ev[c.check] || []).map(sentences).concat(c.not_run_on ? [`Not run on ${c.not_run_on}.`] : []).join(' ')}));
     if (all.length) sensors = `<div class="ck-block"><div class="ck-head"><span class="ck-title">Sensor and depth checks`
@@ -3262,7 +3412,7 @@ function checksSection(d) {
     const all = [['clock_offset', "Touch sensor's clock against the cameras", !!(tc.offset_ms && tc.offset_ms.n)],
       ['touch_not_seen', 'Contacts the frames show no touch at', ran],
       ['hand_mismatch', 'Contacts seen on the other hand', ran],
-      ['contact_missing', 'Grasps no recorded contact covers', ran]]
+      ['contact_missing', 'Grasps outside sensor-activity intervals', ran]]
       .map(([k, name, run]) => ({name, st: (tc.not_assessed || {})[k] ? 'na' : ev[k] ? 'note' : run ? 'clear' : 'na',
         text: (tc.not_assessed || {})[k] ? asWritten(tc.not_assessed[k]) : (ev[k] || []).map(asWritten).join(' ')}))
       .concat(Object.keys(ev).filter(k => !['clock_offset', 'touch_not_seen', 'hand_mismatch', 'contact_missing']
@@ -3464,6 +3614,8 @@ function firstDataset(want) {
   return want && datasets.includes(want) && has(want) ? want : (datasets.find(has) || null);
 }
 async function loadEpisodes() {
+  // the build this list comes from, read first so a rebuild while the list loads is still seen
+  await liveVersion(true);
   const [eps, cmp, kp, sn] = await Promise.all([loadAllEpisodes(), BOARD.compare ? fetchJson(compareUrl('index'))
     : null, BOARD.keypoints ? fetchJson(kpIndexUrl()) : null, BOARD.sensors ? fetchJson(snIndexUrl()) : null]);
   ALL_EPS = eps;
@@ -3491,6 +3643,46 @@ async function loadEpisodes() {
   else if (ds) await setDataset(ds, undefined, nav);
   else renderRail(null, undefined, false, nav);
   prefetchWhenIdle();
+}
+
+// ---- a live board follows a run in progress ----
+// While the tab is visible the page asks every 30s which build of the board it is (board/serve.py board_version, two
+// stats on the server). After a rebuild it reloads the episode list and the targets in place: the coverage strip,
+// its bars, the issue filter's counts and the list follow, and the open episode, the filter, the search and the
+// list's scroll stay as they were. A static site is a fixed build and never asks.
+const LIVE_EVERY_MS = 30000;
+let _liveVersion = null, _liveBusy = false;
+async function liveVersion(first) {
+  if (STATIC) return null;
+  try {
+    const v = await okJson(await fetch('api/version', {cache: 'no-store'}), 'api/version');
+    if (first) _liveVersion = v.version;
+    return v;
+  } catch (e) { return null; }       // a board server from before api/version, or a dropped request: try again later
+}
+async function liveCheck() {
+  if (STATIC || _liveBusy || document.hidden || !currentDataset || BY
+      || document.body.classList.contains('view-cmp')) return;
+  _liveBusy = true;
+  try {
+    const v = await liveVersion(false);
+    if (!v || v.version === _liveVersion) return;
+    const eps = await loadAllEpisodes();
+    _liveVersion = v.version;
+    TARGETS = v.targets && typeof v.targets === 'object' ? v.targets : {};
+    ALL_EPS = eps;
+    const scroll = epListEl.scrollTop;
+    // an open filter menu is left as the reader has it; its counts follow on the next rebuild after it closes
+    if (!issueFilterEl.classList.contains('open')) buildIssueFilter(currentDataset);
+    renderRail(currentDataset, _activeFile, true);
+    epListEl.scrollTop = scroll;
+  } catch (e) {
+    // a list that failed to load leaves the page as it was
+  } finally { _liveBusy = false; }
+}
+if (!STATIC) {
+  setInterval(liveCheck, LIVE_EVERY_MS);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) liveCheck(); });
 }
 
 // ---- a dataset tab opens at once: its first episode is fetched ahead ----
@@ -3569,14 +3761,34 @@ function fmtSpan(sec, long) {
   return sec < 3600 ? [(sec / 60).toFixed(1), long ? 'minutes' : 'min'] : [fmtHours(sec), long ? 'hours' : 'h'];
 }
 function sumDur(list) { return list.reduce((a, e) => a + (e.duration_s || 0), 0); }
+// a dataset's target from the manifest (board/serve.py targets): episodes and hours a run in progress is meant to label
+let TARGETS = (BOARD.targets && typeof BOARD.targets === 'object') ? BOARD.targets : {};
+// labelled seconds against a target in hours, both in the target's unit: [labelled, target, unit]
+function fmtOf(sec, hours, long) {
+  return hours >= 1 ? [(sec / 3600).toFixed(1), hours.toFixed(1), long ? 'hours' : 'h']
+    : [(sec / 60).toFixed(1), (hours * 60).toFixed(1), long ? 'minutes' : 'min'];
+}
+// the bar starts from where it was drawn last, so a rebuild that labels more grows it instead of redrawing it
+const coverageWas = {};
+function coverageBar(key, sec, hours) {
+  const now = Math.min(1, sec / 3600 / hours), was = coverageWas[key] ?? now;
+  coverageWas[key] = now;
+  return `<span class="cv-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" `
+    + `aria-valuenow="${Math.round(now * 100)}" aria-label="Share of the target labelled">`
+    + `<i style="width:${(was * 100).toFixed(2)}%" data-to="${(now * 100).toFixed(2)}%"></i></span>`;
+}
 function renderCoverage(ds, shown) {
   if (!ALL_EPS.length) { coverageEl.innerHTML = ''; return; }
   // every dataset of the board keeps its tab; the numbers are the labeller's (a model that labelled none of a
   // dataset's episodes leaves its tab dimmed)
   const src = railEps();
-  const per = presentDatasets(ALL_EPS).map(d => {
+  // a dataset with a target and no episode yet keeps a tab too (dimmed, 0 of its target), so the totals count every
+  // target from the start of a run
+  const present = presentDatasets(ALL_EPS);
+  const per = present.concat(Object.keys(TARGETS).filter(d => !present.includes(d))).map(d => {
     const eps = src.filter(e => datasetOf(e) === d);
-    return { d, n: eps.length, sec: sumDur(eps) };
+    const t = TARGETS[d];
+    return { d, n: eps.length, sec: sumDur(eps), t: t && t.episodes > 0 && t.hours > 0 ? t : null };
   });
   const shownSec = sumDur(shown);
   const cur = per.find(p => p.d === ds) || { n: 0, sec: 0 };
@@ -3587,16 +3799,33 @@ function renderCoverage(ds, shown) {
     const num = on && narrowed
       ? `<em>${shown.length.toLocaleString()}</em> of ${p.n.toLocaleString()} &middot; <em>${fmtSpan(shownSec)[0]}`
         + `</em> ${fmtSpan(shownSec)[1]}`
+      : p.t ? `${p.n.toLocaleString()} of ${p.t.episodes.toLocaleString()}<span class="u"> eps</span> &middot; `
+        + `${fmtOf(p.sec, p.t.hours)[0]} of ${fmtOf(p.sec, p.t.hours)[1]} ${fmtOf(p.sec, p.t.hours)[2]}`
       : `${p.n.toLocaleString()}<span class="u"> ${p.n === 1 ? 'ep' : 'eps'}</span> &middot; ${fmtSpan(p.sec)[0]} ${fmtSpan(p.sec)[1]}`;
     return `<div class="cv-cell${on ? ' on' : ''}${p.n ? '' : ' none'}" role="tab" aria-selected="${on}" `
       + `aria-disabled="${!p.n}" aria-label="${esc(dsLabel(p.d))}" data-ds="${esc(p.d)}">`
       + `<span class="cv-name">${esc(DS_SHORT[p.d] || dsLabel(p.d))}</span><span class="cv-num">${num}</span>`
+      + (p.t ? coverageBar(p.d, p.sec, p.t.hours) : '')
       + '</div>';
   }).join('');
+  // the totals count against a target only when every dataset on the board has one
+  const whole = per.length && per.every(p => p.t)
+    ? { episodes: per.reduce((a, p) => a + p.t.episodes, 0), hours: per.reduce((a, p) => a + p.t.hours, 0) } : null;
+  const allSec = sumDur(src);
+  const figs = whole
+    // short units, as on the tabs: the totals sit over the rail, which is too narrow for "of 2,682 episodes"
+    ? `<span><b>${src.length.toLocaleString()}</b><small>of ${whole.episodes.toLocaleString()} eps</small></span>`
+      + `<span><b>${fmtOf(allSec, whole.hours)[0]}</b><small>of ${fmtOf(allSec, whole.hours)[1]} `
+      + `${fmtOf(allSec, whole.hours)[2]}</small></span>`
+    : `<span><b>${src.length.toLocaleString()}</b><small>${src.length === 1 ? 'episode' : 'episodes'}</small></span>`
+      + `<span><b>${fmtSpan(allSec, true)[0]}</b><small>${fmtSpan(allSec, true)[1]}</small></span>`;
   coverageEl.innerHTML = `<div class="cv-all"><span class="cv-k">All datasets</span>`
-    + `<span class="cv-fig"><span><b>${src.length.toLocaleString()}</b><small>${src.length === 1 ? 'episode' : 'episodes'}</small></span>`
-    + `<span><b>${fmtSpan(sumDur(src), true)[0]}</b><small>${fmtSpan(sumDur(src), true)[1]}</small></span></span>`
+    + `<span class="cv-fig">${figs}</span>${whole ? coverageBar('', allSec, whole.hours) : ''}`
     + `</div><div class="cv-cells" role="tablist">${tabs}</div>`;
+  // grow each bar from where it was to where it is now
+  requestAnimationFrame(() => coverageEl.querySelectorAll('.cv-bar i[data-to]').forEach(i => {
+    i.style.width = i.dataset.to;
+  }));
   coverageEl.querySelectorAll('.cv-cell').forEach(el => {
     el.addEventListener('click', () => {
       if (el.classList.contains('none')) return;
@@ -4166,11 +4395,13 @@ function loadSensors(file) {
 }
 // the cameras of an episode with a depth clip to switch to
 function depthViews(file) {
+  const unpaired = SN_INDEX && SN_INDEX[file] ? (SN_INDEX[file].unpaired_depth || []) : [];
   if (STATIC) {
     const rec = ALL_EPS.find(e => e.file === file) || {};
-    return Object.keys(rec._media || {}).filter(k => k.startsWith('depth_')).map(k => k.slice(6));
+    return Object.keys(rec._media || {}).filter(k => k.startsWith('depth_')).map(k => k.slice(6))
+      .filter(view => !unpaired.includes(view));
   }
-  return BOARD.sensors && SN_INDEX && SN_INDEX[file] ? (SN_INDEX[file].depth || []) : [];
+  return BOARD.sensors && SN_INDEX && SN_INDEX[file] ? (SN_INDEX[file].depth || []).filter(view => !unpaired.includes(view)) : [];
 }
 // on its own line after the camera's video, so a camera without depth draws exactly as before
 function dpHtml(v, views) {
@@ -4322,14 +4553,15 @@ function snMapHtml(s, k) {
       + `${100 / cols}%;height:${100 / rows}%"></div></div>
     <span class="lane-title">${esc(s.name)}</span>
     <span class="lane-now"></span>
-    <span class="sn-note">Each cell's distance from its resting level at the playhead. Darker is farther, and black `
-      + `is ${snNum(s.swing)} ${snAway(s.direction)} rest or more, ${scope}.</span>
+    <span class="sn-note">Darker cells are farther from rest; black is ${snNum(s.swing)} ${snAway(s.direction)} rest `
+      + `or more, ${scope}.</span>
   </div>`;
 }
 function snDepthHtml(D, camName, order) {
   const groups = new Map();
   const rank = v => (order.indexOf(v) + 1) || 99;
   for (const [v, e] of Object.entries(D.depth || {}).sort((a, b) => rank(a[0]) - rank(b[0]))) {
+    if (e.playback && e.playback.kind === 'source_frames') continue;
     const key = JSON.stringify([e.units, e.kind, e.bar, e.ticks]);
     if (!groups.has(key)) groups.set(key, {e, views: []});
     groups.get(key).views.push(v);
@@ -4381,8 +4613,8 @@ function snMapDraw(m, i, ink) {
     m.peak.style.top = (100 * Math.floor(bi / cols) / rows) + '%';
   }
   m.peak.classList.toggle('on', active);
-  m.now.textContent = none ? 'No reading at the playhead' : active ? `Row ${Math.floor(bi / cols) + 1}, column `
-    + `${bi % cols + 1} is the strongest, ${snNum(best)} ${snAway(s.direction)} rest` : 'At rest';
+  m.now.textContent = none ? 'No reading at the playhead' : active ? `Largest change: row ${Math.floor(bi / cols) + 1}, column `
+    + `${bi % cols + 1}, ${snNum(best)} ${snAway(s.direction)} rest` : 'Near rest';
 }
 // the signals with no lane, by name: those whose every value is the same at every frame, those the same wherever they
 // read but with no reading at some frames (board/sensors.py signal_doc no_reading_frames), and those with no reading at
@@ -4406,7 +4638,7 @@ function snStillHtml(D) {
 }
 // lay out the panel for the episode renderEp just drew, and wire it to the playhead (its listeners go with the render).
 // On an episode with contacts the Touch lane above shows what matters, so the signals start folded away.
-function setupSensors(file, duration, seek, on, vid, camName, order, hasContacts) {
+function setupSensors(file, duration, seek, on, vid, camName, order, hasContacts, label = {}) {
   window._sn = null;
   const slot = document.getElementById('sn-slot');
   if (!slot || !BOARD.sensors || !SN_INDEX || !SN_INDEX[file]) return;
@@ -4420,7 +4652,7 @@ function setupSensors(file, duration, seek, on, vid, camName, order, hasContacts
     if (sigs.length || still) counts.push(`${sigs.length} ${sigs.length === 1 ? 'signal changes'
       : 'signals change'}${D.constant.length ? `, ${D.constant.length} constant` : ''}${D.none.length
       ? `, ${D.none.length} with no reading` : ''}`);
-    if (nDepth) counts.push(`depth on ${nDepth} ${nDepth === 1 ? 'camera' : 'cameras'}`);
+    if (nDepth) counts.push(`${nDepth} depth ${nDepth === 1 ? 'stream' : 'streams'}`);
     const lane = (s, i) => `<div class="lane sn-lane">
         <div class="lane-head"><span class="lane-title">${esc(s.name)} <span class="lane-sum">${esc(snWhat(s))}`
           + `</span></span><span class="lane-now" data-i="${i}"></span></div>
@@ -4444,7 +4676,9 @@ function setupSensors(file, duration, seek, on, vid, camName, order, hasContacts
         ${fold ? `<div class="sn-fold"><div class="sn-fold-in">${signalsHtml}</div></div><button class="ck-more `
           + `sn-show" type="button" aria-expanded="${shown}">${foldWord(shown)}</button>` : signalsHtml}
         ${snDepthHtml(D, camName, order || [])}
+        ${unpairedDepthHtml(D, label, encodeURIComponent((label._meta || {}).episode_id || ''))}
       </div>`;
+    setupUnpairedDepth(slot, D, label, on);
     if (fade) { slot.classList.add('sn-wait'); void slot.offsetWidth; slot.classList.remove('sn-wait'); }
     const box = slot.querySelector('.sn');
     const moreBtn = slot.querySelector('.sn-more');
@@ -4509,7 +4743,7 @@ function setupSensors(file, duration, seek, on, vid, camName, order, hasContacts
     }
     if (vid) {
       on(vid, 'play', watch);
-      on(vid, 'seeked', () => sync(vid.currentTime));
+      on(vid, 'seeked', () => sync(snPlaybackTime(D, vid.currentTime)));
     }
     window._epCleanup.push(() => {
       if (rv && vid && vid.cancelVideoFrameCallback) vid.cancelVideoFrameCallback(rv);
@@ -4584,17 +4818,51 @@ function genericSensorSamplesHtml(G, f) {
   return `<div class="sensor-samples" role="group" aria-label="Recorded evidence samples"><span>Samples</span>${times.map(t =>
     `<button type="button" data-sensor-sample-t="${t}" title="Inspect recorded sample paused">${esc(String(Number(t.toFixed(6))))}s</button>`).join('')}</div>`;
 }
+// The card's rows: the finding's own display rows (label/sensor_display.py), named for what they measure and pointing
+// the way the recording declares a stronger response. The expanded panel (limit Infinity) keeps every cited series.
+// A card row derived from what the finding cites (a region, or an area of one), or a reference to a cited series,
+// which is drawn as the series always is.
+function displaySensorSeries(f, cited) {
+  const rows = (Array.isArray(f.display) ? f.display : []).filter(r => r && ((typeof r.series_id === 'string' && cited.has(r.series_id))
+    || (typeof r.label === 'string' && r.label && Array.isArray(r.times) && Array.isArray(r.values) && r.times.length === r.values.length
+      && r.times.length > 1 && r.times.every((t, i) => Number.isFinite(t) && (!i || t > r.times[i - 1])) && r.values.some(Number.isFinite))));
+  if (!rows.some(r => typeof r.series_id !== 'string')) return [];
+  return rows.map(r => {
+    if (typeof r.series_id === 'string') return cited.get(r.series_id);
+    const valid = r.values.filter(Number.isFinite), low = Math.min(0, ...valid), high = Math.max(0, ...valid);
+    const padding = Math.max(1, high - low) * .12;
+    return {label: r.label + (typeof r.unit === 'string' ? ' (' + r.unit + ')' : ''), times: r.times,
+      values: r.values.map(v => Number.isFinite(v) ? v : null), nativePlot: true, sample_period_s: r.sample_period_s,
+      low: low - padding, high: high + padding, hideValue: true, displayRow: true};
+  });
+}
 function genericSensorSeries(G, f, limit = 3) {
   if (!G || !G.generic || !f) return [];
+  const cited = citedSensorSeries(G, f);
+  if (limit !== Infinity) {
+    const display = displaySensorSeries(f, new Map(cited.map(r => [r.id, r])));
+    if (display.length) return display.slice(0, limit);
+  }
+  return cited.slice(0, limit);
+}
+function citedSensorSeries(G, f) {
   const ids = new Set((f.evidence || []).map(e => e.series_id).filter(Boolean));
   const selected = (G.series || []).filter(r => ids.has(r.id) && genericSensorAvailable(G, r.sensor_id) && r.review_status !== 'rejected'
     && !r.withheld_from_final && (f.evidence || []).some(e => e.series_id === r.id && e.sensor_id === r.sensor_id) && Array.isArray(r.values) && Array.isArray(r.times)
     && r.values.length === r.times.length && r.values.some(Number.isFinite));
+  const priority = new Map((f.evidence || []).map((ref, i) => [ref.series_id, i]).reverse());
+  selected.sort((a, b) => priority.get(a.id) - priority.get(b.id));
   const sensors = new Map((G.sensors || []).map(s => [s.id, s]));
   const sourceName = r => String((sensors.get(r.sensor_id) || {}).name || r.sensor_id || 'Recorded field');
   const leafName = r => sourceName(r).split(/[./]/).filter(Boolean).pop() || sourceName(r);
   const readable = name => name.replace(/_/g, ' ');
-  return selected.slice(0, limit).map(r => {
+  return selected.map(r => {
+      const plot = r.plot;
+      const native = plot?.kind === 'native_samples' && Array.isArray(plot.times) && Array.isArray(plot.values)
+        && plot.times.length === r.native_samples && plot.times.length === plot.values.length && plot.times.length <= 4096
+        && plot.times.every((t, i) => Number.isFinite(t) && (!i || t > plot.times[i - 1]))
+        && plot.values.every(v => v === null || Number.isFinite(v)) && plot.values.some(Number.isFinite);
+      if (native) r = {...r, times: plot.times, values: plot.values, nativePlot: true};
       const valid = r.values.filter(Number.isFinite);
       const receipt = (G.receipts || []).find(receipt => receipt.id === r.sensor_id && receipt.current);
       const depthRegion = !!receipt && receipt.mode === 'regions' && (receipt.descriptor || {}).kind === 'depth';
@@ -4636,8 +4904,9 @@ function genericSensorPanelHtml(G, f) {
 function genericSensorMethodHtml(G) {
   if (!G || !G.generic) return '';
   return `<details class="se-method grip-method"><summary>Method and limits</summary>
-    <p>These findings use the video and the recorded sensor evidence supplied in the same annotation request. They have not been validated by a matched control or an accuracy study.</p>
-    <p>Each trace shows recorded values on its own fixed scale. Points mark supplied samples, without implying continuous measurements between them. Units and locations come from recorded descriptors and the data dictionary. Unknown units remain unknown. Zero codes are retained unless the source declares them invalid. Missing readings remain blank. A larger electrical reading does not establish a stronger squeeze.</p>
+    <p>These findings use the video and sensor evidence supplied in their annotation requests. They have not been validated by a matched control or an accuracy study.</p>
+    <p>Traces show recorded readings or the named computed measurement, each on its own fixed scale. Points mark supplied samples, without implying continuous measurements between them. Units and locations come from recorded descriptors and the data dictionary. Unknown units remain unknown. Zero codes are retained unless the source declares them invalid. Missing readings remain blank. A larger electrical reading does not establish a stronger squeeze.</p>
+    ${(G.sensors || []).flatMap(s => (s.derivations || []).map(d => `<p><strong>${esc(s.name)}</strong><br>${esc(d.operation)}<br>${esc((d.reference || {}).method || '')}${d.provenance ? '<br>' + esc(d.provenance.authority || '') : ''}${(d.limitations || []).map(x => '<br>' + esc(x)).join('')}</p>`)).join('')}
     ${(G.limitations || []).map(x => `<p>${esc(x)}</p>`).join('')}
     ${(G.sensors || []).filter(s => Object.keys(s.timing || {}).length).map(s => {
       const timing = s.timing || {}, parts = [];
@@ -4710,6 +4979,9 @@ function recordingFindingsHtml(findings) {
       ${f.alternative ? `<p>${esc(f.alternative)}</p>` : ''}</details></article>`).join('')}</section>`;
 }
 
+// The copy contract versions whose detail is the shared explanation on video and in the list (label/sensor_copy.py
+// SHARED_VERSIONS; a test keeps the two equal).
+const SHARED_COPY_VERSIONS = [2, 3, 4, 5];
 function sensorEvidence(d) {
   const text = v => v != null && String(v).trim() && String(v).toLowerCase() !== 'null'
     ? String(v).replace(/[\u2013\u2014]/g, '-') : '';
@@ -4727,7 +4999,9 @@ function sensorEvidence(d) {
   const legacy = d.grip_evidence && d.grip_evidence.version === 1 ? d.grip_evidence : null;
   const grip = generic || legacy;
   const seen = new Set();
-  for (const owner of [generic, legacy].filter(Boolean)) for (const f of Array.isArray(owner.findings) ? owner.findings : []) {
+  // Findings from separate passes are listed together in playback order.
+  const byStart = (a, b) => (finite(a?.start_s) ? a.start_s : Infinity) - (finite(b?.start_s) ? b.start_s : Infinity);
+  for (const owner of [generic, legacy].filter(Boolean)) for (const f of (Array.isArray(owner.findings) ? [...owner.findings] : []).sort(byStart)) {
     const grip = owner;
     if (!f || f.review_status === 'rejected' || f.withheld_from_final || grip.source_current === false
       || (grip.generic && d.evidence_inspection?.source_current === false) || (grip.generic && f.adds_beyond_video !== true) || !finite(f.start_s) || !finite(f.end_s)
@@ -4741,17 +5015,23 @@ function sensorEvidence(d) {
       return /\b(thumb|index finger|middle finger|ring finger|little finger)\b/i.test(sensor?.name || '');
     });
     const copy = value => anatomical ? gripFingerCopy(text(value)) : text(value);
+    // The card call writes every finding in plain words: a chosen one reads the same in the list as on the video.
+    const written = entry => grip.generic && entry && entry.version === 1 && text(entry.headline) && text(entry.detail)
+      ? {headline: text(entry.headline), detail: text(entry.detail)} : null;
+    const videoCard = written(f.video_card), plain = videoCard || written(f.list_copy);
     insights.push({anatomical, evidenceSource: grip, findingIndex: insights.length, start: f.start_s, end: f.end_s, index: -1, priority: 3, kind: 'insight',
-      headline: grip.generic ? text(typeof f.overlay_headline === 'string' && text(f.overlay_headline)
+      headline: plain ? plain.headline : grip.generic ? text(typeof f.overlay_headline === 'string' && text(f.overlay_headline)
         ? f.overlay_headline : f.headline) : gripFingerCopy(text(f.headline)),
-      detail: copy(f.detail), reading: grip.generic ? 'Recorded sensor evidence' : 'Relative grip loading',
+      detail: plain ? plain.detail : copy(f.detail), reading: grip.generic ? 'Recorded sensor evidence' : 'Relative grip loading',
       visual: f.confidence === 'high' ? 'High confidence' : f.confidence === 'medium' ? 'Medium confidence' : 'Low confidence',
       t: finite(f.inspect_s) && f.inspect_s >= f.start_s && f.inspect_s <= f.end_s ? f.inspect_s : f.start_s,
       timing: '', alternative: copy(f.alternative), observation: copy(f.observation), claim: copy(f.claim),
-      overlayDetail: typeof f.overlay_detail === 'string' ? copy(f.overlay_detail) : null,
+      overlayDetail: plain ? plain.detail : typeof f.overlay_detail === 'string' ? copy(f.overlay_detail)
+        : SHARED_COPY_VERSIONS.includes(f.copy_contract_version) ? copy(f.detail) : null,
       quotedTimeOffset: finite(f.quoted_time_offset_s) ? f.quoted_time_offset_s : 0,
       generic: !!grip.generic, evidence: grip.generic && Array.isArray(f.evidence) ? f.evidence : [],
-      addsBeyond: f.adds_beyond_video === true || f.adds_beyond_rgb_pose === true, cellGroups: Array.isArray(f.cell_groups) ? f.cell_groups : []});
+      display: grip.generic && f.display && f.display.version === 1 && Array.isArray(f.display.rows) ? f.display.rows : null,
+      videoCard, addsBeyond: f.adds_beyond_video === true || f.adds_beyond_rgb_pose === true, cellGroups: Array.isArray(f.cell_groups) ? f.cell_groups : []});
   }
   for (const [i, c] of (d.contacts || []).entries()) {
     if (!c || c.review_status === 'rejected' || !finite(c.start_s) || !finite(c.end_s) || c.end_s < c.start_s) continue;
@@ -4782,17 +5062,20 @@ function sensorEvidence(d) {
     if (!c.to_end) add(c.end_s, 'Contact signal ends', 'end');
   }
   for (const m of d.contacts_missing || []) if (m && !m.withheld_from_final && m.review_status !== 'rejected' && finite(m.t_s)) moments.push({t: m.t_s, kind: 'missing',
-    headline: 'Visible grasp has no recorded contact', reading: 'No covering contact', visual: 'Reported from video',
+    headline: 'Visible grasp has no covering sensor-activity interval', reading: 'No covering contact', visual: 'Reported from video',
     detail: [text(m.hand), text(m.object)].filter(Boolean).join(' '), priority: 6, index: -1, timing: ''});
   moments.sort((a, b) => a.t - b.t || b.priority - a.priority);
-  const overlayFindings = [...insights, ...warnings.map((w, i) => ({
+  // When the run chose video cards, the video plays only those, in their own words; every finding stays in the list.
+  const carded = !!generic && generic.video_cards?.version === 1;
+  const onVideo = carded ? insights.filter(f => f.videoCard) : insights;
+  const overlayFindings = [...onVideo, ...warnings.map((w, i) => ({
     findingIndex: insights.length + i, start: w.start_s, end: w.end_s, t: w.start_s,
     headline: w.headline, detail: w.detail, kind: 'quality', priority: 6, generic: true, evidence: []
   }))];
   // Keep existing contact anomalies visible when a sensor finding or quality card owns the dock.
   for (const anomaly of [...contacts, ...moments].filter(f => f.priority >= 3)) {
     const moment = Number.isFinite(anomaly.t);
-    overlayFindings.push({...anomaly, findingIndex: overlayFindings.length, kind: 'anomaly',
+    overlayFindings.push({...anomaly, findingIndex: insights.length + overlayFindings.length - onVideo.length, kind: 'anomaly',
       start: moment ? anomaly.t : anomaly.start,
       end: moment ? anomaly.t : anomaly.end,
       t: moment ? anomaly.t : anomaly.start, generic: true, evidence: []});
@@ -4820,12 +5103,17 @@ function displayGripFindings(E, t, windows = sensorFindingWindows(E)) {
   const findings = E.overlayFindings || E.insights || [];
   // Equal onsets coexist. Every finding gets at least two seconds of media time,
   // including subsecond intervals. Superseded findings never return later.
-  return findings.filter(f => t + 1e-6 >= f.start && t < windows.get(f.findingIndex))
+  const shown = findings.filter(f => t + 1e-6 >= f.start && t < windows.get(f.findingIndex))
     .map(f => ({...f, phase: t <= f.end + 1e-6 ? 'Now' : 'Earlier'}))
     .sort((a, b) => b.priority - a.priority || b.start - a.start);
+  // At most two sensor finding cards share the video at once, whether or not the run chose its cards. The newest
+  // onsets win, so a card a newer one displaced never comes back, and every finding stays in the list and on the
+  // timeline. Quality warnings and contact anomalies are not findings and always show.
+  const kept = new Set(shown.filter(f => f.kind === 'insight').slice(0, MAX_CARDS_ON_VIDEO).map(f => f.findingIndex));
+  return shown.filter(f => f.kind !== 'insight' || kept.has(f.findingIndex));
 }
+const MAX_CARDS_ON_VIDEO = 2;
 
-function displayGripFinding(E, t) { return displayGripFindings(E, t)[0] || null; }
 function gripOverlaySeries(G, f, limit = 3) {
   G = f?.evidenceSource || G;
   if (G && G.generic) return genericSensorSeries(G, f, limit);
@@ -4851,27 +5139,31 @@ function gripOverlayPressureHtml(G, f, limit = 3) {
   if (!traces.length) return '';
   const allTimes = traces.flatMap(v => v.times || G.times || []);
   const end = Math.max(1e-6, ...allTimes), x = t => 180 * t / end;
-  return `<span class="gf-pressure" title="${G.generic ? 'Recorded readings, each row on its own fixed scale. Points are sampled readings. Depth region rows show their recorded range. Other rows retain zero. Missing samples remain blank. Compare within a row.' : 'The dot follows the video. Missing and censored samples remain blank. The dashed line is the starting level. Each row uses a fixed scale over the whole clip. Height shows recorded sensor change, not calibrated force. Compare changes within a row.'}">
+  return `<span class="gf-pressure" title="${G.generic ? 'Lines connect consecutive native readings. Isolated points show sparse supplied samples. Missing readings break the line. Each row has one fixed scale; compare changes within a row.' : 'The dot follows the video. Missing and censored samples remain blank. The dashed line is the starting level. Each row uses a fixed scale over the whole clip. Height shows recorded sensor change, not calibrated force. Compare changes within a row.'}">
     ${traces.map((v, k) => {
       const times = v.times || G.times;
       const y = value => 28 - 24 * (value - v.low) / (v.high - v.low);
       let pen = false, path = '', points = '';
+      const maxGap = v.nativePlot ? Math.max(.001, v.sample_period_s || .03) * 1.5 : .1001;
       v.values.forEach((value, i) => {
         if (!Number.isFinite(value)) { pen = false; return; }
-        if (G.generic) {
-          points += `<circle data-sensor-recorded-point cx="${x(times[i]).toFixed(2)}" cy="${y(value).toFixed(2)}" r="1.8" fill="currentColor" opacity=".65"/>`;
+        const previous = i > 0 && Number.isFinite(v.values[i - 1]) && times[i] - times[i - 1] <= maxGap;
+        const next = i + 1 < times.length && Number.isFinite(v.values[i + 1]) && times[i + 1] - times[i] <= maxGap;
+        if (G.generic && (!v.nativePlot || !previous && !next)) {
+          points += `<circle data-sensor-recorded-point cx="${x(times[i]).toFixed(2)}" cy="${y(value).toFixed(2)}" r=".01" fill="none" stroke="currentColor" stroke-width="3.6" stroke-linecap="round" vector-effect="non-scaling-stroke" opacity=".65"/>`;
+          pen = false;
           return;
         }
-        if (!G.generic && i && times[i] - times[i - 1] > .1001) pen = false;
+        if (i && times[i] - times[i - 1] > maxGap) pen = false;
         path += `${pen ? 'L' : 'M'}${x(times[i]).toFixed(2)},${y(value).toFixed(2)} `;
         pen = true;
       });
-      return `<span class="gf-pressure-row"><span><span class="gf-pressure-label" title="${esc(v.label)}">${esc(v.label)}</span>${v.depthRegion ? `<span class="gf-pressure-range">${esc(v.recordedLow)} to ${esc(v.recordedHigh)}</span>` : ''}${G.generic ? `<span class="gf-pressure-value" data-grip-mini-value="${k}"></span>` : ''}</span>
-        <span class="gf-pressure-chart"><svg viewBox="0 0 180 32" preserveAspectRatio="none" role="img" aria-label="${esc(v.label)} ${G.generic ? 'recorded readings' : 'relative sensor response over this clip'}">
+      return `<span class="gf-pressure-row"><span><span class="gf-pressure-label" title="${esc(v.label)}">${esc(v.label)}</span>${v.depthRegion ? `<span class="gf-pressure-range">${esc(v.recordedLow)} to ${esc(v.recordedHigh)}</span>` : ''}${G.generic && !v.hideValue ? `<span class="gf-pressure-value" data-grip-mini-value="${k}"></span>` : ''}</span>
+        <span class="gf-pressure-chart"><svg viewBox="0 0 180 32" preserveAspectRatio="none" role="img" aria-label="${esc(v.label)} ${G.generic ? 'supplied measurements' : 'relative sensor response over this clip'}">
           <rect x="${x(f.start)}" y="2" width="${x(f.end) - x(f.start)}" height="28" fill="currentColor" opacity=".08"/>
           ${v.depthRegion ? '' : `<line x1="0" x2="180" y1="${y(0)}" y2="${y(0)}" stroke="currentColor" opacity=".3" stroke-dasharray="2 3"/>`}
           ${points}<path d="${path.trim()}" fill="none" stroke="currentColor" opacity=".65" stroke-width="1.2" vector-effect="non-scaling-stroke"/>
-          <circle data-grip-mini-dot="${k}" cx="0" cy="0" r="2.8" fill="currentColor" visibility="hidden"/>
+          <circle data-grip-mini-dot="${k}" cx="0" cy="0" r=".01" fill="none" stroke="currentColor" stroke-width="5.6" stroke-linecap="round" vector-effect="non-scaling-stroke" visibility="hidden"/>
         </svg>${G.generic ? '' : `<span class="gf-pressure-gap" data-grip-mini-gap="${k}" visibility="hidden">No reading</span>`}</span></span>`;
     }).join('')}
     </span>`;
@@ -4904,7 +5196,7 @@ function syncGripOverlayPressure(G, f, t, scope = document, limit = 3) {
   }
   for (const label of scope.querySelectorAll('[data-grip-mini-value]')) {
     const v = traces[+label.dataset.gripMiniValue], now = v && sample(v);
-    label.textContent = now && now.nearby && Number.isFinite(now.value) ? String(now.value) : '';
+    label.textContent = now && now.nearby && Number.isFinite(now.value) ? String(Number(now.value.toPrecision(3))) : '';
   }
   for (const label of scope.querySelectorAll('[data-grip-mini-time]')) label.textContent = 'Video ' + fmtT(t);
 }
@@ -5158,7 +5450,8 @@ function syncGripEvidence(G, t, finding = null) {
   if (panel && finding) syncGripOverlayPressure(G, finding, t, panel, Infinity);
   if (G?.generic) syncGenericSensorVideos(t);
 }
-function setupSensorEvidence(E, seek, on, inspectContact, d = null, file = null, relayout = () => {}) {
+function setupSensorEvidence(E, seek, on, inspectContact, d = null, file = null, relayout = () => {}, media = null,
+    presentedTime = null) {
   const overlay = document.getElementById('sensor-overlay'), strip = document.getElementById('grip-finding-overlay'),
     now = document.getElementById('sensor-evidence-now');
   const details = document.getElementById('sensor-evidence-details');
@@ -5207,7 +5500,7 @@ function setupSensorEvidence(E, seek, on, inspectContact, d = null, file = null,
   const presentationWindows = sensorFindingWindows(E);
   let previousTime = null, currentCandidates = [], disposed = false;
   const wire = {reset(t = currentTime, keepSelection = false) {
-    const selection = keepSelection && Math.abs(t - currentTime) < 1e-6 ? chosenGrip : null;
+    const selection = keepSelection ? chosenGrip : null;
     chosenGrip = null; displayedGrip = null;
     currentCandidates = []; previousTime = null; stripKey = null;
     wire.sync(t, selection);
@@ -5215,12 +5508,19 @@ function setupSensorEvidence(E, seek, on, inspectContact, d = null, file = null,
     disposed = true;
   }, sync(t, explicitFindingIndex = null) {
     if (disposed) return;
-    const delta = previousTime == null ? 0 : t - previousTime;
-    if (delta < -1e-6) chosenGrip = null;
     if (explicitFindingIndex != null) chosenGrip = explicitFindingIndex;
+    if (!media?.ended) {
+      const shown = presentedTime ? presentedTime() : media && (media.seeking || media.readyState < 2) ? null : t;
+      if (shown == null) return;
+      t = shown;
+    }
+    const delta = previousTime == null ? 0 : t - previousTime;
+    if (delta < -1e-6 && explicitFindingIndex == null) chosenGrip = null;
     const allFindings = E.overlayFindings || E.insights || [];
+    // The end of playback is the timeline's last moment, not an event: the cards and evidence shown are the ones the
+    // final frame's time calls for, so a card leaves only when its own window has passed.
     const available = displayGripFindings(E, t, presentationWindows);
-    const explicit = allFindings.find(f => f.findingIndex === chosenGrip);
+    const explicit = allFindings.find(f => f.findingIndex === chosenGrip) || (E.insights || []).find(f => f.findingIndex === chosenGrip);
     // A manual inspection follows its source interval, even after another onset replaces its automatic card.
     if (explicit && explicit.start <= t && t <= explicit.end + 1e-6
         && !available.some(f => f.findingIndex === explicit.findingIndex))
@@ -5302,6 +5602,8 @@ function setupSensorEvidence(E, seek, on, inspectContact, d = null, file = null,
     }
     if (now) now.innerHTML = (html + distribution) || `<span>${(E.insights || []).length ? 'Select a grip finding to inspect its evidence' : loaded ? 'No retained tactile intensity samples' : 'Loading tactile measurements'}</span>`;
   }};
+  // Encoded media can finish before the declared annotation clock does.
+  if (media) on(media, 'ended', () => wire.sync(media.currentTime));
   if (d && file && E.contacts.length && !(E.insights || []).length) loadSensors(file).then(D => {
     if (file !== _activeFile || !details || !document.body.contains(details)) return;
     profiles = sensorProfiles(d, D); loaded = true; signature = null;
@@ -5351,12 +5653,12 @@ function tcData(d) {
   const rows = ['left', 'right', ''].filter(h => named.has(h));
   return {contacts, missing, rows};
 }
-// the rows a missed grasp is marked on: its hand's, or every row when it names none (or both)
-const tcMissRows = (x, rows) => rows.includes(tcHandKey(x.hand)) ? [tcHandKey(x.hand)] : rows;
 // the Touch lane, in the lane markup the Hands out of view lane uses
 function touchLaneHtml(T, lanePct, chev, duration = null) {
   const {contacts, missing, rows} = T;
   if (!contacts.length) return '';
+  const physical = contacts.every(c => c.evidence_kind === 'recorded_contact_state');
+  const event = physical ? 'contact' : 'interval';
   const n = contacts.length, st = contacts.map(tcState);
   const end = duration != null ? duration : Math.max(...contacts.map(c => c.end_s));
   const recordedRows = rows.filter(h => contacts.some(c => tcHandKey(c.hand) === h));
@@ -5374,20 +5676,20 @@ function touchLaneHtml(T, lanePct, chev, duration = null) {
     const indices = contacts.map((c, i) => tcHandKey(c.hand) === h ? i : -1).filter(i => i >= 0);
     const states = [...new Set(indices.map(i => st[i]))];
     return `<div class="tc-row"><div class="tc-row-head">${h ? `<span class="tc-hand">${tcHandName(h)}</span>` : '<span>Sensor response</span>'}
-      <span class="tc-verdict">${states.length === 1 ? words[states[0]] : 'Inspect a contact for its visual verdict'}</span></div>
+      <span class="tc-verdict">${states.length === 1 ? words[states[0]] : 'Inspect a sensor interval for its visual verdict'}</span></div>
       <div class="lane-bar tc-bar">${indices.map(i => seg(contacts[i], i)).join('')}<div class="lane-ph"></div></div>
       <div class="recording-axis"><span>${fmtT(0)}</span><span>${fmtT(end)}</span></div></div>`;
   };
   const observations = missing.length ? `<div class="tc-observations"><div class="tc-observations-label">Video observations</div>
     ${missing.map((x, j) => `<button type="button" class="tc-observation" data-t="${esc(x.t_s)}" data-m="${j}">
       <span class="tc-observation-time">${fmtT(x.t_s)}</span><span><span class="tc-observation-title">${esc(tcHandName(tcHandKey(x.hand)))} takes hold of ${esc(x.object || 'an object')}</span>
-      <span class="tc-observation-note">No covering contact recorded for this hand</span></span></button>`).join('')}</div>` : '';
+      <span class="tc-observation-note">No covering sensor interval supplied for this hand</span></span></button>`).join('')}</div>` : '';
   return `<div class="lane lane-touch recording-card" id="lane-touch">
-      <div class="lane-head"><span class="lane-title">Recorded touch</span>
-        ${n > 1 ? `<span class="lane-nav" role="group" aria-label="Contacts">
-          <button type="button" class="lane-step" data-dir="-1" aria-label="Previous contact">${chev('M6.5 2 3.5 5l3 3')}</button>
-          <span class="lane-pos" id="lane-touch-pos">${n} contacts</span>
-          <button type="button" class="lane-step" data-dir="1" aria-label="Next contact">${chev('M3.5 2l3 3-3 3')}</button>
+      <div class="lane-head"><span class="lane-title">${physical ? 'Recorded touch' : 'Sensor activity'}</span>
+        ${n > 1 ? `<span class="lane-nav" role="group" aria-label="Sensor intervals">
+          <button type="button" class="lane-step" data-dir="-1" aria-label="Previous ${event}">${chev('M6.5 2 3.5 5l3 3')}</button>
+          <span class="lane-pos" id="lane-touch-pos">${n} ${event}s</span>
+          <button type="button" class="lane-step" data-dir="1" aria-label="Next ${event}">${chev('M3.5 2l3 3-3 3')}</button>
         </span>` : ''}</div>
       ${recordedRows.map(rowHtml).join('')}${observations}
     </div>`;
@@ -5407,13 +5709,17 @@ function tcRegions(c) {
 }
 function tcCardHtml(c, i, st) {
   const s = c.seen || {};
+  const physical = c.evidence_kind === 'recorded_contact_state';
+  const event = physical ? 'contact' : 'activity interval';
   const tt = t => `<span data-t="${esc(t)}">${fmtT(t)}</span>`;
-  const times = [c.from_start ? 'Already touching at the start' : `Begins ${tt(c.start_s)}`,
+  const times = [c.from_start ? (physical ? 'Already touching at the start' : 'Already active at the start') : `Begins ${tt(c.start_s)}`,
     isFinite(c.peak_s) ? `strongest ${tt(c.peak_s)}` : '',
-    c.to_end ? 'still touching at the end' : `ends ${tt(c.end_s)}`].filter(Boolean).join(', ');
+    c.to_end ? (physical ? 'still touching at the end' : 'still active at the end') : `ends ${tt(c.end_s)}`].filter(Boolean).join(', ');
   const kv = (k, vs) => `<div class="kv"><div class="kv-k">${k}</div>${[].concat(vs).map(v => `<div class="kv-v">${v}`
     + `</div>`).join('')}</div>`;
   const rows = [];
+  if (c.reference_note) rows.push(kv('Reference', esc(c.reference_note)));
+  else if (!physical) rows.push(kv('Reference', 'Response activity has no verified unloaded reference or physical-contact interpretation.'));
   if (c.shown && c.seen) {
     const told = v => v != null && String(v).trim() !== '' && String(v).toLowerCase() !== 'null';
     if (told(s.object)) rows.push(kv('Object', esc(s.object)));
@@ -5429,20 +5735,20 @@ function tcCardHtml(c, i, st) {
   }
   const where = tcRegions(c);
   rows.push(kv('Signals', esc(tcList(c.signals || []))));
-  if (where.length) rows.push(kv('Where it bears', where.map(esc)));
+  if (where.length) rows.push(kv('Source cells', where.map(esc)));
   const dips = (c.dips_s || []).filter(isFinite);
-  rows.push(kv('Dips', dips.length ? `${tcList(dips.map(fmtT))}: its strength falls under half its peak and comes back`
-    : 'None: its strength stays above half its peak'));
-  const plain = !c.shown ? `<div class="tc-plain">The model was not shown this contact, so nothing here says what the `
+  rows.push(kv('Dips', dips.length ? `${tcList(dips.map(fmtT))} response falls under half its peak and comes back`
+    : 'Response stays above half its peak'));
+  const plain = !c.shown ? `<div class="tc-plain">The model was not shown this ${event}, so nothing here says what the `
       + `frames show at it.</div>`
-    : !c.seen ? `<div class="tc-plain">The model was shown this contact and gave no answer for it.</div>` : '';
+    : !c.seen ? `<div class="tc-plain">The model was shown this ${event} and gave no answer for it.</div>` : '';
   // a contact timed by a signal placed from both starts (label/contacts.py mark_aligned) has the placement's times
   const placed = c.aligned_by ? `<div class="tc-plain">${c.aligned_by === 'assumed camera clock'
     ? TC_CAMERA_PLACED : c.aligned_by === 'assumed start' ? TC_PLACED
     : esc('Its times are ' + placementText(c.aligned_by) + '. They are not measured contact times.')}</div>` : '';
   return `<div class="tc-card info-block" data-c="${i}">
       <div class="tc-card-head"><span class="tc-card-title">${tcHandKey(c.hand) ? tcHandName(tcHandKey(c.hand)) + ', '
-        + 'contact' : 'Contact'} ${esc(c.id || String(i + 1))}</span><span class="tc-pill ${tcCls(st)}">${TC_WORD[st]}</span></div>
+        + (physical ? 'contact' : 'response activity') : physical ? 'Contact' : 'Response activity'} ${esc(c.id || String(i + 1))}</span><span class="tc-pill ${tcCls(st)}">${TC_WORD[st]}</span></div>
       <div class="tc-times">${times}</div>
       ${placed}${plain}
       <div class="kv-block tc-kv">${rows.join('')}</div>
@@ -5452,7 +5758,7 @@ function tcCardHtml(c, i, st) {
 function tcCardsHtml(T) {
   if (!T.contacts.length) return '';
   return `<div class="tc-cards" id="tc-cards">
-      <div class="tc-card info-block tc-empty on" data-c="-1"><div class="tc-plain">No contact at the playhead. Click one `
+      <div class="tc-card info-block tc-empty on" data-c="-1"><div class="tc-plain">No sensor interval at the playhead. Click one `
         + `on the Touch lane, or step through them with its arrows.</div></div>
       ${T.contacts.map((c, i) => tcCardHtml(c, i, tcState(c))).join('')}
     </div>`;
@@ -5586,7 +5892,7 @@ function setupTouch(T, file, duration, seek, on, vid, evidenceSync = null) {
 
 // Only the depth frame named by a regions receipt gets its measured boxes. These are sampled image regions,
 // not tracked objects or boxes registered to RGB.
-function depthRoiFrames(label, view) {
+function depthRoiFrames(label, view, sourceRows = false) {
   const inspection = label.evidence_inspection || {};
   if (inspection.source_current === false) return [];
   const records = (Array.isArray(inspection.inspections) ? inspection.inspections : [])
@@ -5599,25 +5905,110 @@ function depthRoiFrames(label, view) {
   }
   return records.filter(({receipt: r}) => r && r.review_status !== 'rejected' && !r.withheld_from_final
     && r.mode === 'regions' && (r.descriptor || {}).kind === 'depth'
-    && ((r.descriptor || {}).descriptor || {}).paired_camera === view)
+    && (sourceRows ? (r.descriptor || {}).name === view
+      && ((r.descriptor || {}).descriptor || {}).paired_camera == null
+      : ((r.descriptor || {}).descriptor || {}).paired_camera === view))
     .flatMap(({receipt: r, origin}) => (Array.isArray(r.frames) ? r.frames : [])
       .filter(f => f && Array.isArray(f.source_shape) && f.source_shape.length === 2
-      && Number.isFinite(+f.time_s) && Array.isArray(f.regions) && f.regions.length)
-      .map(f => ({...f, time_s: Number(f.time_s) + origin, receipt: r.id})));
+      && (sourceRows ? (r.source_frames || []).some(source => source.row === f.row
+        && Number.isInteger(source.source_frame) && source.source_frame >= 0) : Number.isFinite(+f.time_s))
+      && Array.isArray(f.regions) && f.regions.length)
+      .map(f => sourceRows ? {...f, source_sequence: true, receipt: r.id,
+        source_frame: r.source_frames.find(source => source.row === f.row).source_frame}
+        : {...f, time_s: Number(f.time_s) + origin, receipt: r.id}));
 }
 function depthRoiMarkup(frame) {
   const [height, width] = frame.source_shape.map(Number);
   if (!(height > 0 && width > 0)) return '';
+  const font = Math.min(17, width * .03);
   const boxes = frame.regions.map((region, i) => {
     const p = (region && Array.isArray(region.pixels) ? region.pixels : []).map(Number);
     if (p.length !== 4 || p.some(v => !Number.isFinite(v)) || p[0] < 0 || p[1] < 0
         || p[2] > width || p[3] > height || p[2] <= p[0] || p[3] <= p[1]) return '';
     const color = i % 2 ? '#fff069' : '#ff624c';
-    return `<rect x="${p[0]}" y="${p[1]}" width="${p[2]-p[0]}" height="${p[3]-p[1]}" fill="none" stroke="${color}" stroke-width="3"/>`
-      + `<text x="${p[0]}" y="${Math.max(17, p[1]-5)}" fill="${color}" stroke="#111" stroke-width="3" paint-order="stroke" font-size="17" font-weight="700">R${i+1}</text>`;
+    return `<rect x="${p[0]}" y="${p[1]}" width="${p[2]-p[0]}" height="${p[3]-p[1]}" fill="none" stroke="${color}" stroke-width="3" vector-effect="non-scaling-stroke"/>`
+      + `<text x="${p[0]}" y="${Math.max(font, p[1]-font*.3)}" fill="${color}" stroke="#111" stroke-width="3" vector-effect="non-scaling-stroke" paint-order="stroke" font-size="${font}" font-weight="700">R${i+1}</text>`;
   }).join('');
   if (!boxes) return '';
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" width="100%" height="100%" role="img" aria-label="Measured depth regions at ${Number(frame.time_s).toFixed(1)}s">${boxes}</svg>`;
+  const address = frame.source_sequence ? `source frame ${frame.source_frame}` : `${Number(frame.time_s).toFixed(1)}s`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" width="100%" height="100%" role="img" aria-label="Measured depth regions at ${address}">${boxes}</svg>`;
+}
+
+function unpairedDepthHtml(D, label, eidEnc) {
+  return Object.entries(D.depth || {}).filter(([, entry]) => (entry.playback || {}).kind === 'source_frames')
+    .map(([view, entry]) => {
+      const count = Number(entry.n_frames) || 0;
+      const samples = depthRoiFrames(label, view, true).filter(frame => frame.source_frame < count);
+      if (!count) return '';
+      const ratio = entry.width > 0 && entry.height > 0 ? `${Number(entry.width)}/${Number(entry.height)}` : '4/3';
+      const units = entry.units === 'metres' ? 'Distance in metres' : 'Relative depth';
+      const bar = (entry.bar || []).length ? `<div class="sn-bar" style="background:linear-gradient(to right, ${entry.bar.join(', ')})"></div>
+        <div class="sn-ticks">${(entry.ticks || []).map(([p, label]) => `<span style="left:${100 * p}%;transform:translateX(-${100 * p}%)">${esc(label)}</span>`).join('')}</div>` : '';
+      return `<div class="source-depth" data-depth-view="${esc(view)}"><span class="lane-title">${esc(entry.name || view)}</span>
+        <div class="source-depth-stage" style="aspect-ratio:${ratio}">
+          <video muted playsinline preload="metadata" src="${esc(videoSrc(eidEnc, 'depth_' + view))}" aria-label="Independent depth sequence"></video>
+          <div class="source-depth-roi" hidden></div></div>
+        <div class="source-depth-controls"><button type="button" data-depth-play>Play sequence</button>
+          <input type="range" min="0" max="${count - 1}" step="1" value="0" data-depth-row aria-label="Depth source frame">
+          <span data-depth-address>Source frame 0</span></div>
+        <div class="sn-note">${units}. Red is near, blue is far. Black is no reading.</div>${bar}
+        ${samples.length ? `<div class="source-depth-samples">${samples.map((sample, index) =>
+          `<button type="button" data-depth-sample="${index}">Source frame ${sample.source_frame}</button>`).join('')}</div>` : ''}
+        <details class="se-method"><summary>Sequence limits</summary><p>Independent depth image coordinates. Sequence timing is for playback only. RGB alignment requires recorded synchronization and registration. R1 and other outlines mark inspected source pixels.</p></details>
+      </div>`;
+    }).join('');
+}
+
+function setupUnpairedDepth(slot, D, label, on) {
+  for (const panel of slot.querySelectorAll('[data-depth-view]')) {
+    const entry = D.depth[panel.dataset.depthView], fps = Number((entry.playback || {}).fps) || 30;
+    const video = panel.querySelector('video'), slider = panel.querySelector('[data-depth-row]');
+    const address = panel.querySelector('[data-depth-address]'), play = panel.querySelector('[data-depth-play]');
+    const overlay = panel.querySelector('.source-depth-roi');
+    const samples = depthRoiFrames(label, panel.dataset.depthView, true)
+      .filter(frame => frame.source_frame < Number(entry.n_frames));
+    let pending = null, selected = null, callback = 0;
+    const show = time => {
+      const row = Math.max(0, Math.min(Number(entry.n_frames) - 1, Math.floor(time * fps + 1e-4)));
+      slider.value = String(row); address.textContent = `Source frame ${row}`;
+      const sample = video.readyState >= 2 && !video.seeking && !video.error
+        ? (selected && selected.source_frame === row ? selected : samples.find(frame => frame.source_frame === row)) : null;
+      overlay.innerHTML = sample ? depthRoiMarkup(sample) : ''; overlay.hidden = !sample;
+    };
+    const jump = row => {
+      video.pause(); pending = row / fps;
+      if (video.readyState >= 1) { video.currentTime = pending; pending = null; }
+      show(row / fps);
+    };
+    on(slider, 'input', () => { selected = null; jump(Number(slider.value)); });
+    for (const button of panel.querySelectorAll('[data-depth-sample]')) on(button, 'click', () => {
+      selected = samples[Number(button.dataset.depthSample)]; jump(selected.source_frame);
+    });
+    on(play, 'click', () => { if (video.paused) video.play().catch(() => {}); else video.pause(); });
+    on(video, 'loadedmetadata', () => { if (pending != null) { video.currentTime = pending; pending = null; } });
+    on(video, 'loadeddata', () => show(video.currentTime));
+    on(video, 'seeking', () => { overlay.hidden = true; });
+    on(video, 'error', () => {
+      overlay.hidden = true; play.disabled = true; slider.disabled = true;
+      address.textContent = 'Depth clip unavailable';
+    });
+    for (const event of ['timeupdate', 'seeked']) on(video, event, () => show(video.currentTime));
+    const next = () => {
+      if (video.paused || !video.requestVideoFrameCallback) return;
+      callback = video.requestVideoFrameCallback((now, metadata) => { callback = 0; show(metadata.mediaTime); next(); });
+    };
+    on(video, 'play', () => { play.textContent = 'Pause sequence'; next(); });
+    on(video, 'pause', () => {
+      play.textContent = 'Play sequence';
+      if (callback && video.cancelVideoFrameCallback) video.cancelVideoFrameCallback(callback);
+      callback = 0;
+    });
+    window._epCleanup.push(() => {
+      if (callback && video.cancelVideoFrameCallback) video.cancelVideoFrameCallback(callback);
+      video.pause();
+    });
+    show(0);
+  }
 }
 
 // each camera with depth: its switch, and its depth clip laid over its colour clip and played in step with it
@@ -5860,6 +6251,76 @@ function progressAt(pts, t) {
   return p;
 }
 
+// Annotations wait for the requested picture before following media time.
+function setupPresentedVideoClock(video, on, render, pending) {
+  let disposed = false, frame = null, target = null, unchanged = null, presented = null, generation = 0, callback = 0;
+  let awaitingSeek = false;
+  const ready = () => !disposed && video.readyState >= 2 && !video.seeking && !video.error;
+  const saved = video._annotationFrame;
+  if (ready() && saved && saved.clock === video.currentTime) frame = saved.time;
+  const cancel = () => {
+    if (callback && video.cancelVideoFrameCallback) video.cancelVideoFrameCallback(callback);
+    callback = 0;
+  };
+  const accept = t => {
+    if (!ready() || !Number.isFinite(t)) return;
+    cancel();
+    frame = t; target = null; unchanged = presented = null; awaitingSeek = false;
+    video._annotationFrame = {time: t, clock: video.currentTime};
+    pending(false); render(video.currentTime);
+  };
+  const watch = () => {
+    if (disposed || video.error || video.ended || frame != null || awaitingSeek) return;
+    if (video.requestVideoFrameCallback) {
+      if (callback) return;
+      const ticket = generation;
+      callback = video.requestVideoFrameCallback((now, metadata) => {
+        if (disposed || ticket !== generation || frame != null) return;
+        callback = 0;
+        presented = metadata.mediaTime;
+        accept(presented);
+        if (frame == null) watch();
+      });
+    }
+  };
+  const begin = t => {
+    if (disposed || (ready() && frame != null && t === video.currentTime)) return;
+    generation++; cancel(); frame = null; unchanged = presented = null; target = t;
+    // With no metadata, default start zero loads without a native seeking event.
+    awaitingSeek = t != null && !(video.readyState === 0 && t === 0);
+    video._annotationFrame = null;
+    pending(true);
+    if (!awaitingSeek) watch();
+  };
+  const refresh = () => {
+    if (disposed) return;
+    if (awaitingSeek) return;
+    if (unchanged != null && ready()) accept(unchanged);
+    else if (presented != null && ready()) accept(presented);
+    else if (!video.requestVideoFrameCallback) accept(video.currentTime);
+    else if (ready() && frame != null) {
+      video._annotationFrame.clock = video.currentTime;
+      render(video.currentTime);
+    }
+    watch();
+  };
+  on(video, 'seeking', () => {
+    if (frame != null || target !== video.currentTime) {
+      const same = frame != null && video._annotationFrame?.clock === video.currentTime ? frame : null;
+      begin(video.currentTime);
+      unchanged = same;
+    }
+    awaitingSeek = false;
+    watch();
+  });
+  for (const event of ['loadeddata', 'seeked', 'timeupdate', 'play', 'pause']) on(video, event, refresh);
+  for (const event of ['emptied', 'error']) on(video, event, () => begin(null));
+  on(video, 'ended', () => { cancel(); if (!disposed) render(video.currentTime); });
+  pending(frame == null); watch();
+  return {begin, time: () => ready() && frame != null ? video.currentTime : null,
+    dispose() { disposed = true; generation++; cancel(); frame = null; }};
+}
+
 function renderEp(d, opts) {
   opts = opts || {};
   const meta = d._meta || {};
@@ -5983,7 +6444,11 @@ function renderEp(d, opts) {
   // itself a data-quality signal. Without one, the model's assessment is the one line.
   const partProgress = d.progress_scope === 'request_parts';
   const givenMode = meta.prompt_mode === 'given' && !!meta.given_prompt;
-  const bannerLabel = partProgress && meta.given_prompt ? 'Source task' : hasTasks ? 'Session summary'
+  // a session labelled from a recording that carries its own instruction shows that instruction above the summary:
+  // whether there is one is read from the instruction, never from the mode the recording was labelled in
+  const givenSession = hasTasks && !partProgress && !!meta.given_prompt;
+  const bannerLabel = partProgress && meta.given_prompt ? 'Source task'
+    : givenSession ? 'Given task and session summary' : hasTasks ? 'Session summary'
     : givenMode ? `Given goal and ${whoOwn(who, 'independent assessment')}`
     : `Task, as ${esc(nameParts(who)[0])}${nameParts(who)[1] ? ` (${esc(nameParts(who)[1])})` : ''} assessed it`;
   // alignment chip: whether the model's independent assessment matches the given goal
@@ -6004,7 +6469,11 @@ function renderEp(d, opts) {
       + `${ga.note ? `<span class="ac-note">${esc(ga.note)}</span>` : ''}</div>`;
   }
   const bannerBody = partProgress && meta.given_prompt
-    ? `<div class="text">${esc(meta.given_prompt)}</div>` : givenMode
+    ? `<div class="text">${esc(meta.given_prompt)}</div>` : givenSession
+    ? `<div class="goal-given"><span class="gg-badge">given task</span>`
+        + `<span class="gg-text">${esc(meta.given_prompt)}</span></div>`
+      + `<div class="goal-read"><span class="gr-badge">session summary</span>`
+        + `<span class="gr-text">${esc(d.episode_prompt || '(empty)')}</span></div>` : givenMode
     ? `<div class="goal-given"><span class="gg-badge">given goal</span>`
         + `<span class="gg-text">${esc(meta.given_prompt)}</span></div>`
       + `<div class="goal-read"><span class="gr-badge">${whoOwn(who, 'independent assessment')}</span>`
@@ -6034,6 +6503,100 @@ function renderEp(d, opts) {
       <span class="po-sub">${progSubLabel}</span>
     </div>`;
   }
+
+  // when the episode's goal was met, for the Outcome box, the caption on the video and the score chip beside it: the
+  // local goal, else the first time the goal was reached (a goal later undone has only that one)
+  const episodeGoalT = comp.completed_at_s ?? comp.goal_reached_at_s ?? null;
+  // the episode's quality scores (board/scores.py): a chip on the video when each subgoal or the goal is reached, and
+  // a Quality section below that sets each score beside what it measured
+  const Q = d.scores && d.scores.version === 2 ? d.scores : null;
+  const qNum = v => v == null ? '-' : (Math.round(v * 10) / 10).toString();
+  const qPct = v => `${v == null ? 0 : Math.max(0, Math.min(10, v)) * 10}%`;
+  const qIn = Q ? Q.inputs || {} : {};
+  const subs = Q ? Q.subgoals || [] : [];
+  const bar = v => `<span class="qual-bar"><i style="width:${qPct(v)}"></i></span>`;
+  // one cell: a short label, the number, its bar, one short value; the longer explanation is its tooltip
+  const cell = (k, v, sub, tip, bad, shown) => `<div class="qual-cell" title="${esc(tip)}"><div class="qc-k">${k}</div>`
+    + (v == null ? `<div class="qc-v qc-word${bad ? ' qc-bad' : ''}">${esc(sub)}</div>`
+       : `<div class="qc-v">${shown ?? qNum(v)}</div>${bar(v)}${sub ? `<div class="qc-sub">${esc(sub)}</div>` : ''}`) + '</div>';
+  const box = (title, v, body, wide, folds, tip) => `<div class="qual-box${wide ? ' wide' : ''}${folds ? ' folds' : ''}${folds
+    && SUBS_OPEN ? ' open' : ''}"><div class="qual-head">`
+    + `<span class="qual-title"${tip ? ` title="${esc(tip)}"` : ''}>${title}</span>${v === undefined ? '' : `<span class="qual-score">${v == null ? '-'
+      : `${qNum(v)}<small>/10</small>`}</span>`}</div>`
+    + (v === undefined ? '' : `<div class="qual-headbar">${v == null ? '<span class="qual-bar none"></span>' : bar(v)}</div>`)
+    + body + '</div>';
+  // what a time was compared with, in words: the same subgoal (or the goal) in other demos of this task, similar
+  // subgoals elsewhere in the same dataset, or nothing (a missing basis is nothing)
+  const peerWords = (basis, n, what) => basis === 'task' ? `Median of ${n ?? 'the'} demo${n === 1 ? '' : 's'} of this task`
+    : basis === 'similar' ? `Median of ${n ?? 'the'} similar ${what}${n === 1 ? '' : 's'} in this dataset`
+    : 'Nothing comparable on this board';
+  // the Subgoals table: one row per subgoal stretch, the first SUBS_FIRST shown and the rest folded; both parts are
+  // tables with the same fixed columns so the folded rows line up under the header
+  const subCols = `<colgroup>${qIn.tasks_total ? '<col class="q-task">' : ''}<col class="q-no"><col class="q-at">`
+    + '<col><col class="q-took"><col class="q-med"><col class="q-fail"><col class="q-exec"></colgroup>';
+  const subTable = `<table class="qual-table${qIn.tasks_total ? ' has-task' : ''}">${subCols}`;
+  let subRowN = 0;
+  const subRows = subs.map(st => `<tr data-t="${st.start_s}">${qIn.tasks_total ? `<td class="num q-task">${st.task ?? '-'}</td>` : ''}
+        <td class="num q-no">${st.goal ? (qIn.tasks_total ? 'End' : 'Goal') : ++subRowN}</td>
+        <td class="num q-at${!st.reached && st.outcome !== 'unclear' ? ' qc-bad' : ''}">${st.reached ? fmtT(st.end_s)
+          : st.outcome === 'unclear' ? 'unclear' : 'not reached'}</td><td class="qt-name">${esc(st.label || '')}</td>
+        <td class="num q-took">${st.duration_s != null ? qNum(st.duration_s) + 's' : '-'}</td><td class="num q-med" title="${
+          esc(peerWords(st.peer_basis ?? null, st.peers, 'subgoal'))}">${st.peer_median_s != null ? qNum(st.peer_median_s) + 's' : '-'}</td>
+        <td class="num q-fail${(st.failed_attempts || []).length ? ' qc-bad' : ''}" title="${esc((st.failed_attempts || [])
+          .map(k => fmtT(k.t_s) + '  ' + (k.label || '')).join('\n'))}">${(st.failed_attempts || []).length}</td>
+        <td class="q-exec"><span class="qt-score"><b>${qNum(st.execution)}</b>${st.execution == null ? ''
+          : bar(st.execution)}</span></td></tr>`);
+  const subsTable = `${subTable}<thead><tr>${qIn.tasks_total ? '<th class="num q-task">Subtask</th>' : ''}`
+    + `<th class="num q-no">#</th><th class="num q-at">Done at</th><th class="qt-name">Subgoal</th><th class="num q-took">Took</th>`
+    + `<th class="num q-med">Median</th><th class="num q-fail">Failed tries</th><th class="q-exec">Execution</th></tr></thead>`
+    + `<tbody>${subRows.slice(0, SUBS_FIRST).join('')}</tbody></table>`
+    + (subRows.length > SUBS_FIRST ? `<div class="ck-all"><div class="ck-all-in">${subTable}`
+      + `<tbody>${subRows.slice(SUBS_FIRST).join('')}</tbody></table></div></div>`
+      + `<button class="ck-more qual-more" type="button" onclick="SUBS_OPEN = !SUBS_OPEN; `
+      + `this.closest('.qual-box').classList.toggle('open', SUBS_OPEN); this.textContent = SUBS_OPEN ? 'Show the first ${SUBS_FIRST}' `
+      + `: 'Show all ${subRows.length} subgoals'">${SUBS_OPEN ? `Show the first ${SUBS_FIRST}` : `Show all ${subRows.length} subgoals`}</button>`
+      : '');
+  const nMistakes = (qIn.penalties || []).length;
+  const goalT = episodeGoalT;
+  const qualityHtml = Q ? `<h3 class="section" id="quality">Quality</h3><div class="qual">
+    ${box('Execution', Q.execution, `<div class="qual-cells">
+      ${cell('Cleanliness', Q.cleanliness, Q.cleanliness == null ? 'not measured'
+        : `${Math.round(100 * (qIn.wasteful_share || 0))}% wasteful, ${nMistakes} mistake${nMistakes === 1 ? '' : 's'}`,
+        (qIn.penalties || []).map(x => `${x.mistake} (${x.severity}${x.recovered ? ', recovered' : ''}, -${x.points})`).join('\n')
+        || 'Share of the work marked wasteful, and points off per operator mistake')}
+      ${cell('Speed', Q.efficiency, Q.efficiency == null ? (qIn.tasks_total ? 'several subtasks'
+          : qIn.outcome === 'success' ? (qIn.time_to_goal_s == null ? 'no goal time' : 'no peers')
+          : qIn.outcome === 'success_then_undone' ? 'goal undone' : 'goal not reached')
+        : `${qNum(qIn.time_to_goal_s)}s, median ${qNum(qIn.peer_median_time_to_goal_s)}s`,
+        (Q.peer_basis ?? null) === 'task'
+          ? `Time from the first action to the goal, against the ${peerWords('task', Q.peers).toLowerCase()}`
+          : Q.efficiency == null && (qIn.tasks_total || qIn.outcome !== 'success')
+          ? 'Time from the first action to the goal, measured only on a single task that reached its goal'
+          : Q.efficiency == null && qIn.time_to_goal_s == null ? 'No timed work before the goal to measure'
+          : peerWords(null))}
+      ${cell('Steadiness', Q.fluency, Q.fluency == null ? 'not measured' : `${Math.round(100 * (qIn.hesitation_share || 0))}% waiting`,
+        `The mean of waiting (share of the work with every arm waiting${qIn.steadiness != null ? `, scores ${qNum(qIn.steadiness)}` : ''})`
+        + ` and busyness (actions per unit of progress against other demos of this task${qIn.actions_per_progress == null
+          ? ', not measured' : qIn.busyness != null ? `, scores ${qNum(qIn.busyness)}` : ', too few to compare'})`)}
+    </div>`, false, false, 'Execution weighs cleanliness 50%, speed 25% and steadiness 25%, over the ones that exist')}
+    ${box('Outcome', Q.outcome, `<div class="qual-cells">
+      ${qIn.tasks_total ? `${cell('Subtasks', null, `${qIn.tasks_done} of ${qIn.tasks_total} done`,
+          'Subtasks whose end state the footage shows reached', qIn.tasks_done < qIn.tasks_judged)}
+        ${cell('Unclear', null, `${qIn.tasks_total - qIn.tasks_judged} subtask${qIn.tasks_total - qIn.tasks_judged === 1 ? '' : 's'}`,
+          'Subtasks the footage does not settle (eg cut off by the end of the clip) or whose progress is not measured; they count for nothing either way')}`
+      : d.prompt_mode === 'session' ? cell('Subtasks', null, 'none labelled',
+          (comp && comp.reason) || 'The labels name no task in this session', true)
+      : `${cell('Goal', null, goalT != null ? `reached ${fmtT(goalT)}`
+          : ['failure', 'partial'].includes(qIn.outcome) ? 'not reached' : 'unclear',
+          'When the labelled goal was first met', goalT == null && ['failure', 'partial'].includes(qIn.outcome))}
+      ${qIn.progress_reached == null ? cell('Progress', null, 'not measured',
+          'Labelled in parts, each part measuring progress toward its own local goal only, so the whole goal has none')
+        : cell('Progress', 10 * qIn.progress_reached, '', 'The furthest the work got toward the labelled goal',
+          false, `${Math.round(100 * qIn.progress_reached)}%`)}`}
+      ${cell('Label', null, Q.relation || 'no label', 'How the work done relates to the labelled task', Q.relation && Q.relation !== 'aligned')}
+    </div>`)}
+    ${subs.length ? box('Subgoals', undefined, subsTable, true, SUBS_FIRST < subs.length) : ''}
+  </div>` : '';
 
   // lanes under the timeline, on its time scale: when the wearer's hands leave a head camera (the model's
   // per-step hands_visible), and the dataset's own timed labels as the publisher ships them
@@ -6181,44 +6744,60 @@ function renderEp(d, opts) {
   let invHtml = '';
   for (const o of inv) {
     invHtml += `<div class="it"><span class="name">${esc(o.name || '?')}</span>`
-      + `${o.color ? `<span class="color">${esc(o.color)}</span>` : ''}</div>`;
+      + `${o.color ? `<span class="color">${esc(o.color)}</span>` : ''}`
+      + `${(o.parts || []).length ? `<span class="color">${o.parts.length > 1 ? 'parts' : 'part'} `
+        + `${esc(o.parts.join(', '))}</span>` : ''}</div>`;
   }
 
   // a key event's mark by kind: the goal and a subgoal green, a failure red, the rest ink
   const keyColor = k => (k.kind === 'goal_reached' || k.kind === 'subgoal_complete') ? 'var(--success)'
     : ((k.outcome || '').toLowerCase() === 'failure' ? 'var(--danger)' : 'var(--fg-2)');
+  // a key event's kind in words, the same in the list, its mark, the feed and the caption on the video; a key event
+  // tagged subgoal_complete is "Subgoal N", numbered like the Quality table when the episode is scored, else in order
+  const subNo = new Map();
+  subs.filter(st => !st.goal).forEach((st, i) => subNo.set(Math.round(st.end_s * 100), i + 1));
+  let subN = 0;
+  const keySubNo = keyEvents.map(k => k.kind !== 'subgoal_complete' ? null
+    : Q ? subNo.get(Math.round(k.t_s * 100)) ?? null : ++subN);
+  const keyKindName = k => {
+    const i = keyEvents.indexOf(k);
+    return k.kind === 'subgoal_complete' ? `Subgoal${i >= 0 && keySubNo[i] ? ' ' + keySubNo[i] : ''}` : kindName(k.kind);
+  };
   let keyMarkersHtml = '';
   for (const k of keyEvents) {
     const pct = (onTl(k.t_s) / duration) * 100;
     const oc = (k.outcome || '').toLowerCase();
     keyMarkersHtml += `<div class="marker key" style="left:${pct}%;background:${keyColor(k)}" data-t="${esc(k.t_s)}"><div `
-      + `class="tip">${esc(fmtT(k.t_s))}   ${k.kind ? esc(kindName(k.kind)) + ': ' : ''}${esc(k.label || '')}${oc
+      + `class="tip">${esc(fmtT(k.t_s))}   ${k.kind ? esc(keyKindName(k)) + ': ' : ''}${esc(k.label || '')}${oc
       ? '  [' + esc(oc) + ']' : ''}</div></div>`;
   }
-  let keyPanelHtml = '';
+  const keyRows = [];
   const untimed = untimedRows(d, keyEvents.length + 1);
+  // each key event names its kind, and the ones tagged subgoal_complete say which subgoal they end (Quality scores them)
   keyEvents.forEach((k, i) => {
     const oc = (k.outcome || '').toLowerCase();
     const goalish = k.kind === 'goal_reached' || k.kind === 'subgoal_complete';
-    keyPanelHtml += `<div class="key-ev ${esc(oc)}${goalish ? ' goal' : ''}" data-t="${esc(k.t_s)}">
+    const kindChip = k.kind ? `<span class="ke-kind${k.kind === 'subgoal_complete' ? ' sub' : ''}">${esc(keyKindName(k))}</span>`
+      : '';
+    keyRows.push(`<div class="key-ev ${esc(oc)}${goalish ? ' goal' : ''}" data-t="${esc(k.t_s)}">
       <span class="ke-num">${i + 1}</span>
       <span class="ke-time">${fmtT(k.t_s)}</span>
       <div class="ke-body">
-        <div class="ke-row1"><span class="ke-label">${esc(k.label || '')}</span>${oc
+        <div class="ke-row1"><span class="ke-label">${kindChip}${esc(k.label || '')}</span>${oc
           ? `<span class="outcome ${esc(oc)}">${esc(oc)}</span>` : ''}</div>
         ${k.note ? `<div class="ke-note">${esc(k.note)}</div>` : ''}
       </div>
-    </div>`;
+    </div>`);
   });
-  keyPanelHtml += untimed.keys.join('');
+  const keyPanelHtml = foldRows([...keyRows, ...untimed.keys], 'key events', 'key');
 
   // the review of how the task was performed, and the state changes; the scene graph is a snapshot that follows the
   // playhead (renderSceneGraph)
   const perfHtml = d.performance_review
     ? `<div class="info-block"><div class="perf">${esc(d.performance_review)}</div></div>` : '';
-  const scHtml = (d.state_changes || []).map(x =>
+  const scHtml = foldRows((d.state_changes || []).map(x =>
     `<div class="line"><span class="t">${fmtT(x.t_s)}</span> <span class="v">${esc(x.object || '')}</span>: ${esc(x.from
-      || '')} <span style="color:var(--fg-3)">-&gt;</span> ${esc(x.to || '')}</div>`).join('');
+      || '')} <span style="color:var(--fg-3)">-&gt;</span> ${esc(x.to || '')}</div>`), 'changes', 'sc');
   // recoveries: each failed subevent paired with its recovery; a reply that leaves out "recovered" but gives a
   // recovery time is read as recovered
   const recoveries = (d.recovery || []).map(r => ({
@@ -6230,7 +6809,7 @@ function renderEp(d, opts) {
     howToFix: r.how_to_fix || '',
   })).filter(r => r.failureT != null).sort((a, b) => a.failureT - b.failureT);
 
-  let rcHtml = '';
+  const rcRows = [];
   for (const r of recoveries) {
     const recTag = r.recovered === true
       ? `<span class="rec-ok"${r.recoveredAt != null ? ` data-t="${esc(r.recoveredAt)}"`
@@ -6241,12 +6820,13 @@ function renderEp(d, opts) {
     const recDetail = r.recovered === true
       ? (r.correction ? `<div class="rec-line"><span class="rec-k">did</span> ${esc(r.correction)}</div>` : '')
       : (r.howToFix ? `<div class="rec-line"><span class="rec-k">how to fix</span> ${esc(r.howToFix)}</div>` : '');
-    rcHtml += `<div class="rec">
+    rcRows.push(`<div class="rec">
       <div class="rec-head"><span class="rec-t" data-t="${esc(r.failureT)}">${fmtT(r.failureT)}</span><span `
         + `class="rec-fail">${esc(r.failure)}</span>${recTag}</div>
       ${recDetail}
-    </div>`;
+    </div>`);
   }
+  const rcHtml = foldRows(rcRows, 'recoveries', 'rec');
   const ivHtml = (d.instruction_variants || []).map(v => `<li>${esc(v)}</li>`).join('');
   const verdict = (comp.task_completed || '').toLowerCase();
   // the verdict's colour: green when the task ends done, red when it does not (undone included), ink otherwise
@@ -6259,13 +6839,13 @@ function renderEp(d, opts) {
   const tcount = {success: 0, failure: 0};
   tasks.forEach(t => { const o = (t.outcome || '').toLowerCase(); if (o in tcount) tcount[o]++; });
   const tPartly = tasks.filter(t => t.failure_kind === 'partial').length;
-  let tasksHtml = '';
+  const taskRows = [];
   tasks.forEach((t, i) => {
     const oc = (t.outcome || '').toLowerCase();
     const span = (t.start_s != null && t.end_s != null) ? `${fmtT(t.start_s)}-${fmtT(t.end_s)}` : '';
     const done = t.completed_at_s != null ? ` &middot; done ${fmtT(t.completed_at_s)}` : '';
     const jump = t.completed_at_s != null ? t.completed_at_s : t.start_s;
-    tasksHtml += `<div class="task-row ${esc(oc)}"${jump != null ? ` data-t="${esc(jump)}"` : ''}>
+    taskRows.push(`<div class="task-row ${esc(oc)}"${jump != null ? ` data-t="${esc(jump)}"` : ''}>
       <span class="task-num ${esc(oc)}">${i + 1}</span>
       <div class="task-body">
         <div class="task-head"><span class="task-name">${esc(t.task || '?')}</span>${oc
@@ -6274,8 +6854,9 @@ function renderEp(d, opts) {
         ${t.success_predicate ? `<div class="task-pred">${esc(t.success_predicate)}</div>` : ''}
         ${t.note ? `<div class="task-note">${esc(t.note)}</div>` : ''}
       </div>
-    </div>`;
+    </div>`);
   });
+  const tasksHtml = foldRows(taskRows, 'tasks', 'task');
   // the problems: deterministic checks that fired, data issues and operator mistakes
   const dataIssues = (d.data_issues || []).filter(x => x && x.issue);
   const tb = (d.dataset_checks || {}).timebase || null;
@@ -6422,7 +7003,7 @@ function renderEp(d, opts) {
       <span class="ts-ok">${tcount.success} success</span> /
       <span class="ts-fail">${tcount.failure} failure${tPartly ? `, ${tPartly} of them partly done` : ''}</span>${
         partsGapHtml(d)}
-      <div class="tasks-note">The episode has no single goal. Each task is graded on its own, and a messy final scene is fine.</div>
+      <div class="tasks-note">Each task is graded on its own.</div>
     </div>
     ${taskGoalFrameHtml}
     <div class="info-block tasks-panel">${tasksHtml}</div>
@@ -6463,12 +7044,13 @@ function renderEp(d, opts) {
           <div class="state-toast" id="state-toast"></div>
           <div class="recovery-overlay" id="recovery-overlay"></div>
           <div class="video-overlay" id="video-overlay"></div>
+          ${Q ? '<div class="score-chip" id="score-chip"></div>' : ''}
   `;
   const mainCameraLabel = isEgo && !unshownCams(d).some(u => u.view === mainCam) ? ''
     : `<span class="cam-label" title="${esc(camLabel(mainCam))}">${esc(unshownCams(d).some(u => u.view === mainCam)
       && cameraPresentation(d, mainCam) === 'scene' ? 'scene' : camLabel(mainCam))}</span>`;
   leftCol.innerHTML = `
-    <div class="video-wrap">
+    <div class="video-wrap" id="video-wrap">
       <div class="cam-row${isEgo ? ' cam-row-single' : (!hasTop ? ' cam-row-grippers' + (sideCams.length ? ''
         : ' cam-row-single') : '')}${mainIsScene ? ' cam-main-scene' : ''}">
         <div class="cam-cell cam-exo">
@@ -6528,13 +7110,15 @@ function renderEp(d, opts) {
 
     ${pubHtml}
     ` : `
-    <h3 class="section">Key events <span class="count">${keyEvents.length + untimed.keys.length}</span></h3>
+    <h3 class="section">Key events <span class="count">${keyEvents.length + untimed.keys.length}</span>${Q && subs.some(st => !st.goal)
+      ? `<span class="ke-what">(${subNo.size} ${subNo.size === 1 ? 'is a subgoal' : 'are subgoals'}, scored under Quality)</span>` : ''}</h3>
     <div class="info-block"><div class="key-events">${keyPanelHtml || '<span style="color:var(--fg-3)">none</span>'}`
       + `</div></div>
 
     ${tasksSection}
     ${requestPartAssessmentsHtml(d)}
 
+    ${qualityHtml}
     ${perfHtml ? `<h3 class="section">How well was the task executed?</h3>${perfHtml}` : ''}
     ${rcHtml ? `<h3 class="section">Recoveries</h3><div class="info-block">${rcHtml}</div>` : ''}
 
@@ -6573,7 +7157,7 @@ function renderEp(d, opts) {
   feedItems.forEach((it, idx) => {
     if (it.kind === 'key') {
       const k = it.k; const oc = (k.outcome || '').toLowerCase();
-      const kindChip = k.kind ? `<span class="ke-kind">${esc(kindName(k.kind))}</span>` : '';
+      const kindChip = k.kind ? `<span class="ke-kind">${esc(keyKindName(k))}</span>` : '';
       feedHtml += `<div class="ev keyrow" data-t="${esc(k.t_s)}" data-idx="${idx}">
         <span class="t">${fmtT(k.t_s)}</span>
         <span class="ke-col"><span class="ke-badge">&#9670; key event</span></span>
@@ -6730,10 +7314,13 @@ function renderEp(d, opts) {
     if (window._epCleanup) window._epCleanup.push(() => clearInterval(_driftIv));
   }
 
+  let presentation = null;
   const seek = (t, autoplay = true) => {
     if (vid && t != null && t !== '' && !isNaN(parseFloat(t))) {
+      if (presentation) presentation.begin(parseFloat(t));
       if (evidenceWire) evidenceWire.reset(parseFloat(t));
-      vid.currentTime = parseFloat(t);
+      if (!presentation || presentation.time() == null || vid.currentTime !== parseFloat(t))
+        vid.currentTime = parseFloat(t);
       // Auto-play from the clicked point (slaves follow via the 'play' handler).
       if (autoplay) vid.play().catch(()=>{});
       else vid.pause();
@@ -6821,7 +7408,7 @@ function renderEp(d, opts) {
     const ev = w.ev;
     const cc = contribClass(ev.contribution);
     const cl = contribText(ev.contribution) || '-';
-    const goalT = comp.completed_at_s;
+    const goalT = episodeGoalT;
     const atEpisodeGoal = goalT != null && t >= goalT - 0.3 && t <= goalT + 3.0;
     const atTaskGoal = taskGoalTimes.some(gt => t >= gt - 0.3 && t <= gt + 3.0);
     const k = activeKey(t);
@@ -6833,7 +7420,7 @@ function renderEp(d, opts) {
     const goalHtml = (atEpisodeGoal || atTaskGoal)
       ? `<div class="vo-goal"><span class="vo-goal-badge">&#10003; ${atTaskGoal && !atEpisodeGoal ? 'task done'
         : 'goal reached'}</span></div>` : '';
-    const keyHtml = k ? `<div class="vo-key"><span class="vo-key-badge">&#9670; ${esc(kindName(k.kind)
+    const keyHtml = k ? `<div class="vo-key"><span class="vo-key-badge">&#9670; ${esc(keyKindName(k)
       || 'key event')}</span><span class="vo-key-label">${esc(k.label || '')}</span>${kOc
       ? `<span class="vo-key-outcome ${esc(kOc)}">${esc(kOc)}</span>` : ''}</div>` : '';
     overlay.innerHTML = `
@@ -6846,6 +7433,67 @@ function renderEp(d, opts) {
     overlay.classList.remove('adv', 'waste', 'idle', 'none');
     overlay.classList.add('active', cc);
   }
+
+  // the score chip shows a subgoal's execution while the caption's key event is that subgoal (activeKey, the caption's
+  // own window), and the episode's execution and outcome while the caption shows the goal reached; beside a caption
+  // about anything else (a contact, a grasp) it stays hidden
+  // (it is first called while the page is still being wired, so it looks up what it needs itself)
+  let _scSig = null, _subByT = null;
+  // the chip stands as tall as the caption beside it, following the caption as it gains or loses a row
+  if (globalThis._scoreChipObserver) globalThis._scoreChipObserver.disconnect();
+  globalThis._scoreChipObserver = null;
+  const capEl = document.getElementById('video-overlay');
+  if (capEl && typeof ResizeObserver !== 'undefined') {
+    globalThis._scoreChipObserver = new ResizeObserver(() => fitCaptionBesideChip());
+    globalThis._scoreChipObserver.observe(capEl);
+    if (capEl.offsetParent) globalThis._scoreChipObserver.observe(capEl.offsetParent);
+  }
+  // while the chip shows, the centred caption narrows so it clears the chip on the left (and keeps the same margin on
+  // the right); when the video is too narrow for both, the chip stands above the caption instead
+  function fitCaptionBesideChip() {
+    const chip = document.getElementById('score-chip');
+    // layout is the browser's: without one (a page function run on its own) there is nothing to fit
+    if (!chip || !capEl || !chip.style || !capEl.style || typeof getComputedStyle === 'undefined') return;
+    // on a narrow screen the caption sits under the video, not over it: the chip keeps its own size in the corner
+    if (getComputedStyle(capEl).position !== 'absolute') {
+      chip.style.height = ''; capEl.style.maxWidth = ''; chip.classList.remove('above'); chip.classList.add('corner');
+      return;
+    }
+    chip.classList.remove('corner');
+    if (capEl.offsetHeight) {
+      chip.style.height = capEl.offsetHeight + 'px';
+      chip.style.setProperty('--cap-h', capEl.offsetHeight + 'px');
+    }
+    const on = chip.classList.contains('active');
+    const width = capEl.offsetParent ? capEl.offsetParent.clientWidth : 0;
+    const room = width - 2 * (chip.offsetLeft + chip.offsetWidth + 10);
+    const beside = on && room >= 200;
+    capEl.style.maxWidth = beside ? room + 'px' : '';
+    chip.classList.toggle('above', on && !beside);
+  }
+  function renderScoreChip(t) {
+    const scoreChip = document.getElementById('score-chip');
+    if (!scoreChip) return;
+    const subByT = _subByT || (_subByT = new Map(subs.filter(st => !st.goal).map(st => [Math.round(st.end_s * 100), st])));
+    const goalT = episodeGoalT;
+    const atGoal = goalT != null && t >= goalT - 0.3 && t <= goalT + 3.0;
+    const k = activeKey(t);
+    const st = k && k.kind === 'subgoal_complete' ? subByT.get(Math.round(k.t_s * 100)) : null;
+    const sig = atGoal ? 'goal' : st ? String(st.end_s) : '';
+    if (sig === _scSig) return;
+    _scSig = sig;
+    if (!sig) { scoreChip.classList.remove('active'); fitCaptionBesideChip(); return; }
+    // the chip names what it scores: the episode at its goal, else the numbered subgoal the caption is on
+    scoreChip.innerHTML = atGoal
+      ? `<span class="sc-k">Episode</span><span class="sc-v">${qNum(Q.execution)}</span>`
+        + `<span class="sc-k">Outcome</span><span class="sc-v">${qNum(Q.outcome)}</span>`
+      : `<span class="sc-k">Subgoal${subNo.get(Math.round(st.end_s * 100)) ? ' ' + subNo.get(Math.round(st.end_s * 100)) : ''}</span>`
+        + `<span class="sc-v">${qNum(st.execution)}</span>`;
+    scoreChip.classList.add('active');
+    fitCaptionBesideChip();
+  }
+
+  document.querySelectorAll('.qual-table tr[data-t]').forEach(r => r.addEventListener('click', () => seek(Number(r.dataset.t))));
 
   // ----- head camera: hands out of view -----
   // A head camera often points away from the hands, so a step's action is inferred rather than seen. The model marks
@@ -7153,7 +7801,9 @@ function renderEp(d, opts) {
   }
 
   // ----- key events: the one the playhead last passed is marked -----
+  // (past the first FOLD_FIRST rows it may sit in the closed fold, whose button then names its number)
   const keyEls = [...document.querySelectorAll('.key-events .key-ev')];
+  const keyMore = document.querySelector('.key-events .fold-more');
   let lastKey = -2;
   function syncKeyEvents(t) {
     let ai = -1;
@@ -7161,6 +7811,10 @@ function renderEp(d, opts) {
     if (ai === lastKey) return;
     lastKey = ai;
     keyEls.forEach((el, i) => el.classList.toggle('now', i === ai));
+    if (keyMore) {
+      keyMore.dataset.now = ai >= FOLD_FIRST ? String(ai + 1) : '';
+      keyMore.innerHTML = foldLabel(keyMore);
+    }
   }
 
   // ----- scene graph: playhead-synced snapshot -----
@@ -7246,6 +7900,10 @@ function renderEp(d, opts) {
   evidenceWire = setupSensorEvidence(evidence, seek, on, (k, t) => { if (tcWire) tcWire.inspect(k, t); }, d, _activeFile, () => {
     placeSensors();
     scheduleTopPlacement();
+  }, vid, () => {
+    const t = presentation ? presentation.time() : null;
+    // The shown frame's capture time decides what the sensor cards show, playing or paused.
+    return t == null ? null : snPlaybackTime(_snData.get(_activeFile), t);
   });
   window._epCleanup.push(() => evidenceWire.dispose());
   const syncEvidence = t => {
@@ -7263,31 +7921,38 @@ function renderEp(d, opts) {
       || event.target === exoCell.querySelector('#video-overlay')) scheduleTopPlacement();
   });
   function syncAll(t) {
+    if (vid) {
+      t = presentation ? presentation.time() : null;
+      if (t == null && !vid.ended) return;
+      if (t == null) t = vid.currentTime;
+    }
     if (duration > 0 && ph) ph.style.left = (100 * t / duration) + '%';
     // progress + state first so the recovery banner can place itself below the
     // corner chips that are actually visible this frame.
-    renderProgress(t); renderState(t); renderRecovery(t);
+    renderProgress(t); renderState(t); renderScoreChip(t); renderRecovery(t);
     renderOverlay(t); renderHands(t); renderTaskGoal(t); syncFeed(t); syncKeyEvents(t); renderSceneGraph(t);
     placeSensors();
       syncLanes(t);
-    const sensorTime = vid && !vid.paused ? snPlaybackTime(_snData.get(_activeFile), t) : t;
+    const sensorTime = vid ? snPlaybackTime(_snData.get(_activeFile), t) : t;
     if (window._sn) window._sn.sync(sensorTime);
     if (tcWire) tcWire.sync(sensorTime);
     else syncEvidence(sensorTime);
   }
   if (vid) {
-    on(vid, 'timeupdate', () => syncAll(vid.currentTime));
     on(vid, 'seeking', () => {
       evidenceWire.reset(vid.currentTime, true);
     });
-    on(vid, 'seeked', () => syncAll(vid.currentTime));
     on(vid, 'play', () => { if (vid.currentTime <= 1e-6) evidenceWire.reset(vid.currentTime); });
+    presentation = setupPresentedVideoClock(vid, on, syncAll, blocked => {
+      document.getElementById('video-wrap').classList.toggle('media-pending', blocked);
+    });
+    window._epCleanup.push(() => presentation.dispose());
   }
   setupSensors(_activeFile, duration, seek, on, vid, v => v === mainCam && isEgo ? 'head' : camLabel(v), camViews,
-    touch.contacts.length > 0);
+    touch.contacts.length > 0, d);
   if (touch.contacts.length) tcWire = setupTouch(touch, _activeFile, duration, seek, on, vid, syncEvidence);
   if (vid && !tcWire && evidence.overlayFindings.length) {
-    // Short findings follow media time between native timeupdate events.
+    // Short findings follow the native sensor clock after the requested picture is ready.
     let frame = 0;
     const cancel = () => { if (frame) cancelAnimationFrame(frame); frame = 0; };
     const update = () => {

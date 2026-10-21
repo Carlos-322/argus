@@ -66,6 +66,10 @@ def coverage(meta: dict[str, dict]) -> dict[str, list[str]]:
 
 
 def _strength(a: np.ndarray, m: dict) -> np.ndarray:
+    declared = sg.declared_zero_activity(a, m)
+    if declared is not None:
+        peak = float(np.nanmax(declared)) if np.isfinite(declared).any() else 0
+        return np.nan_to_num(declared / peak) if peak > 0 else np.zeros(len(a))
     act = sg.activity(a, m.get("rest"), m.get("swing"))
     swing = sg.swing_of(a, m.get("rest"), m.get("swing"))
     return np.nan_to_num(act / swing) if swing > 0 else np.zeros(len(a))
@@ -77,7 +81,7 @@ def find(signals: dict, meta: dict, t: np.ndarray, verdicts=None) -> list[dict]:
     (label/episode.py plan()["touch"], label/pieces.py write_pieces), are used instead of judging each signal again:
     one judgement of a 16 x 16 glove takes about a second."""
     n = len(t)
-    touch = {}
+    touch, declared = {}, {}
     for name, a in signals.items():
         a = np.asarray(a[:n])          # as stored: label/signals.py reads it in float64 pieces
         m = meta.get(name) or {}
@@ -86,9 +90,14 @@ def find(signals: dict, meta: dict, t: np.ndarray, verdicts=None) -> list[dict]:
         role = (m.get("dictionary") or {}).get("role")
         if sg.touch_cache_permission(name, role, m.get("touch_role")) is False:
             continue
-        if len(a) == n and (name in verdicts if verdicts is not None
-                            else sg.is_touch(name, a, m.get("rest"), m.get("swing"), role=role)):
+        from prepare.formats import names_touch
+        response = sg.declared_zero_activity(a, m)
+        literal = response is not None and (names_touch(name) or sg._role(role) in
+            ('touch', 'tactile', 'pressure', 'normal_force', 'shear_force', 'force_torque', 'contact', 'contact_state'))
+        if len(a) == n and (literal or (name in verdicts if verdicts is not None
+                            else sg.is_touch(name, a, m.get("rest"), m.get("swing"), role=role))):
             touch[name] = (a, m)
+            declared[name] = response if literal else None
     if not touch:
         return []
     groups: dict = {}
@@ -97,12 +106,15 @@ def find(signals: dict, meta: dict, t: np.ndarray, verdicts=None) -> list[dict]:
         groups.setdefault(hand if hand else ("source", m.get("source") or name), []).append(name)
     by_hand: dict = {}
     for key, names in groups.items():
-        timed = {nm: sg.active_spans(touch[nm][0], t, touch[nm][1].get("rest"), touch[nm][1].get("swing"))
-                 for nm in names
-                 if sg.rests_and_rises(touch[nm][0], touch[nm][1].get("rest"), touch[nm][1].get("swing"))}
+        timed = {nm: (sg.response_spans(declared[nm], t, declared_zero=True) if declared[nm] is not None else
+                      sg.active_spans(touch[nm][0], t, touch[nm][1].get("rest"), touch[nm][1].get("swing")))
+                 for nm in names if declared[nm] is not None or
+                 sg.rests_and_rises(touch[nm][0], touch[nm][1].get("rest"), touch[nm][1].get("swing"))}
         timed = {nm: sp for nm, sp in timed.items() if sp}
         for nm in names:
-            if timed:
+            if declared[nm] is not None:
+                spans = timed.get(nm, [])
+            elif timed:
                 spans = timed.get(nm, [])        # a signal on through the episode sets no span beside timed ones
             else:
                 spans = [(float(t[0]), float(t[-1]))] if np.isfinite(touch[nm][0]).any() else []
@@ -110,7 +122,7 @@ def find(signals: dict, meta: dict, t: np.ndarray, verdicts=None) -> list[dict]:
                 by_hand.setdefault(key, []).append([s0, s1, {nm}])
         if timed:
             # the signals on throughout still count in each contact's strength and regions
-            always = {nm for nm in names if nm not in timed}
+            always = {nm for nm in names if nm not in timed and declared[nm] is None}
             for sp in by_hand.get(key, []):
                 sp[2] |= always
     contacts = []
@@ -154,6 +166,19 @@ def mark_aligned(contacts: list[dict], meta: dict) -> list[dict]:
     a recorded clock is returned as it was."""
     out = []
     for c in contacts:
+        names = c.get('signals') or []
+        if names:
+            literal = [sg.declared_zero_reference(meta.get(nm) or {}) is not None for nm in names]
+            kind = 'declared_zero' if all(literal) else 'mixed' if any(literal) else 'inferred'
+            recorded_state = all(sg._role(((meta.get(nm) or {}).get('dictionary') or {}).get('role'))
+                                 in ('contact', 'contact_state') for nm in names)
+            note = ('Response activity relative to a declared calibration zero and response direction; physical contact is not independently verified.'
+                    if kind == 'declared_zero' else
+                    'Response activity uses an inferred response reference, not a verified unloaded baseline or verified physical contact.')
+            c = {**c, 'evidence_kind': 'recorded_contact_state' if recorded_state else 'response_activity',
+                 'reference_kind': 'declared_contact_state' if recorded_state else kind,
+                 'reference_note': 'Recorded contact-state channel; compare its state with the pictured frames independently.'
+                                   if recorded_state else note}
         camera = any((meta.get(nm) or {}).get("camera_aligned_by") == ALIGNED_CAMERA
                      for nm in c.get("signals") or [])
         if camera:
@@ -172,7 +197,9 @@ def _regions(touch: dict, names: set, k: int) -> dict:
     active = []
     for nm in sorted(names):
         a, m = touch[nm]
-        act = sg.active_at(a, k, m.get("rest"), m.get("swing"))
+        reference = sg.declared_zero_reference(m, a.shape[1])
+        act = ((reference[1] * (a[k] - reference[0]) > 0) & np.isfinite(a[k]) if reference is not None else
+               sg.active_at(a, k, m.get("rest"), m.get("swing")))
         if act.any():
             active.append(nm)
         shape = m.get("shape")
@@ -197,7 +224,10 @@ def of_episode(ep: dict, verdicts=None) -> list[dict]:
         entry = field_interpretation(ep["context"], name)
         if entry:
             meta.setdefault(name, {})["dictionary"] = entry
-    if "contacts" in ep["context"]:
+    sig = ep.get('signals') or {}
+    calibrated = any(sg.declared_zero_reference(meta.get(name) or {}, a.shape[1]) is not None
+                     for name, a in sig.items())
+    if "contacts" in ep["context"] and not calibrated:
         contacts = []
         for contact in ep["context"]["contacts"] or []:
             names = contact.get("signals") or []

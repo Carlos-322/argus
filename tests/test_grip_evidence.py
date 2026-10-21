@@ -117,23 +117,24 @@ const source=fs.readFileSync(process.argv[1],'utf8');
 const begin=source.indexOf('// ================= sensor evidence:');
 const end=source.indexOf('// ================= touch:',begin);
 const esc=s=>String(s).replace(/</g,'&lt;'),fmtT=t=>t+' s';
-const api=new Function('esc','fmtT',source.slice(begin,end)+'return {sensorEvidence,activeSensorEvidence,sensorEvidenceHtml,displayGripFinding,gripFindingDetailHtml,gripFindingStripHtml,gripEvidencePanelHtml};')(esc,fmtT);
+const api=new Function('esc','fmtT',source.slice(begin,end)+'return {sensorEvidence,activeSensorEvidence,sensorEvidenceHtml,displayGripFindings,gripFindingDetailHtml,gripFindingStripHtml,gripEvidencePanelHtml};')(esc,fmtT);
 const grip={version:1,findings:[{start_s:.6,end_s:.87,headline:'Likely grip tightening',confidence:'medium',detail:'Response rises after closure',observation:'Several cells rise together',claim:'Additional relative loading',alternative:'Glove bending may contribute',inspect_s:.733},
  {start_s:2.73,end_s:3.03,headline:'Thumb response eases',confidence:'medium',detail:'Index response persists',inspect_s:3},
  {start_s:0,end_s:4,headline:'Rejected claim',review_status:'rejected'}]};
 const evidence=api.sensorEvidence({grip_evidence:grip});
+const shown=(E,t)=>api.displayGripFindings(E,t)[0]||null;   // the finding the page shows first
 assert.equal(api.activeSensorEvidence(evidence,0),null,'no percentage or force at noncontact start');
 assert.equal(api.activeSensorEvidence(evidence,.7)?.headline,'Likely grip tightening');
 assert.equal(api.activeSensorEvidence(evidence,1),null,'do not extend an inferred change outside its span');
-assert.equal(api.displayGripFinding(evidence,0),null);
-assert.equal(api.displayGripFinding(evidence,.7).phase,'Now');
-assert.equal(api.displayGripFinding(evidence,1).phase,'Earlier');
-assert.equal(api.displayGripFinding(evidence,2.6),null,'the subsecond card retires two seconds after onset');
-assert.equal(api.displayGripFinding(evidence,2.8).headline,'Thumb response eases');
-assert.equal(api.displayGripFinding(evidence,3.8).phase,'Earlier');
-assert.equal(api.displayGripFinding(evidence,4.73),null);
-assert.equal(api.displayGripFinding(evidence,.2),null,'backward seeking clears later findings');
-assert.equal(api.displayGripFinding(evidence,.7).end,.87,'display persistence does not change the evidence interval');
+assert.equal(shown(evidence,0),null);
+assert.equal(shown(evidence,.7).phase,'Now');
+assert.equal(shown(evidence,1).phase,'Earlier');
+assert.equal(shown(evidence,2.6),null,'the subsecond card retires two seconds after onset');
+assert.equal(shown(evidence,2.8).headline,'Thumb response eases');
+assert.equal(shown(evidence,3.8).phase,'Earlier');
+assert.equal(shown(evidence,4.73),null);
+assert.equal(shown(evidence,.2),null,'backward seeking clears later findings');
+assert.equal(shown(evidence,.7).end,.87,'display persistence does not change the evidence interval');
 const detail=api.gripFindingDetailHtml(evidence.insights[0]);
 assert(detail.includes('Several cells rise together'));
 assert(detail.includes('Additional relative loading'));
@@ -185,7 +186,8 @@ const begin=source.indexOf('  const seek = (t');
 const end=source.indexOf("  document.querySelectorAll('.timeline .marker')",begin);
 let paused=false,plays=0;const resets=[];
 const vid={currentTime:0,parentElement:null,play(){plays++;paused=false;return Promise.resolve()},pause(){paused=true},scrollIntoView(){}};
-const seek=new Function('vid','document','evidenceWire',source.slice(begin,end)+'return seek;')(vid,{body:{}},{reset:t=>resets.push(t)});
+const seek=new Function('vid','document','evidenceWire','presentation',source.slice(begin,end)+'return seek;')(
+ vid,{body:{}},{reset:t=>resets.push(t)},null);
 seek(.733,false);
 assert.equal(vid.currentTime,.733);
 assert(paused,'inspection keeps the short evidence interval visible');

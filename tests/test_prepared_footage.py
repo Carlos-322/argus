@@ -31,6 +31,12 @@ def get(url):
         return response.read()
 
 
+def served(token):
+    """The prepared movie a download ticket serves, read as the server reads it (serve._ticket_reader), or None."""
+    with serve._ticket_reader(token) as (movie, _):
+        return movie
+
+
 def count_media_reads(monkeypatch):
     """[(file name, bytes)] of every read the server makes from an opened .mp4 (its sources and prepared videos)."""
     reads, original = [], Path.open
@@ -128,15 +134,15 @@ def test_ticket_survives_process_restart_and_receipts_have_a_per_client_count_bo
     monkeypatch.setattr(serve, '_TICKET_CLIENT_MAX', 2)
     tokens = [serve.prepare_footage_ticket(result) for _ in range(3)]
     assert len(list((serve.FOOTAGE_DIR / '.tickets').glob('*.json'))) == 2
-    assert serve.ticket_footage(tokens[0]) is None
+    assert served(tokens[0]) is None
     script = '''
 import hashlib, sys
 from pathlib import Path
 from board import serve
 serve.FOOTAGE_DIR = Path(sys.argv[1])
 serve.footage = lambda *args: (_ for _ in ()).throw(AssertionError('source preparation repeated'))
-result = serve.ticket_footage(sys.argv[2])
-print(hashlib.sha256(result[0].read_bytes()).hexdigest())
+with serve._ticket_reader(sys.argv[2]) as (result, _):
+    print(hashlib.sha256(result[0].read_bytes()).hexdigest())
 '''
     completed = subprocess.run([sys.executable, '-c', script, str(serve.FOOTAGE_DIR), tokens[-1]],
                                capture_output=True, text=True, check=True, timeout=5)
@@ -145,7 +151,7 @@ print(hashlib.sha256(result[0].read_bytes()).hexdigest())
     record = json.loads(receipt.read_text())
     record['expires_at'] = 0
     receipt.write_text(json.dumps(record))
-    assert serve.ticket_footage(tokens[-1]) is None and not receipt.exists()
+    assert served(tokens[-1]) is None and not receipt.exists()
 
 
 @pytest.mark.parametrize('change', ['content', 'mtime', 'size'])

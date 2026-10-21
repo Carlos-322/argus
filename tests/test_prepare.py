@@ -656,8 +656,7 @@ def test_galaxea_signals_keep_the_dataset_s_value_names(tmp_path):
     """The chassis IMU is recorded as ten values (acceleration, angular rate, orientation); the reader names each one
     from the folder's feature table, as the generic reader does, instead of showing 10 anonymous values."""
     root = tmp_path / "galaxea_one"
-    info = _galaxea_folder(root)
-    assert galaxea.recognizes(info)
+    _galaxea_folder(root)
     meta = galaxea.meta_from(lambda rel: root / rel, "galaxea_one")
     ep = meta["episodes"][0]
     ctx = galaxea.write_episode(meta, ep, lambda rel: root / rel, tmp_path / "ep", "galaxea_test")

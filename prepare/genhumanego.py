@@ -32,10 +32,10 @@ from prepare import formats
 from prepare import hub
 from prepare.mcap_source import decoded_messages
 from prepare.remux import RemuxSourceError, remux  # each frame's recorded time as its pts (shared with ABC-130k, RealOmni)
+from label.presented import presented_pts
 
 REPO = "genrobot2025/Gen-HumanEgo"
 CAMERA_TOPIC = "/robot0/sensor/camera2/compressed"
-CALIB_TOPIC = "/robot0/sensor/camera2/camera_info"
 ANNOTATION_TOPIC = "/robot0/annotation_v2"
 CAMERA_DESC = ("the forward-facing fisheye camera on the headset the person wears (camera2 of the six-camera "
                "DAS-Ego rig), looking out and down at their hands and the work in front of them")
@@ -163,25 +163,6 @@ def extract(mcap: Path, raw: Path, rel: str) -> None:
     (raw / "meta.json").write_text(json.dumps(meta))
 
 
-# an uploaded MCAP from this headset (its forward camera and its annotation) is read by this adapter
-UPLOAD = None
-
-
-def recognizes(topics: list[str]) -> bool:
-    return CAMERA_TOPIC in topics and ANNOTATION_TOPIC in topics
-
-
-def convert_upload(item: dict, ep: Path) -> dict:
-    """The forward camera, and the recording's own goal and timed steps (claims for the model to check)."""
-    extract(Path(item["file"]), ep / "source", item["name"])
-    ctx = write_sidecar(ep / "source", ep)
-    ctx["episode_id"] = ep.name
-    if not any(ctx.get("task_label") or []):
-        ctx["task_label"] = [item["name"]]
-    (ep / "instruction.txt").write_text((ctx.get("instruction") or "") + "\n")
-    return ctx
-
-
 def write_sidecar(raw: Path, dst: Path) -> dict:
     import av
     meta = json.loads((raw / "meta.json").read_text())
@@ -190,7 +171,7 @@ def write_sidecar(raw: Path, dst: Path) -> dict:
     camera_file = selected.get("file", "cam2.mp4")
     with av.open(str(raw / camera_file)) as c:
         st = c.streams.video[0]
-        pts = sorted(p.pts for p in c.demux(st) if p.pts is not None and not p.is_discard)
+        pts = presented_pts(c, st)
         w, h = st.codec_context.width, st.codec_context.height
     n = len(pts)
     times_file = raw / selected.get("times", TIMES)

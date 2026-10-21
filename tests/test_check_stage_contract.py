@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from checks import stream_pairing as pairing
+from checks import workers
 from review import __main__ as review
 
 
@@ -29,7 +30,7 @@ def test_pairing_modes_retry_errors_and_invalidate_old_results(tmp_path, monkeyp
         ctx = {key: {finding: True}} if name == 'episode_legacy' else {}
         (ep / 'context.json').write_text(json.dumps(ctx))
     monkeypatch.setitem(pairing.MODES, mode, (key, assess, finding))
-    monkeypatch.setattr(pairing, 'ProcessPoolExecutor', ThreadPoolExecutor)
+    monkeypatch.setattr(workers, 'ProcessPoolExecutor', ThreadPoolExecutor)
     monkeypatch.setattr(sys, 'argv', ['checks.stream_pairing', '--jobs', '1', *flag, str(tmp_path)])
     assert pairing.main() == 3
     assert set(assessed) == {'episode_bad', 'episode_good', 'episode_inapplicable', 'episode_legacy'}

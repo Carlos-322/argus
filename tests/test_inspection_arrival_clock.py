@@ -9,11 +9,11 @@ from prepare.signal_alignment import RECORDER_ARRIVAL, RECORDER_ARRIVAL_LIMITATI
 
 
 @pytest.fixture
-def arrival_episode(tmp_path, monkeypatch):
+def arrival_episode(tmp_path):
     from test_abc_generic import capture_mcap, converted
     source = tmp_path / 'source'; source.mkdir()
     capture_mcap(source / 'recording.mcap', n=60, bad_header='/left-arm-state')
-    path, context = converted(source, tmp_path / 'prepared', monkeypatch, legacy=False)
+    path, context = converted(source, tmp_path / 'prepared')
     assert context['source']['presentation_clock']['basis'] == 'mcap_log_time'
     loaded = episode.load(path)
     name = next(name for name, meta in loaded['signal_meta'].items()

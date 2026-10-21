@@ -6,7 +6,6 @@ is labelled exactly as before."""
 from __future__ import annotations
 
 import json
-from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -336,8 +335,8 @@ def test_a_contact_touching_at_the_first_frame_is_told_and_asked_only_for_the_st
     r = me.build_request(tmp_path / "eps" / rep["episodes"][0]["episode_id"])
     (c,) = r["contacts"]
     assert c["from_start"] and not c["to_end"] and list(r["contact_views"]["strips"]["c1"]) == ["end"]
-    assert ("each contact above has one picture: three frames around the time the signal says the touch ends, "
-            "numbered 1 to 3, and the moment it is strongest") in r["prompt"]
+    assert ("each contact above has one picture: three frames around the time signal activity ends, "
+            "numbered 1 to 3, and the moment of its largest recorded response") in r["prompt"]
     assert "first_touch_frame" not in r["prompt"] and "begin strip" not in r["prompt"]
     assert '"last_touch_frame": <1-3, the last frame of the end strip' in r["prompt"]
     ep = me.load(tmp_path / "eps" / rep["episodes"][0]["episode_id"])
@@ -345,9 +344,9 @@ def test_a_contact_touching_at_the_first_frame_is_told_and_asked_only_for_the_st
     later = {**c, "id": "c2", "from_start": False, "start_s": 0.9, "end_s": 1.1, "peak_s": 1.0}
     ep["contacts"] = ep["contacts_shown"] = [c, later]
     block = me.contacts_block(ep, pl)
-    assert ("five frames around the time the signal says the touch begins, numbered 1 to 5 (not for c1, already "
-            "touching at the first frame), three around the time it says the touch ends, numbered 1 to 3, and the "
-            "moment it is strongest") in block
+    assert ("five frames around the time signal activity begins, numbered 1 to 5 (not for c1, already "
+            "active at the first frame), three around the time signal activity ends, numbered 1 to 3, and the "
+            "moment of its largest recorded response") in block
     assert ('"first_touch_frame": <for c2 only, 1-5, the first frame of the begin strip in which the hand is touching, '
             'or null>') in block
     assert '"last_touch_frame": <1-3, the last frame of the end strip' in block
@@ -611,9 +610,13 @@ def test_a_contact_on_a_recorded_clock_reads_as_before():
     c = {"id": "c1", "hand": "right", "signals": ["right_pressure"], "start_s": 1.0, "peak_s": 1.25, "end_s": 1.5,
          "from_start": False, "to_end": False, "peak_strength": 2.0, "dips_s": [],
          "regions": {"right_pressure": {"cells": 4, "rows": [1, 2], "columns": [1, 2], "of": [4, 4]}}}
-    assert me._contact_line(c) == ("  c1: right hand, from right_pressure, 1.00 s to 1.50 s, strongest at 1.25 s; at "
-                                   "its strongest right_pressure: 4 cells, rows 1-2 and columns 1-2 of 4 x 4")
-    assert lc.mark_aligned([c], {"right_pressure": {"shape": [4, 4]}}) == [c]
+    assert me._contact_line(c) == ("  c1: right hand, from right_pressure, 1.00 s to 1.50 s, largest response at 1.25 s; at "
+                                   "its largest response right_pressure: 4 cells, rows 1-2 and columns 1-2 of 4 x 4. "
+                                   "Response activity has no verified unloaded reference or physical-contact interpretation.")
+    qualified = lc.mark_aligned([c], {"right_pressure": {"shape": [4, 4]}})[0]
+    assert all(qualified[key] == value for key, value in c.items())
+    assert qualified['reference_kind'] == 'inferred'
+    assert 'not a verified unloaded' in qualified['reference_note']
 
 
 def test_a_signal_that_swings_both_ways_or_a_switching_setting_is_not_touch():

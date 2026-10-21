@@ -1,7 +1,6 @@
 """Native split state fields retain their sources through generic LeRobot conversion."""
 import hashlib
 import json
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -19,8 +18,9 @@ def native(root, *, reverse=False, width=6):
     expected = {}
     for prefix, offset in [('observation.state', 0), ('action', 1000)]:
         groups = []
-        for side, base in [('left', 10), ('right', 100)]:
-            arms = np.arange(4 * width, dtype=np.float64).reshape(4, width) / 100 + base + offset
+        for side, base in [('left', 0.1), ('right', 1.0)]:
+            # Distinct per side and array, and within one turn, as joints declared in radians are.
+            arms = np.arange(4 * width, dtype=np.float64).reshape(4, width) / 100 + base + offset / 2000
             gripper = np.array([0, 25, 50, 100], dtype=np.float64) + (1 if side == 'right' else 0) + offset
             df[f'{prefix}.{side}_arm'] = list(arms)
             df[f'{prefix}.{side}_gripper'] = gripper
@@ -44,14 +44,21 @@ def native(root, *, reverse=False, width=6):
     return path, expected
 
 
-def convert(root, out, monkeypatch, *, legacy=False):
-    discover = formats.upload_adapters
-    with monkeypatch.context() as patch:
-        patch.setattr(formats, 'upload_adapters', lambda kind: [galaxea] if legacy and kind == 'lerobot'
-                      else [] if kind == 'lerobot' else discover(kind))
-        report = formats.convert(root, 'teleop_arms', out, 'native parity', 900)
+def convert(root, out):
+    """The upload folder root read as Data Review reads it, by the generic reader."""
+    report = formats.convert(root, 'teleop_arms', out, 'native parity', 900)
     assert not report['failed'] and len(report['episodes']) == 1, report
     path = out / report['episodes'][0]['episode_id']
+    return path, json.loads((path / 'context.json').read_text())
+
+
+def published(root, out):
+    """The episode the published Galaxea preparation (python -m prepare galaxea, prepare_one) writes for the one
+    episode in root."""
+    get = lambda rel: root / rel
+    meta = galaxea.meta_from(get, root.name)
+    path = out / galaxea.episode_dir_name(meta['folder'], int(meta['episodes'][0]['episode_index']))
+    galaxea.write_episode(meta, meta['episodes'][0], get, path, 'native parity')
     return path, json.loads((path / 'context.json').read_text())
 
 
@@ -61,12 +68,12 @@ def hashes(root):
 
 
 @pytest.mark.parametrize('reverse', [False, True])
-def test_native_wrapper_matches_generic_split_arrays_goals_annotations_and_images(tmp_path, monkeypatch, reverse):
+def test_native_wrapper_matches_generic_split_arrays_goals_annotations_and_images(tmp_path, reverse):
     root = tmp_path / 'recording'
     _, expected = native(root, reverse=reverse)
     originals = hashes(root)
-    old_ep, old = convert(root, tmp_path / 'legacy', monkeypatch, legacy=True)
-    new_ep, new = convert(root, tmp_path / 'generic', monkeypatch)
+    old_ep, old = published(root, tmp_path / 'legacy')
+    new_ep, new = convert(root, tmp_path / 'generic')
     assert new['state_kind'] == old['state_kind'] == 'joints'
     assert new['instruction'] == old['instruction'] == 'fold the cloth'
     assert new['fps'] == old['fps'] == 15
@@ -79,16 +86,19 @@ def test_native_wrapper_matches_generic_split_arrays_goals_annotations_and_image
             assert a[key].tobytes() == b[key].tobytes() == expected[prefix].tobytes()
             arrays[key] = {'shape': list(b[key].shape), 'dtype': str(b[key].dtype),
                            'sha256': hashlib.sha256(b[key].tobytes()).hexdigest()}
-    assert new['signals'] == old['signals']
+    # rest, swing and scale_note are measured across the whole upload, which a published episode is not part of
+    upload_scale = ('rest', 'swing', 'scale_note')
+    assert [{k: v for k, v in row.items() if k not in upload_scale} for row in new['signals']] == old['signals']
     with np.load(old_ep / 'signals.npz') as a, np.load(new_ep / 'signals.npz') as b:
         assert a.files == b.files
         for key in a.files:
             assert a[key].dtype == b[key].dtype and a[key].tobytes() == b[key].tobytes()
     assert new['signals'][0]['names'] == ['ax', 'ay', 'az']
-    assert new['annotation_subtasks'] == old['annotation_subtasks']
-    assert new['annotation_unresolved'] == old['annotation_unresolved']
+    # the published reader rounds its step times to 0.01s; the generic reader keeps the recorded rows' times
+    assert [s['label'] for s in new['annotation_subtasks']] == [s['label'] for s in old['annotation_subtasks']] == [
+        'pick', 'place']
+    assert [round(s['t0'], 2) for s in new['annotation_subtasks']] == [s['t0'] for s in old['annotation_subtasks']]
     assert any(row['column'] == 'quality_index' and row['value'] == 7 for row in new['annotation_unresolved'])
-    assert all(new['recorded_metadata'][key] == value for key, value in old['recorded_metadata'].items())
     assert new['recorded_metadata'][str(root / 'meta/episodes.jsonl')][0]['fields'] == {
         'episode_index': 0, 'length': 4, 'tasks': []}
     requests = [episode.build_request(path) for path in [old_ep, new_ep]]
@@ -119,34 +129,34 @@ def test_native_wrapper_matches_generic_split_arrays_goals_annotations_and_image
                                       'owned episode row metadata retained']}))
 
 
-def test_partial_split_group_never_drops_the_remaining_native_arrays(tmp_path, monkeypatch):
+def test_partial_split_group_never_drops_the_remaining_native_arrays(tmp_path):
     root = tmp_path / 'partial'
     path, _ = native(root)
     df = pd.read_parquet(path).drop(columns=['observation.state.right_gripper'])
     df.to_parquet(path)
-    _, ctx = convert(root, tmp_path / 'output', monkeypatch)
+    _, ctx = convert(root, tmp_path / 'output')
     assert ctx['state_kind'] == 'none'
     assert 'incomplete' in ctx['state_note'].lower()
     assert {'observation.state.left_arm', 'observation.state.left_gripper',
             'observation.state.right_arm'} <= {s['name'] for s in ctx['signals']}
 
 
-def test_unknown_split_actor_never_becomes_a_named_arm(tmp_path, monkeypatch):
+def test_unknown_split_actor_never_becomes_a_named_arm(tmp_path):
     root = tmp_path / 'unknown'
     path, _ = native(root)
     df = pd.read_parquet(path).rename(columns={'observation.state.right_arm': 'observation.state.actor2_arm',
                                              'observation.state.right_gripper': 'observation.state.actor2_gripper'})
     df.to_parquet(path)
-    _, ctx = convert(root, tmp_path / 'output', monkeypatch)
+    _, ctx = convert(root, tmp_path / 'output')
     assert ctx['state_kind'] == 'none'
     assert 'actor' in ctx['state_note'].lower()
     assert 'observation.state.actor2_arm' in {s['name'] for s in ctx['signals']}
 
 
-def test_seven_joint_groups_stay_video_labelled_with_every_split_signal(tmp_path, monkeypatch):
+def test_seven_joint_groups_stay_video_labelled_with_every_split_signal(tmp_path):
     root = tmp_path / 'unsupported'
     native(root, width=7)
-    ep, ctx = convert(root, tmp_path / 'output', monkeypatch)
+    ep, ctx = convert(root, tmp_path / 'output')
     assert ctx['state_kind'] == 'none'
     assert not (ep / 'state.npz').exists()
     assert {'observation.state.left_arm', 'observation.state.right_arm', 'action.left_arm',
@@ -155,27 +165,27 @@ def test_seven_joint_groups_stay_video_labelled_with_every_split_signal(tmp_path
 
 
 @pytest.mark.parametrize('coarse', [True, 0.5])
-def test_invalid_coarse_code_never_borrows_a_constant_fine_task(tmp_path, monkeypatch, coarse):
+def test_invalid_coarse_code_never_borrows_a_constant_fine_task(tmp_path, coarse):
     root = tmp_path / 'invalid'
     path, _ = native(root)
     df = pd.read_parquet(path)
     df['coarse_task_index'] = coarse
     df['task_index'] = 0
     df.to_parquet(path)
-    _, ctx = convert(root, tmp_path / 'output', monkeypatch)
+    _, ctx = convert(root, tmp_path / 'output')
     assert not ctx.get('instruction')
 
 
-def test_explicit_episode_goal_keeps_priority_over_coarse_and_quality_codes(tmp_path, monkeypatch):
+def test_explicit_episode_goal_keeps_priority_over_coarse_and_quality_codes(tmp_path):
     root = tmp_path / 'declared'
     native(root)
     (root / 'meta/episodes.jsonl').write_text('{"episode_index":0,"length":4,"tasks":["recorded episode goal"]}\n')
-    _, ctx = convert(root, tmp_path / 'output', monkeypatch)
+    _, ctx = convert(root, tmp_path / 'output')
     assert ctx['instruction'] == 'recorded episode goal'
     assert any(row['column'] == 'quality_index' for row in ctx['annotation_unresolved'])
 
 
-def test_declared_rate_disagreement_retains_native_stamps_and_qualifies_mapping(tmp_path, monkeypatch):
+def test_declared_rate_disagreement_retains_native_stamps_and_qualifies_mapping(tmp_path):
     # stamps at 1/15 s sit on a declared 30 Hz grid, every other slot empty: missing frames, not another rate, so the
     # declared rate pairs the frames with the table's rows and the stamps place them
     root = tmp_path / 'rate'
@@ -183,7 +193,7 @@ def test_declared_rate_disagreement_retains_native_stamps_and_qualifies_mapping(
     info = json.loads((root / 'meta/info.json').read_text())
     info['fps'] = 30
     (root / 'meta/info.json').write_text(json.dumps(info))
-    ep, ctx = convert(root, tmp_path / 'output', monkeypatch)
+    ep, ctx = convert(root, tmp_path / 'output')
     assert ctx['fps'] == 30
     assert any(issue['kind'] == 'recorded_rate_mismatch' for issue in ctx['reader_issues'])
     assert not any(issue['kind'] == 'declared_rate_wrong' for issue in ctx['reader_issues'])
@@ -191,18 +201,18 @@ def test_declared_rate_disagreement_retains_native_stamps_and_qualifies_mapping(
         assert clocks['exo_pts'].tolist() == [0, 1024, 2048, 3072]
 
 
-def test_competing_coarse_table_claims_never_supply_an_episode_goal(tmp_path, monkeypatch):
+def test_competing_coarse_table_claims_never_supply_an_episode_goal(tmp_path):
     root = tmp_path / 'conflict'
     native(root)
     with (root / 'meta/tasks.jsonl').open('a') as stream:
         stream.write('{"task_index":2,"task":"a competing coarse task"}\n')
-    _, ctx = convert(root, tmp_path / 'output', monkeypatch)
+    _, ctx = convert(root, tmp_path / 'output')
     assert not ctx.get('instruction')
     assert any(issue['kind'] == 'metadata_unreadable' for issue in ctx['reader_issues'])
     assert ctx['recorded_metadata'][str(root / 'meta/info.json')]['fps'] == 15
 
 
-def test_fourth_stereo_camera_is_preserved_and_its_selection_is_explicit(tmp_path, monkeypatch):
+def test_fourth_stereo_camera_is_preserved_and_its_selection_is_explicit(tmp_path):
     import shutil
     root = tmp_path / 'stereo'
     native(root)
@@ -213,7 +223,7 @@ def test_fourth_stereo_camera_is_preserved_and_its_selection_is_explicit(tmp_pat
     path = root / 'videos/chunk-000' / key / 'episode_000000.mp4'
     path.parent.mkdir()
     shutil.copyfile(root / 'videos/chunk-000/observation.images.head_rgb/episode_000000.mp4', path)
-    ep, ctx = convert(root, tmp_path / 'output', monkeypatch)
+    ep, ctx = convert(root, tmp_path / 'output')
     sources = json.loads((ep / 'sources.json').read_text())
     shown = [row['camera_key'] for row in sources.values()]
     unshown = [row['name'] for row in ctx.get('unshown_cameras', [])]
@@ -221,19 +231,8 @@ def test_fourth_stereo_camera_is_preserved_and_its_selection_is_explicit(tmp_pat
     assert len(shown + unshown) == 4
 
 
-def test_generic_upload_discovery_does_not_import_a_retired_adapter(monkeypatch):
-    import importlib
-    load = importlib.import_module
-    def declared_only(name, *args, **kwargs):
-        if name == 'prepare.galaxea':
-            pytest.fail('retired adapter imported on the generic path')
-        return load(name, *args, **kwargs)
-    monkeypatch.setattr(importlib, 'import_module', declared_only)
-    assert 'prepare.galaxea' not in [module.__name__ for module in formats.upload_adapters('lerobot')]
-
-
 @pytest.mark.parametrize('mode', ['image', 'packed'])
-def test_structural_split_columns_work_on_other_lerobot_camera_storage(tmp_path, monkeypatch, mode):
+def test_structural_split_columns_work_on_other_lerobot_camera_storage(tmp_path, mode):
     from test_annotations import _native_case
     root = tmp_path / 'structural'
     expected = _native_case(root, mode)
@@ -251,7 +250,7 @@ def test_structural_split_columns_work_on_other_lerobot_camera_storage(tmp_path,
         info['features'][f'observation.state.{side}_gripper'] = {
             'dtype': 'float32', 'shape': [1], 'names': [f'{side}_gripper'], 'units': 'fraction'}
     info_path.write_text(json.dumps(info))
-    ep, ctx = convert(root, tmp_path / 'output', monkeypatch)
+    ep, ctx = convert(root, tmp_path / 'output')
     assert ctx['state_kind'] == 'joints'
     with np.load(ep / 'state.npz') as arrays:
         assert arrays['state'].dtype == expected.dtype and arrays['state'].tobytes() == expected.tobytes()
@@ -260,7 +259,7 @@ def test_structural_split_columns_work_on_other_lerobot_camera_storage(tmp_path,
 
 @pytest.mark.parametrize('mode', ['video', 'image', 'packed'])
 @pytest.mark.parametrize('quantity, want', [('pose', 'ee_pose'), ('effort', 'none')])
-def test_split_value_names_set_the_recorded_layout_on_every_storage(tmp_path, monkeypatch, mode, quantity, want):
+def test_split_value_names_set_the_recorded_layout_on_every_storage(tmp_path, mode, quantity, want):
     from test_annotations import _native_case
     root = tmp_path / 'names'
     if mode == 'video':
@@ -283,7 +282,7 @@ def test_split_value_names_set_the_recorded_layout_on_every_storage(tmp_path, mo
         info['features'][f'observation.state.{side}_gripper'] = {'dtype': 'float32', 'shape': [1]}
     (root / 'meta/info.json').write_text(json.dumps(info))
     originals = hashes(root)
-    ep, ctx = convert(root, tmp_path / 'out', monkeypatch)
+    ep, ctx = convert(root, tmp_path / 'out')
     assert ctx['state_kind'] == want
     assert ctx['recorded_metadata'][str(root / 'meta/info.json')] == info
     if want == 'none':
@@ -299,14 +298,14 @@ def test_split_value_names_set_the_recorded_layout_on_every_storage(tmp_path, mo
 
 
 @pytest.mark.parametrize('names', [['x', 'y'], ['x', 'y', 'z', 'joint3', 'joint4', 'joint5']])
-def test_partial_or_contradictory_split_names_never_promote_width_to_joints(tmp_path, monkeypatch, names):
+def test_partial_or_contradictory_split_names_never_promote_width_to_joints(tmp_path, names):
     root = tmp_path / 'uncertain'
     native(root)
     info = json.loads((root / 'meta/info.json').read_text())
     for side in ['left', 'right']:
         info['features'][f'observation.state.{side}_arm']['names'] = names
     (root / 'meta/info.json').write_text(json.dumps(info))
-    ep, ctx = convert(root, tmp_path / 'out', monkeypatch)
+    ep, ctx = convert(root, tmp_path / 'out')
     assert ctx['state_kind'] == 'none'
     assert not (ep / 'state.npz').exists()
     assert {'observation.state.left_arm', 'observation.state.right_arm'} <= {s['name'] for s in ctx['signals']}

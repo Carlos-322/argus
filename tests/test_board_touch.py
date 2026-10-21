@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from board import build as board_build
+from test_board_sensors import dequantize
 from board import sensors
 from label import contacts as lc
 
@@ -47,7 +48,7 @@ def test_a_contacts_signals_keep_its_strength_in_the_sensors_file(tmp_path):
     doc = sensors.episode_doc(ep)
     pmap, vel = doc["signals"]
     assert "strength" in pmap and "strength" not in vel        # only a signal a contact is timed by
-    got = sensors.dequantize(pmap["strength"], doc["n"])[:, 0]
+    got = dequantize(pmap["strength"], doc["n"])[:, 0]
     a = np.load(ep / "signals.npz")["s0"].astype(np.float64)
     want = lc._strength(a, {})[doc['sample_indices']]
     assert np.max(np.abs(got - want)) <= pmap["strength"]["step"][0] / 2 + 1e-9

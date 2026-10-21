@@ -13,7 +13,7 @@ from PIL import Image
 from label import episode
 from prepare import formats
 from test_formats import _lerobot_v3
-from test_ingestion_timing_regressions import reordered_h264
+from test_ingestion_timing_regressions import reordered_h264  # noqa: F401 (a fixture)
 from test_prepare import _mp4, joint_names
 
 
@@ -310,7 +310,7 @@ def test_camera_fallback_keeps_depth_source_ownership(tmp_path, reordered_h264, 
     statuses = {row['check']: row for row in assessed['checks']}
     assert statuses['depth_invalid']['status'] == 'clear'
     for check in ('depth_frozen', 'depth_offset'):
-        assert statuses[check]['status'] == ('na' if reject_front else 'clear')
+        assert statuses[check]['status'] == ('not_applicable' if reject_front else 'clear')
         if reject_front:
             assert 'paired colour camera' in statuses[check]['why']
 

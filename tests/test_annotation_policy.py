@@ -52,3 +52,40 @@ def test_inherited_provider_policy_is_checked_before_routing(tmp_path, monkeypat
         harness.label_episode(ep, tmp_path / 'label.json', model=None, reasoning=None,
                               api_key='sk-proj-test', max_tokens=100, timeout=10)
     assert not (tmp_path / 'label.json').exists()
+
+
+def test_only_astra_defaults_to_medium_reasoning_and_every_other_model_to_high():
+    ctx = {'profile': 'teleop_arms'}
+    assert policy.resolve(ctx)['reasoning'] == 'medium'                         # Astra, the default model
+    for model in ('google/gemini-4-argon', policy.SOL61, 'custom/model'):
+        assert policy.resolve(ctx, model=model)['reasoning'] == 'high', model
+        assert policy.resolve(ctx, model=model, reasoning='low')['reasoning'] == 'low'
+    saved = {**ctx, 'annotation_policy': policy.resolve(ctx, model='google/gemini-4-argon', reasoning='medium')}
+    assert policy.resolve(saved)['reasoning'] == 'medium'                       # a saved choice is kept on resume
+
+
+def test_the_paid_calls_beside_the_annotation_are_on_by_default_and_written_only_when_turned_off(tmp_path):
+    ctx = {'profile': 'teleop_arms'}
+    default = policy.resolve(ctx)
+    assert default['inspection'] == 'auto' and 'field_dictionary' not in default     # a new policy writes its mode
+    assert policy.resolve(ctx, inspection='auto', field_dictionary=True) == default
+    off = policy.resolve(ctx, inspection='off', field_dictionary=False)
+    assert off == {**default, 'inspection': 'off', 'field_dictionary': False}
+    assert policy.resolve({**ctx, 'annotation_policy': off}) == off             # a saved choice is kept on resume
+    assert policy.resolve({**ctx, 'annotation_policy': off}, inspection='auto', field_dictionary=True) == default
+    # a policy saved before the setting existed inspected every recorded field, and keeps doing so on resume, with
+    # the saved policy unchanged, so a job labelled then rebinds its paid replies instead of refusing them as stale
+    legacy = {key: value for key, value in default.items() if key != 'inspection'}
+    assert policy.resolve({**ctx, 'annotation_policy': legacy}) == legacy
+    assert policy.inspection_mode(legacy) == 'all' and policy.inspection_mode(default) == 'auto'
+    assert 'inspection' not in policy.resolve(ctx, inspection='all')
+    for bad in ('none', 0, True, 'Off'):
+        with pytest.raises(ValueError):
+            policy.resolve(ctx, inspection=bad)
+    with pytest.raises(ValueError):
+        policy.resolve(ctx, field_dictionary='off')
+    ep, _ = _packed_episode(tmp_path)
+    kw = dict(model=policy.SOL61, reasoning='high', max_tokens=100, cell_w=128, example_dir=None)
+    same = harness.input_identity(ep, **kw, inspection='auto')
+    assert harness.same_input_identity(harness.input_identity(ep, **kw), same)
+    assert not harness.same_input_identity(same, harness.input_identity(ep, **kw, inspection='off'))

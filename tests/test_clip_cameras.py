@@ -785,3 +785,47 @@ def test_a_camera_the_model_is_not_shown_that_did_not_cut_is_not_offered_to_play
         tmp_path)
     assert d["unshown_cameras"] == [{"view": "unshown1", "name": "cam_ir", "why": "an infrared video"}]
     assert [x["camera"] for x in d["dataset_checks"]["reader_issues"]] == ["unshown2"]
+
+
+def _fail_recut(monkeypatch, cams):
+    """extract_one fails for these cameras' clips only on the cut again after the main camera went, the one call
+    main makes itself (the first cuts run on worker threads)."""
+    real = clips.extract_one
+
+    def cut(packed, base_s, n_frames, out_mp4, *args, **kw):
+        if sys._getframe(1).f_code is clips.main.__code__ and any(f"/{c}/" in str(out_mp4) for c in cams):
+            raise RuntimeError("the clip does not decode")
+        return real(packed, base_s, n_frames, out_mp4, *args, **kw)
+    monkeypatch.setattr(clips, "extract_one", cut)
+
+
+def _clips_here(monkeypatch, eps, out):
+    monkeypatch.chdir(REPO)
+    monkeypatch.setattr(sys, "argv", ["clips", "--episodes", str(eps), "--out", str(out)])
+    return clips.main()
+
+
+def test_a_camera_whose_cut_fails_after_the_main_camera_went_is_taken_out_and_named(tmp_path, monkeypatch):
+    """The top camera does not decode, the left wrist camera becomes main and every camera left is cut again. A side
+    camera whose cut fails then is taken out as one that does not decode, named on the episode, never kept on a clip
+    timed on the old clock."""
+    eps, ep = _recording(tmp_path, size="1600x900")
+    (eps.parent / "up" / "top.mp4").write_bytes(b"not a video at all" * 50)
+    _fail_recut(monkeypatch, ["wrist_right"])
+    _clips_here(monkeypatch, eps, tmp_path / "clips")
+    assert list(json.loads((ep / "sources.json").read_text())) == ["left"]
+    ctx = json.loads((ep / "context.json").read_text())
+    gone = {x["camera"] for x in ctx["reader_issues"] if x["kind"] == clips.CAMERA_NOT_DECODABLE}
+    assert {"exo", "right"} <= gone, ctx["reader_issues"]
+    assert not (tmp_path / "clips" / "wrist_right" / f"{ep.name}.mp4").exists()
+
+
+def test_a_new_main_camera_whose_cut_fails_moves_the_main_camera_again(tmp_path, monkeypatch):
+    """When the camera that became main fails its cut too, the next camera left becomes main and is cut once more."""
+    eps, ep = _recording(tmp_path, size="1600x900")
+    (eps.parent / "up" / "top.mp4").write_bytes(b"not a video at all" * 50)
+    _fail_recut(monkeypatch, ["wrist_left"])
+    _clips_here(monkeypatch, eps, tmp_path / "clips")
+    src = json.loads((ep / "sources.json").read_text())
+    assert list(src) == ["right"] and clips.main_cam(src) == "right"
+    assert _clip_timing(tmp_path / "clips" / "wrist_right" / f"{ep.name}.mp4")[0] == 1600

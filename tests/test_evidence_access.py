@@ -1,6 +1,5 @@
 """Unknown measurements remain inspectable, with exact evidence and bounded model work."""
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -205,7 +204,7 @@ def test_unknown_vector_keeps_each_component_and_exact_uint64(tmp_path):
 
 def test_metadata_is_discoverable_and_nested_inspection_is_bounded(tmp_path):
     a = access(tmp_path, recorded_metadata={'levels': [{'material': 'steel', 'secret_path': '/Users/x/private/a.h5'}]})
-    assert ea.needs_inspection(a.ep, {})
+    assert ea.needs_inspection(a.ep, {}, 'all')
     f = next(f for f in a.inventory() if f['name'] == 'recorded_metadata')
     r = a.inspect({'field_id': f['id'], 'mode': 'metadata', 'pointer': '/levels/0/material'})
     assert r['value'] == 'steel'
@@ -238,8 +237,8 @@ def test_metadata_is_discoverable_and_nested_inspection_is_bounded(tmp_path):
     build.add_context(rebuilt, changed, tmp_path)
     assert rebuilt['evidence_inspection']['untimed_findings'] == []
     ordinary = access(tmp_path, timebase_neighbours_in_upload=1, annotation_subtasks=['already supplied'])
-    assert not ea.needs_inspection(ordinary.ep, {})
-    assert not ea.needs_inspection(access(tmp_path, recorded_metadata={}).ep, {})
+    assert not ea.needs_inspection(ordinary.ep, {}, 'all')
+    assert not ea.needs_inspection(access(tmp_path, recorded_metadata={}).ep, {}, 'all')
     with pytest.raises(ValueError):
         a.inspect({'field_id': '../../etc/passwd'})
 
@@ -582,11 +581,16 @@ def test_harness_uses_requested_evidence_in_final_annotation_and_accounts_for_co
                 dst.mux(packet)
         for packet in stream.encode():
             dst.mux(packet)
+    from label import sensor_cards
+    cards = []
     def provider(content, model, reasoning, api_key, max_tokens, timeout, **options):
         selections = [p['text'] for p in content if p.get('type') == 'text' and '\nFIELD INVENTORY\n' in p['text']]
         receipts = [json.loads(p['text'].split('\n', 1)[1]) for p in content
                     if p.get('type') == 'text' and p.get('text', '').startswith('INSPECTED EVIDENCE\n')]
-        if selections:
+        if content[0].get('text', '').startswith(sensor_cards.PROMPT):
+            cards.append(json.loads(content[0]['text'].split('\nRECORDING\n', 1)[1]))
+            text = {'cards': [{'finding': 0, 'headline': 'Force rises', 'detail': 'The recorded force rises across the clip.'}]}
+        elif selections:
             page = json.loads(selections[-1].split('\nFIELD INVENTORY\n')[1])
             field = next(f for f in page['fields'] if f['name'] == 'force')
             camera = next(f for f in page['fields'] if f['kind'] == 'image')
@@ -607,9 +611,12 @@ def test_harness_uses_requested_evidence_in_final_annotation_and_accounts_for_co
     result = harness.label_episode(ep, tmp_path / 'out.json', model='openai/gpt-6-astra', reasoning='medium',
                                    api_key='fixture', max_tokens=2000, timeout=10, cell_w=128)
     assert len(result['sensor_evidence']['findings']) == 1
-    assert harness.episode_cost(result) == pytest.approx(.03)
+    # The video card call reads the bound finding and bills into the same inspection invoice.
+    assert [f['headline'] for f in cards[0]['findings']] == ['Recorded response increases']
+    assert result['sensor_evidence']['findings'][0]['video_card']['headline'] == 'Force rises'
+    assert harness.episode_cost(result) == pytest.approx(.04)
     exported = convert(result)
-    assert exported['evidence_inspection']['cost_usd'] == pytest.approx(.02)
+    assert exported['evidence_inspection']['cost_usd'] == pytest.approx(.03)
     assert exported['sensor_evidence']['series'][0]['values'] == list(np.arange(12, dtype=float))
     assert episode.load(ep)['signals']['force'].shape == (12, 1)
     def unavailable(*args, **kwargs):
@@ -620,7 +627,8 @@ def test_harness_uses_requested_evidence_in_final_annotation_and_accounts_for_co
                               api_key='fixture', max_tokens=2000, timeout=10, cell_w=128)
     failed = json.loads((tmp_path / 'noreply_out.json').read_text())
     assert failed['final_dispatch_outcome'] == 'unverified'
-    assert harness.episode_cost(failed) == pytest.approx(failed['final_reserved_usd'] + .03)
+    # The earlier paid reply, its two inspection calls and its card call stay billed.
+    assert harness.episode_cost(failed) == pytest.approx(failed['final_reserved_usd'] + .04)
     assert failed['final_cost_history'][0]['generation_id'] == 'actual_inspection_fixture'
     assert failed['evidence_inspection']['inspections'][0]['values'][-1] == [11.]
 
@@ -799,7 +807,7 @@ def test_spend_retains_unknown_paid_receipts(tmp_path, prefix, record, expected,
     assert label_spend_complete(tmp_path) is complete
 
 
-def test_rgb_request_and_model_call_are_unchanged(tmp_path, monkeypatch):
+def test_rgb_request_and_model_call_are_unchanged(inspect_every_field, tmp_path, monkeypatch):
     from label import harness, episode
     from test_camera_timing import recording
     ep = recording(tmp_path, np.arange(12) / 30)
@@ -941,7 +949,7 @@ def test_native_mcap_inspection_keeps_selected_row_component_identities(tmp_path
 
 
 @pytest.mark.parametrize('declared_role', [None, 'command', 'target', 'invalid'])
-def test_canonical_hdf_commands_reach_inspection_without_extra_sensors(tmp_path, declared_role):
+def test_canonical_hdf_commands_reach_inspection_without_extra_sensors(inspect_every_field, tmp_path, declared_role):
     import h5py
     from prepare import formats
     from label import episode
@@ -989,12 +997,12 @@ def test_canonical_hdf_commands_reach_inspection_without_extra_sensors(tmp_path,
         ep['context']['action_semantics'] = {'version': 1, 'producer': 'invalid source', 'role': 'command',
             'relationship': {'kind': 'next_observation', 'field': 'state', 'row_offset': 1, 'terminal': 'repeat_last'}}
         assert action_semantics(ep['context'])['role'] == 'action/target_unknown'
-        assert ea.needs_inspection(ep, {})
+        assert ea.needs_inspection(ep, {}, 'all')
         ep['context'].pop('action_semantics')
     ep['action'] = None
-    assert not ea.needs_inspection(ep, {})
+    assert not ea.needs_inspection(ep, {}, 'all')
     ep['state'] = np.zeros((6, 0))
-    assert not ea.needs_inspection(ep, {})
+    assert not ea.needs_inspection(ep, {}, 'all')
 
 
 def test_each_selection_respects_media_caps_before_dispatch(tmp_path):
@@ -1123,7 +1131,7 @@ def test_resolved_annotation_policy_does_not_opt_rgb_into_inspection(tmp_path):
            'task_mode': 'session', 'check_versions': {'stream_pairing': 1}}
     ep = {'dir': tmp_path, 'context': ctx, 'signals': {}, 'sources': {}}
     assert not needs_extra_evidence(ctx)
-    assert not ea.needs_inspection(ep, {})
+    assert not ea.needs_inspection(ep, {}, 'all')
     inspected = access(tmp_path, **ctx, recorded_metadata={'material': 'steel'})
     fields = {field['name']: field for field in inspected.inventory()}
     generated = inspected.inspect({'field_id': fields['check_versions']['id'], 'mode': 'metadata'})
@@ -1140,3 +1148,34 @@ def test_resolved_annotation_policy_does_not_opt_rgb_into_inspection(tmp_path):
     assert fields['check_versions']['kind'] == 'context'
     assert fields['recorded_metadata']['kind'] == 'metadata'
     assert {'annotation_policy', 'task_mode', 'check_versions'} <= ea.PREPARED_CONTEXT
+
+
+def test_by_default_only_depth_and_touch_sensors_are_inspected_and_all_restores_every_recorded_field(tmp_path):
+    arm = access(tmp_path).ep
+    arm['signals'] = {'joint_vel': np.zeros((4, 6))}                     # arm signals alone, as YAM teleop records
+    arm['action'] = np.ones((4, 7))
+    assert not ea.needs_inspection(arm, {}) and not ea.needs_inspection(arm, {}, 'off')
+    # fields only inspection can reach (an ego recording's hand poses, read from the source file and carried by no
+    # prompt row) still opt a recording in, as signals and actions, which reach the prompt as rows, do not
+    poses = {**arm, 'context': {**arm['context'], 'table_field_inventory': [
+        {'name': 'transforms/leftHand', 'shape': [94, 4, 4], 'bookkeeping': False}]}}
+    assert ea.needs_inspection(poses, {}) and ea.needs_inspection(poses, {}, 'off')
+    assert ea.needs_inspection(arm, {}, 'all')
+    wrench = {'sensors': [{'id': 'signal:wrist_ft', 'kind': 'numeric', 'quantity': 'force_torque'}]}
+    assert not ea.needs_inspection(arm, wrench) and ea.needs_inspection(arm, wrench, 'all')
+    touch = {'sensors': [{'id': 'signal:pressure', 'kind': 'numeric', 'quantity': 'pressure_response'}]}
+    for mode in ('auto', 'all', 'off'):
+        assert ea.needs_inspection(arm, touch, mode)
+        assert ea.needs_inspection({**arm, 'depth': {'exo': {}}}, {}, mode)
+        assert not ea.needs_inspection(access(tmp_path).ep, {}, mode)    # cameras alone are never inspected
+
+
+def test_inspection_turned_off_makes_no_selection_and_its_coverage_says_so(tmp_path):
+    def forbidden(content):
+        pytest.fail('inspection turned off must not select')
+    for _ in range(2):                                                    # the second run reads the saved receipt
+        doc, extra = ea.discover(access(tmp_path, new_fact={'value': 7}), [], forbidden, tmp_path / 'receipt.json',
+                                 rounds=0)
+        assert extra == [] and doc['rounds'] == [] and doc['cost_usd'] == 0 and doc['status'] == 'complete'
+        assert doc['limitations'].count(ea.INSPECTION_OFF) == 1
+    assert ea.INSPECTION_OFF in json.dumps(ea.Access.coverage_summary(doc))

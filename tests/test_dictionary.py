@@ -1,6 +1,5 @@
 import json
 import multiprocessing
-import os
 from pathlib import Path
 import socket
 
@@ -621,3 +620,20 @@ def test_unrepresentable_metadata_stays_qualified_without_aborting_dictionary(tm
         return {'choices': [{'message': {'content': '{"entries": []}'}}], 'usage': {'cost': 0.001}}
     result = dd.prepare_upload(tmp_path / 'job', [ep], 'injected key', fake)
     assert len(calls) == 1 and result['status'] == 'success'
+
+
+def test_a_dictionary_turned_off_makes_no_call_and_no_claim_and_says_why(tmp_path):
+    from label import dictionary_stage
+    ep = episode(tmp_path, 'one', [('pressure', np.array([[1., 2.], [3., 4.]]),
+                                  {'names': ['pad0', 'pad1'], 'source': 'native.h5/pressure'})])
+    job = tmp_path / 'job'
+    job.mkdir()
+    def forbidden(*a, **k):
+        pytest.fail('a dictionary turned off must not be called')
+    result = dictionary_stage.prepare(job, ep.parent, [ep.name], free=False, cap=10., api_key='sk-or-test',
+                                      call_model=forbidden, enabled=False)
+    assert result['cost_usd'] == 0. and dictionary_stage.DICTIONARY_OFF in result['limitations']
+    assert not (job / 'dictionary.json').exists() and not (job / 'dictionary.claim').exists()
+    assert dictionary_stage.dictionary_spend(job) == {'cost_usd': 0., 'reserved_usd': 0., 'complete': True}
+    status = json.loads((job / 'dictionary_status.json').read_text())
+    assert dictionary_stage.DICTIONARY_OFF in status['limitations']

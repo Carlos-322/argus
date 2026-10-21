@@ -11,7 +11,6 @@ import socketserver
 import threading
 import urllib.error
 import urllib.request
-from pathlib import Path
 
 import pytest
 from board import build, serve

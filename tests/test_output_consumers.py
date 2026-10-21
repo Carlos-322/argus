@@ -171,11 +171,11 @@ def test_invalid_supplied_booleans_cannot_trigger_missing_field_outcome_inferenc
 const fs=require('fs'),assert=require('assert');
 const s=fs.readFileSync('board/index.html','utf8'),cases=JSON.parse(process.argv[1]);
 const start=s.indexOf('  const recoveries ='),end=s.indexOf('  const ivHtml =',start);
-const recovery=new Function('d','esc','fmtT',s.slice(start,end)+'return {recoveries,rcHtml};');
+const recovery=new Function('d','esc','fmtT','foldRows',s.slice(start,end)+'return {recoveries,rcHtml};');
 const gaStart=s.indexOf('  const ga = d.goal_alignment'),gaEnd=s.indexOf('  const bannerBody =',gaStart);
 const alignment=new Function('d','givenMode','esc',s.slice(gaStart,gaEnd)+'return alignHtml;');
 for(const c of cases){
- const r=recovery(c.d,String,String),a=alignment(c.d,true,String);
+ const r=recovery(c.d,String,String,rows=>rows.join('')),a=alignment(c.d,true,String);
  assert.strictEqual(r.recoveries[0].recovered,c.recovered);
  assert.strictEqual(r.rcHtml.includes('class="rec-ok"'),c.recovered===true);
  assert.strictEqual(a.includes('align-chip match'),c.match===true);
@@ -253,10 +253,10 @@ def test_schema_defects_are_counted_once_per_field_across_layers(scope, key, val
         labels['timeline'] = [[labels['timeline'][0].get(column) for column in TIMELINE_COLUMNS]]
     parsed, ok = parse_response(json.dumps(labels))
     assert ok
-    violations = metrics.schema_violations(parsed)
+    violations = metrics.measure(parsed, None)['violations']
     assert len(violations) == want, violations
     projected, _ = to_board.typed({'labels': parsed})
-    assert len(metrics.schema_violations(projected)) == want
+    assert len(metrics.measure(projected, None)['violations']) == want
 
 
 def test_each_bad_row_and_field_keeps_its_own_schema_identity():
@@ -266,7 +266,7 @@ def test_each_bad_row_and_field_keeps_its_own_schema_identity():
     labels['data_issues'] = [{'issue': 'visible issue', 'severity': 'Critical'}]
     parsed, ok = parse_response(json.dumps(labels))
     assert ok
-    assert len(metrics.schema_violations(parsed)) == 3
+    assert len(metrics.measure(parsed, None)['violations']) == 3
 
 
 def test_schema_identity_retains_source_row_indices_after_compaction():
@@ -279,7 +279,7 @@ def test_schema_identity_retains_source_row_indices_after_compaction():
     labels['timeline'][2][8] = True
     parsed, ok = parse_response(json.dumps(labels))
     assert ok
-    assert len(metrics.schema_violations(parsed)) == 3
+    assert len(metrics.measure(parsed, None)['violations']) == 3
     d = to_board.convert({'labels': parsed})
     assert len(d['_schema_violations']) == 3
     assert any('timeline[1].contribution' in text for text in d['_schema_violations'])

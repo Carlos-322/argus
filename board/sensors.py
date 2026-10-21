@@ -75,7 +75,7 @@ from pathlib import Path
 
 import numpy as np
 
-from board.hands import vlq_append, vlq_decode
+from board.hands import vlq_append
 from board.to_board import dumps
 from label.atomic import write_atomic
 
@@ -138,16 +138,6 @@ def quantize(a: np.ndarray, bits: int = 16, per_value: bool = True) -> dict:
     return {"lo": float(lo[0]), "step": float(step[0]), "data": data}
 
 
-def dequantize(block: dict, rows: int, bits: int = 16) -> np.ndarray:
-    """The page's decoder, in Python: rows x values floats, NaN for no reading."""
-    raw = np.frombuffer(base64.b64decode(block["data"]), dtype="<u2" if bits == 16 else "u1").astype(np.float64)
-    q = raw.reshape(rows, -1)
-    lo, step = np.asarray(block["lo"], dtype=np.float64), np.asarray(block["step"], dtype=np.float64)
-    v = lo + q * step
-    v[q == (NONE16 if bits == 16 else NONE8)] = np.nan
-    return v
-
-
 def encode_times(t_s: np.ndarray) -> dict:
     ms = np.round(np.asarray(t_s, dtype=np.float64) * 1000).astype(np.int64)
     gaps = np.diff(ms)
@@ -158,31 +148,20 @@ def encode_times(t_s: np.ndarray) -> dict:
     return {"ms0": int(ms[0]) if len(ms) else 0, "dur": dur, "d": "".join(out)}
 
 
-def decode_times(block: dict) -> np.ndarray:
-    p = block["ms0"]
-    out = [p]
-    for g in vlq_decode(block["d"]):
-        p += block["dur"] + g
-        out.append(p)
-    return np.asarray(out, dtype=np.float64) / 1000.0
-
-
 # ---------------------------------------------------------------- one episode
 
-def clip_times(ep_dir: Path, ctx: dict, n: int) -> np.ndarray:
-    """Seconds on the board clip's clock for each anchor frame: the anchor camera's real capture times (times.npz)
-    minus the explicit clock origin when present, as the request and clips use, else frame / fps."""
-    from label.episode import order_views
-    tp = ep_dir / "times.npz"
+def strip_times(ep_dir: Path, ctx: dict, n: int) -> np.ndarray:
+    """Seconds on the board clip's clock for each of n anchor frames: the main camera's times as its clip plays them
+    (board/clips.py clip_times, which reads context.json real_times and the clock origin), else frame / fps, as its
+    clip plays a camera without capture times."""
+    from board.clips import clip_times, main_cam
     src_p = ep_dir / "sources.json"
-    if tp.exists() and src_p.exists():
-        views = order_views(json.loads(src_p.read_text()))
-        from prepare.camera_clock import load_times
-        z = load_times(ep_dir, ctx)
-        if views and views[0] in z and len(z[views[0]]) >= n > 0:
-            t = np.asarray(z[views[0]][:n], dtype=np.float64)
-            return t - float(ctx.get("clock_zero_s") or 0.0)
     fps = float(ctx.get("fps") or 30.0)
+    if src_p.exists() and n > 0:
+        sources = json.loads(src_p.read_text())
+        t = clip_times(ep_dir, sources, fps, ctx).get(main_cam(sources)) if sources else None
+        if t is not None and len(t) >= n:
+            return np.asarray(t[:n], dtype=np.float64)
     return np.arange(n, dtype=np.float64) / fps
 
 
@@ -359,9 +338,10 @@ def signal_doc(meta: dict, a: np.ndarray, t: np.ndarray, stride: int, in_contact
     return doc
 
 
-def depth_doc(entry: dict, ctx_depth: dict) -> dict:
+def depth_doc(entry: dict) -> dict:
     """One camera's depth: its units and the colour bar of its pictures (label/depth.py)."""
-    out = {"units": ctx_depth.get("units") or ("metres" if entry.get("scale_m") else "relative"),
+    from label import depth as dp
+    out = {"units": "metres" if dp.metric_scale(entry) else "relative",
            "scale_m": entry.get("scale_m"), "kind": entry.get("kind") or "depth"}
     out.update(legend_bar(entry))
     return out
@@ -376,8 +356,9 @@ def legend_bar(entry: dict) -> dict:
     if not hasattr(dp, "picture") or not hasattr(dp, "legend_ticks"):
         return {}
     disparity = entry.get("kind") == "disparity"
-    if entry.get("scale_m") and not disparity:
-        ramp = np.geomspace(dp.METRIC_NEAR_M, dp.METRIC_FAR_M, BAR_STOPS) / float(entry["scale_m"])
+    scale = dp.metric_scale(entry)
+    if scale:
+        ramp = np.geomspace(dp.METRIC_NEAR_M, dp.METRIC_FAR_M, BAR_STOPS) / scale
         e = entry
     else:
         # a ramp across the range of unknown-unit depth (or disparity) is the same whatever the range, so it is drawn
@@ -415,7 +396,7 @@ def episode_doc(ep_dir: Path) -> dict | None:
         src = json.loads(source_p.read_text()) if source_p.exists() else {}
         anchor = order_views(src)
         n = int(src[anchor[0]]["n_frames"] if anchor else ctx.get("n_state_frames") or 0)
-        t = clip_times(ep_dir, ctx, n)
+        t = strip_times(ep_dir, ctx, n)
         n = min(n, len(t))
         t = t[:n]
         dt = float(np.median(np.diff(t))) if n > 1 else 1.0 / RATE_HZ
@@ -445,8 +426,17 @@ def episode_doc(ep_dir: Path) -> dict | None:
         from label import depth as dp
         entries = dp.load(ep_dir)
         src = json.loads((ep_dir / "sources.json").read_text()) if (ep_dir / "sources.json").exists() else {}
-        cd = ctx.get("depth") or {}
-        doc["depth"] = {v: depth_doc(e, cd.get(v) or {}) for v, e in entries.items() if not src or v in src}
+        doc["depth"] = {}
+        for view, entry in entries.items():
+            unpaired = view not in src or entry.get('paired_camera', view) is None
+            detail = depth_doc(entry)
+            detail['paired_camera'] = None if unpaired else entry.get('paired_camera', view)
+            if unpaired:
+                from board.clips import DEPTH_SOURCE_FPS
+                detail.update(name=entry.get('source_key') or view, n_frames=int(entry.get('n_frames') or 0),
+                              width=entry.get('width'), height=entry.get('height'),
+                              playback={'kind': 'source_frames', 'fps': DEPTH_SOURCE_FPS})
+            doc['depth'][view] = detail
     return doc
 
 
@@ -457,16 +447,24 @@ def summary(doc: dict) -> dict:
     none = sum(1 for s in sigs if s.get("no_reading"))
     return {"signals": sum(1 for s in sigs if not s.get("constant") and not s.get("no_reading")),
             "constant": sum(1 for s in sigs if s.get("constant")), **({"no_reading": none} if none else {}),
-            "depth": sorted(doc.get("depth") or {})}
+            "depth": sorted(doc.get("depth") or {}),
+            **({'unpaired_depth': sorted(view for view, entry in (doc.get('depth') or {}).items()
+                                        if entry.get('playback', {}).get('kind') == 'source_frames')}
+               if any(entry.get('playback', {}).get('kind') == 'source_frames'
+                      for entry in (doc.get('depth') or {}).values()) else {})}
 
 
-def build(episodes: dict, out_dir: Path) -> dict:
+def build(episodes: dict, out_dir: Path, reuse=None) -> dict:
     """Write the sensors file of every board label file whose prepared episode has signals or depth into out_dir
-    (which must exist), and index.json. episodes maps a label file to its prepared episode folder."""
-    files, skipped, total, biggest = {}, [], 0, 0
+    (which must exist), and index.json. episodes maps a label file to its prepared episode folder; reuse(file), when
+    given, returns the last build's document for a file whose inputs are unchanged (board/build.py), or None."""
+    files, skipped, total, biggest, reused = {}, [], 0, 0, 0
     for f, ep in sorted(episodes.items()):
+        doc = reuse(f) if reuse else None
+        if doc is not None:
+            reused += 1
         try:
-            doc = episode_doc(Path(ep))
+            doc = doc if doc is not None else episode_doc(Path(ep))
         except Exception as err:  # noqa: BLE001 - reported per episode, the build goes on
             skipped.append({"file": f, "skip": f"{type(err).__name__}: {err}"[:300]})
             continue
@@ -479,7 +477,7 @@ def build(episodes: dict, out_dir: Path) -> dict:
         biggest = max(biggest, size)
     write_atomic(out_dir / "index.json", {"format": FORMAT, "files": files}, indent=None,
                  serializer=dumps, separators=(",", ":"))
-    return {"written": len(files), "skipped": skipped, "bytes": {"total": total, "max": biggest}}
+    return {"written": len(files), "skipped": skipped, "bytes": {"total": total, "max": biggest}, "reused": reused}
 
 
 def episode_folders(qa: Path, roots: list) -> dict:

@@ -55,12 +55,14 @@ import os
 import re
 import threading
 import time
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 
 from checks import EXIT_PARTIAL
+from checks import results
+from checks.workers import run_each
 from checks.vendor import public_dataset_adapter_qc as up
 from checks.camera_intervals import to_anchor
 from label import episode as me
@@ -336,7 +338,7 @@ def decode_gray(ep: dict, v: str) -> dict:
                         break
     except FileNotFoundError:
         raise
-    except Exception as e:  # decoder failure on an existing file
+    except Exception as e:  # noqa: BLE001 - PyAV on an existing file raises many types; recorded in info error
         info["error"] = f"{type(e).__name__}: {e}"[:300]
     info["frames"] = frames
     info["got"] = got
@@ -422,8 +424,8 @@ def _na(why: str) -> dict:
 
 def _errored(e: Exception) -> dict:
     """A check that stopped with an error: status errored, the error, and why in words (format_result lists it)."""
-    msg = f"{type(e).__name__}: {e}"[:300]
-    return {**_r("errored", f"the check stopped with an error ({msg})"), "error": msg}
+    msg = results.error_text(e)
+    return {**_r(results.ERRORED, f"the check stopped with an error ({msg})"), "error": msg}
 
 
 class _guard:
@@ -1571,10 +1573,11 @@ def format_result(a: dict) -> dict:
         row = {"check": check, "name": name, "group": group}
         if r["status"] == "not_assessed":
             not_assessed[check] = r["why"]
-            listing.append({**row, "status": "not_applicable", "why": r["why"]})
+            listing.append(results.not_applicable_row(row, r["why"]))
             continue
-        if r["status"] == "errored":
-            listing.append({**row, "status": "errored", "why": r["why"]})
+        if r["status"] == results.ERRORED:
+            listing.append(results.errored_row(row, r["error"]) if r.get("error")
+                           else {**row, "status": results.ERRORED, "why": r["why"]})
             continue
         if r["status"] != "fired":
             listing.append({**row, "status": "clear", **({"why": r["why"]} if r.get("why") else {})})
@@ -1611,9 +1614,16 @@ def format_result(a: dict) -> dict:
 
 
 def errored_record(e: Exception) -> dict:
-    """The context["capture_qc"] record of an episode whose checks could not run at all: every check errored, with
-    the error."""
-    return format_result({"checks": {c: _errored(e) for c in CHECKS}, "cameras": {}, "actors": {}, "episode": {}})
+    """The context["capture_qc"] record of an episode whose checks could not run at all: the error, and every check
+    errored with it (checks/results.py)."""
+    record = format_result({"checks": {c: _errored(e) for c in CHECKS}, "cameras": {}, "actors": {}, "episode": {}})
+    return {**record, "error": results.error_text(e)}
+
+
+def _safe(d: str) -> tuple:
+    """(episode, its record, None), the record errored_record when run_episode itself raises (checks/results.py
+    run_safely), as checks/sensors.py and checks/stream_pairing.py give theirs."""
+    return results.run_safely(d, run_episode, errored_record)
 
 
 def run_episode(ep_dir: Path | str) -> dict:
@@ -1637,35 +1647,13 @@ def _one(d: str) -> tuple[str, dict, str | None, float]:
     t0 = time.time()
     try:
         return d, run_episode(Path(d)), None, time.time() - t0
-    except Exception as e:  # reported per episode and recorded on every check, never silently skipped
-        return d, errored_record(e), f"{type(e).__name__}: {e}"[:300], time.time() - t0
+    except Exception as e:  # noqa: BLE001 - reported per episode and recorded on every check, never silently skipped
+        return d, errored_record(e), results.error_text(e), time.time() - t0
 
 
-def _pool(eps: list[str], jobs: int, record) -> list[str]:
-    """Run each episode's _one on one pool of jobs worker processes and record each answer as it finishes. Returns the
-    episodes the pool never finished: a worker that dies (killed by a signal, out of memory) breaks the whole pool, so
-    the episode it was on and every one still waiting come back unfinished, not only the one that killed it."""
-    lost = []
-    with ProcessPoolExecutor(jobs) as ex:
-        futures = {ex.submit(_one, d): d for d in eps}
-        for fut in as_completed(futures):
-            try:
-                res = fut.result()
-            except Exception:  # noqa: BLE001 - the pool broke: retried alone (_alone)
-                lost.append(futures[fut])
-                continue
-            record(*res)
-    return sorted(lost)
-
-
-def _alone(d: str) -> tuple[str, dict, str | None, float]:
-    """_one for one episode in a worker process of its own, so a worker that dies costs that episode only: then it gets
-    a record with every check errored and the error."""
-    try:
-        with ProcessPoolExecutor(1) as ex:
-            return ex.submit(_one, d).result()
-    except Exception as e:  # noqa: BLE001 - its worker died again
-        return d, errored_record(e), f"{type(e).__name__}: {e}"[:300], 0.0
+def _died(d: str, e: Exception) -> tuple[str, dict, str | None, float]:
+    """The answer of an episode whose worker died on its retry alone too: every check errored, with the error."""
+    return d, errored_record(e), results.error_text(e), 0.0
 
 
 def needs_check(ctx: dict) -> bool:
@@ -1673,13 +1661,7 @@ def needs_check(ctx: dict) -> bool:
     cq = ctx.get("capture_qc")
     if not isinstance(cq, dict) or cq.get("worker_stopped") or cq.get("version") != VERSION:
         return True
-    checks = cq.get("checks")
-    if not isinstance(checks, list) or not checks or not all(isinstance(c, dict) for c in checks):
-        return True
-    names = [c.get("check") for c in checks]
-    if not all(isinstance(n, str) for n in names) or len(names) != len(set(names)) or set(names) != set(CHECKS):
-        return True
-    return any(c.get("status") not in ("clear", "fired", "not_applicable") for c in checks)
+    return results.rows_need_check(cq.get("checks"), CHECKS)
 
 
 def main() -> int:
@@ -1706,7 +1688,7 @@ def main() -> int:
     def record(d: str, r: dict, err: str | None, secs: float) -> None:
         nonlocal done, flagged, failed
         done += 1
-        errors = [c for c in r.get("checks", []) if c.get("status") == "errored"]
+        errors = [c for c in r.get("checks", []) if results.status(c) == results.ERRORED]
         if err or errors:
             failed += 1
             if err:
@@ -1723,13 +1705,7 @@ def main() -> int:
         if done % 25 == 0:
             print(f"progress {done}/{len(eps)} flagged={flagged} failed={failed} last={secs:.1f}s", flush=True)
 
-    lost = _pool(eps, args.jobs, record)
-    if lost:
-        print(f"retrying {len(lost)} episodes a worker's death left unfinished, each in a process of its own",
-              flush=True)
-        with ThreadPoolExecutor(args.jobs) as ex:
-            for res in ex.map(_alone, lost):
-                record(*res)
+    run_each(_one, eps, args.jobs, lambda res: record(*res), _died)
     print(f"done {done} flagged={flagged} failed={failed}", flush=True)
     return EXIT_FAILED if failed else 0
 

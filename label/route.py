@@ -24,10 +24,12 @@ from contextlib import nullcontext
 from pathlib import Path
 
 from label import episode as me, providers
+from label import policy
 
 ROUTE_MODEL = providers.default_model("openai/gpt-6-sol")
 ROUTE_REASONING = "low"
-ROUTE_MAX_TOKENS = 2000
+# The answer is a short JSON object; the limit adds reasoning room at ROUTE_REASONING.
+ROUTE_MAX_TOKENS = policy.output_limit(500, ROUTE_REASONING)
 ROUTE_PROMPT = (
     "You choose the image resolution for labelling one episode of a robot-learning dataset, from its text alone. "
     "The labeller sees the episode's cameras as small frames, about 200 pixels wide. That is enough for most tasks: "
@@ -80,18 +82,18 @@ def request(ep: dict) -> list:
     return [{"type": "text", "text": ROUTE_PROMPT + route_text(ep)}]
 
 
-def _paid_route(ep, api_key, call_model, timeout, receipt_path, identity, reserve_dispatch, settle_dispatch, billing_fields, force_refresh):
-    from label.errors import DispatchError, KeyExhausted, SpendCap
+def _paid_route(ep, api_key, call_model, timeout, out_path, identity, reserve_dispatch, settle_dispatch, billing_fields, force_refresh):
+    from label.errors import DispatchError, SpendCap
     from label.harness import model_prices, _verified_final_cost, persist_final_claim, same_input_identity
     text = route_text(ep)
     routing_identity = {'version': 1, 'task_sha256': hashlib.sha256(text.encode()).hexdigest(),
                         'rig': me.rig(ep), 'model': ROUTE_MODEL, 'reasoning': ROUTE_REASONING,
                         'max_tokens': ROUTE_MAX_TOKENS}
-    if receipt_path is not None:
-        name = receipt_path.name.removeprefix('noreply_')
+    # the output the receipts belong to is given, never recovered from a receipt's name
+    receipt_path = out_path.with_name('noreply_' + out_path.name) if out_path is not None else None
+    if out_path is not None:
         mismatched = False
-        for previous_path in (receipt_path.parent / name,
-                              receipt_path.with_name('failed_' + name), receipt_path):
+        for previous_path in (out_path, out_path.with_name('failed_' + out_path.name), receipt_path):
             if not previous_path.exists():
                 continue
             previous = json.loads(previous_path.read_text())
@@ -149,7 +151,7 @@ def _paid_route(ep, api_key, call_model, timeout, receipt_path, identity, reserv
                 settle_dispatch(bound, 0.0)
             raise
         hit.update(why=f'routing failed: {str(error)[:120]}', dispatch_outcome='unverified')
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - recorded as the route's why, its outcome unverified
         hit.update(why=f'routing failed: {str(error)[:120]}', dispatch_outcome='unverified')
     else:
         usage = resp.get('usage') or {}
@@ -180,7 +182,7 @@ def _paid_route(ep, api_key, call_model, timeout, receipt_path, identity, reserv
 
 
 def route_width(ep_dir: Path, api_key: str | None, call_model, timeout: int = 120, *,
-                receipt_path=None, input_identity=None, reserve_dispatch=None,
+                out_path=None, input_identity=None, reserve_dispatch=None,
                 settle_dispatch=None, billing_fields=None, force_refresh=False) -> tuple[int | None, dict]:
     """(widest cell width, record) for an episode of a routed rig; (None, {"routed": False}) for the others.
     call_model is label.harness.call_model_once; api_key None means a dry run."""
@@ -202,15 +204,15 @@ def route_width(ep_dir: Path, api_key: str | None, call_model, timeout: int = 12
     text = route_text(ep)
     with _LOCK:
         task_lock = _TASK_LOCKS.setdefault(text, threading.Lock())
-    receipt_path = Path(receipt_path) if receipt_path is not None else None
-    if receipt_path is not None:
-        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path = Path(out_path) if out_path is not None else None
+    if out_path is not None:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
     # A process restart reuses the durable claim, including an ambiguous dispatch.
-    with task_lock, (receipt_path.with_name('.' + receipt_path.name + '.route.lock').open('a')
-                     if receipt_path is not None else nullcontext()) as lock:
+    with task_lock, (out_path.with_name('.noreply_' + out_path.name + '.route.lock').open('a')
+                     if out_path is not None else nullcontext()) as lock:
         if lock is not None:
             fcntl.flock(lock, fcntl.LOCK_EX)
-        hit = _paid_route(ep, api_key, call_model, timeout, receipt_path, input_identity,
+        hit = _paid_route(ep, api_key, call_model, timeout, out_path, input_identity,
                           reserve_dispatch, settle_dispatch, billing_fields, force_refresh)
     w = low if hit["fine_detail"] is False else high
     return w, {"routed": True, "model": ROUTE_MODEL, **hit, "cell_w": w}

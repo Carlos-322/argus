@@ -1,13 +1,12 @@
 """Distinct camera frames remain visible when their recorded timestamps repeat."""
 import hashlib
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 from board import clips, sensors
-from label import episode, frames
+from label import episode
 from prepare import formats
 
 
@@ -87,7 +86,7 @@ def test_tied_capture_frames_use_a_qualified_clock_without_changing_raw_arrays(t
     assert "The times are exact: use them, do not invent your own." not in request["prompt"]
     assert "headed with its exact time" not in request["prompt"]
     loaded = episode.load(ep)
-    np.testing.assert_allclose(sensors.clip_times(ep, context, 60), loaded["times"]["exo"])
+    np.testing.assert_allclose(sensors.strip_times(ep, context, 60), loaded["times"]["exo"])
     jobs = list(clips.episode_jobs(ep, tmp_path / "clips", True))
     assert len(jobs) == 2
     for job in jobs:

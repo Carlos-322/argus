@@ -61,18 +61,16 @@ build_keypoints() when the board's manifest names "hands": {"src": ..., "clips":
 from __future__ import annotations
 
 import argparse
-import concurrent.futures as cf
 import json
-import os
-import shutil
 import subprocess
-import sys
 from collections import Counter
 from fractions import Fraction
 from pathlib import Path
 
+from board.clips import clip_path
 from board.to_board import dumps
 from label.atomic import write_bytes_atomic
+from prepare import tools
 
 FORMAT = "board-hand-pose/1"
 STEP = 4
@@ -80,13 +78,6 @@ TOL = 0.5
 B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 B64_INV = {c: i for i, c in enumerate(B64)}
 HEAD_RIG = "ego_head"
-
-
-def _ffprobe() -> str:
-    for c in (os.environ.get("FFPROBE"), shutil.which("ffprobe")):
-        if c and Path(c).exists():
-            return c
-    sys.exit("ffprobe not found")
 
 
 # ---------------------------------------------------------------- VLQ
@@ -204,7 +195,7 @@ def decode_hand(h: dict, n_frames: int, step: int = STEP) -> list:
 def probe_pts(clip: Path) -> tuple:
     """(width, height, time base, every frame's presentation timestamp): packets sorted by pts, which is display
     order, so the i-th is the i-th decoded frame the keypoints are numbered by."""
-    r = subprocess.run([_ffprobe(), "-v", "error", "-select_streams", "v:0", "-show_entries",
+    r = subprocess.run([tools.ffprobe(), "-v", "error", "-select_streams", "v:0", "-show_entries",
                         "stream=width,height,time_base:packet=pts,flags", "-of", "json", str(clip)],
                        capture_output=True, text=True, timeout=300)
     if r.returncode != 0:
@@ -244,9 +235,10 @@ def frame_times(clip_block: dict) -> list:
     return out
 
 
-def retime(doc: dict, clip: Path) -> dict:
+def for_copy(doc: dict, clip: Path) -> dict:
     """The same keypoints timed against another copy of the clip (the static build's web copy, whose timestamps
-    ffmpeg re-bases to start at 0). Refused unless it has the same frames at the same size."""
+    ffmpeg re-bases to start at 0). Refused unless it has the same frames at the same size. Not board/clips.py
+    retime, which puts a clip's own frames on screen at their capture times."""
     cl = probe_clip(clip)
     old = doc["clip"]
     if (cl["frames"], cl["w"], cl["h"]) != (old["frames"], old["w"], old["h"]):
@@ -443,6 +435,14 @@ def keypoints_one(job: tuple) -> dict:
         return {"key": key, "skip": f"{type(err).__name__}: {err}"[:300]}
 
 
+def _each(fn, jobs_, jobs):
+    """fn over every job on worker processes; a worker that dies skips only its own episode, with the reason."""
+    from checks.workers import run_each
+    res = []
+    run_each(fn, jobs_, jobs, res.append, lambda job, err: {"key": job[0], "skip": f"worker died: {type(err).__name__}"})
+    return res
+
+
 def build_keypoints(src: Path, qa: Path, episodes: dict, out_dir: Path, jobs: int = 8) -> dict:
     """Write the download of every head-camera board episode the run covers into out_dir (which must exist), and
     index.json: {"format", "licence", "files": {label file: {"frames", "bytes"}}}. episodes maps a label file to its
@@ -451,8 +451,7 @@ def build_keypoints(src: Path, qa: Path, episodes: dict, out_dir: Path, jobs: in
     board = head_camera_files(qa)
     jobs_ = [(key, src / e["hands2d"], qa / board[key][0], board[key][1], Path(episodes[board[key][0]]), out_dir)
              for key, e in index.items() if key in board and board[key][0] in episodes]
-    with cf.ProcessPoolExecutor(max(1, jobs)) as ex:
-        res = list(ex.map(keypoints_one, jobs_))
+    res = _each(keypoints_one, jobs_, jobs)
     written = sorted((r for r in res if "file" in r), key=lambda r: r["file"])
     (out_dir / "index.json").write_text(dumps(
         {"format": KP_FORMAT, "licence": LICENCE,
@@ -491,9 +490,8 @@ def build(src: Path, qa: Path, clips: Path, out_dir: Path, jobs: int = 8) -> dic
         if key not in board:
             continue
         label_file, eid = board[key]
-        jobs_.append((key, src / e["hands2d"], label_file, clips / f"{eid}.mp4", out_dir, source))
-    with cf.ProcessPoolExecutor(max(1, jobs)) as ex:
-        res = list(ex.map(build_one, jobs_))
+        jobs_.append((key, src / e["hands2d"], label_file, clip_path(clips, eid, "exo"), out_dir, source))
+    res = _each(build_one, jobs_, jobs)
     written = [r for r in res if "file" in r]
     skipped = [r for r in res if "skip" in r]
     done = {r["file"] for r in written}

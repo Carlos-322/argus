@@ -7,7 +7,7 @@ import urllib.request
 import pytest
 
 from board import serve, static
-from test_prepared_footage import media, serving, get
+from test_prepared_footage import media, served, serving, get
 
 
 def prepare(base, span, client=None):
@@ -72,7 +72,7 @@ def test_own_load_withdraws_own_oldest_ticket_when_the_cache_has_no_room(tmp_pat
         oldest = prepare(base, (0, .1))
         prepare(base, (.05, .2))
         newest = prepare(base, (.1, .3))
-        assert serve.ticket_footage(oldest) is None and serve.ticket_footage(newest)
+        assert served(oldest) is None and served(newest)
 
 
 def test_tickets_of_other_clients_filling_the_cache_refuse_new_work_instead_of_evicting(tmp_path, monkeypatch):

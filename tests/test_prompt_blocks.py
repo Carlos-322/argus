@@ -10,6 +10,7 @@ import pytest
 from label import episode as me
 from label import frames as mf
 from label import policy, prompts
+from label import signals as sg
 from label import state as ms
 
 
@@ -396,7 +397,7 @@ BLOCK_CASES = [
      ("RECORDED ACTOR IDENTITY DISAGREES", "The left source names right joints; the actor side is unknown.")),
 ]
 # blocks whose presence switches the shared instructions to another variant
-CHANGES_FIXED = ("state", "no_state")
+CHANGES_FIXED = ("state", "no_state", "sensor_evidence")
 
 
 @pytest.mark.parametrize("block,base,add,markers", BLOCK_CASES, ids=[c[0] for c in BLOCK_CASES])
@@ -770,6 +771,9 @@ def test_per_value_gives_rows_to_named_and_joint_named_flat_vectors_only():
     assert sg.per_value("observation.state", 26)
     assert sg.per_value("hand_joints", sg.JOINT_NAME_MAX)
     assert not sg.per_value("hand_joints", 63)
+    # the name's words are matched whole, as every name word is: a glued robotstate is a state, a statevec is not
+    assert sg.per_value("observation.robotstate", 26) and sg.per_value("left_jointpos", 26)
+    assert not sg.per_value("observation.statevec", 26) and not sg.per_value("jointly", 26)
 
 
 def test_a_rate_is_stated_only_below_nine_tenths_of_the_frame_rate():
@@ -827,7 +831,7 @@ def test_the_values_at_each_instant_keep_what_moves_most_and_name_the_rest():
     assert "would not fit" not in table
     readout = table.split("at every instant you receive")[1]
     left = [l for l in table.splitlines() if l.startswith("  The values at each instant leave out ")]
-    assert len(left) == 1 and left[0].endswith(", because these move least and there is no more room.")
+    assert len(left) == 1 and left[0].endswith(", because these rank lowest and there is no more room.")
     body = readout.split(left[0])[0]
     # the budget counts the instants' row and the value rows, without their line breaks
     assert sum(len(l) for l in body.splitlines() if l.startswith("    ")) <= me.SIGNAL_TABLE_MAX_CHARS
@@ -861,7 +865,10 @@ def _humanoid_overflow(state_w, vel_w):
     return episode, left, shown
 
 
-def test_over_the_budget_the_state_line_names_the_joint_readings_only_when_every_row_of_them_is_shown():
+def test_over_the_budget_the_state_line_names_the_joint_readings_only_when_every_row_of_them_is_shown(monkeypatch):
+    # the fixture's waves are one wave at shifted phases, some within a lag of each other, so the readout would
+    # send them once (label/signals.py tracking); this test is about the budget, so no row is taken as a copy
+    monkeypatch.setattr(sg, "TRACK_LEVEL", 2.0)
     named = ("The signal whose name says joints or a state (observation.state) is given value by value under their own "
              "names among the other recorded signals below.")
     episode, left, shown = _humanoid_overflow(0.4, 0.8)
@@ -894,6 +901,9 @@ def test_signal_readout_skips_an_oversized_row_without_discarding_smaller_eviden
     """The captured 60 s fixture fits 42 moving signals, then smaller flags at 12k.
     At 13k the previously oversized row and the remaining flag fit as well.
     """
+    # the fixture's waves are one wave at shifted phases, some within a lag of each other, so the readout would
+    # send them once (label/signals.py tracking); this test is about the budget, so no row is taken as a copy
+    monkeypatch.setattr(sg, "TRACK_LEVEL", 2.0)
     monkeypatch.setattr(me, "SIGNAL_TABLE_MAX_CHARS", budget)
     ep, pl = _sweeps_wide_and_flags()
     lines, whole = me._signal_readout(ep, pl)
@@ -906,16 +916,20 @@ def test_signal_readout_skips_an_oversized_row_without_discarding_smaller_eviden
     omitted = set(ep["signals"]) - expected
     if omitted:
         assert all(name in lines[-1] for name in omitted)
-        assert "ranked by movement" in lines[-1] and "move least" not in lines[-1]
+        assert "ranked by how well each reading stands for its instant, then by movement" in lines[-1]
+        assert "move least" not in lines[-1]
     else:
         assert "leave out" not in "\n".join(lines)
 
 
 def test_with_no_row_that_fits_each_signal_with_rows_is_named_as_left_out_because_none_fits(monkeypatch):
     """A budget smaller than the times row or any value row names every omitted signal with the actual reason."""
+    # the fixture's waves are one wave at shifted phases, some within a lag of each other, so the readout would
+    # send them once (label/signals.py tracking); this test is about the budget, so no row is taken as a copy
+    monkeypatch.setattr(sg, "TRACK_LEVEL", 2.0)
     ep, pl = _sweeps_wide_and_flags()
     head = len("    at: " + " ".join(f"{me.frame_time(ep, k):.2f}" for k in pl["ks"]))
-    shortest = min(len("    " + name + ": " + " ".join(me._num(x) for x in a[pl["ks"], 0]))
+    shortest = min(len("    " + name + ": " + " ".join(sg.reading_text(x) for x in a[pl["ks"], 0]))
                    for name, a in ep["signals"].items())
     for budget in (head - 1, head + shortest - 1):
         monkeypatch.setattr(me, "SIGNAL_TABLE_MAX_CHARS", budget)
@@ -936,3 +950,40 @@ def test_other_reader_notes_do_not_add_a_table_interpretation_block():
     ]
     assert me.build_prompt(ep, pl, cell_w=256, cell_h=144) == before
     assert "table_numbers" not in [b.name for b in me.present_blocks(ep, pl)]
+
+
+@pytest.mark.parametrize('case', [case_ego_plain, case_teleop_joints, case_handheld_pose])
+def test_sensor_contract_follows_visual_rules_without_replacing_them(case):
+    ep, pl = case()
+    visual_fixed, _ = me.build_prompt(ep, pl, cell_w=256, cell_h=144)
+    pl['sensor_evidence'] = {'sensors': [{'id': 'signal:pad', 'name': 'pad'}],
+                             'series': [], 'limitations': []}
+    fixed, episode = me.build_prompt(ep, pl, cell_w=256, cell_h=144)
+    assert visual_fixed in fixed
+    assert episode.index('BETWEEN INSTANTS') < episode.index('SENSOR EVIDENCE FOR ADDITIONAL ANNOTATION')
+    assert 'VISUAL ANNOTATION CONTRACT' in fixed
+    assert 'supplied sensor_findings and evidence_findings fields first' in fixed
+
+
+@pytest.mark.parametrize("rig", ["teleop_arms", "handheld_gripper", "ego_head"])
+@pytest.mark.parametrize("kw", [{}, {"recorded": False}, {"sessions": True}, {"has_instruction": False}])
+def test_every_prompt_defines_a_subgoal_once_as_a_lasting_change_and_keeps_failure_kinds(rig, kw):
+    s = " ".join(prompts.fixed_instructions(rig, **kw).split())
+    assert s.count("A subgoal is a lasting step") == 1
+    assert "kind subgoal_complete" in s and "A pick, a grasp, a contact or a motion is not a subgoal" in s
+    assert "never subgoal_complete" in s and "subgoal_failed" not in s
+    assert "at the goal frame (completed_at_s, judged by its own rule below)" in s or "at that task's completed_at_s" in s
+    assert "at the first moment its change holds once the hand" in s and "lets go" in s
+    assert "neither moves it nor makes a new subgoal" in s and "waits for the last such adjustment" not in s
+    assert "setting it down is a subgoal of its own at the first moment it holds" in s
+    assert "Subgoals do not lengthen the list" in s and "are still key_events of their own kind" not in s
+
+
+@pytest.mark.parametrize('rig', ['teleop_arms', 'handheld_gripper'])
+def test_in_a_session_each_repeat_of_a_cycle_is_its_own_task(rig):
+    from label import prompts
+    rules = ' '.join(prompts.session_rules(rig).split())
+    assert ('starts the same unit of work again after its end-state was reached: in a cycle, where the objects are '
+            'reset and the same work repeats, each repeat is its own task, judged on its own.') in rules
+    assert ('Stages toward one end state are one task with subgoals, never separate tasks: building a stack in two '
+            'halves, or packing a box item by item, is one task.') in rules

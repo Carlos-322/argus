@@ -66,7 +66,6 @@ import json
 import math
 import os
 import re
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -82,13 +81,13 @@ from board import serve as sa
 from board.to_board import dumps
 from board.public_export import project as public_json, public_build_manifest, publication_policy
 from label.atomic import temporary_path, write_atomic, write_bytes_atomic
+from prepare import tools
 
 HERE_DIR = Path(__file__).resolve().parent
 TITLE = "Data Dashboard"
 
 FFMPEG = sa.FFMPEG
-FFPROBE = (str(Path(FFMPEG).with_name("ffprobe")) if FFMPEG and Path(FFMPEG).with_name("ffprobe").exists()
-           else shutil.which("ffprobe"))
+FFPROBE = tools.ffprobe_or_none()     # the one ffprobe every caller runs (prepare/tools.py)
 # the clips' recipe is board/clips.py's (the build records its name)
 ENC_TAG = bc.ENC_TAG
 # every published video's name carries this tag, the recipe's name when the board's media were first built. A static
@@ -106,8 +105,9 @@ clip_path = sa.clip_path   # the source clip board/serve.py's /api/video serves 
 
 
 def media_key(cam: str) -> str:
-    return cam if cam in ("left", "right") or sa.EXTRA_CAM.fullmatch(cam or "") or sa.DEPTH_CAM.fullmatch(cam or "") \
-        else "exo"
+    """The media key of a camera value: the value itself, since every camera has a clip of its own (clip_path), so
+    no two cameras share a key (the page's mediaKey)."""
+    return cam
 
 
 def shown_cams(d: dict) -> list:
@@ -324,11 +324,9 @@ def plan(qa: Path, clips: Path, compare: Path | None = None, dictionary_job: Pat
                 media[key] = {"src": src, "rel": video_rel(eid, key, src_sig(src)), "main": cam == cams[0]}
                 # the camera's first frame, the video's poster: the player shows footage from the first paint
                 frames[f"{key}|0"] = {"src": src, "t": 0.0, "rel": frame_rel(eid, key, 0, src_sig(src))}
-                # the camera's depth clip (board/clips.py), which the page's depth switch plays, when it was cut
-                dsrc = clip_path(clips, eid, f"depth_{cam}")
-                if dsrc.exists():
-                    media[f"depth_{cam}"] = {"src": dsrc, "rel": video_rel(eid, f"depth_{cam}", src_sig(dsrc)),
-                                             "main": cam == cams[0]}
+            for view, source in sa.depth_clips(clips, eid).items():
+                key = f'depth_{view}'
+                media[key] = {'src': source, 'rel': video_rel(eid, key, src_sig(source)), 'main': view == cams[0]}
             main = cams[0]
             msrc = clip_path(clips, eid, main)
             times = goal_times(d)
@@ -740,7 +738,7 @@ def cmd_site(a):
     # Page settings, board metadata and the publication policy also change the exported site. Every option enters
     # unless it is known not to change what is published, so an option added later cannot reuse an old build id.
     options = {k: v for k, v in vars(a).items() if k not in _UNPUBLISHED_OPTIONS}
-    presentation = dumps([options, sa.board_name(a.board), sa.labels_license(a.board),
+    presentation = dumps([options, sa.board_name(a.board), sa.labels_license(a.board), sa.targets(a.board),
                           sa.read_header(getattr(a, 'header', None)), publication_policy()], sort_keys=True, default=str)
     bid = a.build_id or identity + '-' + _h(presentation, 8)
     if not bid or Path(bid).name != bid or bid.startswith('.'):
@@ -828,7 +826,7 @@ def cmd_site(a):
     hands_res = None
     if hands is not None:
         # the hand pose files, each re-timed against the web copy the static page plays (the copy keeps the clip's
-        # timestamps, and retime refuses a copy whose frames or size differ); an episode whose web copy is not made
+        # timestamps, and board/hands.py for_copy refuses a copy whose frames or size differ); an episode whose web copy is not made
         # yet gets none until the next build
         (stage / "data/hands").mkdir()
         todo = [(e, a.out / "media" / e["media"]["exo"]["rel"]) for e in eps
@@ -840,7 +838,7 @@ def cmd_site(a):
             if not mp4.exists():
                 return f, "no web copy of the clip yet"
             try:
-                doc = hands_overlay.retime(json.loads((hands / f).read_text()), mp4)
+                doc = hands_overlay.for_copy(json.loads((hands / f).read_text()), mp4)
             except (ValueError, RuntimeError) as err:
                 return f, str(err)[:200]
             (stage / "data/hands" / site_file(f)).write_text(dumps(public_json(doc), separators=(",", ":")))
@@ -886,7 +884,8 @@ def cmd_site(a):
     # has them (no request that can only fail)
     has = {"compare": compare is not None, "hands": bool(hands_res and hands_res["files"]),
            "keypoints": bool(kp_res and kp_res["files"]), "sensors": bool(sn_res and sn_res["files"]),
-           "labels_license": sa.labels_license(a.board), "grids": grid_count > 0}
+           "labels_license": sa.labels_license(a.board), "targets": sa.targets(a.board),
+           "grids": grid_count > 0}
     name = sa.board_name(a.board)
     header = sa.read_header(getattr(a, "header", None))
     (stage / "index.html").write_text(sa.render_index(
@@ -983,7 +982,10 @@ def main():
         ap.error('No board qa directory exists. A free review stops before board generation; use a built board with labels.')
     a.out = a.out or a.board / "static"
     if not FFMPEG or not FFPROBE:
-        sys.exit("ffmpeg/ffprobe not found")
+        try:
+            tools.ffmpeg(), tools.ffprobe()
+        except tools.Missing as e:
+            sys.exit(e.strerror)
     from board.public_export import publish_uploader_values
     publish_uploader_values(getattr(a, "publish_uploader_values", False))
     return {"measure": cmd_measure, "media": cmd_media, "site": cmd_site, "status": cmd_status}[a.cmd](a) or 0
