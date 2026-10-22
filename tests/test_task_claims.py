@@ -423,3 +423,178 @@ def test_head_camera_tasks_record_what_they_were_judged_against_and_one_task_wit
     bare = {'tasks': [{'start_s': 0.0, 'end_s': 4.0, 'task': 'wipe'}]}
     judge_head_camera_tasks(bare, [], None)
     assert bare['tasks'][0]['judged_against'] == 'own_end_state' and bare['tasks'][0]['judged_against_derived']
+
+
+# A real Gen-HumanEgo reply with an annotated goal and two tasks (paid check B, 82c0fc2,
+# episode_f2fa4df231a64d63abcbace97a4ca8ab, goal "Store toothpicks on the tabletop", 2 timed steps), trimmed to the fields
+# the verdict reads. Main gave it no verdict, like 16 of 16 such clips (audit_2026-10-21 task_semantics.md S3).
+TOOTHPICKS = {
+    'task_summary': 'The person gathers loose toothpicks into a holder and sets the filled holder on a tray.',
+    'goal_alignment': {'matches_given': True, 'relation': 'aligned', 'note': ''},
+    'timeline': [{'start_s': 0.0, 'end_s': 94.07, 'arm': 'both', 'action': 'transfer toothpicks into the holder',
+                  'contribution': 'advancing', 'progress': 1.0, 'hands_visible': True}],
+    'tasks': [
+        {'start_s': 0.0, 'end_s': 93.5, 'task': 'Collect the loose tabletop toothpicks into the holder',
+         'objects': ['wooden toothpicks', 'toothpick holder', 'white tissue'], 'outcome': 'success',
+         'success_predicate': 'The loose toothpicks have been transferred into the holder and the tissue is clear.',
+         'completed_at_s': 93.5, 'note': 'The repeated transfers and cleared ending surface establish completion; '
+                                         'precise counts per pinch are not resolvable.'},
+        {'start_s': 93.5, 'end_s': 94.07, 'task': 'Place the filled toothpick holder on the tabletop tray',
+         'objects': ['toothpick holder', 'white tray'], 'outcome': 'success',
+         'success_predicate': 'The filled holder rests upright on the tray without hand support.',
+         'completed_at_s': 94.04, 'note': None}]}
+GOAL_OUTCOME = {'outcome': 'success', 'success_predicate': 'The toothpicks are stored in the holder on the tray.',
+                'completed_at_s': 94.04, 'note': None}
+
+
+def test_a_head_camera_clip_with_an_annotated_goal_takes_its_verdict_from_the_goals_outcome():
+    """S3, decided by Eric: a head-camera clip with an annotated goal is asked one optional field, whether it reached
+    the goal's end state, and derive_completion reads it as the clip's completion, judged against the goal, while every
+    task keeps its own outcome beside it. A reply without the field, or a clip without a goal, is read as on main."""
+    request = {'annotation_policy': {'version': 1, 'rig': 'ego_head'}, 'label_schema': 'tasks', 'task_prompts': 2,
+               'given_prompt': 'Store toothpicks on the tabletop', 'config': {'timesteps_s': [0.0, 47.0, 94.0]}}
+    reply = {**TOOTHPICKS, 'goal_outcome': GOAL_OUTCOME}
+    labels, ok = harness.read_reply(json.dumps(reply), request)
+    assert ok
+    c = labels['completion']
+    assert (c['task_completed'], c['basis'], c['judged_against'], c['completed_at_s'], c['from_tasks']) == (
+        'success', 'instruction', 'instruction', 94.04, 2)
+    assert c['success_predicate'] == GOAL_OUTCOME['success_predicate']
+    assert not any(v.startswith('completion') for v in labels.get('_schema_violations') or [])
+    d = to_board.convert({'episode_dir': 'episode_f2fa4', 'parse_ok': True, 'labels': labels, 'label_schema': 'tasks',
+                          'given_prompt': request['given_prompt']}, 'genhumanego')
+    assert verdict_or_tasks(d) == ('success', []) and len(shown_tasks(d)) == 2
+    rail = serve._rail_record(Path('e.json'), d)
+    assert (rail['task_completed'], rail['n_tasks'], rail.get('verdict_first')) == ('success', 2, True)
+    assert judge({'outcome': ['success']}, labels)[0]
+    # read again, as a resumed job reads a saved record, it is the same
+    again, ok = harness.read_reply(json.dumps(labels), request)
+    assert ok and again['completion'] == c
+    # main's reading: the same reply without the field, an unknown outcome word, or a clip with no goal
+    for other, given in ((TOOTHPICKS, request['given_prompt']), ({**reply, 'goal_outcome': {'outcome': 'done'}},
+                                                                 request['given_prompt']), (reply, None)):
+        got, ok = harness.read_reply(json.dumps(other), {**request, 'given_prompt': given})
+        assert ok and 'completion' not in got
+
+
+AGAINST_SCRIPT = r'''
+const fs = require('fs');
+const s = fs.readFileSync(process.argv[1], 'utf8');
+const i = s.indexOf('    // what the task was judged against'), j = s.indexOf('    const jump', i);
+if (i < 0 || j < i) throw new Error('task row source not found');
+const esc = x => String(x ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+const f = new Function('t', 'esc', s.slice(i, j) + 'return against;');
+console.log(JSON.stringify(JSON.parse(process.argv[2]).map(t => f(t, esc))));
+'''
+
+
+def test_the_board_names_only_what_a_head_camera_tasks_time_overlap_supports():
+    """S3: a head camera's reply never says what a task was judged against; the board derived it from time overlap and
+    printed "against step N" or "against the instruction", which nobody established. A derived step now reads
+    "covers step N", a derived goal nothing, and a robot task's own judged_against is printed as before."""
+    import shutil
+    import subprocess
+    if not shutil.which('node'):
+        pytest.skip('no node')
+    page = Path(__file__).resolve().parents[1] / 'board' / 'index.html'
+    tasks = [{'judged_against': 'subtask', 'subtask': 2, 'judged_against_derived': True},
+             {'judged_against': 'instruction', 'judged_against_derived': True},
+             {'judged_against': 'subtask', 'subtask': 3}, {'judged_against': 'instruction'}]
+    p = subprocess.run(['node', '-e', AGAINST_SCRIPT, str(page), json.dumps(tasks)], text=True, capture_output=True)
+    assert p.returncode == 0, p.stderr
+    assert json.loads(p.stdout) == [' &middot; covers step 2', '', ' &middot; against step 3',
+                                    ' &middot; against the instruction']
+
+
+# The shape of 15 of the 16 S3 paid-check replies (464d573): a head-camera clip's progress restarts at each task (the
+# ego schema asks it toward the CURRENT sub-task), so the first task reaches 1.0 long before the annotated goal holds.
+CABLES = {
+    'task_summary': 'The person bundles two cables and stores each in the box.',
+    'goal_alignment': {'matches_given': True, 'relation': 'aligned', 'note': ''},
+    'timeline': [{'start_s': 0.0, 'end_s': 18.5, 'arm': 'both', 'action': 'bundle the first cable',
+                  'contribution': 'advancing', 'progress': 1.0, 'hands_visible': True},
+                 {'start_s': 18.5, 'end_s': 30.0, 'arm': 'both', 'action': 'bundle the second cable',
+                  'contribution': 'advancing', 'progress': 0.5, 'hands_visible': True},
+                 {'start_s': 30.0, 'end_s': 47.0, 'arm': 'both', 'action': 'store the second cable',
+                  'contribution': 'advancing', 'progress': 1.0, 'hands_visible': True}],
+    'tasks': [{'start_s': 0.0, 'end_s': 18.5, 'task': 'Bundle and store the first cable', 'outcome': 'success',
+               'success_predicate': 'The first cable is bundled in the box.', 'completed_at_s': 18.5, 'note': None},
+              {'start_s': 18.5, 'end_s': 47.0, 'task': 'Bundle and store the second cable', 'outcome': 'success',
+               'success_predicate': 'The second cable is bundled in the box.', 'completed_at_s': 46.5, 'note': None}]}
+CABLES_REQUEST = {'annotation_policy': {'version': 1, 'rig': 'ego_head'}, 'label_schema': 'tasks',
+                  'given_prompt': 'Bundle the cables one by one and place them into the storage box.',
+                  'config': {'timesteps_s': [0.0, 23.5, 47.0]}}
+
+
+@pytest.mark.parametrize('outcome, done', [('success', 46.5), ('unclear', None), ('partial', None)])
+def test_a_goal_verdict_is_never_read_against_progress_that_restarts_at_each_task(outcome, done):
+    """S3 paid check: the goal's verdict made the progress rules read a head camera's per-task progress as progress
+    toward the goal, and 15 of 16 clips were flagged (progress_before_goal on every success, progress_vs_outcome on every
+    unclear), flags that exist only because of the new field. The record now says its progress is per task
+    (progress_scope "tasks"): the consistency check, the outcome score and the board's progress chart read no progress
+    toward the goal from it, and a recording whose progress measures its goal is checked as before."""
+    from checks import label_consistency
+    reply = {**CABLES, 'goal_outcome': {'outcome': outcome, 'success_predicate': 'Both cables are stored.',
+                                        'completed_at_s': done, 'note': None if done else 'the clip ends first'}}
+    labels, ok = harness.read_reply(json.dumps(reply), CABLES_REQUEST)
+    assert ok and labels['completion']['task_completed'] == outcome and labels['progress_scope'] == 'tasks'
+    assert label_consistency.check(labels, 47.0) == []
+    d = to_board.convert({'episode_dir': 'episode_cables', 'parse_ok': True, 'labels': labels, 'label_schema': 'tasks',
+                          'given_prompt': CABLES_REQUEST['given_prompt'], 'duration_s': 47.0}, 'genhumanego')
+    assert d['progress_scope'] == 'tasks' and label_consistency.check(d, 47.0) == []
+    score, why = scores._outcome(scores.facts(d))
+    # a success is reached whatever the progress; any other verdict has no progress toward the goal to scale it
+    assert (score, why['progress_reached']) == ((10.0, None) if outcome == 'success' else (None, None))
+    # main's reading is unchanged: without the field the clip has no verdict and no progress scope
+    plain, ok = harness.read_reply(json.dumps(CABLES), CABLES_REQUEST)
+    assert ok and 'progress_scope' not in plain and 'completion' not in plain
+    # a recording whose progress measures its goal (a robot instruction's completion) is still flagged
+    robot = {**{k: v for k, v in labels.items() if k != 'progress_scope'},
+             'completion': {**labels['completion'], 'basis': 'instruction'}}
+    rules_fired = {x['rule'] for x in label_consistency.check(robot, 47.0)}
+    assert rules_fired == ({'progress_before_goal'} if outcome == 'success' else {'progress_vs_outcome'})
+
+
+PROGRESS_SCRIPT = r'''
+const fs = require('fs');
+const s = fs.readFileSync(process.argv[1], 'utf8');
+const i = s.indexOf('function progressPoints('), j = s.indexOf('\nfunction ', i + 1);
+const k = s.indexOf('  // progress that restarts at each task'), m = s.indexOf('  let progOverlayHtml', k);
+if (i < 0 || j < i || k < 0 || m < k) throw new Error('progress chart source not found');
+const a0 = s.indexOf('function progressAt('), a1 = s.indexOf('\nfunction ', a0 + 1);
+if (a0 < 0 || a1 < a0) throw new Error('progressAt source not found');
+const progressPoints = new Function(s.slice(i, j) + '\n' + s.slice(a0, a1) + '\nreturn progressPoints;')();
+const a = JSON.parse(process.argv[2]);
+const chart = new Function('progressPoints', 'eventLabels', 'duration', 'd', 'comp', 'hasTasks', 'tasks', 'allTasks',
+  s.slice(k, m) + 'return {pts: progPts, label: progSubLabel};');
+console.log(JSON.stringify(chart(progressPoints, a.steps, a.duration, a.d, a.d.completion, a.hasTasks,
+  a.hasTasks ? a.d.tasks : [], a.d.tasks)));
+'''
+
+
+def test_the_board_charts_per_task_progress_as_tasks_done_never_as_progress_to_the_goal():
+    """S3: with a goal verdict the board drew a head camera's per-task progress as progress "to goal", which showed the
+    goal 99% done after the first of several tasks. A record whose progress is per task is charted as tasks done, as
+    main charts a clip with several tasks and no verdict; a record whose progress measures its verdict is charted to
+    the goal as before."""
+    import shutil
+    import subprocess
+    if not shutil.which('node'):
+        pytest.skip('no node')
+    page = Path(__file__).resolve().parents[1] / 'board' / 'index.html'
+    steps = [{'t_s': s['start_s'], 'end_s': s['end_s'], 'progress': s['progress'], 'contribution': s['contribution']}
+             for s in CABLES['timeline']]
+    verdict = {'task_completed': 'success', 'completed_at_s': 46.5, 'basis': 'instruction'}
+
+    def run(d, has_tasks):
+        p = subprocess.run(['node', '-e', PROGRESS_SCRIPT, str(page), json.dumps(
+            {'steps': steps, 'duration': 47.0, 'd': {'tasks': CABLES['tasks'], **d}, 'hasTasks': has_tasks})],
+            text=True, capture_output=True)
+        assert p.returncode == 0, p.stderr
+        out = json.loads(p.stdout)
+        return out['label'], [(round(q['t'], 2), round(q['p'], 3)) for q in out['pts']]
+    per_task = run({'completion': verdict, 'progress_scope': 'tasks'}, False)
+    assert per_task == run({'completion': {'basis': 'tasks'}}, True)
+    assert per_task[0] == 'tasks done' and dict(per_task[1])[18.5] == 0.5
+    label, to_goal = run({'completion': verdict}, False)
+    assert label == 'to goal' and dict(to_goal)[18.5] == 0.99

@@ -6756,9 +6756,13 @@ function renderEp(d, opts) {
   const keyEvents = (d.key_events || []).filter(k => k.t_s != null)
       .slice().sort((a, b) => a.t_s - b.t_s);
 
-  const progPts = progressPoints(eventLabels, duration, {progressScope: d.progress_scope, ...(hasTasks ? {tasks}
+  // progress that restarts at each task (a head-camera clip judged on its annotated goal, progress_scope "tasks") is
+  // charted as tasks done, as a clip read task by task is; it never measures progress to the goal
+  const perTaskProgress = hasTasks || d.progress_scope === 'tasks';
+  const progPts = progressPoints(eventLabels, duration, {progressScope: d.progress_scope, ...(perTaskProgress
+    ? {tasks: hasTasks ? tasks : allTasks}
     : {completedAt: comp.completed_at_s, reachedAt: comp.goal_reached_at_s, undoneAt: comp.undone_at_s})});
-  const progSubLabel = hasTasks ? 'tasks done' : 'to goal';
+  const progSubLabel = perTaskProgress ? 'tasks done' : 'to goal';
   let progOverlayHtml = '';
   if (progPts.length >= 2) {
     const W = 100, H = 24;
@@ -7177,8 +7181,12 @@ function renderEp(d, opts) {
     const oc = (t.outcome || '').toLowerCase();
     const span = (t.start_s != null && t.end_s != null) ? `${fmtT(t.start_s)}-${fmtT(t.end_s)}` : '';
     const done = t.completed_at_s != null ? ` &middot; done ${fmtT(t.completed_at_s)}` : '';
-    // what the task was judged against (label/prompts.py TASK_RULES): one of the dataset's timed steps, the instruction
-    const against = t.judged_against === 'subtask' && t.subtask != null ? ` &middot; against step ${esc(t.subtask)}`
+    // what the task was judged against (label/prompts.py TASK_RULES): one of the dataset's timed steps, the instruction.
+    // A head camera's reply never says (board/label_projection.py judge_head_camera_tasks derives it), so its task
+    // shows only what the time overlap supports: the step it covers
+    const against = t.judged_against_derived
+      ? (t.judged_against === 'subtask' && t.subtask != null ? ` &middot; covers step ${esc(t.subtask)}` : '')
+      : t.judged_against === 'subtask' && t.subtask != null ? ` &middot; against step ${esc(t.subtask)}`
       : t.judged_against === 'instruction' ? ' &middot; against the instruction' : '';
     const jump = t.completed_at_s != null ? t.completed_at_s : t.start_s;
     taskRows.push(`<div class="task-row ${esc(oc)}"${jump != null ? ` data-t="${esc(jump)}"` : ''}>
