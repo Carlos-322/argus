@@ -272,6 +272,7 @@ def test_stitching_puts_the_parts_back_on_the_recordings_clock(monkeypatch):
         assert [x["part"] for x in lab["data_issues"]] == [2]                  # the recording's own end stays
         assert [x["excluded_by"] for x in lab["_excluded"]] == ["piece_cut"]   # the cut after part 1 is ours
         assert out["stitched"]["parts"] == 2 and out["usage"]["est_cost_usd"] == 1.0
+        assert out["stitched"]["version"] == pieces.STITCH_VERSION == 2
         # every part's routing call is billed, and every part was checked against the recording's instruction
         assert out["config"]["resolution_route"]["cost_usd"] == 0.03 and len(out["config"]["resolution_route"]["parts"]) == 2
         assert harness.episode_cost(out) == 1.03 and out["prompt_mode"] == "given"
