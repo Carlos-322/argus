@@ -2106,7 +2106,11 @@ def _clean_stitch(tmp_path, monkeypatch):
                           'severity': 'low', 'evidence': 'Glare from 0.75 s. It is seen near the internal request cut '
                                                          'too.'},
                          {'t_s': 0.2, 'issue': f'Motion blur in part {i + 1}', 'category': 'motion_blur',
-                          'severity': 'low'}],
+                          'severity': 'low'}]
+            # the part after a cut says it starts mid task: our cut's doing, set aside under _excluded
+            + ([{'t_s': 0.0, 'issue': 'starts mid task', 'category': 'starts_mid_task', 'severity': 'low',
+                 'evidence': 'The stacking is under way at the internal request cut. Two cups already stand.'}]
+               if i == 1 else []),
             performance_review=f'Smooth until 0.50 s in part {i + 1}. The internal request cut ends this view.')
     seams = {contexts[1]['piece']['t0_s']: {'same_task': True, 'evidence': 'the same cups on both sides'}}
     return src, contexts, records, pieces.stitch(src, list(zip(contexts, records)), seams=seams)
@@ -2139,10 +2143,13 @@ def test_a_stitched_label_quotes_recording_clock_times_in_its_text(tmp_path, mon
 def test_a_stitched_label_has_no_sentence_about_our_request_cuts_in_any_text(tmp_path, monkeypatch):
     """What the stitch does at a cut is recorded in cut_joins and cut_continuation, never written into text, and a
     sentence a part's model wrote about the internal request cut is taken out of every text: task notes and the halves
-    under joined_from, cut_continuation's evidence, part_assessments, the performance review and issue evidence."""
+    under joined_from, cut_continuation's evidence, part_assessments, the performance review, issue evidence and the
+    items set aside under _excluded."""
     _, _, _, stitched = _clean_stitch(tmp_path, monkeypatch)
-    labels = {k: v for k, v in stitched['labels'].items() if k != '_excluded'}
+    labels = stitched['labels']
     assert 'internal request' not in json.dumps(labels).lower()
+    (cut_issue,) = [x for x in labels['_excluded'] if x.get('category') == 'starts_mid_task']
+    assert cut_issue['excluded_by'] == 'piece_cut' and cut_issue['evidence'] == 'Two cups already stand.'
     joined = labels['tasks'][0]
     assert joined['cut_joins'][0]['by'] == 'seam_check' and not joined['note'].startswith('Continues across')
     assert joined['joined_from'][0]['note'] == 'Two cups are stacked by 0.50 s.'

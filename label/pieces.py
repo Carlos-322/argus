@@ -1518,7 +1518,8 @@ SENTENCE_END = re.compile(r"(?<=[.;!?])\s+")
 def without_cut_notes(labels: dict) -> dict:
     """Stitched labels with every sentence that names an internal request cut taken out of every text, in place, at
     any depth (task notes and the halves under joined_from, cut_continuation's evidence, part_assessments, the
-    performance review, issue evidence). A text left empty becomes null. Run after every rule that reads the parts'
+    performance review, issue evidence, and the items set aside under _excluded and _dropped). A text left empty
+    becomes null. Run after every rule that reads the parts'
     notes (mark_cut_tasks, is_cut_artifact), since those read what the part wrote."""
     def clean(v):
         if isinstance(v, dict):
@@ -1897,10 +1898,8 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
         else:
             events.append(event)
     L["key_events"] = events
-    # the parts' lists were appended part after part: every list in time order, and no sentence about our own request
-    # cuts left in any text (what the cuts did is in cut_joins, cut_continuation and the stitched record)
+    # the parts' lists were appended part after part: every list in time order
     chronological(L)
-    without_cut_notes(L)
     first = parts[0][1]
     ctx = ep["context"]
     cfg = dict(first.get("config") or {})
@@ -1934,6 +1933,9 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
         L["_dropped"] = dropped
     if views["shown"] or contacts_missing:
         L["contacts"], L["contacts_missing"] = list(contacts_model.values()), contacts_missing
+    # no sentence about our own request cuts in any text of the labels, the items set aside (_excluded) and the parts'
+    # omitted values (_dropped) included: what the cuts did is in cut_joins, cut_continuation and the stitched record
+    without_cut_notes(L)
     from label.sensor_evidence import merge
     sensor_evidence = merge(parts, ctx, ep_dir=ep_dir)
     from label.evidence_access import merge as merge_inspection
