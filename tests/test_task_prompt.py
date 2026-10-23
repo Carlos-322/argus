@@ -121,10 +121,27 @@ OWN_RULE = '''
   null.'''
 
 
+# An approved edit (Eric, 2026-10-23) to the handheld gripper's prompt only: after what keeps the task observable, a
+# check of which hand each gripper camera is on. 317 of the 4,609 DiverseUMI 1K recordings have their two wrist
+# streams exchanged at capture, and the labels named it on 272 of them, unasked; the prompt only listed "swapped"
+# among a camera's faults. The test holds its own copy, as for the head camera's edits.
+HANDHELD_SIDES_AFTER = '  the task state at such a moment cannot be established from any view, and the task did not intend it.\n'
+HANDHELD_SIDES = """- WHICH HAND EACH GRIPPER CAMERA IS ON. Where the dataset names the hand that carries each of two gripper
+  cameras, check that naming. The camera on the left hand sees the other gripper toward the right of its
+  image, and the camera on the right hand toward the left. A top or side camera can also help, since when
+  one hand makes a clear move there, the view that moves with it is that hand's camera. If both gripper
+  views clearly show the opposite of their names across most of the recording, report a data issue tagged
+  camera_side_mismatch, with two or three moments as evidence. When unsure, report nothing.
+"""
+
+
 def _robot_expected(rig, recorded, steps):
     """Main's episode prompt with the list of tasks after its completion, the task rules (and the step rules) before
-    the granularity note, and that note naming the tasks."""
+    the granularity note, and that note naming the tasks; the handheld gripper's also has its camera side check."""
     expected = main(rig, recorded)
+    if rig == 'handheld_gripper':
+        assert expected.count(HANDHELD_SIDES_AFTER) == 1
+        expected = expected.replace(HANDHELD_SIDES_AFTER, HANDHELD_SIDES_AFTER + HANDHELD_SIDES)
     end = '    "reason": "<if not a clean success, why>"\n  },\n'
     assert expected.count(end) == 1
     note = '     "note": "<if not a clean success, why>"}'
@@ -154,6 +171,15 @@ def test_a_robot_episode_with_an_instruction_keeps_mains_prompt_word_for_word_an
         assert sentence in s, sentence
     assert prompts.INSTRUCTION_RULES in got
     assert prompts.requested_outcome(rig, has_instruction=True, has_steps=steps) == 'completion.task_completed'
+
+
+@pytest.mark.parametrize('rig', RIGS)
+@pytest.mark.parametrize('given,steps', STRUCTURES)
+@pytest.mark.parametrize('recorded', [True, False])
+def test_only_the_handheld_gripper_is_asked_which_hand_each_camera_is_on(rig, given, steps, recorded):
+    """Once, in the handheld gripper's prompt with or without an instruction, steps or recorded motion; never in a
+    teleoperated arm's or a head camera's."""
+    assert text(rig, given, recorded, steps).count('WHICH HAND EACH GRIPPER CAMERA IS ON') == (rig == 'handheld_gripper')
 
 
 @pytest.mark.parametrize('rig', ROBOTS)
