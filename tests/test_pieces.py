@@ -1035,7 +1035,9 @@ def test_stitch_preserves_observed_incidents_with_unfinished_recovery_at_cuts(tm
     assert [(task['source_piece']['index'], task['outcome']) for task in tasks if task['task'] == 'Seat the cup'] == [
         (1, observed_outcome), (3, observed_outcome)]
     assert [(task['source_piece']['index'], task['outcome']) for task in tasks if task['task'] == 'Align the holder'] == [
-        (1, 'continues_past_cut'), (2, 'continues_past_cut'), (3, 'partial')]
+        (1, 'unclear'), (2, 'unclear'), (3, 'partial')]
+    assert [bool(task.get('cut_continuation')) for task in tasks if task['task'] == 'Align the holder'] == [
+        True, True, False]
     assert [task['outcome'] for task in tasks if task['task'].startswith('Recover the cup')] == ['failure', 'failure']
     assert [event['outcome'] for event in labels['key_events']] == ['failure'] * 5
     noted_event = next(event for event in labels['key_events'] if event.get('note') ==
@@ -1105,7 +1107,7 @@ def test_blanket_continuation_joins_only_on_a_seam_verdict_that_says_same_task()
               'note': second['note'] + ' The clip ends while this task is still under way.'}
     both = {**same, 500.: {'same_task': True, 'evidence': 'The blanket is still being spread at 500s.'}}
     open_task = pieces.mark_cut_tasks(pieces.join_across_cuts([first, middle], [cut, 500.], both), [cut, 500.])
-    assert len(open_task) == 1 and open_task[0]['outcome'] == 'continues_past_cut'
+    assert len(open_task) == 1 and open_task[0]['outcome'] == 'unclear'
     assert len(open_task[0]['joined_from']) == 2 and open_task[0]['cut_continuation']['t_s'] == 500.
     last = {**second, 'start_s': 500., 'end_s': 530., 'completed_at_s': 529., 'goal_reached_at_s': 529.,
             'source_piece': source(3, 500., 600.)}
@@ -1195,8 +1197,10 @@ def test_an_unclear_task_ending_at_our_cut_continues_past_it_whatever_its_note_s
     labels = {'timeline': [{'start_s': 120.0, 'end_s': 124.0, 'contribution': 'wasteful',
                             'source_piece': {'index': 1, 't0_s': 0.0, 't1_s': cut}}]}
     [marked] = pieces.mark_cut_tasks([task], [cut], labels)
-    assert marked['outcome'] == 'continues_past_cut' and marked['outcome_in_part'] == 'unclear'
-    assert marked['cut_continuation']['t_s'] == cut
+    assert marked['outcome'] == 'unclear' and marked['outcome_in_part'] == 'unclear'
+    assert marked['cut_continuation'] == {'side': 'end', 't_s': cut, 'evidence': task['note'],
+                                          'reason': pieces.OPEN_AT_CUT}
+    assert marked['note'] == task['note']
     partial = {**task, 'outcome': 'partial'}
     assert pieces.mark_cut_tasks([partial], [cut], labels) == [partial]
     away = {**task, 'end_s': 300.0}
@@ -1271,9 +1275,8 @@ def test_independent_request_goals_do_not_become_episode_tasks_or_progress(tmp_p
     assert stitched['given_prompt'] == json.loads((src / 'context.json').read_text())['instruction']
     assert labels['tasks'] == [] and labels['completion']['task_completed'] == 'unclear'
     assert labels['progress_scope'] == 'request_parts'
-    assert all(step['progress'] is None for step in labels['timeline'])
-    # each step keeps its progress toward its own part's sub-task, for the task it belongs to (board/scores.py)
-    assert [step.get('progress_in_part') for step in labels['timeline'] if step.get('object') == 'cup'] == [1.0, .03, .03]
+    # each step keeps its progress toward its own part's sub-task, the value its part's assessment holds
+    assert [step.get('progress') for step in labels['timeline'] if step.get('object') == 'cup'] == [1.0, .03, .03]
     assert [assessment['progress'][0]['progress'] for assessment in labels['part_assessments']] == [1.0, .03, .03]
     for i, assessment in enumerate(labels['part_assessments']):
         offset = contexts[i]['piece']['t0_s']
@@ -1599,7 +1602,7 @@ def test_in_the_tasks_format_a_task_open_at_the_last_cut_or_parts_of_two_formats
     stitched = pieces.stitch(src, list(zip(contexts, records)), seams=seams)
     (task,) = stitched['labels']['tasks']
     completion = stitched['labels']['completion']
-    assert task['outcome'] == 'continues_past_cut'
+    assert task['outcome'] == 'unclear' and task['cut_continuation']['t_s'] == contexts[2]['piece']['t0_s']
     assert completion['task_completed'] is None and completion['from_tasks'] == 1 and 'cut' in completion['reason']
     # one part asked before the tasks format: the parts give no single reading
     older = _part_result(parts[2], 'stack the cups')
@@ -1718,9 +1721,9 @@ def test_steps_and_key_events_of_a_shared_window_are_kept_from_one_part_only(tmp
         span = round(ctx['piece']['t1_s'] - ctx['piece']['t0_s'], 3)
         times = [0.3, at(.25), at(.75)] if i == 0 else [at(.25), at(.75), 2.8]
         record['labels'].update(
-            timeline=[{'start_s': local(i, x), 'end_s': local(i, x) + .05, 'action': f'part {i + 1} at {x}'}
+            timeline=[{'start_s': local(i, x), 'end_s': local(i, x) + .05, 'action': f'part {i + 1} at {local(i, x):.3f}'}
                       for x in times],
-            key_events=[{'t_s': local(i, x), 'label': f'part {i + 1} event at {x}', 'outcome': 'success'}
+            key_events=[{'t_s': local(i, x), 'label': f'part {i + 1} event at {local(i, x):.3f}', 'outcome': 'success'}
                         for x in times],
             tasks=[{'start_s': 0.1 if i == 0 else 0.0, 'end_s': span if i == 0 else local(i, 2.5),
                     'task': 'Build the tower' if i == 0 else 'Finish stacking the cubes', 'objects': [],
@@ -1731,10 +1734,11 @@ def test_steps_and_key_events_of_a_shared_window_are_kept_from_one_part_only(tmp
         records.append(record)
     stitched = pieces.stitch(src, list(zip(contexts, records)))
     labels = stitched['labels']
-    assert [s['action'] for s in labels['timeline']] == ['part 1 at 0.3', f'part 1 at {at(.25)}',
-                                                         f'part 2 at {at(.75)}', 'part 2 at 2.8']
-    assert [e['label'] for e in labels['key_events']] == ['part 1 event at 0.3', f'part 1 event at {at(.25)}',
-                                                          f'part 2 event at {at(.75)}', 'part 2 event at 2.8']
+    # each part wrote its times on its own clock, in the text as well; the stitch reads them on the recording's
+    assert [s['action'] for s in labels['timeline']] == ['part 1 at 0.300', f'part 1 at {at(.25):.3f}',
+                                                         f'part 2 at {at(.75):.3f}', 'part 2 at 2.800']
+    assert [e['label'] for e in labels['key_events']] == ['part 1 event at 0.300', f'part 1 event at {at(.25):.3f}',
+                                                          f'part 2 event at {at(.75):.3f}', 'part 2 event at 2.800']
     copies = [x for x in labels['_excluded'] if x['excluded_by'] == 'shared_window']
     assert sorted((x['list'], x['source_piece']['index']) for x in copies) == [
         ('key_events', 1), ('key_events', 2), ('timeline', 1), ('timeline', 2)]
@@ -1758,7 +1762,7 @@ def test_a_job_with_seam_verdicts_joins_the_cut_they_say_is_one_task(tmp_path, m
     long_eps = {src.name: [p.name for p in parts]}
     pieces.stitch_run(job, src.parent, long_eps, tmp_path / 'apart')
     apart = json.loads((tmp_path / 'apart' / f'{src.name}.json').read_text())
-    assert [t['outcome'] for t in apart['labels']['tasks']] == ['continues_past_cut', 'success']
+    assert [t['outcome'] for t in apart['labels']['tasks']] == ['unclear', 'success']
     cut = contexts[1]['piece']['t0_s']
     verdict = {'same_task': True, 'evidence': 'The same cups are stacked on both sides of the cut.'}
     (job / 'seams.json').write_text(json.dumps({'seams': {src.name: {str(cut): verdict}}}))
@@ -2057,16 +2061,142 @@ def test_a_step_across_the_window_midpoint_is_clipped_to_its_half_never_dropped_
     records = []
     for i, (p, ctx) in enumerate(zip(parts, contexts)):
         record = _part_result(p, 'stack')
-        record['labels'].update(timeline=[{'start_s': local(i, a), 'end_s': local(i, b), 'action': f'part {i + 1} {a}'}
-                                          for a, b in spans[i]], key_events=[])
+        # each part writes its times on its own clock, in its text as well
+        record['labels'].update(timeline=[{'start_s': local(i, a), 'end_s': local(i, b),
+                                           'action': f'part {i + 1} {local(i, a):.3f}'} for a, b in spans[i]],
+                                key_events=[])
         records.append(record)
     labels = pieces.stitch(src, list(zip(contexts, records)))['labels']
     got = [(s['action'], round(s['start_s'], 3), round(s['end_s'], 3)) for s in labels['timeline']]
-    assert got == [('part 1 0.3', 0.3, at(.1)), (f'part 1 {at(.1)}', at(.1), mid),
-                   (f'part 2 {at(.25)}', mid, round(end2, 3))]
+    assert got == [('part 1 0.300', 0.3, at(.1)), (f'part 1 {at(.1):.3f}', at(.1), mid),
+                   (f'part 2 {at(.25):.3f}', mid, round(end2, 3))]
     # the steps cover the recording with no gap and no second copy of any moment
     assert all(a[2] == b[1] for a, b in zip(got, got[1:]))
     # the part's own times are kept on the record of what was set aside
     copies = [x for x in labels['_excluded'] if x['excluded_by'] == 'shared_window']
     assert sorted((x['source_piece']['index'], x.get('clipped_to') is not None) for x in copies) == [
         (1, True), (2, False), (2, True)]
+
+
+# ---- what the stitched label says, as a release reads it ----------------------------------------------------------
+
+def _clean_stitch(tmp_path, monkeypatch):
+    """Three parts of a 3s recording, each written on its own clock as a model writes it: times quoted in prose, a
+    sentence about the internal request cut, steps with progress and lists not in time order. The task of parts 1 and
+    2 is one task by a seam verdict at the first cut and is still under way at the second, where no verdict joins it."""
+    _, src, parts = _three_parts(tmp_path, monkeypatch)
+    contexts = [json.loads((part / 'context.json').read_text()) for part in parts]
+    span = [round(c['piece']['t1_s'] - c['piece']['t0_s'], 3) for c in contexts]
+    stack = {'task': 'stack the cups', 'objects': ['cup'], 'judged_against': 'own_end_state',
+             'success_predicate': 'three cups stacked', 'completed_at_s': None, 'outcome': 'unclear'}
+    tasks = [[{**stack, 'start_s': 0.0, 'end_s': span[0],
+               'note': 'Two cups are stacked by 0.50 s. The cups are still being stacked at the internal request cut.'}],
+             [{**stack, 'start_s': 0.0, 'end_s': span[1],
+               'note': 'Continues the task from the previous part. The third cup lands at 0.80 s.'}],
+             [{**stack, 'task': 'put the cloth away', 'start_s': 0.0, 'end_s': 0.5, 'outcome': 'success',
+               'completed_at_s': 0.45, 'note': 'Matches the parent recording at 2.40 s. Done well before 12.50 s.'}]]
+    records = [_tasks_part(p, c, t) for p, c, t in zip(parts, contexts, tasks)]
+    for i, record in enumerate(records):
+        record['labels'].update(
+            timeline=[{'start_s': 0.6, 'end_s': 0.8, 'action': 'lift', 'progress': 0.7, 'notes': 'Lifted at 0.70 s.'},
+                      {'start_s': 0.1, 'end_s': 0.3, 'action': 'reach', 'progress': 0.2}],
+            state_changes=[{'t_s': 0.7, 'object': 'cup', 'from': 'on the table', 'to': 'on the stack'},
+                           {'t_s': 0.2, 'object': 'cloth', 'from': 'folded', 'to': 'open'}],
+            data_issues=[{'t_s': 0.8, 'issue': f'Glare on the lens in part {i + 1}', 'category': 'lighting',
+                          'severity': 'low', 'evidence': 'Glare from 0.75 s. It is seen near the internal request cut '
+                                                         'too.'},
+                         {'t_s': 0.2, 'issue': f'Motion blur in part {i + 1}', 'category': 'motion_blur',
+                          'severity': 'low'}]
+            # the part after a cut says it starts mid task: our cut's doing, set aside under _excluded
+            + ([{'t_s': 0.0, 'issue': 'starts mid task', 'category': 'starts_mid_task', 'severity': 'low',
+                 'evidence': 'The stacking is under way at the internal request cut. Two cups already stand.'}]
+               if i == 1 else []),
+            performance_review=f'Smooth until 0.50 s in part {i + 1}. The internal request cut ends this view.')
+    seams = {contexts[1]['piece']['t0_s']: {'same_task': True, 'evidence': 'the same cups on both sides'}}
+    return src, contexts, records, pieces.stitch(src, list(zip(contexts, records)), seams=seams)
+
+
+def test_a_stitched_label_quotes_recording_clock_times_in_its_text(tmp_path, monkeypatch):
+    """The model labelling a part saw only that part, so every time it wrote, in a field or in prose, is on the part's
+    clock: the stitch moves the times quoted in text with the time fields (3,532 of 3,605 recordings of the DiverseUMI
+    1K labelled in parts quoted part-clock times in text). A number past the part's length is no time of the part and
+    stays as written, and so does text that quotes the parent recording's times."""
+    _, contexts, _, stitched = _clean_stitch(tmp_path, monkeypatch)
+    labels = stitched['labels']
+    t0 = [c['piece']['t0_s'] for c in contexts]
+    on = lambda i, u: f'{t0[i] + u:.2f}'
+    joined, cloth = labels['tasks']
+    assert joined['note'] == f'Continues the task from the previous part. The third cup lands at {on(1, .8)} s.'
+    assert joined['joined_from'][0]['note'].startswith('Two cups are stacked by 0.50 s.')     # part 1 starts at 0
+    assert cloth['note'] == 'Matches the parent recording at 2.40 s. Done well before 12.50 s.'
+    assert [s['notes'] for s in labels['timeline'] if s.get('notes')] == [f'Lifted at {on(i, .7)} s.' for i in range(3)]
+    assert sorted(i['evidence'] for i in labels['data_issues'] if i.get('evidence')) == [
+        f'Glare from {on(i, .75)} s.' for i in range(3)]
+    assert labels['performance_review'] == ' '.join(f'Part {i + 1}: Smooth until {on(i, .5)} s in part {i + 1}.'
+                                                    for i in range(3))
+    assert [a['performance_review'] for a in labels['part_assessments']] == [
+        f'Smooth until {on(i, .5)} s in part {i + 1}.' for i in range(3)]
+    # a text time and the time field beside it agree on the recording's clock
+    assert [s['start_s'] for s in labels['timeline'] if s.get('notes')] == [round(t0[i] + .6, 3) for i in range(3)]
+
+
+def test_a_stitched_label_has_no_sentence_about_our_request_cuts_in_any_text(tmp_path, monkeypatch):
+    """What the stitch does at a cut is recorded in cut_joins and cut_continuation, never written into text, and a
+    sentence a part's model wrote about the internal request cut is taken out of every text: task notes and the halves
+    under joined_from, cut_continuation's evidence, part_assessments, the performance review, issue evidence and the
+    items set aside under _excluded."""
+    _, _, _, stitched = _clean_stitch(tmp_path, monkeypatch)
+    labels = stitched['labels']
+    assert 'internal request' not in json.dumps(labels).lower()
+    (cut_issue,) = [x for x in labels['_excluded'] if x.get('category') == 'starts_mid_task']
+    assert cut_issue['excluded_by'] == 'piece_cut' and cut_issue['evidence'] == 'Two cups already stand.'
+    joined = labels['tasks'][0]
+    assert joined['cut_joins'][0]['by'] == 'seam_check' and not joined['note'].startswith('Continues across')
+    assert joined['joined_from'][0]['note'] == 'Two cups are stacked by 0.50 s.'
+    # a text that was only such a sentence is gone; the rest of a text stays
+    without = pieces.without_cut_notes({'tasks': [{'note': 'Still under way at the internal request cut at 1s.'},
+                                                  {'note': 'Kept. Internal request edge. Also kept!'}]})
+    assert [t['note'] for t in without['tasks']] == [None, 'Kept. Also kept!']
+
+
+def test_a_stitched_timeline_carries_each_parts_progress(tmp_path, monkeypatch):
+    """Each step keeps the progress its part gave it, the value part_assessments[].progress holds for the same step,
+    and progress_scope "request_parts" tells every reader it measures the part's own sub-task: the board draws no
+    progress toward the recording's goal from it and the scores read none."""
+    from board import scores, to_board
+    _, _, _, stitched = _clean_stitch(tmp_path, monkeypatch)
+    labels = stitched['labels']
+    key = lambda s: (s['source_piece']['index'], s['start_s'], s['end_s'], s['action'])
+    own = {key(s): s['progress'] for a in labels['part_assessments'] for s in a['progress']}
+    assert len(labels['timeline']) == 6 and all(s['progress'] == own[key(s)] for s in labels['timeline'])
+    assert labels['progress_scope'] == 'request_parts'
+    d = to_board.convert(stitched, 'demo')
+    assert d['progress_scope'] == 'request_parts' and scores.facts(d)['progress_reached'] is None
+
+
+def test_a_stitched_task_open_at_a_cut_reads_unclear_with_the_cut_recorded(tmp_path, monkeypatch):
+    """No final task keeps the outcome continues_past_cut. A task joined across a cut takes the later part's outcome;
+    one still under way at a cut that no join reached is unclear, its part's own outcome and the cut under
+    cut_continuation with the reason, and every reader leaves it out of a count of tasks done."""
+    from board.label_projection import open_at_cut
+    _, contexts, _, stitched = _clean_stitch(tmp_path, monkeypatch)
+    tasks = stitched['labels']['tasks']
+    assert 'continues_past_cut' not in json.dumps(stitched['labels'])
+    joined, cloth = tasks
+    assert len(joined['joined_from']) == 2 and joined['outcome'] == 'unclear' and joined['outcome_in_part'] == 'unclear'
+    assert joined['cut_continuation'] == {'side': 'end', 't_s': contexts[2]['piece']['t0_s'],
+                                          'evidence': joined['joined_from'][1]['note'], 'reason': pieces.OPEN_AT_CUT}
+    assert open_at_cut(joined) and not open_at_cut(cloth) and cloth['outcome'] == 'success'
+
+
+def test_every_list_of_a_stitched_label_is_in_time_order(tmp_path, monkeypatch):
+    """The parts' items are appended part after part and a part's own list need not be in order: every timed list of
+    the stitched label is sorted by its first time, ties by its end, an untimed item last."""
+    _, _, _, stitched = _clean_stitch(tmp_path, monkeypatch)
+    labels = stitched['labels']
+    for k, key in (('timeline', 'start_s'), ('state_changes', 't_s'), ('data_issues', 't_s'), ('tasks', 'start_s')):
+        times = [x[key] for x in labels[k]]
+        assert len(times) > 1 and times == sorted(times), k
+    tied = pieces.chronological({'timeline': [{'start_s': 1., 'end_s': 3.}, {'note': 'untimed'},
+                                              {'start_s': 1., 'end_s': 2.}, {'start_s': '0.5', 'end_s': 4.}]})
+    assert [s.get('end_s') for s in tied['timeline']] == [4., 2., 3., None]

@@ -44,7 +44,8 @@ def _result(tasks, cuts, ends, *, views=('exo', 'left', 'right'), cell=(320, 320
 def test_a_stitched_label_gives_back_its_parts_tasks_and_the_cuts_to_ask_about():
     left, right = _halves()
     result = _result([left, right], [CUT], [CUT, 600.])
-    assert result['labels']['tasks'][0]['outcome'] == 'continues_past_cut'
+    (open_task, _) = result['labels']['tasks']
+    assert open_task['outcome'] == 'unclear' and open_task['cut_continuation']['t_s'] == CUT
     assert seam.part_tasks(result['labels']) == [left, right]
     (candidate,) = seam.candidates(result)
     assert candidate['cut_s'] == CUT and candidate['left'] == left and candidate['right'] == right
@@ -169,10 +170,32 @@ def test_rejoining_a_stitched_label_follows_each_verdict():
     assert (same['labels']['completion']['basis'], same['labels']['completion']['task_completed']) == (
         'one_task', 'success')
     different = seam.rejoin(result, {str(CUT): {'same_task': False, 'evidence': 'a new task'}})
-    assert [t['outcome'] for t in different['labels']['tasks']] == ['continues_past_cut', 'success']
+    assert [t['outcome'] for t in different['labels']['tasks']] == ['unclear', 'success']
+    assert different['labels']['tasks'][0]['cut_continuation']['t_s'] == CUT
     assert different['labels']['tasks'][0]['cut_seams'][0]['same_task'] is False
     # without a verdict the tasks are the stitched ones, unchanged
     assert seam.rejoin(result, {})['labels']['tasks'] == result['labels']['tasks']
+
+
+def test_rejoining_a_label_stitched_before_leaves_no_open_outcome_word_and_no_cut_sentence():
+    """A record stitched before marked a task open at a cut with the outcome continues_past_cut and a sentence in its
+    note, and a joined task with another. Rejoined, the open task reads unclear with its cut under cut_continuation,
+    and no text names the internal request cut."""
+    left, right = _halves()
+    result = _result([left, right], [CUT], [CUT, 600.], label_schema='tasks')
+    old = {**result['labels']['tasks'][0], 'outcome': 'continues_past_cut',
+           'note': left['note'] + f' Still under way at the internal request cut at {CUT:g}s.'}
+    old['cut_continuation'].pop('reason')
+    joined_before = {**right, 'start_s': 700., 'end_s': 720., 'source_piece': _source(3, 650., 900.),
+                     'note': 'Continues across the internal request cut at 650s. Tucked in at the end.'}
+    result['labels']['tasks'] = [old, result['labels']['tasks'][1], joined_before]
+    result['labels']['completion'] = {'basis': 'tasks', 'from_tasks': 3, 'task_completed': None}
+    apart = seam.rejoin(result, {str(CUT): {'same_task': False, 'evidence': 'a new task'}})
+    tasks = apart['labels']['tasks']
+    assert [t['outcome'] for t in tasks] == ['unclear', 'success', 'success']
+    assert tasks[0]['outcome_in_part'] == 'unclear' and tasks[0]['cut_continuation']['t_s'] == CUT
+    assert tasks[0]['note'] == left['note'] and tasks[2]['note'] == 'Tucked in at the end.'
+    assert 'internal request' not in json.dumps(apart['labels']).lower()
 
 
 def test_a_task_its_part_judged_a_success_is_never_asked_about_even_without_a_time():

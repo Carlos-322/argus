@@ -7355,7 +7355,9 @@ function renderEp(d, opts) {
   // tasks counts its tasks in the verdict and lists each task with its own outcome.
   const tAll = tasks.length, tOk = tcount.success;
   // a task still under way at a cut has no known outcome, so it is in neither count and named on its own
-  const tOpen = tasks.filter(t => String(t.outcome || '').toLowerCase() === 'continues_past_cut').length;
+  // (board/label_projection.py open_at_cut: cut_continuation, or continues_past_cut in a record stitched before)
+  const tOpen = tasks.filter(t => (t.cut_continuation && typeof t.cut_continuation === 'object')
+    || String(t.outcome || '').toLowerCase() === 'continues_past_cut').length;
   const tKnown = tAll - tOpen;
   const tUndone = tcount.success_then_undone;
   const tColor = !tKnown ? 'var(--fg-2)' : tOk === tKnown ? 'var(--success)' : tcount.failure || tUndone ? 'var(--danger)'

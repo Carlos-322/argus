@@ -48,14 +48,16 @@ SEAMS_VERSION = 1
 
 def part_tasks(labels: dict) -> list:
     """A stitched label's tasks as its parts gave them: a joined task is its halves again, and a task marked as
-    continuing past a cut (label/pieces.py mark_cut_tasks) has its part's own outcome back."""
+    still under way at a cut (label/pieces.py mark_cut_tasks: cut_continuation, or the outcome continues_past_cut in
+    a record stitched before) has its part's own outcome back, and in an older record its note without the sentence
+    the stitch added."""
     out = []
     for task in labels.get("tasks") or []:
         if not isinstance(task, dict):
             continue
         for half in task.get("joined_from") or [task]:
             half = copy.deepcopy(half)
-            if half.get("outcome") == "continues_past_cut":
+            if half.get("outcome") == "continues_past_cut" or isinstance(half.get("cut_continuation"), dict):
                 cut = (half.get("cut_continuation") or {}).get("t_s")
                 half["outcome"] = half.pop("outcome_in_part", None)
                 half["completed_at_s"] = half.pop("completed_at_s_in_part", None)
@@ -375,7 +377,13 @@ def rejoin(result: dict, seams: dict) -> dict:
     if stitched.get("windows"):
         raise ValueError("parts that share a window at their cuts are joined by time when they are stitched")
     cuts = [float(c) for c in stitched.get("cuts_s") or []]
-    labels["tasks"] = pieces.mark_cut_tasks(pieces.join_across_cuts(part_tasks(labels), cuts, seams), cuts, labels)
+    # a task the stitch found open at a cut stays open there unless a verdict joins it: its note, which the stitch
+    # judged, may since have lost its sentences about the cut (pieces.without_cut_notes)
+    before = [((t.get("source_piece") or {}).get("index"), t["cut_continuation"].get("t_s"))
+              for t in labels.get("tasks") or [] if isinstance(t, dict) and isinstance(t.get("cut_continuation"), dict)]
+    labels["tasks"] = pieces.mark_cut_tasks(pieces.join_across_cuts(part_tasks(labels), cuts, seams), cuts, labels,
+                                            before)
+    pieces.without_cut_notes(labels)
     scene = labels.get("scene") or {}
     if isinstance(scene.get("objects"), list):
         flat = []
