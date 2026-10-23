@@ -733,7 +733,13 @@ _VISIBILITY = {
         "  Where a camera is not carried on a gripper, it is what keeps the task observable. What a model needs\n"
         "  is for the task state to be recoverable at the moments that matter (each grasp, each placement, the\n"
         "  end state) from the views at that moment or just before and after. Observability is lost only when\n"
-        "  the task state at such a moment cannot be established from any view, and the task did not intend it."),
+        "  the task state at such a moment cannot be established from any view, and the task did not intend it.\n"
+        "- WHICH HAND EACH GRIPPER CAMERA IS ON. Where the dataset names the hand that carries each of two gripper\n"
+        "  cameras, check that naming. The camera on the left hand sees the other gripper toward the right of its\n"
+        "  image, and the camera on the right hand toward the left. A top or side camera can also help, since when\n"
+        "  one hand makes a clear move there, the view that moves with it is that hand's camera. If both gripper\n"
+        "  views clearly show the opposite of their names across most of the recording, report a data issue tagged\n"
+        "  camera_side_mismatch, with two or three moments as evidence. When unsure, report nothing."),
     "ego_head": (
         "- WHAT KEEPS THE WORK OBSERVABLE. Objects and hands can leave the frame during the work and return later.\n"
         "  The presentation profile alone does not establish camera mounting. The work is observable when\n"
