@@ -4,15 +4,17 @@ A recording longer than its part limit (piece_max: the part_max_s that label/pol
 rig's default sampling and at most 330s at denser sampling) is one episode on the board, with one clip and one
 timeline, but the model labels it in parts: the recording is cut at frame boundaries within the request limit, preferring the least motion near each evenly
 spaced target (from recorded state when available and anchor-camera image change otherwise), each
-part is labelled as its own request, and the parts' labels are shifted back onto the recording's clock and
-joined. Nothing about the recording's episode boundaries is invented: an unsplit recording stays one episode,
+part is labelled as its own request, and the parts' labels, the times written in their text included, are shifted
+back onto the recording's clock and joined. Nothing about the recording's episode boundaries is invented: an unsplit recording stays one episode,
 and only actual model-emitted activities become tasks on its one timeline. Request-local
 goals, outcomes and progress remain attributed assessments, not recording-level judgments.
 
 Neighbouring parts share a few seconds around each cut (OVERLAP_S), so an activity under way at a cut is seen by
 both requests: the stitch joins the two parts' tasks there by the time they share, and keeps each step and key event
 of those seconds from one part only. A recording cut without them (labelled before they existed) has its tasks
-joined at a cut only on a seam check's verdict (label/seam.py).
+joined at a cut only on a seam check's verdict (label/seam.py). A task no join reaches is unclear, and its
+cut_continuation says which cut ended its part's view; what the stitch did at a cut is recorded in such fields
+(cut_joins, cut_continuation, the stitched record), never in the labels' text.
 
 Each part is told it is one part of a continuous recording cut at a still moment, so activity carrying across
 a cut is expected; an issue a part reports about being cut off at one of our cuts (a truncated start or end)
@@ -890,20 +892,49 @@ T_KEYS = ("t_s", "start_s", "end_s", "completed_at_s", "goal_reached_at_s", "und
 STRIP_FIELDS = {"begin": "first_touch_frame", "end": "last_touch_frame"}
 
 
-def _shift(x, dt: float):
+# A time quoted in a part's text. The model saw each frame's time printed with two decimals ("at 88.09 s",
+# "77.08-81.08"), so a number with two or three decimals that is not followed by a unit is a time; an integer ("an 11 s
+# pause") is left alone.
+TEXT_TIME = re.compile(r'(?<![\w.])(\d{1,5}\.\d{2,3})(?![\d]|\.\d)(?!\s*(?:cm|mm|m\b|kg|g\b|%|x\b|times|deg|°))')
+# text that names a time of the parent recording already quotes the recording's clock
+PARENT_TIME = re.compile(r'\bparent\b', re.I)
+# fields that name a thing rather than describe what happened, left as written: a task's name and an id
+TEXT_NAMES = ("task", "id")
+
+
+def _shift_text(text: str, dt: float, length_s: float) -> str:
+    """The times quoted in one text of a part moved by dt seconds onto the recording's clock. Only a number that can be
+    a time of the part (at most its length plus half a second) moves; a larger one is left as written, and so is a
+    text that quotes the parent recording's times. Each time keeps the decimals it was written with."""
+    if not dt or PARENT_TIME.search(text):
+        return text
+
+    def one(m):
+        u = float(m.group(1))
+        if u > length_s + 0.5:
+            return m.group(0)
+        return f"{u + dt:.{len(m.group(1).split('.')[1])}f}"
+    return TEXT_TIME.sub(one, text)
+
+
+def _shift(x, dt: float, length_s: float | None = None, key: str | None = None):
     """Every time field of a label structure shifted by dt seconds, one written as text that reads as a number
-    (label/episode.py number) as well; one that reads as none is left as it is."""
+    (label/episode.py number) as well; one that reads as none is left as it is. Given the part's length, every time
+    its text quotes moves with it (_shift_text): the part's model saw only the part, so every time it wrote, in a
+    field or in prose, is on the part's clock, and this is the one place the stitch moves them."""
     from label.episode import number
     if isinstance(x, list):
-        return [_shift(v, dt) for v in x]
+        return [_shift(v, dt, length_s, key) for v in x]
     if isinstance(x, dict):
         out = {}
         for k, v in x.items():
             if k in T_KEYS and number(v) is not None:
                 out[k] = round(number(v) + dt, 3)
             else:
-                out[k] = _shift(v, dt)
+                out[k] = _shift(v, dt, length_s, k)
         return out
+    if isinstance(x, str) and length_s is not None and key not in T_KEYS and key not in TEXT_NAMES:
+        return _shift_text(x, dt, length_s)
     return x
 
 
@@ -1303,9 +1334,10 @@ def _window_pairs(tasks: list, window: dict) -> list[tuple[dict, dict, dict]]:
 
 
 def _join(tasks: list, left: dict, right: dict, cut: float, how: dict) -> list:
-    """The tasks with left and right as one task: how it ended from the right half (END_FIELDS), what it set out to do
-    (GOAL_FIELDS) from the left half unless the seam verdict that matched them says goal_from "after", both halves
-    under joined_from and how they were matched under cut_joins."""
+    """The tasks with left and right as one task: how it ended from the right half (END_FIELDS) and its note, what it
+    set out to do (GOAL_FIELDS) from the left half unless the seam verdict that matched them says goal_from "after",
+    both halves under joined_from and how they were matched under cut_joins. That it continues across the cut is
+    recorded only in cut_joins, never written into its text."""
     from label.episode import number
     objects = []
     for obj in [*(left.get("objects") or []), *(right.get("objects") or [])]:
@@ -1319,7 +1351,7 @@ def _join(tasks: list, left: dict, right: dict, cut: float, how: dict) -> list:
               "source_piece": copy.deepcopy(right["source_piece"]), "joined_from": originals,
               "cut_joins": [*copy.deepcopy(left.get("cut_joins") or []), {"cut_s": cut, **copy.deepcopy(how)},
                             *copy.deepcopy(right.get("cut_joins") or [])],
-              "note": f"Continues across the internal request cut at {cut:g}s. " + str(right.get("note") or "")}
+              "note": right.get("note")}
     if None not in starts and starts[1] < starts[0]:
         joined["start_s"] = right.get("start_s")
     if how.get("by") == "seam_check" and how.get("goal_from") == "after":
@@ -1408,34 +1440,100 @@ def window_copies(items: list, windows: list[dict], key: str) -> tuple[list, lis
     return kept, dropped
 
 
-def mark_cut_tasks(tasks: list, cuts_s: list[float], labels: dict | None = None) -> list:
+OPEN_AT_CUT = ("still under way at a cut of the recording and not joined to a task of the next part, so no part saw "
+               "how it ended")
+
+
+def mark_cut_tasks(tasks: list, cuts_s: list[float], labels: dict | None = None, open_before=()) -> list:
     """Qualify an unfinished task at its owning internal end, retaining the part's original judgment. The task's own
     span establishes that our cut ended its view, so an unclear outcome there is qualified whatever its note says: it
     holds no judgment to lose, and an incident inside the task stays recorded as its own event or mistake. A partial or
     failure outcome is a judgment, so it is qualified only when the note attributes it to the cut alone and no incident
-    is observed in the task."""
+    is observed in the task, or when an earlier stitch of the same labels qualified it (open_before, {(part index,
+    cut)}, label/seam.py rejoin).
+
+    It runs after join_across_cuts, so a task qualified here is one no join reached: a joined task already took the
+    later part's outcome there (_join). Its outcome is unclear, and cut_continuation records the cut, the part's
+    note it was judged on and why (OPEN_AT_CUT), beside the part's own outcome and completion time (outcome_in_part,
+    completed_at_s_in_part). Nothing is written into its note. Every reader leaves it out of a count of tasks done
+    (board/label_projection.py open_at_cut)."""
     from label.episode import number
     out = []
     for task in tasks:
         tail = _last_task(task)
         end = number(task.get("end_s"))
-        cut = _internal_boundary(tail.get("source_piece") or {}, "end", cuts_s)
+        source = tail.get("source_piece") or {}
+        cut = _internal_boundary(source, "end", cuts_s)
         at_cut = (cut is not None and end is not None and cut - JOIN_GUARD_S <= end <= cut + .001
                   and number(task.get("goal_reached_at_s")) is None and number(task.get("undone_at_s")) is None)
-        if at_cut and (task.get("outcome") == "unclear" or (
+        before = any(source.get("index") == i and number(c) is not None and abs(number(c) - cut) <= .001
+                     for i, c in open_before) if at_cut else False
+        if at_cut and (task.get("outcome") == "unclear" or before or (
                 task.get("outcome") in ("partial", "failure")
                 and "end" in _cut_sides({"note": tail.get("note")})
                 and _boundary_only_text(tail.get('note'))
                 and not _observed_incident(tail, labels or {}, cuts_s))):
-            task = {**task, "outcome": "continues_past_cut", "outcome_in_part": task.get("outcome"),
+            task = {**task, "outcome": "unclear", "outcome_in_part": task.get("outcome"),
                     "completed_at_s_in_part": task.get("completed_at_s"), "completed_at_s": None,
-                    "cut_continuation": {"side": "end", "t_s": cut, "evidence": tail.get("note")},
-                    "note": str(task.get("note") or "") + f" Still under way at the internal request cut at {cut:g}s."}
+                    "cut_continuation": {"side": "end", "t_s": cut, "evidence": tail.get("note"),
+                                         "reason": OPEN_AT_CUT}}
         out.append(task)
     return out
 
 
-FRAME_TIME_S = 0.01         # a reply writes a frame's time to two decimals: 310.74 for the frame at 310.744
+START_KEYS = ("start_s", "t_s", "failure_t_s")
+END_KEYS = ("end_s", "recovered_at_s")
+
+
+def chronological(labels: dict) -> dict:
+    """Every timed list of stitched labels (timeline, key_events, state_changes, scene_graph, recovery, data_issues,
+    operator_mistakes, tasks) in time order, in place: by its first time (START_KEYS), ties by its end (END_KEYS). The
+    sort is stable and an item with no time keeps its place after the timed ones. The parts' items are appended part
+    after part, and a part's own list need not be in order: the DiverseUMI 1K release build b2 found 186 timelines,
+    178 data_issues, 79 state_changes and 8 key_events lists of its stitched labels out of order."""
+    from label.episode import number
+
+    def first(item, keys):
+        return next((number(item[k]) for k in keys if isinstance(item, dict) and number(item.get(k)) is not None),
+                    None)
+
+    def key(item):
+        a = first(item, START_KEYS)
+        b = first(item, END_KEYS)
+        return (a is None, a if a is not None else 0.0, b is None, b if b is not None else 0.0)
+    for k in ("timeline", "key_events", "state_changes", "scene_graph", "recovery", "data_issues",
+              "operator_mistakes", "tasks"):
+        if isinstance(labels.get(k), list):
+            labels[k] = sorted(labels[k], key=key)
+    return labels
+
+
+# a sentence about the labelling pipeline's own request cuts: what the stitch writes about a cut is in cut_joins and
+# cut_continuation, and a part's model, told it is one request of a longer recording (label/prompts.py), echoes the
+# words in its own text
+CUT_NOTE = re.compile(r"\binternal request\b", re.I)
+SENTENCE_END = re.compile(r"(?<=[.;!?])\s+")
+
+
+def without_cut_notes(labels: dict) -> dict:
+    """Stitched labels with every sentence that names an internal request cut taken out of every text, in place, at
+    any depth (task notes and the halves under joined_from, cut_continuation's evidence, part_assessments, the
+    performance review, issue evidence). A text left empty becomes null. Run after every rule that reads the parts'
+    notes (mark_cut_tasks, is_cut_artifact), since those read what the part wrote."""
+    def clean(v):
+        if isinstance(v, dict):
+            return {k: clean(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [clean(x) for x in v]
+        if isinstance(v, str) and CUT_NOTE.search(v):
+            return " ".join(s for s in SENTENCE_END.split(v) if not CUT_NOTE.search(s)).strip() or None
+        return v
+    for k in list(labels):
+        labels[k] = clean(labels[k])
+    return labels
+
+
+FRAME_TIME_S = 0.01       # a reply writes a frame's time to two decimals: 310.74 for the frame at 310.744
 
 
 def part_frames(pieces_cfg: list) -> dict:
@@ -1597,9 +1695,13 @@ def merge_camera_observations(ep_dir: Path, parts: list[tuple[dict, dict]], miss
 
 def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (), seams: dict | None = None) -> dict:
     """One labelling result for the whole recording from its parts' results [(part context, part result), ...]
-    in order. Times are shifted onto the recording's clock; observations and actual tasks are joined.
-    Independently inferred request goals/outcomes/progress retain their scope under part_assessments,
-    never becoming episode tasks or whole-recording progress. Cut issues are set aside in _excluded. missing names
+    in order. Times are shifted onto the recording's clock, the times each part's text quotes with them (_shift);
+    observations and actual tasks are joined. Independently inferred request goals/outcomes/progress retain their
+    scope under part_assessments, never becoming episode tasks or whole-recording progress; each timeline step keeps
+    its part's progress, and progress_scope "request_parts" says it is the part's. A task still under way at a cut
+    that no join reached reads unclear, with the cut under cut_continuation (mark_cut_tasks). Every list is put in
+    time order (chronological), and no text keeps a sentence about our request cuts (without_cut_notes). Cut issues
+    are set aside in _excluded. missing names
     the parts that gave no labels ({"part", "t0_s", "t1_s", "why"}, stitch_run): the recording is stitched from the
     rest, its cuts are still every cut, and the record keeps the gaps under stitched["missing"]. Where two labelled
     parts share a window at their cut (write_pieces), their tasks are joined by time and each step and key event of
@@ -1633,7 +1735,7 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
         t0, t1 = float(pc["piece"]["t0_s"]), float(pc["piece"]["t1_s"])
         from board.label_projection import project
         projected, omitted = project(r.get('labels') or {})
-        lab = _shift(projected, t0)
+        lab = _shift(projected, t0, t1 - t0)
         owner = {"index": i, "t0_s": t0, "t1_s": t1}
         for field in ("tasks", "key_events", "timeline"):
             lab[field] = [{**item, "source_piece": dict(owner)} for item in lab.get(field) or []]
@@ -1645,13 +1747,10 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
             **({'goal_outcome': copy.deepcopy(lab['goal_outcome'])} if 'goal_outcome' in lab else {}),
             'progress': [copy.deepcopy(step) for step in lab['timeline'] if step.get('progress') is not None],
         })
-        for step in lab['timeline']:
-            # a step's progress is toward the sub-task under way in its own part: no reading of the whole recording,
-            # so it leaves the recording's progress, and stays with the step for the task it belongs to
-            # (board/scores.py, a task's own progress)
-            if step.get('progress') is not None:
-                step['progress_in_part'] = step['progress']
-            step['progress'] = None
+        # a step keeps the progress its part gave it (the value part_assessments[].progress copies): progress toward
+        # the sub-task under way in its own part, never a reading of the whole recording, which progress_scope
+        # "request_parts" tells every reader (board/label_projection.py progress_toward_verdict). Records stitched
+        # before kept it only under progress_in_part, with progress null, and the readers still read that.
         off = outside_part(lab, t0, t1)
         if off:
             outside.append({"part": i, "t0_s": t0, "t1_s": t1, **off})
@@ -1766,8 +1865,6 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
                                 + ("this step is kept only over its own part's half of the window"
                                    if item.get("clipped_to") else "the other part's copy is kept")}
                      for item in copies]
-    for k in ("timeline",):
-        L[k].sort(key=lambda s: (s.get("start_s") is None, s.get("start_s") or 0))      # an untimed step last
     L["tasks"] = mark_cut_tasks(join_across_cuts(L["tasks"], cuts_s, seams, windows), edges_s, L)
     if tasks_format and not (rig != "ego_head" and instruction):
         # the tasks joined across the cuts give the completion as one request's would; a part with no labels may hold
@@ -1795,10 +1892,15 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
     for event in L["key_events"]:
         if is_cut_key_event(event, edges_s, frames):
             excluded.append({**event, "list": "key_events", "excluded_by": "piece_cut",
-                             "reason": "This event describes the owning part's internal request boundary."})
+                             "reason": "This event describes where the owning part's footage starts or ends at our "
+                                       "cut."})
         else:
             events.append(event)
     L["key_events"] = events
+    # the parts' lists were appended part after part: every list in time order, and no sentence about our own request
+    # cuts left in any text (what the cuts did is in cut_joins, cut_continuation and the stitched record)
+    chronological(L)
+    without_cut_notes(L)
     first = parts[0][1]
     ctx = ep["context"]
     cfg = dict(first.get("config") or {})

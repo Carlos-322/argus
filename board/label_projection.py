@@ -28,10 +28,12 @@ def effective_outcome(value):
 
 
 def open_at_cut(task) -> bool:
-    """Whether a task is still under way at a cut of the recording (continues_past_cut, label/pieces.py
-    mark_cut_tasks). Its outcome is unknown, so a count of tasks done leaves it out of both the done count and the
-    total, and says how many it left out."""
-    return isinstance(task, dict) and str(task.get('outcome') or '').strip().lower() == 'continues_past_cut'
+    """Whether a task is still under way at a cut of the recording and joined to no task past it (label/pieces.py
+    mark_cut_tasks): its outcome is unclear and cut_continuation records the cut, or, in a record stitched before,
+    its outcome is continues_past_cut. Its outcome is unknown, so a count of tasks done leaves it out of both the done
+    count and the total, and says how many it left out."""
+    return isinstance(task, dict) and (isinstance(task.get('cut_continuation'), dict)
+                                       or str(task.get('outcome') or '').strip().lower() == 'continues_past_cut')
 
 
 # The output format of a request that asks every recording for a list of tasks, each with its own outcome
@@ -58,7 +60,7 @@ def recording_completion(tasks, *, task_prompts: int = 0) -> dict:
     takes that task's outcome, times and predicate as its own. One whose dataset times its own steps, or one of
     several tasks or none, has no single verdict: every field is null, and each task keeps its own outcome under
     tasks. from_tasks says how many tasks it was derived from and basis what it stands on (BASES). A task still open
-    at a cut of the recording (continues_past_cut), or one whose outcome is no outcome word, is no verdict either."""
+    at a cut of the recording (open_at_cut), or one whose outcome is no outcome word, is no verdict either."""
     rows = [t for t in tasks if isinstance(t, dict)] if isinstance(tasks, list) else []
     empty = {name: None for name, _ in COMPLETION_FROM_TASK}
     n = len(rows)
@@ -67,7 +69,7 @@ def recording_completion(tasks, *, task_prompts: int = 0) -> dict:
                                    "task's outcome, against its step, is under tasks", 'from_tasks': n,
                 'basis': 'task_prompts'}
     word = str(rows[0].get('outcome') or '').strip().lower() if n == 1 else None
-    if word == 'continues_past_cut':
+    if n == 1 and open_at_cut(rows[0]):
         return {**empty, 'reason': 'its one task continues past a cut of the recording, so its outcome is open',
                 'from_tasks': 1, 'basis': 'tasks'}
     if n == 1 and word not in OUTCOMES:

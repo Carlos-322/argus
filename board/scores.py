@@ -181,7 +181,7 @@ def facts(d: dict) -> dict:
     # only each part's local progress (label/pieces.py), which says nothing about the whole goal, so there it is
     # unknown, never 0
     progress = [min(1.0, max(0.0, p)) for p in (_num(e.get("progress")) for e in steps) if p is not None]
-    reached = max(progress) if progress else None
+    reached = max(progress) if progress and d.get("progress_scope") != "request_parts" else None
     # a head-camera clip judged on its annotated goal has progress per sub-task (progress_scope), none toward the goal
     # its verdict is about, so its outcome is never scaled by it
     goal_progress = reached if progress_toward_verdict(d) else None
