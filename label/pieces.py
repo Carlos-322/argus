@@ -11,10 +11,11 @@ goals, outcomes and progress remain attributed assessments, not recording-level 
 
 Neighbouring parts share a few seconds around each cut (OVERLAP_S), so an activity under way at a cut is seen by
 both requests: the stitch joins the two parts' tasks there by the time they share, and keeps each step and key event
-of those seconds from one part only. A recording cut without them (labelled before they existed) has its tasks
-joined at a cut only on a seam check's verdict (label/seam.py). A task no join reaches is unclear, and its
-cut_continuation says which cut ended its part's view; what the stitch did at a cut is recorded in such fields
-(cut_joins, cut_continuation, the stitched record), never in the labels' text.
+of those seconds from one part only. A recording cut without them (labelled before they existed, or one whose cuts
+leave no room for them, as its context's overlap_not_used says) has its tasks joined at a cut only on a seam check's
+verdict (label/seam.py). A task still under way at a cut that no join reaches is unclear, and its cut_continuation
+says which cut ended its part's view; what the stitch did at a cut is recorded in such fields (cut_joins,
+cut_continuation, the stitched record), never in the labels' text.
 
 Each part is told it is one part of a continuous recording cut at a still moment, so activity carrying across
 a cut is expected; an issue a part reports about being cut off at one of our cuts (a truncated start or end)
