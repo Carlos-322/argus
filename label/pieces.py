@@ -61,6 +61,11 @@ CUT_TAGS = ("truncat", "incomplete", "cut_off", "starts_mid", "ends_mid", "mid_t
 # limits real recordings are cut at, cuts fall well over 30s apart (2 of 1,279 stitched UMI takes have a part under
 # 150s).
 OVERLAP_S = 15.0
+# The stitch's version, kept in every stitched record (stitched["version"]) so a reader can tell labels stitched with
+# text times on the recording's clock, no cut sentences in text, each step's progress kept, no continues_past_cut
+# outcome and every list in time order (2) from labels stitched before those rules (no version), and never repairs
+# a label twice.
+STITCH_VERSION = 2
 OVERLAP_FIT = 4
 
 
@@ -854,7 +859,8 @@ def unlabelled(ep_dir: Path, failed: list[tuple[dict, dict | None]], missing: li
             **({'sensor_evidence': sensor} if sensor['sensors'] else {}),
             "config": cfg, "parse_ok": False, "no_part": True, "usage": usage,
             "labels": {"_raw": raw, "_parse_error": f"no part of the recording returned labels that parse ({whys})"},
-            "stitched": {"parts": count, "cuts_s": [c["cut_s"] for c in cut_layout(missing)], "missing": missing},
+            "stitched": {"version": STITCH_VERSION, "parts": count, "cuts_s": [c["cut_s"] for c in cut_layout(missing)],
+                         "missing": missing},
             "decode_failed": [x for _, r in failed for x in (r or {}).get("decode_failed") or []]}
     _carry_part_billing(result, failed)
     return result
@@ -1958,7 +1964,8 @@ def stitch(ep_dir: Path, parts: list[tuple[dict, dict]], missing: list[dict] = (
             "task_label": ctx.get("task_label"), "sampling": first.get("sampling"),
             "arm_still_spans": still, "dataset_checks": pl["checks"], "config": cfg,
             "provider": first.get("provider"), "parse_ok": True, "labels": L, "usage": usage,
-            "stitched": {"parts": count, "cuts_s": cuts_s, **({"missing": missing} if missing else {}),
+            "stitched": {"version": STITCH_VERSION, "parts": count, "cuts_s": cuts_s,
+                         **({"missing": missing} if missing else {}),
                          **({"outside_part": outside} if outside else {}),
                          **({"windows": [c["window"] for c in layout if c["window"]]}
                             if any(c["window"] for c in layout) else {}),
