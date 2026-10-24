@@ -235,6 +235,14 @@ def test_one_contribution_policy_reaches_runtime_requests(rig, evidence, given, 
         assert f'"idle": the {actor} is not engaged in the task.' in shared
         assert "internal request cut" in shared
         assert "unseen continuation" in shared.lower()
+        # missed grasps of a fine object are not excused as adjustments, a real correction still advances, and the
+        # example is framed as one among many, never as a list of banned words
+        flat = " ".join(shared.split())
+        assert "Do not be overly lenient in the other direction either." in flat
+        assert "straightening a piece already set in a bin" in flat
+        assert "One example among many, not a complete list" in flat
+        assert f"When the {actor} keeps returning to the same object" in flat
+        assert "only the try that finally works is advancing" not in flat
         assert '"timeline_columns":' in fixed and '"operator_mistakes":' in fixed
         assert "Each failed\n  attempt is a key_event with outcome failure." in fixed
         assert "Every failure and every\n  wasteful stretch in the timeline belongs to exactly one operator mistake" in fixed
