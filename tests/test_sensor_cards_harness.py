@@ -70,9 +70,11 @@ def test_a_failed_card_call_leaves_the_paid_annotation_current_after_a_code_chan
 
 
 def test_the_card_call_is_checked_against_what_the_final_call_billed_not_its_bound(tmp_path, monkeypatch):
-    # At this cap the final call's bound ($1.36) plus the card bound ($1.05) exceeds the cap, while the billed final
-    # ($0.003) plus the card bound fits easily: an unsettled final bound refused these cards. The cap also holds each
-    # selection reservation beside the final call's bound ($0.66 + $1.01).
+    # At this cap the final call's bound (about $1.08) plus the card bound ($1.05) exceeds the cap, while the billed
+    # final ($0.003) plus the card bound fits easily: an unsettled final bound refused these cards. The cap also holds
+    # the inspection selection's reservation beside the final call's bound, which grows with the shared instructions:
+    # at $1.90 it no longer fit once the contribution rule gained its sentences on missed grasps.
+    cap = 2.0
     bounds = []
     real = harness.final_cost_bound
     def spy(content, max_tokens, **kw):
@@ -84,10 +86,10 @@ def test_the_card_call_is_checked_against_what_the_final_call_billed_not_its_bou
     calls = []
     install(monkeypatch, calls, lambda: response('{"cards": []}'))
     out = tmp_path / 'out'
-    assert harness.run_batch([ep], out, **{**options(), 'max_tokens': 12000, 'max_spend': 1.9}) == 0
+    assert harness.run_batch([ep], out, **{**options(), 'max_tokens': 12000, 'max_spend': cap}) == 0
     final_bound = max(v for t, v in bounds if t == 12000)
     card_bound = next(v for t, v in bounds if t == policy.output_limit(sensor_cards.ANSWER_TOKENS, 'medium'))
-    assert final_bound + card_bound > 1.9 > output_spend(out) + card_bound
+    assert final_bound + card_bound > cap > output_spend(out) + card_bound
     assert 'cards' in calls
 
 

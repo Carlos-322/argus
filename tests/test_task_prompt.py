@@ -26,7 +26,27 @@ def text(rig, given, recorded=True, steps=False):
 
 
 def main(rig, recorded=True):
-    return MAIN[f'{rig}/{"recorded" if recorded else "video"}']
+    """main's text with the approved edits every rig shares (MISSED_GRASPS)."""
+    text = MAIN[f'{rig}/{"recorded" if recorded else "video"}']
+    assert text.count(REPETITION) == 1
+    actor = {'teleop_arms': 'arm', 'handheld_gripper': 'gripper', 'ego_head': 'hand'}[rig]
+    return text.replace(REPETITION, MISSED_GRASPS.format(actor=actor))
+
+
+# An approved edit to the shared contribution rule (Eric, 2026-10-23): runs of missed grasps on a fine object were
+# labelled as adjusting or repositioning. The sentence on repetition goes on to say a real correction advances, that
+# returns to an object that never get their result are failed attempts, and gives missed grasps as one example among
+# many.
+REPETITION = '  Repeated failed attempts at the same aim are wasteful, but repetition alone is not evidence of failure.\n'
+MISSED_GRASPS = '''  Repeated failed attempts at the same aim are wasteful, but repetition alone is not evidence of failure: a few
+  seconds spent straightening a piece already set in a bin, or turning a part into line, gets what it aims at and
+  advances, however small the motions are. Equally, do not be overly lenient. When the {actor} keeps returning to
+  the same object without ever getting the result those returns evidently aim at, each return is a failed attempt.
+  One example among many, not a complete list: repeated missed grasps of a particularly fine object can look like
+  small adjustments, but naming them "adjust", "reposition", "align" or "nudge" does not make them succeed; if the
+  frames never show the object held, each try aimed at holding it failed. Those words fit whenever the object does
+  end up where it was evidently meant to be.
+'''
 
 
 # The owner's two approved edits to the head camera's prompt: its absolutes softened, so a short clip of one task is
