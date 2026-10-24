@@ -932,16 +932,67 @@ def _model_diagnostics(labels: dict) -> None:
             _model_diagnostics(assessment)
 
 
+_CLOSER_OF = {'{': '}', '[': ']'}
+
+
+def _one_wrong_closer(body: str) -> tuple[str, dict] | None:
+    """The reply with its one wrong closing bracket replaced, and where, or None. Sol and Gemini sometimes close one
+    array or object with the other kind of bracket, or with ')', and the whole reply then fails to parse. This applies
+    only when, outside strings, every bracket pairs up except exactly one closer of the wrong kind, and the reply then
+    parses; a missing, extra or second wrong bracket, or a reply cut off, is left to fail as before."""
+    stack, wrong, in_string, escaped = [], [], False, False
+    for i, ch in enumerate(body):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == '\\':
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in _CLOSER_OF:
+            stack.append(ch)
+        elif ch in '}])':
+            if not stack:
+                return None
+            expected = _CLOSER_OF[stack.pop()]
+            if ch != expected:
+                wrong.append((i, ch, expected))
+    if stack or in_string or len(wrong) != 1:
+        return None
+    at, found, expected = wrong[0]
+    fixed = body[:at] + expected + body[at + 1:]
+    try:
+        json.loads(fixed)
+    except json.JSONDecodeError:
+        return None
+    return fixed, {'at_char': at, 'found': found, 'replaced_with': expected}
+
+
+def _load_reply(body: str) -> tuple[object, dict | None]:
+    """The reply's JSON, and the repair it needed (_one_wrong_closer) or None."""
+    try:
+        return json.loads(body), None
+    except json.JSONDecodeError:
+        repaired = _one_wrong_closer(body)
+        if repaired is None:
+            raise
+        return json.loads(repaired[0]), repaired[1]
+
+
 def parse_response(text: str) -> tuple[dict, bool]:
     """A model's reply as labels, or the raw text and the reason it could not be read. The one parser for every
     model and for re-reading stored replies (label/reparse.py). A reply that is a JSON object but breaks the output
-    format in places keeps the rest of its labels (normalize_timeline, typed_labels)."""
+    format in places keeps the rest of its labels (normalize_timeline, typed_labels). A reply whose only defect is
+    one closing bracket of the wrong kind is read with that bracket replaced, and says so in _reply_repair."""
     try:
         # some models ignore json_object and wrap the JSON in a markdown fence
         fenced = re.fullmatch(r"\s*```(?:json)?\s*(.*?)\s*```\s*", text, re.S)
-        labels = json.loads(fenced.group(1) if fenced else text)
+        labels, repair = _load_reply(fenced.group(1) if fenced else text)
         if not isinstance(labels, dict):
             raise ValueError(f"the reply is {json_kind(labels)}, not an object")
+        labels.pop('_reply_repair', None)      # only the parser may say a reply was repaired
         _model_diagnostics(labels)
         had_rows = bool(labels.get('timeline'))
         labels = typed_labels(normalize_timeline(labels))
@@ -966,6 +1017,8 @@ def parse_response(text: str) -> tuple[dict, bool]:
             raise ValueError('no usable timeline rows remain')
         if not substantive_annotation(labels):
             raise ValueError('the reply contains no substantive annotation content')
+        if repair:
+            labels['_reply_repair'] = repair
         return labels, True
     except Exception as e:  # noqa: BLE001 - any reply that does not parse is kept raw, with why
         return {"_raw": text, "_parse_error": f"{type(e).__name__}: {e}"[:300]}, False
