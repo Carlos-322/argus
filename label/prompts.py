@@ -93,17 +93,14 @@ def contribution_rules(r: str) -> str:
       wasteful even when the operator later recovers; judge the effective correction separately as advancing.
     "idle": the {actor} is not engaged in the task. Lack of object contact alone does not establish idle:
       necessary approach, repositioning, search or waiting can serve the task when the footage supports that role.
-  Repeated failed attempts at the same aim are wasteful, but repetition alone is not evidence of failure.
-  Name and judge a step by what it evidently aimed at and what the frames show it achieved, not by how small or
-  careful the motion looks. Small corrections are often exactly what they appear to be: a few seconds spent
-  straightening a piece already set in a bin, or turning a part into line, gets what it aims at and advances.
-  Do not be overly lenient in the other direction either. When the {actor} keeps returning to the same object
-  without ever getting the result those returns evidently aim at, each return is a failed attempt, however small
-  the motion. One example among many, not a complete list: repeated missed grasps of a particularly fine object
-  can look like small adjustments, and naming them "adjust", "reposition", "align" or "nudge" does not make them
-  succeed; if the frames never show the object held, each try aimed at holding it failed. These words are right
-  whenever the object does end up where it was evidently meant to be. Judge each case from the frames, and when
-  they leave the aim or the result unclear, say so in notes instead of settling it either way.
+  Repeated failed attempts at the same aim are wasteful, but repetition alone is not evidence of failure: a few
+  seconds spent straightening a piece already set in a bin, or turning a part into line, gets what it aims at and
+  advances, however small the motions are. Equally, do not be overly lenient. When the {actor} keeps returning to
+  the same object without ever getting the result those returns evidently aim at, each return is a failed attempt.
+  One example among many, not a complete list: repeated missed grasps of a particularly fine object can look like
+  small adjustments, but naming them "adjust", "reposition", "align" or "nudge" does not make them succeed; if the
+  frames never show the object held, each try aimed at holding it failed. Those words fit whenever the object does
+  end up where it was evidently meant to be.
   Intentional undo, disassembly, reset or a new activity does not retroactively make useful work wasteful.
   Assess each step's effect within the activity it served, whether or not the whole activity ultimately succeeds.
   Do not excuse an observed failure by inventing learning or exploration, or invent inefficiency from a

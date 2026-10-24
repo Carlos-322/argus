@@ -238,7 +238,7 @@ def test_one_contribution_policy_reaches_runtime_requests(rig, evidence, given, 
         # missed grasps of a fine object are not excused as adjustments, a real correction still advances, and the
         # example is framed as one among many, never as a list of banned words
         flat = " ".join(shared.split())
-        assert "Do not be overly lenient in the other direction either." in flat
+        assert "Equally, do not be overly lenient." in flat
         assert "straightening a piece already set in a bin" in flat
         assert "One example among many, not a complete list" in flat
         assert f"When the {actor} keeps returning to the same object" in flat
