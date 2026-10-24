@@ -1294,6 +1294,46 @@ def test_one_bad_row_or_field_never_costs_the_whole_reply():
     assert not ok and "not an object" in labels["_parse_error"]
 
 
+def test_a_reply_whose_only_defect_is_one_wrong_closing_bracket_is_read_and_says_so():
+    """A glimpse reply closed its last timeline row with '}' instead of ']', and Gemini replies have ended with ')':
+    each whole reply failed to parse over one character. Exactly one closer of the wrong kind, with every other bracket
+    paired and the result parsing, is replaced and recorded in _reply_repair; brackets inside strings are text, and a
+    second wrong closer, a missing or extra bracket, or a reply cut off still does not parse."""
+    clean = {"timeline_columns": harness.TIMELINE_COLUMNS,
+             "timeline": [[0.0, 1.0, "left", "reach (toward the cup]", "cup", None, None, "advancing", 0.1, None],
+                          [1.0, 2.0, "right", "grasp", "cup", None, "in gripper", "advancing", 0.2, "held)"]],
+             "task_summary": "reach and grasp the cup", "scene": {"objects": [{"name": "cup"}], "setting": "a table"}}
+    text = json.dumps(clean, indent=1)
+    want, ok = harness.parse_response(text)
+    assert ok and "_reply_repair" not in want
+
+    last_row_end = text.index('"held)"') + len('"held)"')
+    last_row_end = text.index(']', last_row_end)
+    cases = {'row closed with }': text[:last_row_end] + '}' + text[last_row_end + 1:],
+             'reply closed with )': text[:text.rindex('}')] + ')' + text[text.rindex('}') + 1:],
+             'fenced': "```json\n" + text[:last_row_end] + '}' + text[last_row_end + 1:] + "\n```"}
+    for name, broken in cases.items():
+        labels, ok = harness.parse_response(broken)
+        assert ok, name
+        repair = labels.pop("_reply_repair")
+        assert labels == want, name
+        assert repair["found"] in '})' and repair["replaced_with"] in ']}', name
+    # the brackets inside strings were never touched
+    assert want["timeline"][0]["action"] == "reach (toward the cup]" and want["timeline"][1]["notes"] == "held)"
+
+    two_wrong = cases['row closed with }'][:cases['row closed with }'].rindex('}')] + ')'
+    missing = text[:last_row_end] + text[last_row_end + 1:]
+    extra = text + '}'
+    cut_off = text[:len(text) // 2]
+    for name, broken in {'two wrong closers': two_wrong, 'missing closer': missing, 'extra closer': extra,
+                         'cut off': cut_off}.items():
+        labels, ok = harness.parse_response(broken)
+        assert not ok and labels["_raw"] == broken and "_reply_repair" not in labels, name
+    # a reply cannot claim a repair of its own
+    labels, ok = harness.parse_response(json.dumps({**clean, "_reply_repair": {"found": "}"}}))
+    assert ok and "_reply_repair" not in labels
+
+
 # ---------------------------------------------------------------- run folders (label/run.py), git and harness faked
 
 
