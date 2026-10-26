@@ -151,7 +151,7 @@ def test_flag_compatibility_does_not_accept_unknown_or_invalid_values(flag):
         spec.validate(value, spec.resolve('heating-v2-complete'), 4)
 
 
-@pytest.mark.parametrize('spec_id', ['heating-v2', 'heating-v2-complete'])
+@pytest.mark.parametrize('spec_id', ['heating-v2', 'heating-v2-complete', 'heating-review-20261026'])
 def test_deepseek_request_to_board_uses_fixed_rules_and_hides_old_answers(tmp_path, monkeypatch, spec_id):
     from test_label import _packed_episode
     from board.to_board import convert
@@ -179,7 +179,13 @@ def test_deepseek_request_to_board_uses_fixed_rules_and_hides_old_answers(tmp_pa
         assert 'SENSOR MECHANICS ANALYSIS CONTRACT' not in text
         assert '奶茶：离开触控板' in text and '规范驱动标注' in text
         calls.append(body)
-        response = answer() if spec_id == 'heating-v2' else complete_answer()
+        if spec_id == 'heating-review-20261026':
+            assert '整个左夹爪' in text and '不强行补齐六段' in text
+            assert json.dumps(spec.resolve(spec_id)['definition']['source_text'], ensure_ascii=False) in text
+        response = answer()
+        response['spec_id'] = spec_id
+        if spec_id == 'heating-review-20261026':
+            response['timeline'][-1]['start_s'] = 2.25
         return io.BytesIO(json.dumps({'choices': [{'finish_reason': 'stop', 'message': {'content': json.dumps(response)}}],
                                     'usage': {'prompt_tokens': 100, 'completion_tokens': 100}}).encode())
     monkeypatch.setattr(harness.urllib.request, 'urlopen', provider)
@@ -195,5 +201,8 @@ def test_deepseek_request_to_board_uses_fixed_rules_and_hides_old_answers(tmp_pa
     assert board['event_labels'][3]['verb_class'] == '奶茶：离开触控板'
     assert board['station_review']['spec_id'] == spec_id
     assert board['station_segments'][3]['start_evidence']
+    if spec_id == 'heating-review-20261026':
+        assert board['station_segments'][-1]['start_s'] == 2.25
+        assert board['station_segments'][-2]['end_s'] == 2.5
     assert harness.run_batch([ep], out, **args) == 0
     assert len(calls) == 1

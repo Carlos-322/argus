@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SPEC_DIR = ROOT / 'configs' / 'annotation_specs'
-SPEC_IDS = ('heating-v2', 'heating-v2-complete')
+SPEC_IDS = ('heating-v2', 'heating-v2-complete', 'heating-review-20261026')
 
 
 def digest(definition):
@@ -41,13 +41,19 @@ def resolve(value, *, current=True):
         installed = json.loads((SPEC_DIR / f'{value["id"]}.json').read_text(encoding='utf-8'))
         if digest(installed) != value['sha256']:
             raise ValueError(f'Annotation rules changed; use a new --out with --annotation-spec {value["id"]}')
-        if hashlib.sha256((ROOT / definition['source']).read_bytes()).hexdigest() != definition['source_sha256']:
-            raise ValueError('Source PDF changed; update the annotation rules before labeling')
+        source = (ROOT / definition['source']).read_bytes()
+        # Markdown may be checked out with CRLF on Windows and LF in WSL.
+        if definition.get('boundary_standard') == 'manual-review-20261026':
+            source = source.replace(b'\r\n', b'\n')
+        if hashlib.sha256(source).hexdigest() != definition['source_sha256']:
+            raise ValueError('Source document changed; update the annotation rules before labeling')
     return copy.deepcopy(value)
 
 
 def instructions(snapshot):
     definition = resolve(snapshot)['definition']
+    if definition.get('boundary_standard') == 'manual-review-20261026':
+        return review_instructions(definition)
     if definition.get('require_complete_sequence'):
         return complete_instructions(definition)
     return '''规范驱动标注。你正在处理已经过上游质检的加热工位录制。
@@ -78,6 +84,44 @@ cycle=1的六个标签都列为未观察到，并给出task_mismatch原因。rul
 不要输出自由生成的tasks、completion、质量评分或instruction_variants。
 
 本次启用的规范（固定模板、原文边界和判断规则）：
+''' + json.dumps(definition, ensure_ascii=False, indent=2)
+
+
+def review_instructions(definition):
+    example = {
+        'spec_id': definition['id'], 'task_summary': '概述实际观察到的加热动作',
+        'timeline': [dict(cycle=1, subtask_id='H1', start_s=0.0, end_s=1.0,
+                          start_evidence='机位名称及起点可见依据', end_evidence='机位名称及终点可见依据',
+                          boundary_status='observed', notes='')],
+        'unobserved_subtasks': [dict(cycle=1, subtask_id=f'H{i}', reason='说明为何没有可定位片段')
+                                for i in range(2, 7)], 'rule_flags': []}
+    return '''规范驱动标注。按照下方事先写好的规则，对本次加热录制定位步骤。
+source_text 是用户给定的分段原文；subtasks 保留原有六种标签并列出起止条件。
+先读规则再看画面定位，不能先自由分段再改名。文件名、原始描述和历史标注不是答案。
+只输出实际发生且有可见依据的步骤，不强行补齐六段，不凭预期编造动作或设备状态。
+同一轮使用同一个正整数 cycle，下一轮才递增；重复尝试保留实际片段和原因。
+H1/H2、H2/H3、H3/H4、H4/H5 明确衔接时，前段 end_s 等于后段 start_s。
+使用本次提供的录制时间轴和秒单位，不重新从某个动作计零，不改变原有时间映射。
+区间使用 [start_s,end_s)，必须正长度、按开始时间排列、在录制范围内。
+H3 的最后接触画面属于 H3；以首次离开时刻作为共享切点，首次离开帧属于 H4。
+H5 结束于左手持纸杯回 Home 并停止；H6 开始于右臂持雪克杯刚要回退之前。
+H5/H6 不强制衔接，可以有空档；实际并行时保留重叠并注明证据。其他步骤不可重叠。
+H4 结束看整个左夹爪（含最高点）首次低于显示屏下边缘。自行选择能同时看清两者的
+参考机位，在 H4 的 end_evidence 写明机位名称和判断依据，H5 起点引用同一切点。
+不能把不同机位的上下位置拼成证据。1–1.5 秒仅供复核，不能按时长认定 H4 结束。
+抽样边界是候选值，不能声称已逐帧核对，不虚构帧号。遮挡或证据不足时标 uncertain，
+写明缺少什么证据；无从定位的步骤列入 unobserved_subtasks，不编造切点。
+不把到达 Home 但仍在运动当作停止。录制截断时仅保留可见部分，注明 incomplete_recording
+和边界不确定，不能声称完整动作已经结束。保持现有输入窗口及输出格式，不新增跨窗字段。
+
+只返回 JSON 对象。下面仅为格式示例，时间、证据和缺失项均须按实际画面填写：
+''' + json.dumps(example, ensure_ascii=False, indent=2) + '''
+每行用 subtask_id，程序填入固定标签名称、模板描述和执行手臂。证据只写当前区间的
+实际动作，不补写相邻步骤。每轮六种标签中未出现的，都在 unobserved_subtasks 说明一次；
+已观察到的不得同时列为缺失。完全不匹配时 timeline 为空、六种标签列为未观察到，并记录
+task_mismatch。rule_flags 使用下方 rule_codes，每项含 code 和具体 reason，无异常为 []。
+不输出自由生成的 tasks、completion、质量评分或 instruction_variants。
+本次规范：
 ''' + json.dumps(definition, ensure_ascii=False, indent=2)
 
 
@@ -137,6 +181,7 @@ def validate(labels, snapshot, duration_s=None):
     for field in ('tasks', 'instruction_variants', 'completion'):
         if labels.get(field):
             raise ValueError(f'{field} is not part of the station annotation format')
+    review_boundaries = definition.get('boundary_standard') == 'manual-review-20261026'
     complete = definition.get('require_complete_sequence', False)
     if complete:
         if (labels['unobserved_subtasks'] or len(labels['timeline']) != 6
@@ -149,6 +194,7 @@ def validate(labels, snapshot, duration_s=None):
     previous_end, previous_cycle, previous_id = 0.0, 0, 0
     seen, absent, review = set(), set(), []
     rows = copy.deepcopy(labels['timeline'])
+    checked = []
     for row in rows:
         key, cycle = row.get('subtask_id'), row.get('cycle')
         if key not in templates or type(cycle) is not int or cycle < 1:
@@ -156,7 +202,19 @@ def validate(labels, snapshot, duration_s=None):
         start, end = row.get('start_s'), row.get('end_s')
         if any(type(t) not in (float, int) or not math.isfinite(t) for t in (start, end)):
             raise ValueError('Segment times must be finite numbers')
-        if start < previous_end or end <= start or (duration_s is not None and end > duration_s + 1e-6):
+        if start < 0 or end <= start or (duration_s is not None and end > duration_s + 1e-6):
+            raise ValueError('Segments must have positive length and stay within the recording')
+        if review_boundaries:
+            if checked and start < checked[-1]['start_s']:
+                raise ValueError('Segments must be ordered by start time')
+            for prior in checked:
+                independent = (cycle == prior['cycle'] and {key, prior['subtask_id']} == {'H5', 'H6'})
+                if start < prior['end_s'] and not independent:
+                    raise ValueError('Only H5/H6 of the same cycle may overlap')
+            if (cycle == previous_cycle and 2 <= int(key[1:]) <= 5
+                    and int(key[1:]) == previous_id + 1 and abs(start - previous_end) > 1e-6):
+                raise ValueError('H1-H5 adjacent observed steps must share a boundary')
+        elif start < previous_end:
             raise ValueError('Segments must be ordered, nonoverlapping and within the recording')
         if complete and previous_id and abs(start - previous_end) > 1e-6:
             raise ValueError('完整六段标注失败：相邻子任务必须共享切点，不能留下未标注区间')
@@ -169,7 +227,7 @@ def validate(labels, snapshot, duration_s=None):
                 raise ValueError(f'{field} is required')
         if not isinstance(row.get('notes', ''), str):
             raise ValueError('Segment notes must be text')
-        if key in ('H4', 'H5'):
+        if not review_boundaries and key in ('H4', 'H5'):
             row['boundary_status'] = 'uncertain'
             review.append(f'第{cycle}轮{key}：H4/H5交界按原文保留候选值，需复核。')
         if row['boundary_status'] == 'uncertain':
@@ -177,6 +235,7 @@ def validate(labels, snapshot, duration_s=None):
         if cycle == previous_cycle and int(key[1:]) < previous_id:
             review.append(f'第{cycle}轮出现顺序回退或重试，保留原始顺序。')
         previous_end, previous_cycle, previous_id = end, cycle, int(key[1:])
+        checked.append(row)
         seen.add((cycle, key))
         template = templates[key]
         row.update(action=template['name'], arm=template['arm'], object=template['object'],
@@ -200,7 +259,8 @@ def validate(labels, snapshot, duration_s=None):
             review.append(f'异常{flag["code"]}仅有名称，未提供理由，已兼容读取，需复核。')
     if not rows and not flags:
         raise ValueError('An empty timeline needs an explanation in rule_flags')
-    excluded = not complete and any(f['code'] in ('multiple_presses', 'simultaneous_arms', 'task_mismatch') for f in flags)
+    excluded_codes = definition.get('excluded_rule_codes', ('multiple_presses', 'simultaneous_arms', 'task_mismatch'))
+    excluded = not complete and any(f['code'] in excluded_codes for f in flags)
     result = copy.deepcopy(labels)
     result['timeline'] = rows
     result['station_review'] = {

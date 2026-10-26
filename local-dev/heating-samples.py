@@ -46,7 +46,9 @@ def print_samples(samples):
 
 def interactive_options(args, samples):
     print_samples(samples)
-    print('\n使用加热工位完整六段模式：H1至H6必须齐全，边界不清保留候选值待复核。')
+    print(f'\n本次规则：{args.annotation_spec}')
+    if args.annotation_spec == 'heating-review-20261026':
+        print('按10月26日规范定位实际步骤，不强行补齐六段；H5、H6各自判断起止。')
     print('单条：17；多条：1 3 5（也可用逗号）；连续：1-5；全部：all；返回：q。')
     while True:
         answer = input('想处理哪些条目：').strip()
@@ -99,8 +101,8 @@ def main():
     parser.add_argument('--no-preparation-cache', action='store_true', help='本次重新转换，不读取或写入共享缓存')
     parser.add_argument('--model', default='deepseek/deepseek-flash', help='本次标注模型（需符合当前DeepSeek接入支持范围）')
     parser.add_argument('--sample-fps', type=float, default=None, help='每秒抽帧数；改变时复用转换视频')
-    parser.add_argument('--annotation-spec', choices=('heating-v2', 'heating-v2-complete'),
-                        default='heating-v2-complete', help='本次采用的标注规则')
+    parser.add_argument('--annotation-spec', choices=('heating-v2', 'heating-v2-complete', 'heating-review-20261026'),
+                        default='heating-review-20261026', help='本次采用的标注规则')
     parser.add_argument('--run-api', action='store_true', help='实际调用DeepSeek；不加时只构建请求')
     parser.add_argument('--cap', type=float, default=1.0, help='每条MCAP的费用上限（美元，默认1）')
     parser.add_argument('--list', action='store_true', help='仅列出样本编号')
@@ -133,7 +135,7 @@ def main():
     env = dict(os.environ, ARGUS_PROVIDER='deepseek')
     env.pop('OPENAI_API_KEY', None)
     env.pop('OPENROUTER_API_KEYS', None)
-    print(f'加热六子任务规范；{len(inputs)}条；模式：{mode}；输出：{output}', flush=True)
+    print(f'加热规则 {args.annotation_spec}；{len(inputs)}条；模式：{mode}；输出：{output}', flush=True)
     if args.run_api:
         print(f'每条上限 ${args.cap:g}，本批最多 ${args.cap * len(inputs):g}。', flush=True)
         env['DEEPSEEK_API_KEY'] = env.get('DEEPSEEK_API_KEY') or getpass.getpass('DeepSeek API Key（隐藏输入）：')

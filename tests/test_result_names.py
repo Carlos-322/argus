@@ -49,3 +49,12 @@ def test_missing_policy_still_has_unique_names_and_printed_titles(tmp_path, caps
     output = capsys.readouterr().out
     assert '第 1 次标注' in output and '第 2 次标注' in output
     assert module.result_titles([two, one])[two].endswith('2026-10-21 16:05:05')
+
+
+def test_new_rule_title_remains_distinct_from_old_results(tmp_path):
+    old = job(tmp_path, '20261021_160505_752770')
+    new = job(tmp_path, '20261026_160505_752770', spec='heating-review-20261026')
+    titles = viewer().result_titles([new, old])
+    assert titles[old].endswith('完整六段')
+    assert titles[new].endswith('10月26日分段规范')
+    assert '第 2 次标注' in titles[new]

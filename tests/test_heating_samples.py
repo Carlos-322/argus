@@ -59,7 +59,7 @@ def test_dispatch_only_selected_mcap(runner, samples, tmp_path, monkeypatch, ans
     for cmd, kw in calls:
         assert ('--free' in cmd) is not live
         assert ('DEEPSEEK_API_KEY' in kw['env']) is live
-        assert cmd[cmd.index('--annotation-spec') + 1] == 'heating-v2-complete'
+        assert cmd[cmd.index('--annotation-spec') + 1] == 'heating-review-20261026'
         if live:
             assert cmd[cmd.index('--cap') + 1] == '0.5'
 

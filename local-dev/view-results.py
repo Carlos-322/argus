@@ -48,7 +48,8 @@ def result_titles(results):
                 spec = next(iter(specs)) if len(specs) == 1 else None
             except (OSError, ValueError, AttributeError):
                 spec = None
-            rule = {'heating-v2': '旧规则', 'heating-v2-complete': '完整六段'}.get(spec)
+            rule = {'heating-v2': '旧规则', 'heating-v2-complete': '完整六段',
+                    'heating-review-20261026': '10月26日分段规范'}.get(spec)
             titles[path] = f'加热 {sample}｜第 {number} 次标注｜{created:%Y-%m-%d %H:%M:%S}'
             if rule:
                 titles[path] += f'｜{rule}'

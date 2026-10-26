@@ -326,8 +326,8 @@ def main() -> int:
     ap.add_argument("--grouping", type=json.loads, default={},
                     help='JSON {folder: "takes" | "cameras"} for folders whose files cannot tell takes from cameras')
     policy.add_arguments(ap)
-    ap.add_argument('--annotation-spec', choices=('heating-v2', 'heating-v2-complete'), default=None,
-                    help='use the supplied heating PDF six-subtask rules instead of free-form annotation')
+    ap.add_argument('--annotation-spec', choices=('heating-v2', 'heating-v2-complete', 'heating-review-20261026'), default=None,
+                    help='use a versioned heating annotation standard instead of free-form annotation')
     ap.add_argument("--field-dictionary", choices=("on", "off"), default=None,
                     help="ask a model what uncertain recorded fields mean, once per upload (default on; off labels "
                          "with the fields as recorded and makes no dictionary call)")
